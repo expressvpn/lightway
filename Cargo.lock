@@ -1016,7 +1016,7 @@ dependencies = [
  "itertools 0.13.0",
  "lightway-app-utils",
  "lru",
- "metrics 0.23.0",
+ "metrics",
  "more-asserts",
  "num_enum",
  "once_cell",
@@ -1055,7 +1055,7 @@ dependencies = [
  "ipnet",
  "lightway-app-utils",
  "lightway-core",
- "metrics 0.22.3",
+ "metrics",
  "metrics-util",
  "more-asserts",
  "pnet",
@@ -1119,16 +1119,6 @@ checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
 
 [[package]]
 name = "metrics"
-version = "0.22.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2be3cbd384d4e955b231c895ce10685e3d8260c5ccffae898c96c723b0772835"
-dependencies = [
- "ahash",
- "portable-atomic",
-]
-
-[[package]]
-name = "metrics"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "884adb57038347dfbaf2d5065887b6cf4312330dc8e94bc30a1a839bd79d3261"
@@ -1139,16 +1129,16 @@ dependencies = [
 
 [[package]]
 name = "metrics-util"
-version = "0.16.3"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b07a5eb561b8cbc16be2d216faf7757f9baf3bfb94dbb0fae3df8387a5bb47f"
+checksum = "4259040465c955f9f2f1a4a8a16dc46726169bca0f88e8fb2dbeced487c3e828"
 dependencies = [
  "aho-corasick",
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "indexmap 2.2.6",
- "metrics 0.22.3",
+ "metrics",
  "num_cpus",
  "ordered-float",
  "quanta",
