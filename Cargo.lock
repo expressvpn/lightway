@@ -1016,7 +1016,7 @@ dependencies = [
  "itertools 0.13.0",
  "lightway-app-utils",
  "lru",
- "metrics",
+ "metrics 0.23.0",
  "more-asserts",
  "num_enum",
  "once_cell",
@@ -1055,7 +1055,7 @@ dependencies = [
  "ipnet",
  "lightway-app-utils",
  "lightway-core",
- "metrics",
+ "metrics 0.22.3",
  "metrics-util",
  "more-asserts",
  "pnet",
@@ -1128,6 +1128,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "884adb57038347dfbaf2d5065887b6cf4312330dc8e94bc30a1a839bd79d3261"
+dependencies = [
+ "ahash",
+ "portable-atomic",
+]
+
+[[package]]
 name = "metrics-util"
 version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,7 +1148,7 @@ dependencies = [
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "indexmap 2.2.6",
- "metrics",
+ "metrics 0.22.3",
  "num_cpus",
  "ordered-float",
  "quanta",

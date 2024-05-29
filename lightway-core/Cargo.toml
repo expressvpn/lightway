@@ -29,7 +29,7 @@ pnet = "0.34.0"
 delegate = "0.12.0"
 lru = "0.12.1"
 once_cell = "1.19.0"
-metrics = "0.22.0"
+metrics = "0.23.0"
 if_chain = "1.0.2"
 
 [dev-dependencies]
