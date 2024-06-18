@@ -1315,8 +1315,8 @@ impl<AppState: Send> Connection<AppState> {
             .send(inside_pkt, self.app_state_mut())
         {
             IOCallbackResult::Ok(_nr) => {}
-            IOCallbackResult::Err(err) => {
-                metrics::inside_io_send_failed(err);
+            IOCallbackResult::Err(_err) => {
+                metrics::inside_io_send_failed();
             }
             IOCallbackResult::WouldBlock => warn!("Send to inside IO would block"),
         }

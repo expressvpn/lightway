@@ -1,5 +1,4 @@
 use metrics::counter;
-use tracing::warn;
 use wolfssl::ProtocolVersion;
 
 const METRIC_CONNECTION_ALLOC_FRAG_MAP: &str = "conn_alloc_frag_map";
@@ -21,7 +20,6 @@ pub(crate) fn wolfssl_appdata(tls_version: &ProtocolVersion) {
 }
 
 /// A call to [`crate::io::InsideIOSendCallback::send`] failed
-pub(crate) fn inside_io_send_failed(err: std::io::Error) {
-    warn!(%err, "Failed to send to inside IO");
+pub(crate) fn inside_io_send_failed() {
     counter!(METRIC_INSIDE_IO_SEND_FAILED).increment(1);
 }
