@@ -79,7 +79,12 @@ pub struct ClientConfig<'cert> {
     pub inside_mtu: Option<i32>,
 
     /// Tun device name to use
+    #[cfg(feature = "linux-tun")]
     pub tun_name: String,
+
+    /// Tun FD to write to for non-linux platform
+    #[cfg(not(feature = "linux-tun"))]
+    pub tun_fd: std::os::fd::RawFd,
 
     /// Local IP to use in Tun device
     pub tun_local_ip: Ipv4Addr,
@@ -209,19 +214,32 @@ pub async fn client(config: ClientConfig<'_>) -> Result<()> {
         outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
     }
 
+    #[cfg(feature = "linux-tun")]
     let iouring = if config.enable_tun_iouring {
         Some(config.iouring_entry_count)
     } else {
         None
     };
 
+    #[cfg(feature = "linux-tun")]
     let inside_io = Arc::new(
-        io::inside::Tun::new(
+        io::inside::Tun::from_name(
             &config.tun_name,
             config.tun_local_ip,
             config.tun_dns_ip,
             config.inside_mtu,
             iouring,
+        )
+        .await?,
+    );
+
+    #[cfg(not(feature = "linux-tun"))]
+    let inside_io = Arc::new(
+        io::inside::Tun::from_fd(
+            config.tun_fd,
+            config.tun_local_ip,
+            config.tun_dns_ip,
+            config.inside_mtu,
         )
         .await?,
     );

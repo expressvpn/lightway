@@ -992,6 +992,7 @@ dependencies = [
  "dashmap",
  "humantime",
  "io-uring",
+ "libc",
  "lightway-core",
  "metrics",
  "pnet",

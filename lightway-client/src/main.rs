@@ -54,7 +54,10 @@ async fn main() -> Result<()> {
         root_ca_cert,
         outside_mtu: config.outside_mtu,
         inside_mtu: config.inside_mtu,
+        #[cfg(feature = "linux-tun")]
         tun_name: config.tun_name,
+        #[cfg(not(feature = "linux-tun"))]
+        tun_fd: -1, // A placeholder until tun_fd retrival is implemented
         tun_local_ip: config.tun_local_ip,
         tun_peer_ip: config.tun_peer_ip,
         tun_dns_ip: config.tun_dns_ip,

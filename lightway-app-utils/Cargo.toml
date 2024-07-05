@@ -22,6 +22,7 @@ serde = "1.0.189"
 serde_with = "3.4.0"
 tokio = { version = "1.33.0", features = ["macros", "rt", "sync", "time"], optional = true }
 tokio-stream = { version = "0.1.14", optional = true }
+libc = "0.2.152"
 clap = { version = "4.4.7", features = ["derive"] }
 tracing-subscriber = { version = "0.3.17", features = ["json"] }
 tokio-util = "0.7.10"

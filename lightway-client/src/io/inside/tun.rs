@@ -21,7 +21,9 @@ pub struct Tun {
 }
 
 impl Tun {
-    pub async fn new(
+    /// Create a linux-only tun instance with IOUring or traditional epoll mode
+    #[cfg(feature = "linux-tun")]
+    pub async fn from_name(
         name: &str,
         ip: Ipv4Addr,
         dns_ip: Ipv4Addr,
@@ -32,6 +34,18 @@ impl Tun {
             Some(ring_size) => AppUtilsTun::iouring(name, mtu, ring_size).await?,
             None => AppUtilsTun::direct(name, mtu).await?,
         };
+        Ok(Tun { tun, ip, dns_ip })
+    }
+
+    /// Create a tun instance with a raw tun descriptor
+    #[cfg(not(feature = "linux-tun"))]
+    pub async fn from_fd(
+        fd: std::os::fd::RawFd,
+        ip: Ipv4Addr,
+        dns_ip: Ipv4Addr,
+        mtu: Option<i32>,
+    ) -> Result<Self> {
+        let tun = AppUtilsTun::raw(fd, mtu).await?;
         Ok(Tun { tun, ip, dns_ip })
     }
 
