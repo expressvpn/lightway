@@ -8,6 +8,10 @@ license = "GPL-2.0-only"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["linux-tun"]
+linux-tun = ["lightway-app-utils/io-uring", "lightway-app-utils/tokio-tun"]
+
 [dependencies]
 lightway-core = { path = "../lightway-core", features = ["postquantum"] }
 lightway-app-utils = { path = "../lightway-app-utils" }

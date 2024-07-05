@@ -9,6 +9,7 @@ mod connection_ticker;
 mod dplpmtud_timer;
 #[cfg(feature = "tokio")]
 mod event_stream;
+#[cfg(feature = "io-uring")]
 mod iouring;
 mod tun;
 
@@ -26,6 +27,7 @@ pub use iouring::IOUring;
 
 pub use tun::Tun;
 
+#[cfg(feature = "io-uring")]
 mod metrics;
 mod utils;
 pub use utils::is_file_path_valid;

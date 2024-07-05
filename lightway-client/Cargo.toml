@@ -9,9 +9,10 @@ license = "GPL-2.0-only"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["postquantum"]
+default = ["postquantum", "linux-tun"]
 debug = ["lightway-core/debug"]
 postquantum = ["lightway-core/postquantum"]
+linux-tun = ["lightway-app-utils/io-uring", "lightway-app-utils/tokio-tun"]
 
 [dependencies]
 lightway-core = { path = "../lightway-core" }

@@ -10,8 +10,9 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = [ "tokio", "io-uring" ]
+default = [ "tokio" ]
 tokio = [ "dep:tokio", "dep:tokio-stream" ]
+tokio-tun = [ "dep:tokio-tun" ]
 io-uring = [ "dep:io-uring", "dep:async-channel", "dep:tokio", ]
 
 [dependencies]
@@ -31,7 +32,7 @@ bytes = "1.5.0"
 tokio-eventfd = "0.2.1"
 dashmap = "6.0.1"
 thiserror = "1.0.57"
-tokio-tun = "0.11.2"
+tokio-tun = { version = "0.11.2", optional = true}
 metrics = "0.23.0"
 
 [[example]]
@@ -43,4 +44,3 @@ async-trait = "0.1.77"
 pnet = "0.35.0"
 tokio-eventfd = "0.2.1"
 tokio-tun = "0.11.2"
-
