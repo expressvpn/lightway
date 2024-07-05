@@ -1027,7 +1027,6 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-stream",
- "tokio-tun",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
