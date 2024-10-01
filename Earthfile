@@ -40,7 +40,8 @@ source:
     FROM +install-build-dependencies
     COPY --keep-ts Cargo.toml Cargo.lock ./
     COPY --keep-ts deny.toml ./
-    COPY --keep-ts --dir lightway-core lightway-app-utils lightway-client lightway-server .cargo ./
+    COPY --keep-ts --dir lightway-core lightway-app-utils lightway-client lightway-server uring-udp-client uring-udp-server .cargo ./
+    COPY --keep-ts --dir tests/certs ./tests/
 
 # build builds with the Cargo release profile
 build:

@@ -121,6 +121,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5a26814d8dcb93b0e5a0ff3c6d80a8843bafb21b39e8e18a6f05471870e110"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+
+[[package]]
 name = "async-channel"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2271,6 +2277,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-unsafe-cell"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8deaecba5382c095cb432cd1e21068dadb144208f057b13720e76bf89749beb4"
+
+[[package]]
 name = "test-case"
 version = "3.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2590,6 +2602,42 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "uring-udp-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayvec",
+ "bytes",
+ "io-uring",
+ "libc",
+ "lightway-core",
+ "pnet",
+ "socket2",
+ "sync-unsafe-cell",
+ "tracing",
+ "tracing-subscriber",
+ "tun2",
+]
+
+[[package]]
+name = "uring-udp-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayvec",
+ "bytes",
+ "io-uring",
+ "libc",
+ "lightway-core",
+ "pnet",
+ "socket2",
+ "sync-unsafe-cell",
+ "tracing",
+ "tracing-subscriber",
+ "tun2",
+]
 
 [[package]]
 name = "utf8parse"

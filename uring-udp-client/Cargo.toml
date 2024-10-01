@@ -1,0 +1,23 @@
+[package]
+name = "uring-udp-client"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+lightway-core = { workspace = true, features = ["postquantum"] }
+io-uring = "0.6"
+anyhow.workspace = true
+libc.workspace = true
+bytes.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+arrayvec = "0.7.6"
+tun2 = "3.1.4"
+pnet.workspace = true
+socket2.workspace = true
+sync-unsafe-cell = "0.1.1"
+
+[lints]
+workspace = true
+

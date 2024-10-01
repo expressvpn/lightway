@@ -27,6 +27,8 @@ exceptions = [
     { name = "lightway-core", allow = ["GPL-2.0"], version = "*" },
     { name = "lightway-server", allow = ["GPL-2.0"], version = "*" },
     { name = "lightway-app-utils", allow = ["GPL-2.0"], version = "*" },
+    { name = "uring-udp-client", allow = ["GPL-2.0"], version = "*" },
+    { name = "uring-udp-server", allow = ["GPL-2.0"], version = "*" },
 ]
 
 [licenses.private]

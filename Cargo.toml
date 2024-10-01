@@ -6,6 +6,8 @@ members = [
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",
+    "uring-udp-server",
+    "uring-udp-client",
 ]
 
 resolver = "2"
@@ -14,10 +16,15 @@ resolver = "2"
 lto = true
 debug = 1
 
+[profile.custom]
+inherits = "release"
+lto = false
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 unused_unsafe = "deny"
+unused_extern_crates = "deny"
 
 [workspace.lints.clippy]
 missing_safety_doc = "deny"
