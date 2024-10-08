@@ -1269,8 +1269,6 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn handle_auth_response(&mut self, cfg: AuthSuccessWithConfigV4) -> ConnectionResult<()> {
-        info!(config = ?cfg, "Authentication succeeded");
-
         // Ignore the message if client is already online
         if matches!(self.state, State::Online) {
             return Ok(());

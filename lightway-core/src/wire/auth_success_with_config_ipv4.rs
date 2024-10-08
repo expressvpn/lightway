@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use crate::wire::SessionId;
 
 use super::{FromWireError, FromWireResult};
@@ -77,13 +79,19 @@ use more_asserts::*;
 /// NOTE: In the lightway-core C implementation this is
 /// `HE_MSGID_CONFIG_IPV4` with `he_msg_config_ipv4_t` as the payload,
 /// however it is sent as the response to an auth request.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq)]
 pub(crate) struct AuthSuccessWithConfigV4 {
     pub(crate) local_ip: String,
     pub(crate) peer_ip: String,
     pub(crate) dns_ip: String,
     pub(crate) mtu: String,
     pub(crate) session: SessionId,
+}
+
+impl Debug for AuthSuccessWithConfigV4 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthSuccessWithConfigV4").finish()
+    }
 }
 
 impl AuthSuccessWithConfigV4 {

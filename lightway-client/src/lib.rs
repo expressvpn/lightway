@@ -178,7 +178,6 @@ pub struct ClientIpConfigCb;
 
 impl<T: Send + Sync> ClientIpConfig<ConnectionState<T>> for ClientIpConfigCb {
     fn ip_config(&self, state: &mut ConnectionState<T>, ip_config: InsideIpConfig) {
-        tracing::debug!("Got IP from server: {ip_config:?}");
         state.ip_config = Some(ip_config);
     }
 }
