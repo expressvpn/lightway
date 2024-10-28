@@ -33,7 +33,7 @@ rand.workspace = true
 rand_core = "0.6.4"
 thiserror.workspace = true
 tracing.workspace = true
-wolfssl = { git = "https://github.com/expressvpn/wolfssl-rs", default-features = false }
+wolfssl = { git = "https://github.com/expressvpn/wolfssl-rs", default-features = false, branch = "CVPN-1521-update-wolfssl-to-5.7.4" }
 
 [dev-dependencies]
 async-trait.workspace = true
