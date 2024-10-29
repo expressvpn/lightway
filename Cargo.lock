@@ -240,7 +240,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2950,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "wolfssl"
 version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1521-update-wolfssl-to-5.7.4#fb59d294def448195bef3bc0dfafe04c449fbaed"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1521-update-wolfssl-to-5.7.4#7073c3ca6f624212cd046f55b3c1894b3292d7a9"
 dependencies = [
  "bytes",
  "log",
@@ -2961,7 +2961,7 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "1.2.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1521-update-wolfssl-to-5.7.4#fb59d294def448195bef3bc0dfafe04c449fbaed"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1521-update-wolfssl-to-5.7.4#7073c3ca6f624212cd046f55b3c1894b3292d7a9"
 dependencies = [
  "autotools",
  "bindgen 0.70.1",
