@@ -2788,18 +2788,18 @@ dependencies = [
 [[package]]
 name = "wolfssl"
 version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1554-remove-liboqs-and-use-new-wolfssl#c62f7d5e3eb2724dcdb252b92e656ac77dd78ae4"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1554-remove-liboqs-and-use-new-wolfssl#f6f46c1eaed12cd2019b4f18e8e17027c1910e5f"
 dependencies = [
  "bytes",
  "log",
- "thiserror 1.0.69",
+ "thiserror 2.0.3",
  "wolfssl-sys",
 ]
 
 [[package]]
 name = "wolfssl-sys"
 version = "1.2.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1554-remove-liboqs-and-use-new-wolfssl#c62f7d5e3eb2724dcdb252b92e656ac77dd78ae4"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=CVPN-1554-remove-liboqs-and-use-new-wolfssl#f6f46c1eaed12cd2019b4f18e8e17027c1910e5f"
 dependencies = [
  "autotools",
  "bindgen",
