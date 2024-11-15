@@ -44,7 +44,6 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 skip = [
     { name = "base64", version = "0.21.7" },
-    { name = "bindgen", version = "0.68.1" },
     { name = "block-buffer", version = "0.9.0" },
     { name = "darling", version = "0.14.4" },
     { name = "darling_core", version = "0.14.4" },
