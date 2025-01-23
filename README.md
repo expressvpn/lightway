@@ -25,7 +25,7 @@ Protocol and design documentation can be found in the
 Lightway Rust implementation currently supports Linux OS. Both x86_64 and arm64 platforms are
 supported and built as part of CI.
 
-Support for other platforms will be added soon.
+Support for other client platforms will be added soon.
 
 ## Development steps
 

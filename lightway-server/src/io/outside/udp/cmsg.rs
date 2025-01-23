@@ -8,8 +8,8 @@ impl<const N: usize> Buffer<N> {
         Self([std::mem::MaybeUninit::<u8>::uninit(); N])
     }
 
-    pub(crate) fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
-        &mut self.0
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr() as *mut _
     }
 
     /// # Safety
@@ -136,6 +136,10 @@ impl<const N: usize> BufferMut<N> {
             cmsghdr,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr() as *mut _
     }
 }
 

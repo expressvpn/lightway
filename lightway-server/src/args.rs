@@ -71,13 +71,25 @@ pub struct Config {
     #[clap(long, default_value_t)]
     pub enable_pqc: bool,
 
-    /// Enable IO-uring interface for Tunnel
-    #[clap(long, default_value_t)]
-    pub enable_tun_iouring: bool,
-
-    /// IO-uring submission queue count. Only applicable when
-    /// `enable_tun_iouring` is `true`
-    // Any value more than 1024 negatively impact the throughput
+    /// Total IO-uring submission queue count.
+    ///
+    /// Must be larger than the total of:
+    ///
+    /// UDP:
+    ///
+    ///   iouring_tun_rx_count + iouring_udp_rx_count +
+    ///   iouring_tx_count + 1 (cancellation request)
+    ///
+    /// TCP:
+    ///
+    ///   iouring_tun_rx_count + iouring_tx_count + 1 (cancellation
+    ///   request) + 2 * maximum number of connections.
+    ///
+    ///   Each connection actually uses up to 3 slots, a persistent
+    ///   recv request and on demand slots for TX and cancellation
+    ///   (teardown).
+    ///
+    /// There is no downside to setting this much larger.
     #[clap(long, default_value_t = 1024)]
     pub iouring_entry_count: usize,
 
@@ -86,6 +98,36 @@ pub struct Config {
     /// the thread will go to sleep.
     #[clap(long, default_value = "100ms")]
     pub iouring_sqpoll_idle_time: Duration,
+
+    /// Number of concurrent TUN device read requests to issue to
+    /// IO-uring. Setting this too large may negatively impact
+    /// performance.
+    #[clap(long, default_value_t = 64)]
+    pub iouring_tun_rx_count: u32,
+
+    /// Configure TUN device in blocking mode. This can allow
+    /// equivalent performance with fewer `ìouring-tun-rx-count`
+    /// entries but can significantly harm performance on some kernels
+    /// where the kernel does not indicate that the tun device handles
+    /// `FMODE_NOWAIT`.
+    ///
+    /// If blocking mode is enabled then `iouring_tun_rx_count` may be
+    /// set much lower.
+    ///
+    /// This was fixed by <https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=438b406055cd21105aad77db7938ee4720b09bee>
+    /// which was part of v6.4-rc1.
+    #[clap(long, default_value_t = false)]
+    pub iouring_tun_blocking: bool,
+
+    /// Number of concurrent UDP socket recvmsg requests to issue to
+    /// IO-uring.
+    #[clap(long, default_value_t = 32)]
+    pub iouring_udp_rx_count: u32,
+
+    /// Maximum number of concurrent UDP + TUN sendmsg/write requests
+    /// to issue to IO-uring.
+    #[clap(long, default_value_t = 512)]
+    pub iouring_tx_count: u32,
 
     /// Log format
     #[clap(long, value_enum, default_value_t = LogFormat::Full)]
@@ -110,6 +152,10 @@ pub struct Config {
     /// Set UDP buffer size. Default value is 15 MiB.
     #[clap(long, default_value_t = ByteSize::mib(15))]
     pub udp_buffer_size: ByteSize,
+
+    /// Set UDP buffer size. Default value is 256 KiB.
+    #[clap(long, default_value_t = ByteSize::kib(256))]
+    pub tcp_buffer_size: ByteSize,
 
     /// Enable WolfSSL debug logging
     #[cfg(feature = "debug")]

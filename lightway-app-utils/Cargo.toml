@@ -23,7 +23,7 @@ bytes.workspace = true
 clap.workspace = true
 fs-mistrust = { version = "0.8.0", default-features = false }
 humantime = "2.1.0"
-io-uring = {  version = "0.7.0", optional = true }
+io-uring = { workspace = true, optional = true }
 ipnet.workspace = true
 libc.workspace = true
 lightway-core.workspace = true
@@ -38,11 +38,12 @@ tokio-stream = { workspace = true, optional = true }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
-tun = { version = "0.7", features = ["async"] }
+tun = { workspace = true, features = ["async"] }
 
 [[example]]
 name = "udprelay"
 path = "examples/udprelay.rs"
+required-features = ["io-uring"]
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -4,7 +4,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpStream;
 
 use super::OutsideIO;
-use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+use lightway_core::{CowBytes, IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 
 pub struct Tcp(tokio::net::TcpStream, SocketAddr);
 
@@ -58,8 +58,8 @@ impl OutsideIO for Tcp {
 }
 
 impl OutsideIOSendCallback for Tcp {
-    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.0.try_write(buf) {
+    fn send(&self, buf: CowBytes) -> IOCallbackResult<usize> {
+        match self.0.try_write(buf.as_bytes()) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock

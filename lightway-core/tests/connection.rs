@@ -106,7 +106,8 @@ impl TestSock for TestDatagramSock {
 }
 
 impl OutsideIOSendCallback for TestDatagramSock {
-    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+    fn send(&self, buf: CowBytes) -> IOCallbackResult<usize> {
+        let buf = buf.as_bytes();
         match self.0.try_send(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
@@ -156,8 +157,8 @@ impl TestSock for TestStreamSock {
 }
 
 impl OutsideIOSendCallback for TestStreamSock {
-    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.0.try_write(buf) {
+    fn send(&self, buf: CowBytes) -> IOCallbackResult<usize> {
+        match self.0.try_write(buf.as_bytes()) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock

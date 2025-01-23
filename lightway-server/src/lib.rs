@@ -17,26 +17,19 @@ pub use lightway_core::{
 use anyhow::{anyhow, Context, Result};
 use ipnet::Ipv4Net;
 use lightway_app_utils::{connection_ticker_cb, TunConfig};
-use lightway_core::{
-    ipv4_update_destination, AuthMethod, BuilderPredicates, ConnectionError, IOCallbackResult,
-    InsideIpConfig, Secret, ServerContextBuilder,
-};
-use pnet::packet::ipv4::Ipv4Packet;
+use lightway_core::{AuthMethod, BuilderPredicates, InsideIpConfig, Secret, ServerContextBuilder};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::io::inside::InsideIO;
 use crate::ip_manager::IpManager;
 
 use connection_manager::ConnectionManager;
-use io::outside::Server;
 
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
@@ -112,14 +105,27 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
-    /// Enable IO-uring interface for Tunnel
-    pub enable_tun_iouring: bool,
-
     /// IO-uring submission queue count
     pub iouring_entry_count: usize,
 
     /// IO-uring sqpoll idle time.
     pub iouring_sqpoll_idle_time: Duration,
+
+    /// Number of concurrent TUN device read requests to issue to
+    /// IO-uring. Setting this too large may negatively impact
+    /// performance.
+    pub iouring_tun_rx_count: u32,
+
+    /// Configure TUN in blocking mode.
+    pub iouring_tun_blocking: bool,
+
+    /// Number of concurrent UDP socket recvmsg requests to issue to
+    /// IO-uring.
+    pub iouring_udp_rx_count: u32,
+
+    /// Maximum number of concurrent UDP + TUN sendmsg/write requests
+    /// to issue to IO-uring.
+    pub iouring_tx_count: u32,
 
     /// The key update interval for DTLS/TLS 1.3 connections
     pub key_update_interval: Duration,
@@ -140,11 +146,40 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
     /// UDP Buffer size for the server
     pub udp_buffer_size: ByteSize,
+
+    /// TCP Buffer size for the server
+    pub tcp_buffer_size: ByteSize,
+}
+
+impl<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'static> ServerConfig<SA> {
+    fn validate(&self) -> Result<()> {
+        let mut required_uring_slots =
+            self.iouring_tun_rx_count as usize + self.iouring_tx_count as usize + 1; // cancellation request
+
+        required_uring_slots += match self.connection_type {
+            // this should be 2 * max connections, but max connections
+            // is unknown, assume at least 1.
+            ConnectionType::Stream => 2,
+            ConnectionType::Datagram => self.iouring_udp_rx_count as usize,
+        };
+
+        if self.iouring_entry_count < required_uring_slots {
+            return Err(anyhow!(
+                "iouring_entry_count too small {} < {}",
+                self.iouring_entry_count,
+                required_uring_slots
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'static>(
     config: ServerConfig<SA>,
 ) -> Result<()> {
+    config.validate()?;
+
     let server_key = Secret::PemFile(&config.server_key);
     let server_cert = Secret::PemFile(&config.server_cert);
 
@@ -175,12 +210,16 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     let connection_type = config.connection_type;
     let auth = Arc::new(AuthAdapter(config.auth));
 
-    let iouring = if config.enable_tun_iouring {
-        Some((config.iouring_entry_count, config.iouring_sqpoll_idle_time))
-    } else {
-        None
-    };
-    let inside_io = Arc::new(io::inside::Tun::new(config.tun_config, iouring).await?);
+    let tx_queue = Arc::new(Mutex::new(io::TxQueue::new(config.iouring_tx_count)));
+
+    let tun = io::inside::Tun::new(
+        config.iouring_tun_rx_count,
+        config.iouring_tun_blocking,
+        config.tun_config,
+        config.lightway_client_ip,
+        ip_manager.clone(),
+        tx_queue.clone(),
+    )?;
 
     let ctx = ServerContextBuilder::new(
         connection_type,
@@ -188,7 +227,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         server_key,
         auth,
         ip_manager.clone(),
-        inside_io.clone().into_io_send_callback(),
+        tun.inside_io_sender(),
     )?
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_key_update_interval(config.key_update_interval)
@@ -201,69 +240,43 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 
     tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
 
-    let mut server: Box<dyn Server> = match connection_type {
-        ConnectionType::Datagram => Box::new(
+    let server = match connection_type {
+        ConnectionType::Datagram => io::OutsideIoSource::Udp(
             io::outside::UdpServer::new(
+                config.iouring_udp_rx_count,
                 conn_manager.clone(),
+                tx_queue.clone(),
                 config.bind_address,
                 config.udp_buffer_size,
             )
             .await?,
         ),
-        ConnectionType::Stream => Box::new(
+        ConnectionType::Stream => io::OutsideIoSource::Tcp(
             io::outside::TcpServer::new(
                 conn_manager.clone(),
+                tx_queue.clone(),
                 config.bind_address,
                 config.proxy_protocol,
+                config.tcp_buffer_size,
             )
             .await?,
         ),
     };
 
-    let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        loop {
-            let mut buf = match inside_io.recv_buf().await {
-                IOCallbackResult::Ok(buf) => buf,
-                IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
-                IOCallbackResult::Err(err) => {
-                    break Err(anyhow!(err).context("InsideIO recv buf error"));
-                }
-            };
-
-            // Find connection based on client ip (dest ip) and forward packet
-            let packet = Ipv4Packet::new(buf.as_ref());
-            let Some(packet) = packet else {
-                eprintln!("Invalid inside packet size (less than Ipv4 header)!");
-                continue;
-            };
-            let conn = ip_manager.find_connection(packet.get_destination());
-
-            // Update destination IP address to client's ip
-            ipv4_update_destination(buf.as_mut(), config.lightway_client_ip);
-
-            if let Some(conn) = conn {
-                match conn.inside_data_received(&mut buf) {
-                    Ok(()) => {}
-                    Err(ConnectionError::InvalidState) => {
-                        // Skip forwarding packet when offline
-                        metrics::tun_rejected_packet_invalid_state();
-                    }
-                    Err(ConnectionError::InvalidInsidePacket(_)) => {
-                        // Skip processing invalid packet
-                        metrics::tun_rejected_packet_invalid_inside_packet();
-                    }
-                    Err(err) => {
-                        let fatal = err.is_fatal(conn.connection_type());
-                        metrics::tun_rejected_packet_invalid_other(fatal);
-                        if fatal {
-                            conn.handle_end_of_stream();
-                        }
-                    }
-                }
-            } else {
-                metrics::tun_rejected_packet_no_connection();
-            }
-        }
+    // On exit dropping _io_handle will cause EPIPE to be delivered to
+    // io_cancel. This causes the corresponding read request on the
+    // ring to complete and signal the loop should exit.
+    let (_io_handle, io_cancel) = tokio::net::unix::pipe::pipe()?;
+    let io_cancel = io_cancel.into_blocking_fd()?;
+    let io_task = tokio::task::spawn_blocking(move || {
+        let io_loop = io::Loop::new(
+            config.iouring_entry_count,
+            config.iouring_sqpoll_idle_time,
+            tx_queue,
+            server,
+            tun,
+        )?;
+        io_loop.run(io_cancel)
     });
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
@@ -275,12 +288,70 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     })?;
 
     tokio::select! {
-        err = server.run() => err.context("Outside IO loop exited"),
-        io = inside_io_loop =>  io.map_err(|e| anyhow!(e).context("Inside IO loop panicked"))?.context("Inside IO loop exited"),
+        r = io_task => r?.context("IO task exited"),
         _ = ctrlc_rx => {
             info!("Sigterm or Sigint received");
             conn_manager.close_all_connections();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_case::test_case;
+
+    struct Auth;
+
+    impl ServerAuth<AuthState<'_>> for Auth {}
+
+    #[test_case(ConnectionType::Stream, 0, 0, 0, 0 => panics "iouring_entry_count too small")]
+    #[test_case(ConnectionType::Stream, 3, 0, 0, 0 => ())]
+    #[test_case(ConnectionType::Stream, 20, 5, 0, 13 => panics "iouring_entry_count too small")]
+    #[test_case(ConnectionType::Stream, 21, 5, 0, 13 => ())]
+    #[test_case(ConnectionType::Stream, 22, 5, 0, 13 => ())]
+    #[test_case(ConnectionType::Stream, 7, 1, 10_000, 3 => ())] // udp rx count irrelevant for stream
+    #[test_case(ConnectionType::Datagram, 0, 0, 0, 0 => panics "iouring_entry_count too small")]
+    #[test_case(ConnectionType::Datagram, 1, 0, 0, 0 => ())]
+    #[test_case(ConnectionType::Datagram, 25, 5, 7, 13 => panics "iouring_entry_count too small")]
+    #[test_case(ConnectionType::Datagram, 26, 5, 7, 13 => ())]
+    #[test_case(ConnectionType::Datagram, 27, 5, 7, 13 => ())]
+    fn validate_iouring_entry_count(
+        connection_type: ConnectionType,
+        iouring_entry_count: usize,
+        iouring_tun_rx_count: u32,
+        iouring_udp_rx_count: u32,
+        iouring_tx_count: u32,
+    ) {
+        let config = ServerConfig {
+            connection_type,
+            auth: Auth,
+            server_cert: "".into(),
+            server_key: "".into(),
+            tun_config: Default::default(),
+            ip_pool: "10.0.0.0/8".parse().unwrap(),
+            ip_map: Default::default(),
+            tun_ip: None,
+            lightway_server_ip: "1.1.1.1".parse().unwrap(),
+            lightway_client_ip: "2.2.2.2".parse().unwrap(),
+            lightway_dns_ip: "3.3.3.3".parse().unwrap(),
+            enable_pqc: false,
+            iouring_entry_count,
+            iouring_sqpoll_idle_time: Default::default(),
+            iouring_tun_rx_count,
+            iouring_tun_blocking: false,
+            iouring_udp_rx_count,
+            iouring_tx_count,
+            key_update_interval: Default::default(),
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            bind_address: "0.0.0.0:0".parse().unwrap(),
+            proxy_protocol: false,
+            udp_buffer_size: Default::default(),
+            tcp_buffer_size: Default::default(),
+        };
+        config.validate().unwrap();
     }
 }

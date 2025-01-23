@@ -130,15 +130,19 @@ async fn main() -> Result<()> {
         lightway_client_ip: config.lightway_client_ip,
         lightway_dns_ip: config.lightway_dns_ip,
         enable_pqc: config.enable_pqc,
-        enable_tun_iouring: config.enable_tun_iouring,
         iouring_entry_count: config.iouring_entry_count,
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+        iouring_tun_rx_count: config.iouring_tun_rx_count,
+        iouring_tun_blocking: config.iouring_tun_blocking,
+        iouring_udp_rx_count: config.iouring_udp_rx_count,
+        iouring_tx_count: config.iouring_tx_count,
         key_update_interval: config.key_update_interval.into(),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         bind_address: config.bind_address,
         proxy_protocol: config.proxy_protocol,
         udp_buffer_size: config.udp_buffer_size,
+        tcp_buffer_size: config.tcp_buffer_size,
     };
 
     server(config).await

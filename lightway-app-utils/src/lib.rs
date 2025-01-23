@@ -14,6 +14,9 @@ mod event_stream;
 mod iouring;
 mod tun;
 
+mod net;
+pub use net::{sockaddr_from_socket_addr, socket_addr_from_sockaddr};
+
 #[cfg(feature = "tokio")]
 pub use connection_ticker::{
     connection_ticker_cb, ConnectionTicker, ConnectionTickerState, ConnectionTickerTask, Tickable,

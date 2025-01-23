@@ -83,13 +83,13 @@ run-udp-floating-ip-test:
 run-udp-pmtud-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-pmtud"
 
-# run-udp-iouring-test runs e2e test using UDP and default cipher with io-uring enabled
+# run-udp-iouring-test runs e2e test using UDP and default cipher with client io-uring enabled
 run-udp-iouring-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
 
-# run-tcp-iouring-test runs e2e test using TCP and default cipher with io-uring enabled
+# run-tcp-iouring-test runs e2e test using TCP and default cipher with client io-uring enabled
 run-tcp-iouring-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
 
 # run-udp-min-inside-mtu-test runs e2e test of UDP with client using smallest valid inside MTU
 run-udp-min-inside-mtu-test:
@@ -121,7 +121,7 @@ run-tcp-keepalive-test:
 
 # run-udp-single-threaded-test runs e2e test of UDP with server and client using a single Tokio worker thread
 run-udp-single-threaded-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TOKIO_WORKER_THREADS=1 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-tun-iouring --enable-pmtud"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TOKIO_WORKER_THREADS=1 --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-tun-iouring --enable-pmtud"
 
 # run-tcp-single-threaded-test runs e2e test of TCP with server and client using a single Tokio worker thread
 run-tcp-single-threaded-test:

@@ -38,7 +38,8 @@ pub use context::{
     ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext, ServerContextBuilder,
 };
 pub use io::{
-    InsideIOSendCallback, InsideIOSendCallbackArg, OutsideIOSendCallback, OutsideIOSendCallbackArg,
+    CowBytes, InsideIOSendCallback, InsideIOSendCallbackArg, OutsideIOSendCallback,
+    OutsideIOSendCallbackArg,
 };
 pub use packet::OutsidePacket;
 pub use plugin::{

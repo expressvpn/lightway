@@ -5,7 +5,8 @@ use more_asserts::*;
 use wolfssl::IOCallbackResult;
 
 use crate::{
-    plugin::PluginList, wire, ConnectionType, OutsideIOSendCallbackArg, PluginResult, Version,
+    plugin::PluginList, wire, ConnectionType, CowBytes, OutsideIOSendCallbackArg, PluginResult,
+    Version,
 };
 
 pub(crate) struct SendBuffer {
@@ -164,26 +165,28 @@ impl WolfSSLIOAdapter {
             }
         }
 
+        let b = b.freeze();
+
         // Send header + buf. If we are in aggressive mode we send it
         // a total of three times. On any send error we return
         // immediately without the remaining tries, otherwise we
         // return the result of the final attempt.
 
         if self.aggressive_send {
-            match self.io.send(&b[..]) {
+            match self.io.send(CowBytes::Owned(b.clone())) {
                 IOCallbackResult::Ok(_) => {}
                 wb @ IOCallbackResult::WouldBlock => return wb,
                 err @ IOCallbackResult::Err(_) => return err,
             }
 
-            match self.io.send(&b[..]) {
+            match self.io.send(CowBytes::Owned(b.clone())) {
                 IOCallbackResult::Ok(_) => {}
                 wb @ IOCallbackResult::WouldBlock => return wb,
                 err @ IOCallbackResult::Err(_) => return err,
             }
         }
 
-        match self.io.send(&b[..]) {
+        match self.io.send(CowBytes::Owned(b)) {
             IOCallbackResult::Ok(n) => {
                 // We've sent `n` bytes successfully out of
                 // `wire::Header::WIRE_SIZE` + `b.len()` that we
@@ -250,7 +253,7 @@ impl WolfSSLIOAdapter {
             debug_assert_le!(send_buffer.original_len(), buf.len());
         }
 
-        match self.io.send(send_buffer.as_bytes()) {
+        match self.io.send(CowBytes::Borrowed(send_buffer.as_bytes())) {
             IOCallbackResult::Ok(n) if n == send_buffer.actual_len() => {
                 // We've now sent everything we were originally
                 // asked to, so signal completion of that original
@@ -335,7 +338,8 @@ mod tests {
     }
 
     impl OutsideIOSendCallback for FakeOutsideIOSend {
-        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+        fn send(&self, buf: CowBytes) -> IOCallbackResult<usize> {
+            let buf = buf.as_bytes();
             let (fakes, sent) = &mut *self.0.lock().unwrap();
             match fakes.pop_front() {
                 Some(IOCallbackResult::Ok(n)) => {

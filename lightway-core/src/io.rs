@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use wolfssl::IOCallbackResult;
 
 /// Application provided callback used to send inside data.
@@ -20,6 +20,33 @@ pub trait InsideIOSendCallback<AppState> {
 /// Convenience type to use as function arguments
 pub type InsideIOSendCallbackArg<AppState> = Arc<dyn InsideIOSendCallback<AppState> + Send + Sync>;
 
+/// A byte buffer to be sent, may be owned or borrowed.
+pub enum CowBytes<'a> {
+    /// An owned buffer
+    Owned(Bytes),
+    /// A borrowed buffer
+    Borrowed(&'a [u8]),
+}
+
+impl CowBytes<'_> {
+    /// Convert this buffer into an owned `Bytes`. Cheap if this
+    /// instance if `::Owned`, but copied if not.
+    pub fn into_owned(self) -> Bytes {
+        match self {
+            CowBytes::Owned(b) => b,
+            CowBytes::Borrowed(b) => Bytes::copy_from_slice(b),
+        }
+    }
+
+    /// Gain access to the underlying byte buffer.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            CowBytes::Owned(b) => b.as_ref(),
+            CowBytes::Borrowed(b) => b,
+        }
+    }
+}
+
 /// Application provided callback used to send outside data.
 pub trait OutsideIOSendCallback {
     /// Called when Lightway wishes to send some outside data
@@ -30,7 +57,7 @@ pub trait OutsideIOSendCallback {
     /// [`IOCallbackResult::WouldBlock`].
     ///
     /// This is the same method as [`wolfssl::IOCallbacks::send`].
-    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize>;
+    fn send(&self, buf: CowBytes) -> IOCallbackResult<usize>;
 
     /// Get the peer's [`SocketAddr`]
     fn peer_addr(&self) -> SocketAddr;

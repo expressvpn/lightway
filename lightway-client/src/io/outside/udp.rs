@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 
 use super::OutsideIO;
 use lightway_app_utils::sockopt;
-use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+use lightway_core::{CowBytes, IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 
 pub struct Udp {
     sock: tokio::net::UdpSocket,
@@ -67,8 +67,8 @@ impl OutsideIO for Udp {
 }
 
 impl OutsideIOSendCallback for Udp {
-    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
+    fn send(&self, buf: CowBytes) -> IOCallbackResult<usize> {
+        match self.sock.try_send_to(buf.as_bytes(), self.peer_addr) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
