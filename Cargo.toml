@@ -6,6 +6,7 @@ members = [
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",
+    "lightway-raptor",
 ]
 
 resolver = "2"

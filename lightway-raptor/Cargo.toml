@@ -1,0 +1,14 @@
+[package]
+name = "lightway-raptor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raptorq = { version = "2.0.0", features = ["serde", "serde_support"] }
+rand = "0.9.0-beta.0"
+anyhow = "1.0.94"
+tokio = "1.42.0"
+time = "0.3.37"
+
+[lints]
+workspace = true
