@@ -5,88 +5,48 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use pnet::packet::ipv4::Ipv4Packet;
 
-use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
-use lightway_core::{
-    ipv4_update_destination, ipv4_update_source, IOCallbackResult, InsideIOSendCallback,
-    InsideIpConfig,
-};
+use lightway_app_utils::TunConfig;
+use lightway_core::{IOCallbackResult, InsideIOSendCallback, InsideIpConfig};
 
 use crate::{io::inside::InsideIO, ConnectionState};
 
+#[allow(dead_code)]
 pub struct Tun {
-    tun: AppUtilsTun,
     ip: Ipv4Addr,
     dns_ip: Ipv4Addr,
 }
 
 impl Tun {
     pub async fn new(
-        tun: TunConfig,
+        _tun: TunConfig,
         ip: Ipv4Addr,
         dns_ip: Ipv4Addr,
-        #[cfg(feature = "io-uring")] iouring: Option<(usize, Duration)>,
+        #[cfg(feature = "io-uring")] _iouring: Option<(usize, Duration)>,
     ) -> Result<Self> {
-        #[cfg(feature = "io-uring")]
-        let tun = match iouring {
-            Some((ring_size, sqpoll_idle_time)) => {
-                AppUtilsTun::iouring(tun, ring_size, sqpoll_idle_time).await?
-            }
-            None => AppUtilsTun::direct(tun).await?,
-        };
-        #[cfg(not(feature = "io-uring"))]
-        let tun = AppUtilsTun::direct(tun).await?;
-        Ok(Tun { tun, ip, dns_ip })
+        Ok(Tun { ip, dns_ip })
     }
 }
 
 #[async_trait]
 impl InsideIO for Tun {
     async fn recv_buf(&self) -> IOCallbackResult<BytesMut> {
-        self.tun.recv_buf().await
+        futures::future::pending::<()>().await;
+        IOCallbackResult::WouldBlock
     }
 
     /// Api to send packet in the tunnel
-    fn try_send(&self, mut pkt: BytesMut, ip_config: Option<InsideIpConfig>) -> Result<usize> {
-        let pkt_len = pkt.len();
-        // Update destination IP from server provided inside ip to TUN device ip
-        ipv4_update_destination(pkt.as_mut(), self.ip);
-
-        // Update source IP from server DNS ip to TUN DNS ip
-        if let Some(ip_config) = ip_config {
-            let packet = Ipv4Packet::new(pkt.as_ref());
-            if let Some(packet) = packet {
-                if packet.get_source() == ip_config.dns_ip {
-                    ipv4_update_source(pkt.as_mut(), self.dns_ip);
-                }
-            };
-        }
-
-        self.tun.try_send(pkt);
-        Ok(pkt_len)
+    fn try_send(&self, pkt: BytesMut, _ip_config: Option<InsideIpConfig>) -> Result<usize> {
+        Ok(pkt.len())
     }
 }
 
 impl<T: Send + Sync> InsideIOSendCallback<ConnectionState<T>> for Tun {
-    fn send(&self, mut buf: BytesMut, state: &mut ConnectionState<T>) -> IOCallbackResult<usize> {
-        // Update destination IP from server provided inside ip to TUN device ip
-        ipv4_update_destination(buf.as_mut(), self.ip);
-
-        // Update source IP from server DNS ip to TUN DNS ip
-        if let Some(ip_config) = state.ip_config {
-            let packet = Ipv4Packet::new(buf.as_ref());
-            if let Some(packet) = packet {
-                if packet.get_source() == ip_config.dns_ip {
-                    ipv4_update_source(buf.as_mut(), self.dns_ip);
-                }
-            };
-        }
-
-        self.tun.try_send(buf)
+    fn send(&self, buf: BytesMut, _state: &mut ConnectionState<T>) -> IOCallbackResult<usize> {
+        IOCallbackResult::Ok(buf.len())
     }
 
     fn mtu(&self) -> usize {
-        self.tun.mtu()
+        1350
     }
 }
