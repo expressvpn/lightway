@@ -1,17 +1,17 @@
 [package]
-name = "lightway-server"
+name = "test-iouring"
 version = "0.1.0"
-repository.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+repository = "https://github.com/expressvpn/lightway"
+edition = "2021"
+authors = ["lightway-developers@expressvpn.com"]
+license = "AGPL-3.0-only"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
 default = ["io-uring"]
 debug = ["lightway-core/debug"]
-io-uring = ["lightway-app-utils/io-uring"]
+io-uring = ["lightway-app-utils/io-uring", "dep:io-uring"]
 
 [lints]
 workspace = true
@@ -51,6 +51,8 @@ tracing.workspace = true
 tracing-log = "0.2.0"
 tracing-subscriber = { workspace = true, features = ["json"] }
 twelf.workspace = true
+tun = { version = "0.7", features = ["async"] }
+io-uring = {  version = "0.7.0", optional = true }
 
 [dev-dependencies]
 more-asserts.workspace = true

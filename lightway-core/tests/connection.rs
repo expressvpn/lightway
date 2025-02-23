@@ -377,7 +377,7 @@ async fn client<S: TestSock>(
                 assert!(matches!(client.state(), State::Online));
                 assert!(message_sent);
 
-                assert_eq!(&buf[..], b"\x40Hello World!");
+                assert_eq!(&buf[..], b"\x40Hello World!But Bigger");
 
                 let curve = client.current_curve().unwrap();
                 assert_eq!(curve, pqc.expected_curve());
@@ -429,7 +429,9 @@ async fn client<S: TestSock>(
                     // work as the first byte too, but be more
                     // explicit to avoid a confusing surprise for some
                     // future developer).
-                    let mut buf: BytesMut = BytesMut::from(&b"\x40Hello World!"[..]);
+                    // Hi, future developer here, this is an invalid ipv4 size,
+                    // now the code sends 20 bytes so we don't fail any validations
+                    let mut buf: BytesMut = BytesMut::from(&b"\x40Hello World!But Bigger"[..]);
                     eprintln!("Sending message: {buf:?}");
                     client.inside_data_received(&mut buf).expect("Send my message");
                     message_sent = true;
