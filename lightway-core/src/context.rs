@@ -1,8 +1,9 @@
 pub mod ip_pool;
 mod server_auth;
 
+use parking_lot::Mutex;
 use rand::SeedableRng;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{

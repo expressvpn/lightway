@@ -6,13 +6,14 @@ mod io_adapter;
 mod key_update;
 
 use bytes::{Bytes, BytesMut};
+use parking_lot::Mutex;
 use rand::Rng;
 use std::borrow::Cow;
 use std::net::AddrParseError;
 use std::num::{NonZeroU16, Wrapping};
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -936,7 +937,7 @@ impl<AppState: Send> Connection<AppState> {
                 ref mut pending_session_id,
                 ..
             } => {
-                let new_session_id = rng.lock().unwrap().r#gen();
+                let new_session_id = rng.lock().r#gen();
 
                 self.session.io_cb_mut().set_session_id(new_session_id);
 

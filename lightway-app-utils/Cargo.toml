@@ -11,7 +11,7 @@ readme = "README.md"
 
 [features]
 default = [ "tokio" ]
-io-uring = [ "dep:io-uring", "dep:tokio", "dep:tokio-eventfd" ]
+io-uring = [ "dep:io-uring", "dep:tokio", "dep:tokio-eventfd", "dep:parking_lot" ]
 tokio = [ "dep:tokio", "dep:tokio-stream" ]
 
 [lints]
@@ -28,6 +28,7 @@ ipnet.workspace = true
 libc.workspace = true
 lightway-core.workspace = true
 metrics.workspace = true
+parking_lot = { version = "0.12.3", optional = true }
 serde.workspace = true
 serde_with = "3.4.0"
 serde_yaml = "0.9.34"

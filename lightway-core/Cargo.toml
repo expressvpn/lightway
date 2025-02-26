@@ -29,6 +29,7 @@ metrics.workspace = true
 more-asserts.workspace = true
 num_enum = "0.7.0"
 once_cell = "1.19.0"
+parking_lot = "0.12"
 pnet.workspace = true
 rand.workspace = true
 rand_core = "0.6.4"

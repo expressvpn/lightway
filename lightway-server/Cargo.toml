@@ -26,6 +26,7 @@ clap.workspace = true
 ctrlc.workspace = true
 delegate.workspace = true
 educe.workspace = true
+hashbrown = "0.15.2"
 ipnet.workspace = true
 jsonwebtoken = "9.3.0"
 libc.workspace = true
@@ -33,6 +34,7 @@ lightway-app-utils.workspace = true
 lightway-core = { workspace = true, features = ["postquantum"] }
 metrics.workspace = true
 metrics-util = "0.18.0"
+parking_lot = "0.12.3"
 pnet.workspace = true
 ppp = "2.2.0"
 pwhash = "1.0.0"

@@ -1,8 +1,9 @@
 use bytes::BytesMut;
 use delegate::delegate;
+use parking_lot::Mutex;
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 use tracing::{trace, warn};
 
@@ -83,7 +84,6 @@ impl Connection {
 
         conn.lw_conn
             .lock()
-            .unwrap()
             .app_state_mut()
             .conn
             .set(Arc::downgrade(&conn))
@@ -96,7 +96,7 @@ impl Connection {
     }
 
     delegate! {
-        to self.lw_conn.lock().unwrap() {
+        to self.lw_conn.lock() {
             pub fn tls_protocol_version(&self) -> ProtocolVersion;
             pub fn connection_type(&self) -> ConnectionType;
             pub fn session_id(&self) -> SessionId;
@@ -148,7 +148,7 @@ impl Connection {
     }
 
     pub fn begin_session_id_rotation(self: &Arc<Self>) {
-        let mut conn = self.lw_conn.lock().unwrap();
+        let mut conn = self.lw_conn.lock();
 
         // A rotation is already in flight, nothing to be done this
         // time.
@@ -174,7 +174,7 @@ impl Connection {
     // Use this only during shutdown, after clearing all connections from
     // connection_manager
     pub fn lw_disconnect(self: Arc<Self>) -> ConnectionResult<()> {
-        self.lw_conn.lock().unwrap().disconnect()
+        self.lw_conn.lock().disconnect()
     }
 
     pub fn disconnect(&self) -> ConnectionResult<()> {
@@ -183,7 +183,7 @@ impl Connection {
         }
         metrics::connection_closed();
         self.manager.remove_connection(self);
-        self.lw_conn.lock().unwrap().disconnect()
+        self.lw_conn.lock().disconnect()
     }
 }
 

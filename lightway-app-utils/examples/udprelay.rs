@@ -206,14 +206,18 @@ struct TunIOUring {
 
 impl TunIOUring {
     async fn new(tun: Tun, ring_size: usize, channel_size: usize) -> Result<Self> {
-        let tun_iouring = IOUring::new(
+        let tun_iouring = match IOUring::new(
             Arc::new(WrappedTun(tun)),
             ring_size,
             channel_size,
             TUN_MTU,
             Duration::from_millis(100),
         )
-        .await?;
+        .await
+        {
+            Ok(it) => it,
+            Err(err) => return Err(err),
+        };
 
         Ok(Self { tun_iouring })
     }
@@ -231,7 +235,13 @@ impl TunAdapter for TunIOUring {
     }
 
     async fn recv_from_tun(&self) -> Result<BytesMut> {
-        self.tun_iouring.recv().await.map_err(anyhow::Error::msg)
+        match self.tun_iouring.recv().await {
+            IOCallbackResult::Ok(pkt) => Ok(pkt),
+            IOCallbackResult::WouldBlock => {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock).into())
+            }
+            IOCallbackResult::Err(err) => Err(err.into()),
+        }
     }
 }
 
