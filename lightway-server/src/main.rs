@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
 
 use metrics_util::debugging::DebuggingRecorder;
+use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 use twelf::Layer;
@@ -117,6 +118,9 @@ async fn main() -> Result<()> {
     let mut tun_config = TunConfig::default();
     tun_config.tun_name(config.tun_name);
 
+    let ingress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
+    let egress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
+
     let config = ServerConfig {
         connection_type: config.mode.into(),
         auth,
@@ -137,6 +141,10 @@ async fn main() -> Result<()> {
         key_update_interval: config.key_update_interval.into(),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        ingress_pkt_accumulator,
+        egress_pkt_accumulator,
+        pkt_accumulator_flush_interval: Duration::from_secs_f64(0.000001),
+        pkt_accumulator_clean_up_interval: Duration::from_secs_f64(2.0),
         bind_address: config.bind_address,
         bind_attempts: config.bind_attempts,
         proxy_protocol: config.proxy_protocol,

@@ -171,6 +171,17 @@ impl Connection {
         self.manager.finalize_session_id_rotation(self, old, new)
     }
 
+    pub fn clean_up_stale_pkt_accumulator_states(self: Arc<Self>) {
+        self.lw_conn
+            .lock()
+            .unwrap()
+            .clean_up_stale_pkt_accumulator_states();
+    }
+
+    pub fn flush_pkt_accumulator(self: Arc<Self>) -> ConnectionResult<()> {
+        self.lw_conn.lock().unwrap().flush_pkts_to_outside()
+    }
+
     // Use this only during shutdown, after clearing all connections from
     // connection_manager
     pub fn lw_disconnect(self: Arc<Self>) -> ConnectionResult<()> {
