@@ -21,6 +21,7 @@ kyber_only = ["wolfssl/kyber_only"]
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bytes.workspace = true
 delegate.workspace = true
 if_chain = "1.0.2"
