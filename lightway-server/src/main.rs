@@ -118,8 +118,16 @@ async fn main() -> Result<()> {
     let mut tun_config = TunConfig::default();
     tun_config.tun_name(config.tun_name);
 
-    let ingress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
-    let egress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
+    let ingress_pkt_accumulator = Box::new(lightway_app_utils::RaptorEncoderFactory::new(
+        1350,
+        3,
+        1350 * 20,
+        0.2,
+    ));
+    let egress_pkt_accumulator = Box::new(lightway_app_utils::RaptorDecoderFactory::new(
+        50,
+        Duration::from_secs_f32(2.0),
+    ));
 
     let config = ServerConfig {
         connection_type: config.mode.into(),
