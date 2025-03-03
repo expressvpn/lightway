@@ -13,6 +13,8 @@ use lightway_client::*;
 mod args;
 use args::Config;
 
+use tokio::time::Duration;
+
 struct EventHandler;
 
 impl EventCallback for EventHandler {
@@ -68,6 +70,9 @@ async fn main() -> Result<()> {
         }
     })?;
 
+    let ingress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
+    let egress_pkt_accumulator = Box::new(lightway_core::NoopPacketAccumulatorFactory::default());
+
     let config = ClientConfig {
         mode,
         auth,
@@ -97,6 +102,10 @@ async fn main() -> Result<()> {
         server: config.server,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        ingress_pkt_accumulator,
+        egress_pkt_accumulator,
+        pkt_accumulator_flush_interval: Some(Duration::from_secs_f64(0.000001)),
+        pkt_accumulator_clean_up_interval: Some(Duration::from_secs_f64(0.5)),
         stop_signal: ctrlc_rx,
         network_change_signal: None,
         event_handler: Some(EventHandler),
