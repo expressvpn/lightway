@@ -784,9 +784,10 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if !self.is_encoding_enabled {
-            return self.send_to_outside(pkt);
+            return self.send_to_outside(pkt, false);
         }
 
+        // If encoding is enabled, pass the packet to the accumulator.
         match self.pkt_accumulator_ingress.store(pkt.clone()) {
             Ok(AccumulatorState::ReadyToFlush) => self.flush_pkts_to_outside(),
             Ok(AccumulatorState::Pending) => Ok(()),
@@ -805,7 +806,7 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         for mut pkt in pkts {
-            match self.send_to_outside(&mut pkt) {
+            match self.send_to_outside(&mut pkt, true) {
                 Ok(()) => {
                     // Go on
                 }
@@ -825,20 +826,20 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn send_to_outside(&mut self, pkt: &mut BytesMut) -> ConnectionResult<()> {
+    fn send_to_outside(&mut self, pkt: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         if_chain::if_chain! {
             if let Some(pmtu) = &self.pmtud;
             if let Some((data_mps, frag_mps)) = pmtu.maximum_packet_sizes();
             if pkt.len() > data_mps;
             then {
-                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps)
+                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps, is_encoded)
             } else {
-                self.send_outside_data(pkt)
+                self.send_outside_data(pkt, is_encoded)
             }
         }
     }
 
-    fn send_outside_data(&mut self, data: &mut BytesMut) -> ConnectionResult<()> {
+    fn send_outside_data(&mut self, data: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         // If PMTUD is not active or the search has not completed then
         // we can only send up to the configured MTU.
         if self.connection_type.is_datagram()
@@ -852,7 +853,7 @@ impl<AppState: Send> Connection<AppState> {
         let inside_pkt = wire::Data {
             data: Cow::Borrowed(data),
         };
-        let msg = if self.is_encoding_enabled {
+        let msg = if is_encoded {
             wire::Frame::EncodedData(inside_pkt)
         } else {
             wire::Frame::Data(inside_pkt)
@@ -869,6 +870,7 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         mut data: Bytes,
         mps: usize,
+        is_encoded: bool,
     ) -> ConnectionResult<()> {
         // NB: pkt.len() is checked vs MAX MTU by the caller so this
         // is currently redundant, but reflects what fragmentation can
@@ -889,7 +891,7 @@ impl<AppState: Send> Connection<AppState> {
                 data: frag,
                 more_fragments: !data.is_empty(),
             };
-            let msg = if self.is_encoding_enabled {
+            let msg = if is_encoded {
                 wire::Frame::EncodedDataFrag(frag)
             } else {
                 wire::Frame::DataFrag(frag)
@@ -1234,6 +1236,7 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::AuthFailure(_) => return Err(ConnectionError::Unauthorized),
                 wire::Frame::Goodbye => return Err(ConnectionError::Goodbye),
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
+                wire::Frame::ToggleEncoding(te) => self.process_toggle_encoding_pkt(te)?,
             };
         }
 
@@ -1481,5 +1484,50 @@ impl<AppState: Send> Connection<AppState> {
     /// Triggers cleaning up stale egress packet accumulator states
     pub fn clean_up_stale_egress_pkt_accumulator_states(&mut self) {
         self.pkt_accumulator_egress.cleanup_stale_states();
+    }
+
+    fn process_toggle_encoding_pkt(&mut self, te: wire::ToggleEncoding) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Received toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let new_setting = te.enable;
+        if self.is_encoding_enabled == new_setting {
+            // No change.
+            return Ok(());
+        }
+
+        // Reply to the client.
+        // TODO: this is not reliable when the packet loss is high (this toggle packet could be dropped)
+        // Is there any other better solution?
+        if matches!(self.mode, ConnectionMode::Server { .. }) {
+            debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
+                self.session_id, new_setting, self.is_encoding_enabled
+            );
+            self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
+        }
+
+        self.is_encoding_enabled = new_setting;
+        debug!(
+            "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
+            self.session_id, self.is_encoding_enabled
+        );
+
+        Ok(())
+    }
+
+    /// Send a toggle encoding packet to the peer.
+    pub fn toggle_encoding(&mut self, enable: bool) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Attempting to send toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let toggle_encoding = wire::ToggleEncoding { enable };
+        let msg = wire::Frame::ToggleEncoding(toggle_encoding);
+
+        self.send_frame_or_drop(msg)
     }
 }
