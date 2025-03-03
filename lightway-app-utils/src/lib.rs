@@ -4,6 +4,9 @@
 pub mod args;
 pub mod sockopt;
 
+mod raptor;
+pub use raptor::{RaptorDecoderFactory, RaptorEncoderFactory};
+
 #[cfg(feature = "tokio")]
 mod connection_ticker;
 #[cfg(feature = "tokio")]
