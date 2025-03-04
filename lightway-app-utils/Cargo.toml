@@ -28,6 +28,7 @@ ipnet.workspace = true
 libc.workspace = true
 lightway-core.workspace = true
 metrics.workspace = true
+raptorq = { version = "2.0.0", features = ["serde", "serde_support"] }
 serde.workspace = true
 serde_with = "3.4.0"
 serde_yaml = "0.9.34"

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
 use lightway_core::{Event, EventCallback};
+use tokio_stream::StreamExt;
 use twelf::Layer;
 
 use lightway_app_utils::{
@@ -13,12 +14,39 @@ use lightway_client::*;
 mod args;
 use args::Config;
 
+use signal_hook::consts::signal::{SIGUSR1, SIGUSR2};
+use signal_hook_tokio::Signals;
+use tokio::time::Duration;
+
 struct EventHandler;
 
 impl EventCallback for EventHandler {
     fn event(&self, event: lightway_core::Event) {
         if let Event::StateChanged(state) = event {
             tracing::debug!("State changed to {:?}", state);
+        }
+    }
+}
+
+async fn handle_toggle_encoding_signals(
+    mut signals: Signals,
+    toggle_signal_tx: tokio::sync::mpsc::Sender<bool>,
+) {
+    while let Some(signal) = signals.next().await {
+        match signal {
+            SIGUSR1 => {
+                tracing::info!("Enable encoding signal SIGUSR1 received.");
+                if let Err(e) = toggle_signal_tx.send(true).await {
+                    tracing::error!("Failed to transmit enable encoding signal. {e}");
+                }
+            }
+            SIGUSR2 => {
+                tracing::info!("Disable encoding signal SIGUSR2 received.");
+                if let Err(e) = toggle_signal_tx.send(false).await {
+                    tracing::error!("Failed to transmit disable encoding signal. {e}");
+                }
+            }
+            _ => unreachable!("handle toggle encoding signals task encoutered an uknown signal"),
         }
     }
 }
@@ -68,6 +96,24 @@ async fn main() -> Result<()> {
         }
     })?;
 
+    let ingress_pkt_accumulator = Box::new(lightway_app_utils::RaptorEncoderFactory::new(
+        1350,
+        3,
+        1350 * 20,
+        0.2,
+    ));
+    let egress_pkt_accumulator = Box::new(lightway_app_utils::RaptorDecoderFactory::new(
+        50,
+        Duration::from_secs_f32(2.0),
+    ));
+
+    let toggle_encode_signals = Signals::new([SIGUSR1, SIGUSR2])?;
+    let (toggle_encode_tx, toggle_encode_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(handle_toggle_encoding_signals(
+        toggle_encode_signals,
+        toggle_encode_tx,
+    ));
+
     let config = ClientConfig {
         mode,
         auth,
@@ -97,6 +143,11 @@ async fn main() -> Result<()> {
         server: config.server,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        ingress_pkt_accumulator,
+        egress_pkt_accumulator,
+        pkt_accumulator_flush_interval: Some(Duration::from_secs_f64(0.000001)),
+        pkt_accumulator_clean_up_interval: Some(Duration::from_secs_f64(0.5)),
+        toggle_encoding_signal: toggle_encode_rx,
         stop_signal: ctrlc_rx,
         network_change_signal: None,
         event_handler: Some(EventHandler),

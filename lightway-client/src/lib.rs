@@ -13,8 +13,8 @@ use lightway_app_utils::{
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIpConfig, OutsidePacket, State,
-    ipv4_update_destination, ipv4_update_source,
+    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIpConfig, OutsidePacket,
+    PacketAccumulatorFactoryType, State, ipv4_update_destination, ipv4_update_source,
 };
 
 // re-export so client app does not need to depend on lightway-core
@@ -154,6 +154,25 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub outside_plugins: PluginFactoryList,
 
+    /// Inside Ingress Packet Accumulator to use
+    #[educe(Debug(method(debug_pkt_accumulator_fac)))]
+    pub ingress_pkt_accumulator: PacketAccumulatorFactoryType,
+
+    /// Inside Egress Packet Accumulator to use
+    #[educe(Debug(method(debug_pkt_accumulator_fac)))]
+    pub egress_pkt_accumulator: PacketAccumulatorFactoryType,
+
+    /// How often the pkt accumulators are flushed
+    /// If None, the task will not be spawn
+    pub pkt_accumulator_flush_interval: Option<Duration>,
+
+    /// How often the pkt accumulators's states are cleaned up
+    /// If None, the task will not be spawn
+    pub pkt_accumulator_clean_up_interval: Option<Duration>,
+
+    /// Signal for toggling inside packet encoding
+    pub toggle_encoding_signal: tokio::sync::mpsc::Receiver<bool>,
+
     /// Specifies if the program responds to INT/TERM signals
     #[educe(Debug(ignore))]
     pub stop_signal: oneshot::Receiver<()>,
@@ -184,6 +203,13 @@ fn debug_fmt_plugin_list(
     write!(f, "{} plugins", list.len())
 }
 
+fn debug_pkt_accumulator_fac(
+    accumulator_fac: &PacketAccumulatorFactoryType,
+    f: &mut std::fmt::Formatter,
+) -> Result<(), std::fmt::Error> {
+    write!(f, "{}", accumulator_fac.get_accumulator_name())
+}
+
 pub struct ClientIpConfigCb;
 
 impl<T: Send + Sync> ClientIpConfig<ConnectionState<T>> for ClientIpConfigCb {
@@ -212,6 +238,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
     event_handler: Option<A>,
+    toggle_flush_encoder_signal_tx: tokio::sync::mpsc::Sender<bool>,
 ) {
     while let Some(event) = stream.next().await {
         match &event {
@@ -223,6 +250,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             Event::KeepaliveReply => keepalive.reply_received().await,
             Event::FirstPacketReceived => {
                 info!("First outside packet received");
+            }
+            Event::PacketEncoderToggled { enabled } => {
+                let _ = toggle_flush_encoder_signal_tx.send(*enabled).await;
             }
 
             // Server only events
@@ -351,6 +381,68 @@ async fn handle_network_change(
     ClientResult::UserDisconnect
 }
 
+async fn pkt_accumulator_flush<T: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    interval: Option<Duration>,
+    mut encoder_toggle_signal: tokio::sync::mpsc::Receiver<bool>,
+) -> Result<()> {
+    if interval.is_none() {
+        // The flush task is not enabled. Awaits forever.
+        let pending_future = futures::future::pending();
+        () = pending_future.await;
+    }
+
+    loop {
+        tokio::time::sleep(interval.unwrap()).await;
+
+        let mut conn = conn.lock().unwrap();
+        match conn.flush_pkts_to_outside() {
+            Ok(()) => {}
+            Err(ConnectionError::InvalidState) => {
+                // Ignore the packet till the connection is online
+            }
+            Err(ConnectionError::InvalidInsidePacket(_)) => {
+                // Ignore invalid inside packet
+            }
+            Err(err) => {
+                // Fatal error
+                return Err(err.into());
+            }
+        }
+    }
+}
+
+async fn pkt_accumulator_clean_up<T: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    interval: Option<Duration>,
+) -> Result<()> {
+    if interval.is_none() {
+        // The clean up task is not enabled. Awaits forever.
+        let pending_future = futures::future::pending();
+        () = pending_future.await;
+    }
+
+    loop {
+        tokio::time::sleep(interval.unwrap()).await;
+        let mut conn = conn.lock().unwrap();
+
+        conn.clean_up_stale_pkt_accumulator_states();
+    }
+}
+
+async fn toggle_encode_task<T: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    mut signal: tokio::sync::mpsc::Receiver<bool>,
+) {
+    while let Some(enable) = signal.recv().await {
+        if let Err(e) = conn.lock().unwrap().toggle_encoding(enable) {
+            tracing::error!("Error encoutered when trying to toggle encoding. {}", e);
+        }
+    }
+
+    tracing::info!("toggle encode task has finished");
+}
+
 fn validate_client_config<A: 'static + Send + EventCallback>(
     config: &ClientConfig<'_, A>,
 ) -> Result<()> {
@@ -440,6 +532,8 @@ pub async fn client<A: 'static + Send + EventCallback>(
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
+    .with_egress_pkt_accumulator(config.egress_pkt_accumulator)
+    .with_ingress_pkt_accumulator(config.ingress_pkt_accumulator)
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
@@ -473,11 +567,14 @@ pub async fn client<A: 'static + Send + EventCallback>(
         Arc::downgrade(&conn),
     );
 
+    let (toggle_encoder_flush_tx, toggle_encoder_flush_rx) = tokio::sync::mpsc::channel(1);
+
     let event_handler = config.event_handler.take();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
         event_handler,
+        toggle_encoder_flush_tx,
     ));
 
     ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
@@ -505,10 +602,24 @@ pub async fn client<A: 'static + Send + EventCallback>(
             None => None.into(),
         };
 
+    let pkt_accumulator_flush_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(
+        pkt_accumulator_flush(conn.clone(), config.pkt_accumulator_flush_interval, toggle_encoder_flush_rx),
+    );
+    tokio::spawn(pkt_accumulator_clean_up(
+        conn.clone(),
+        config.pkt_accumulator_clean_up_interval,
+    ));
+
+    tokio::spawn(toggle_encode_task(
+        conn.clone(),
+        config.toggle_encoding_signal,
+    ));
+
     tokio::select! {
         Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
         io = outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
         io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
+        io = pkt_accumulator_flush_task => Err(anyhow!("Inside IO (Pkt accumulator flush task) exited: {io:?}")),
         _ = config.stop_signal => {
             info!("client shutting down ..");
             let _ = conn.lock().unwrap().disconnect();
