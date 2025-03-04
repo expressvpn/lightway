@@ -30,4 +30,11 @@ pub enum Event {
     ///
     /// Client connections only
     FirstPacketReceived,
+    /// Inside Packet Encoder is enabled/disabled
+    ///
+    /// Client connections only
+    PacketEncoderToggled {
+        /// Encoder enabled or disabled
+        enabled: bool,
+    },
 }

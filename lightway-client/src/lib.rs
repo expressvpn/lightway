@@ -238,6 +238,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
     event_handler: Option<A>,
+    toggle_flush_encoder_signal_tx: tokio::sync::mpsc::Sender<bool>,
 ) {
     while let Some(event) = stream.next().await {
         match &event {
@@ -249,6 +250,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             Event::KeepaliveReply => keepalive.reply_received().await,
             Event::FirstPacketReceived => {
                 info!("First outside packet received");
+            }
+            Event::PacketEncoderToggled { enabled } => {
+                let _ = toggle_flush_encoder_signal_tx.send(*enabled).await;
             }
 
             // Server only events
@@ -380,6 +384,7 @@ async fn handle_network_change(
 async fn pkt_accumulator_flush<T: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     interval: Option<Duration>,
+    mut encoder_toggle_signal: tokio::sync::mpsc::Receiver<bool>,
 ) -> Result<()> {
     if interval.is_none() {
         // The flush task is not enabled. Awaits forever.
@@ -562,11 +567,14 @@ pub async fn client<A: 'static + Send + EventCallback>(
         Arc::downgrade(&conn),
     );
 
+    let (toggle_encoder_flush_tx, toggle_encoder_flush_rx) = tokio::sync::mpsc::channel(1);
+
     let event_handler = config.event_handler.take();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
         event_handler,
+        toggle_encoder_flush_tx,
     ));
 
     ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
@@ -595,7 +603,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
         };
 
     let pkt_accumulator_flush_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(
-        pkt_accumulator_flush(conn.clone(), config.pkt_accumulator_flush_interval),
+        pkt_accumulator_flush(conn.clone(), config.pkt_accumulator_flush_interval, toggle_encoder_flush_rx),
     );
     tokio::spawn(pkt_accumulator_clean_up(
         conn.clone(),

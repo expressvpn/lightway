@@ -356,6 +356,9 @@ async fn client<S: TestSock>(
                     println!("First packet received");
                     is_first_packet_received = true;
                 }
+                Event::PacketEncoderToggled { enabled } => {
+                    println!("Packet encoder toggled: {enabled}")
+                }
             }
         }
     });
