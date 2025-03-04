@@ -170,6 +170,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// If None, the task will not be spawn
     pub pkt_accumulator_clean_up_interval: Option<Duration>,
 
+    /// Signal for toggling inside packet encoding
+    pub toggle_encoding_signal: tokio::sync::mpsc::Receiver<bool>,
+
     /// Specifies if the program responds to INT/TERM signals
     #[educe(Debug(ignore))]
     pub stop_signal: oneshot::Receiver<()>,
@@ -422,6 +425,19 @@ async fn pkt_accumulator_clean_up<T: Send + Sync>(
     }
 }
 
+async fn toggle_encode_task<T: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    mut signal: tokio::sync::mpsc::Receiver<bool>,
+) {
+    while let Some(enable) = signal.recv().await {
+        if let Err(e) = conn.lock().unwrap().toggle_encoding(enable) {
+            tracing::error!("Error encoutered when trying to toggle encoding. {}", e);
+        }
+    }
+
+    tracing::info!("toggle encode task has finished");
+}
+
 fn validate_client_config<A: 'static + Send + EventCallback>(
     config: &ClientConfig<'_, A>,
 ) -> Result<()> {
@@ -584,6 +600,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
     tokio::spawn(pkt_accumulator_clean_up(
         conn.clone(),
         config.pkt_accumulator_clean_up_interval,
+    ));
+
+    tokio::spawn(toggle_encode_task(
+        conn.clone(),
+        config.toggle_encoding_signal,
     ));
 
     tokio::select! {
