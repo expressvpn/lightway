@@ -176,7 +176,7 @@ async fn handle_events(mut stream: EventStream, conn: Weak<Connection>) {
             }
             Event::TlsKeysUpdateStart => handle_tls_keys_update_start(&conn),
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
-            Event::FirstPacketReceived => {
+            Event::FirstPacketReceived | Event::PacketEncoderToggled { .. } => {
                 unreachable!("client only event received");
             }
         }

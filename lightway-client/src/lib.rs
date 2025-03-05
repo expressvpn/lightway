@@ -35,7 +35,10 @@ use std::{
 };
 use tokio::{
     net::{TcpStream, UdpSocket},
-    sync::{mpsc, oneshot},
+    sync::{
+        mpsc::{self, error::TryRecvError},
+        oneshot,
+    },
     task::{JoinHandle, JoinSet},
 };
 use tokio_stream::StreamExt;
@@ -163,12 +166,11 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     pub egress_pkt_accumulator: PacketAccumulatorFactoryType,
 
     /// How often the pkt accumulators are flushed
-    /// If None, the task will not be spawn
-    pub pkt_accumulator_flush_interval: Option<Duration>,
+    pub pkt_accumulator_flush_interval: Duration,
 
     /// How often the pkt accumulators's states are cleaned up
     /// If None, the task will not be spawn
-    pub pkt_accumulator_clean_up_interval: Option<Duration>,
+    pub pkt_accumulator_clean_up_interval: Duration,
 
     /// Signal for toggling inside packet encoding
     pub toggle_encoding_signal: tokio::sync::mpsc::Receiver<bool>,
@@ -238,6 +240,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
     event_handler: Option<A>,
+    toggle_flush_encoder_signal_tx: tokio::sync::mpsc::Sender<bool>,
 ) {
     while let Some(event) = stream.next().await {
         match &event {
@@ -249,6 +252,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             Event::KeepaliveReply => keepalive.reply_received().await,
             Event::FirstPacketReceived => {
                 info!("First outside packet received");
+            }
+            Event::PacketEncoderToggled { enabled } => {
+                let _ = toggle_flush_encoder_signal_tx.send(*enabled).await;
             }
 
             // Server only events
@@ -379,16 +385,39 @@ async fn handle_network_change(
 
 async fn pkt_accumulator_flush<T: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
-    interval: Option<Duration>,
+    interval: Duration,
+    mut encoder_toggle_signal: tokio::sync::mpsc::Receiver<bool>,
 ) -> Result<()> {
-    if interval.is_none() {
-        // The flush task is not enabled. Awaits forever.
-        let pending_future = futures::future::pending();
-        () = pending_future.await;
-    }
+    // Tracking the state within the task instead of retrieving the state
+    // from conn to avoid locking too many times
+    let mut is_encoding_enabled = false;
 
     loop {
-        tokio::time::sleep(interval.unwrap()).await;
+        if !is_encoding_enabled {
+            match encoder_toggle_signal.recv().await {
+                Some(true) => {
+                    is_encoding_enabled = true;
+                    tracing::debug!("Flush task has been enabled.");
+                }
+                Some(false) => continue,
+                None => break,
+            }
+        }
+
+        match encoder_toggle_signal.try_recv() {
+            Ok(true) => {}
+            Ok(false) => {
+                is_encoding_enabled = false;
+                tracing::debug!("Flush task has been disabled.");
+                continue;
+            }
+            Err(TryRecvError::Empty) => {
+                // No message from the channel. Go on.
+            }
+            Err(TryRecvError::Disconnected) => break,
+        }
+
+        tokio::time::sleep(interval).await;
 
         let mut conn = conn.lock().unwrap();
         match conn.flush_pkts_to_outside() {
@@ -405,20 +434,17 @@ async fn pkt_accumulator_flush<T: Send + Sync>(
             }
         }
     }
+
+    tracing::debug!("flush task loop complete");
+    Ok(())
 }
 
 async fn pkt_accumulator_clean_up<T: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
-    interval: Option<Duration>,
+    interval: Duration,
 ) -> Result<()> {
-    if interval.is_none() {
-        // The clean up task is not enabled. Awaits forever.
-        let pending_future = futures::future::pending();
-        () = pending_future.await;
-    }
-
     loop {
-        tokio::time::sleep(interval.unwrap()).await;
+        tokio::time::sleep(interval).await;
         let mut conn = conn.lock().unwrap();
 
         conn.clean_up_stale_egress_pkt_accumulator_states();
@@ -562,11 +588,14 @@ pub async fn client<A: 'static + Send + EventCallback>(
         Arc::downgrade(&conn),
     );
 
+    let (toggle_encoder_flush_tx, toggle_encoder_flush_rx) = tokio::sync::mpsc::channel(1);
+
     let event_handler = config.event_handler.take();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
         event_handler,
+        toggle_encoder_flush_tx,
     ));
 
     ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
@@ -594,9 +623,12 @@ pub async fn client<A: 'static + Send + EventCallback>(
             None => None.into(),
         };
 
-    let pkt_accumulator_flush_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(
-        pkt_accumulator_flush(conn.clone(), config.pkt_accumulator_flush_interval),
-    );
+    let pkt_accumulator_flush_task: JoinHandle<anyhow::Result<()>> =
+        tokio::spawn(pkt_accumulator_flush(
+            conn.clone(),
+            config.pkt_accumulator_flush_interval,
+            toggle_encoder_flush_rx,
+        ));
     tokio::spawn(pkt_accumulator_clean_up(
         conn.clone(),
         config.pkt_accumulator_clean_up_interval,

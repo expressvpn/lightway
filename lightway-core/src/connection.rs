@@ -1509,6 +1509,12 @@ impl<AppState: Send> Connection<AppState> {
             self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
         }
 
+        if matches!(self.mode, ConnectionMode::Client { .. }) {
+            self.event(Event::PacketEncoderToggled {
+                enabled: new_setting,
+            });
+        }
+
         self.is_encoding_enabled = new_setting;
         debug!(
             "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
