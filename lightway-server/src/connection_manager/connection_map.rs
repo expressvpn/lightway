@@ -75,6 +75,10 @@ impl<T> ConnectionMap<T> {
         self.by_socket_addr.values()
     }
 
+    pub(crate) fn get_all_connections(&self) -> Vec<Arc<T>> {
+        self.by_socket_addr.values().cloned().collect()
+    }
+
     pub(crate) fn remove_connections(&mut self) -> Vec<Arc<T>> {
         self.by_session_id.clear();
         self.by_socket_addr.drain().map(|e| e.1).collect()

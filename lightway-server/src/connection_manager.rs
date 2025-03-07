@@ -22,8 +22,8 @@ use crate::{
 use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback};
 use lightway_core::{
-    ConnectionActivity, ConnectionBuilderError, ConnectionError, ContextError, Event,
-    OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State, Version,
+    ConnectionActivity, ConnectionBuilderError, ConnectionError, ConnectionResult, ContextError,
+    Event, OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State, Version,
 };
 
 /// How often to check for connections to expire aged connections
@@ -176,7 +176,7 @@ async fn handle_events(mut stream: EventStream, conn: Weak<Connection>) {
             }
             Event::TlsKeysUpdateStart => handle_tls_keys_update_start(&conn),
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
-            Event::FirstPacketReceived => {
+            Event::FirstPacketReceived | Event::PacketEncoderToggled { .. } => {
                 unreachable!("client only event received");
             }
         }
@@ -446,6 +446,25 @@ impl ConnectionManager {
                 });
             }
         }
+    }
+
+    pub(crate) fn clean_up_stale_egress_pkt_accumulator_states(&self) {
+        let connections = self.connections.lock().unwrap().get_all_connections();
+
+        for conn in connections {
+            conn.clean_up_stale_egress_pkt_accumulator_states();
+        }
+    }
+
+    pub(crate) fn flush_ingress_pkt_accumulator(
+        &self,
+    ) -> Vec<(Arc<Connection>, ConnectionResult<()>)> {
+        let connections = self.connections.lock().unwrap().get_all_connections();
+
+        connections
+            .into_iter()
+            .map(|conn| (conn.clone(), conn.flush_ingress_pkt_accumulator()))
+            .collect()
     }
 
     pub(crate) fn close_all_connections(&self) {

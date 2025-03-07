@@ -296,6 +296,7 @@ async fn client<S: TestSock>(
     cipher: Option<Cipher>,
     pqc: PQCrypto,
     server_dn: Option<&str>,
+    enable_inside_pkt_encoding: bool,
 ) {
     let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -327,6 +328,10 @@ async fn client<S: TestSock>(
 
     let event_client = client.clone();
 
+    let (send_first_message_signal_tx, mut send_first_message_signal_rx) =
+        tokio::sync::mpsc::channel(1);
+    let send_first_message_signal_tx_clone = send_first_message_signal_tx.clone();
+
     let mut is_first_packet_received = false;
     let event_handler_handle = tokio::spawn(async move {
         let client = event_client;
@@ -355,6 +360,13 @@ async fn client<S: TestSock>(
                     assert!(!is_first_packet_received);
                     println!("First packet received");
                     is_first_packet_received = true;
+                }
+                Event::PacketEncoderToggled { enabled } => {
+                    println!("Packet encoder toggled: {enabled}");
+                    assert_eq!(enabled, enable_inside_pkt_encoding);
+                    send_first_message_signal_tx_clone.send(()).await.expect(
+                        "send first message signal from PacketEncoderToggled Event handler",
+                    );
                 }
             }
         }
@@ -420,20 +432,43 @@ async fn client<S: TestSock>(
                     eprintln!("Sending keepalive");
                     client.keepalive().unwrap();
 
-                    // This has to look enough like an ipv4 packet to
-                    // make it through. In practice for now that means
-                    // the version (the first nibble in the packet)
-                    // needs to be ok.
-                    //
-                    // (Note that 'H' is ASCII 0x48 so that happens to
-                    // work as the first byte too, but be more
-                    // explicit to avoid a confusing surprise for some
-                    // future developer).
-                    let mut buf: BytesMut = BytesMut::from(&b"\x40Hello World!"[..]);
-                    eprintln!("Sending message: {buf:?}");
-                    client.inside_data_received(&mut buf).expect("Send my message");
-                    message_sent = true;
+                    if enable_inside_pkt_encoding {
+                        // Send a toggle encoding pkt to server.
+                        //
+                        // Server should reply with the same toggle encoding pkt.
+                        // When the client receives the toggle encoding pkt, client
+                        // will emit a PacketEncoderToggled event that emits the
+                        // send_first_message_signal_rx below.
+                        client.toggle_encoding(true).expect("sending toggle encoding packet");
+                    }
+                    else {
+                        // No need to enable encoding.
+                        // Directly sends the first message.
+                        send_first_message_signal_tx.send(()).await.expect("sending send_first_message_signal without encoding");
+                    }
                 };
+            }
+
+            signal = send_first_message_signal_rx.recv() => {
+                // Should not exit early.
+                assert!(signal.is_some());
+
+                let mut client = client.lock().unwrap();
+                assert_eq!(client.state(), State::Online);
+
+                // This has to look enough like an ipv4 packet to
+                // make it through. In practice for now that means
+                // the version (the first nibble in the packet)
+                // needs to be ok.
+                //
+                // (Note that 'H' is ASCII 0x48 so that happens to
+                // work as the first byte too, but be more
+                // explicit to avoid a confusing surprise for some
+                // future developer).
+                let mut buf: BytesMut = BytesMut::from(&b"\x40Hello World!"[..]);
+                eprintln!("Sending message: {buf:?}");
+                client.inside_data_received(&mut buf).expect("Send my message");
+                message_sent = true;
             }
         }
     }
@@ -488,11 +523,12 @@ async fn run_test<S: TestSock>(
     pqc: PQCrypto,
     server_sock: Arc<S>,
     client_sock: Arc<S>,
+    enable_inside_pkt_encoding: bool,
 ) {
     let test = async move {
         tokio::join!(
             server(server_sock, pqc),
-            client(client_sock, cipher, pqc, None)
+            client(client_sock, cipher, pqc, None, enable_inside_pkt_encoding)
         )
     };
 
@@ -501,20 +537,32 @@ async fn run_test<S: TestSock>(
         .expect("Timed out");
 }
 
-#[test_case(None,                   PQCrypto::Enabled;    "Default cipher + PQC")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled;    "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled;    "chacha20 +_PQC")]
-#[test_case(None,                   PQCrypto::Disabled;   "PQC disabled")]
-#[test_case(None,                   PQCrypto::ServerOnly; "PQC server only")]
-#[test_case(None,                   PQCrypto::ClientOnly; "PQC client only")]
+#[test_case(None,                   PQCrypto::Enabled,    false;    "Default cipher + PQC")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,    false;    "aes + PQC")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled,    false;    "chacha20 +_PQC")]
+#[test_case(None,                   PQCrypto::Disabled,   false;   "PQC disabled")]
+#[test_case(None,                   PQCrypto::ServerOnly, false; "PQC server only")]
+#[test_case(None,                   PQCrypto::ClientOnly, false; "PQC client only")]
+#[test_case(None,                   PQCrypto::Enabled, true; "Inside packet encoding enabled")]
 #[tokio::test]
-async fn test_datagram_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
+async fn test_datagram_connection(
+    cipher: Option<Cipher>,
+    pqc: PQCrypto,
+    enable_inside_pkt_encoding: bool,
+) {
     // Communicate over a local datagram socket for simplicity
     let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
     let server_sock = Arc::new(TestDatagramSock(server_sock));
     let client_sock = Arc::new(TestDatagramSock(client_sock));
 
-    run_test(cipher, pqc, server_sock, client_sock).await;
+    run_test(
+        cipher,
+        pqc,
+        server_sock,
+        client_sock,
+        enable_inside_pkt_encoding,
+    )
+    .await;
 }
 
 #[test_case(None,                   PQCrypto::Enabled;    "Default cipher + PQC")]
@@ -534,7 +582,7 @@ async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
     // started, else we'll get a `WouldBlock`.
     let _ = client_sock.writable().await;
 
-    run_test(cipher, pqc, server_sock, client_sock).await;
+    run_test(cipher, pqc, server_sock, client_sock, false).await;
 }
 
 #[test_case(None; "No server domain name")]
@@ -554,7 +602,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let test = async move {
         tokio::join!(
             server(server_sock, PQCrypto::Enabled),
-            client(client_sock, None, PQCrypto::Enabled, server_dn)
+            client(client_sock, None, PQCrypto::Enabled, server_dn, false)
         )
     };
 
