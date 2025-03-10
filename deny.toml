@@ -16,7 +16,7 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "MIT",
-    "OpenSSL",
+    "NCSA",
     "Unicode-3.0",
     "WTFPL",
     "Zlib",
@@ -41,7 +41,6 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 skip = [
-    { name = "base64", version = "0.21.7" },
     { name = "block-buffer", version = "0.9.0" },
     { name = "darling", version = "0.14.4" },
     { name = "darling_core", version = "0.14.4" },
@@ -50,12 +49,14 @@ skip = [
     { name = "hashbrown", version = "0.12.3" },
     { name = "heck", version = "0.4.1" },
     { name = "indexmap", version = "1.9.3" },
+    { name = "itertools", version = "0.13.0" },
     { name = "serde_yaml", version = "0.8.26" },
     { name = "strsim", version = "0.10.0" },
     { name = "syn", version = "1.0.109" },
     { name = "thiserror", version = "1.0.69" },
     { name = "thiserror-impl", version = "1.0.69" },
     { name = "windows-sys", version = "0.52.0" },
+    { name = "zerocopy", version = "0.7.35" }
 ]
 
 [sources]
