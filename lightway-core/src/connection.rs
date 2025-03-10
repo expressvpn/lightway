@@ -25,6 +25,7 @@ use crate::{
     TCP_HEADER_SIZE, Version,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     metrics,
+    packet_accumulator::{AccumulatorState, PacketAccumulatorType},
     plugin::PluginList,
     utils::tcp_clamp_mss,
     wire::{self, AuthMethod},
@@ -171,6 +172,14 @@ pub enum ConnectionError {
     /// A WolfSSL error occurred
     #[error("WolfSSL Error: {0}")]
     WolfSSL(#[from] wolfssl::Error),
+
+    /// Packet accumulator does not exist
+    #[error("Packet Accumulator Does Not Exist")]
+    PacketAccumulatorDoesNotExist,
+
+    /// A Packet Accumulator error occurred
+    #[error("Packet Accumulator error: {0}")]
+    PacketAccumulatorError(Box<dyn std::error::Error + Sync + Send>),
 }
 
 impl ConnectionError {
@@ -194,6 +203,8 @@ impl ConnectionError {
                     AccessDenied => true,
                     Goodbye => true,
                     WireError(_) => true,
+                    PacketAccumulatorDoesNotExist => true,
+                    PacketAccumulatorError(_) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
 
@@ -344,6 +355,12 @@ pub struct Connection<AppState: Send = ()> {
 
     // Is the first outside packet received
     is_first_packet_received: bool,
+
+    // Inside ingress packet accumulator
+    pkt_accumulator_ingress: Option<PacketAccumulatorType>,
+
+    // Inside egress packet accumulator
+    pkt_accumulator_egress: Option<PacketAccumulatorType>,
 }
 
 /// Information about the new session being established with a new
@@ -363,6 +380,8 @@ struct NewConnectionArgs<AppState> {
     outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
+    pkt_accumulator_egress: Option<PacketAccumulatorType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -404,6 +423,8 @@ impl<AppState: Send> Connection<AppState> {
             },
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,
+            pkt_accumulator_egress: args.pkt_accumulator_egress,
+            pkt_accumulator_ingress: args.pkt_accumulator_ingress,
         };
 
         // This will very likely fail since negotiation always needs
@@ -763,19 +784,71 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
+        if let Some(pkt_accumulator) = &mut self.pkt_accumulator_ingress {
+            match pkt_accumulator.store(pkt) {
+                Ok(AccumulatorState::ReadyToFlush) => self.flush_pkts_to_outside(),
+                Ok(AccumulatorState::Pending) => Ok(()),
+                Ok(AccumulatorState::Skip) => {
+                    // Accumulator does not accept the packet.
+                    // Packet should be un-encoded. Sending to inside directly.
+                    self.send_to_outside(pkt, false)
+                }
+                Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
+            }
+        } else {
+            // If no packet accumulator presents, directly send to outside
+            self.send_to_outside(pkt, false)
+        }
+    }
+
+    /// Flush the packets in the pkt accumulator to outside
+    /// Called by either inside_io_task or periodic_flush_task
+    pub fn flush_pkts_to_outside(&mut self) -> ConnectionResult<()> {
+        let pkt_accumulator = match &mut self.pkt_accumulator_ingress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return Err(ConnectionError::PacketAccumulatorDoesNotExist),
+        };
+
+        let pkts = match pkt_accumulator.get_accumulated_pkts() {
+            Ok(pkts) => pkts,
+            Err(e) => return Err(ConnectionError::PacketAccumulatorError(e)),
+        };
+
+        for mut pkt in pkts {
+            match self.send_to_outside(&mut pkt, true) {
+                Ok(()) => {
+                    // Go on
+                }
+                Err(ConnectionError::InvalidState) => {
+                    // Ignore the packet till the connection is online
+                }
+                Err(ConnectionError::InvalidInsidePacket(_)) => {
+                    // Ignore invalid inside packet
+                }
+                Err(err) => {
+                    // Propagate fatal error up
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_to_outside(&mut self, pkt: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         if_chain::if_chain! {
             if let Some(pmtu) = &self.pmtud;
             if let Some((data_mps, frag_mps)) = pmtu.maximum_packet_sizes();
             if pkt.len() > data_mps;
             then {
-                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps)
+                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps, is_encoded)
             } else {
-                self.send_outside_data(pkt)
+                self.send_outside_data(pkt, is_encoded)
             }
         }
     }
 
-    fn send_outside_data(&mut self, data: &mut BytesMut) -> ConnectionResult<()> {
+    fn send_outside_data(&mut self, data: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         // If PMTUD is not active or the search has not completed then
         // we can only send up to the configured MTU.
         if self.connection_type.is_datagram()
@@ -789,7 +862,11 @@ impl<AppState: Send> Connection<AppState> {
         let inside_pkt = wire::Data {
             data: Cow::Borrowed(data),
         };
-        let msg = wire::Frame::Data(inside_pkt);
+        let msg = if is_encoded {
+            wire::Frame::EncodedData(inside_pkt)
+        } else {
+            wire::Frame::Data(inside_pkt)
+        };
         self.send_frame_or_drop(msg)
     }
 
@@ -802,6 +879,7 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         mut data: Bytes,
         mps: usize,
+        is_encoded: bool,
     ) -> ConnectionResult<()> {
         // NB: pkt.len() is checked vs MAX MTU by the caller so this
         // is currently redundant, but reflects what fragmentation can
@@ -822,7 +900,12 @@ impl<AppState: Send> Connection<AppState> {
                 data: frag,
                 more_fragments: !data.is_empty(),
             };
-            let msg = wire::Frame::DataFrag(frag);
+            let msg = if is_encoded {
+                wire::Frame::EncodedDataFrag(frag)
+            } else {
+                wire::Frame::DataFrag(frag)
+            };
+
             self.send_frame_or_drop(msg)?;
             offset += mps;
         }
@@ -1152,12 +1235,17 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::AuthRequest(auth_request) => {
                     self.handle_auth_request(auth_request)?;
                 }
-                wire::Frame::Data(data) => self.handle_outside_data_packet(data)?,
-                wire::Frame::DataFrag(frag) => self.handle_outside_data_fragment(frag)?,
+                wire::Frame::Data(data) => self.handle_outside_data_packet(data, false)?,
+                wire::Frame::DataFrag(frag) => self.handle_outside_data_fragment(frag, false)?,
+                wire::Frame::EncodedData(data) => self.handle_outside_data_packet(data, true)?,
+                wire::Frame::EncodedDataFrag(frag) => {
+                    self.handle_outside_data_fragment(frag, true)?
+                }
                 wire::Frame::AuthSuccessWithConfigV4(cfg) => self.handle_auth_response(cfg)?,
                 wire::Frame::AuthFailure(_) => return Err(ConnectionError::Unauthorized),
                 wire::Frame::Goodbye => return Err(ConnectionError::Goodbye),
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
+                wire::Frame::ToggleEncoding(te) => self.process_toggle_encoding_pkt(te)?,
             };
         }
 
@@ -1295,7 +1383,60 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn handle_outside_data_bytes(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
+    fn handle_outside_data_bytes(
+        &mut self,
+        inside_bytes: BytesMut,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
+        if !is_encoded {
+            return self.send_to_inside_io(inside_bytes);
+        }
+
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => {
+                // No Packet Accumulator exists to process the encoded packet
+                return Err(ConnectionError::PacketAccumulatorDoesNotExist);
+            }
+        };
+
+        match pkt_accumulator.store(&inside_bytes) {
+            Ok(AccumulatorState::ReadyToFlush) => {
+                for result in self.flush_pkts_to_inside_io() {
+                    result?
+                }
+
+                Ok(())
+            }
+            Ok(AccumulatorState::Pending) => Ok(()),
+            Ok(AccumulatorState::Skip) => {
+                // Accumulator does not accept the packet.
+                // Packet should be un-encoded. Sending to inside directly.
+                self.send_to_inside_io(inside_bytes)
+            }
+            Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
+        }
+    }
+
+    /// Flush from pkt accumulator
+    /// Called by either handle_outside_data_bytes or periodic_flush_task
+    pub fn flush_pkts_to_inside_io(&mut self) -> Vec<ConnectionResult<()>> {
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return vec![Err(ConnectionError::PacketAccumulatorDoesNotExist)],
+        };
+
+        let pkts = match pkt_accumulator.get_accumulated_pkts() {
+            Ok(pkts) => pkts,
+            Err(e) => return vec![Err(ConnectionError::PacketAccumulatorError(e))],
+        };
+
+        pkts.into_iter()
+            .map(|pkt| self.send_to_inside_io(pkt))
+            .collect()
+    }
+
+    fn send_to_inside_io(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::InvalidIpv4Packet;
 
@@ -1320,7 +1461,6 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        // Send packet to inside io
         self.activity.last_data_traffic_from_peer = Instant::now();
         match self.inside_io.send(inside_pkt, &mut self.app_state) {
             IOCallbackResult::Ok(_nr) => {}
@@ -1333,7 +1473,11 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn handle_outside_data_packet(&mut self, data: wire::Data) -> ConnectionResult<()> {
+    fn handle_outside_data_packet(
+        &mut self,
+        data: wire::Data,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
@@ -1341,21 +1485,97 @@ impl<AppState: Send> Connection<AppState> {
         // into_owned should be a NOP here since
         // `wire::Data::try_from_wire` produced a `Cow::Owned`
         // variant.
-        self.handle_outside_data_bytes(data.data.into_owned())
+        self.handle_outside_data_bytes(data.data.into_owned(), is_encoded)
     }
 
-    fn handle_outside_data_fragment(&mut self, frag: wire::DataFrag) -> ConnectionResult<()> {
+    fn handle_outside_data_fragment(
+        &mut self,
+        frag: wire::DataFrag,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
 
         match self.fragment_map.add_fragment(frag) {
             FragmentMapResult::Complete(data) => {
-                self.handle_outside_data_bytes(data)?;
+                self.handle_outside_data_bytes(data, is_encoded)?;
                 Ok(())
             }
             FragmentMapResult::Incomplete => Ok(()),
             FragmentMapResult::Err(err) => Err(err.into()),
         }
+    }
+
+    /// Triggers cleaning up stale egress packet accumulator states
+    pub fn clean_up_stale_egress_pkt_accumulator_states(&mut self) {
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return, // No accumulator to clean up
+        };
+
+        pkt_accumulator.cleanup_stale_states();
+    }
+
+    fn process_toggle_encoding_pkt(&mut self, te: wire::ToggleEncoding) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Received toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let pkt_accumulator = match &mut self.pkt_accumulator_ingress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => {
+                debug!("Received ToggleEncoding packet even without an accumulator.");
+                return Ok(()); // No Accumulator. Ignoring the request.
+            }
+        };
+
+        let new_setting = te.enable;
+        if pkt_accumulator.get_encoding_status() == new_setting {
+            // No change.
+            return Ok(());
+        }
+
+        pkt_accumulator.set_encoding_status(new_setting);
+        debug!(
+            "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
+            self.session_id,
+            pkt_accumulator.get_encoding_status()
+        );
+
+        // Reply to the client.
+        // TODO: this is not reliable when the packet loss is high (this toggle packet could be dropped)
+        // Is there any other better solution?
+        if matches!(self.mode, ConnectionMode::Server { .. }) {
+            debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
+                self.session_id,
+                new_setting,
+                pkt_accumulator.get_encoding_status()
+            );
+            self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
+        }
+
+        if matches!(self.mode, ConnectionMode::Client { .. }) {
+            self.event(Event::PacketEncoderToggled {
+                enabled: new_setting,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Send a toggle encoding packet to the peer.
+    pub fn toggle_encoding(&mut self, enable: bool) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Attempting to send toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let toggle_encoding = wire::ToggleEncoding { enable };
+        let msg = wire::Frame::ToggleEncoding(toggle_encoding);
+
+        self.send_frame_or_drop(msg)
     }
 }

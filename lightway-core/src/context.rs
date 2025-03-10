@@ -12,6 +12,7 @@ use crate::{
     Version,
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
+    packet_accumulator::PacketAccumulatorFactoryType,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
     wire,
@@ -104,6 +105,8 @@ pub struct ClientContext<AppState> {
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
+    pub(crate) pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pub(crate) pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -127,6 +130,8 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
+    pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -159,6 +164,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
+            pkt_accumulator_egress: None,
+            pkt_accumulator_ingress: None,
         })
     }
 
@@ -198,6 +205,30 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
+    /// Sets the Egress Packet Accumulator which should be used for Lightway connection.
+    /// See [`PacketAccumulatorFactoryType`].
+    pub fn with_egress_pkt_accumulator(
+        self,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
+    ) -> Self {
+        Self {
+            pkt_accumulator_egress: pkt_accumulator,
+            ..self
+        }
+    }
+
+    /// Sets the Ingress Packet Accumulator which should be used for Lightway connection.
+    /// See [`PacketAccumulatorFactoryType`].
+    pub fn with_ingress_pkt_accumulator(
+        self,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
+    ) -> Self {
+        Self {
+            pkt_accumulator_ingress: pkt_accumulator,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -209,6 +240,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
+            pkt_accumulator_egress: self.pkt_accumulator_egress,
+            pkt_accumulator_ingress: self.pkt_accumulator_ingress,
         }
     }
 }
@@ -255,6 +288,8 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
+    pub(crate) pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pub(crate) pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -309,6 +344,8 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
+    pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -370,6 +407,8 @@ impl<AppState> ServerContextBuilder<AppState> {
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
+            pkt_accumulator_egress: None,
+            pkt_accumulator_ingress: None,
         })
     }
 
@@ -441,6 +480,30 @@ impl<AppState> ServerContextBuilder<AppState> {
         })
     }
 
+    /// Sets the Egress Packet Accumulator which should be used for Lightway connection.
+    /// See [`PacketAccumulatorFactoryType`].
+    pub fn with_egress_pkt_accumulator(
+        self,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
+    ) -> Self {
+        Self {
+            pkt_accumulator_egress: pkt_accumulator,
+            ..self
+        }
+    }
+
+    /// Sets the Ingress Packet Accumulator which should be used for Lightway connection.
+    /// See [`PacketAccumulatorFactoryType`].
+    pub fn with_ingress_pkt_accumulator(
+        self,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
+    ) -> Self {
+        Self {
+            pkt_accumulator_ingress: pkt_accumulator,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ServerContext`].
     pub fn build(self) -> ContextBuilderResult<ServerContext<AppState>> {
         debug_assert!(self.supported_protocol_versions.valid());
@@ -460,6 +523,8 @@ impl<AppState> ServerContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             outside_plugins_instance,
+            pkt_accumulator_egress: self.pkt_accumulator_egress,
+            pkt_accumulator_ingress: self.pkt_accumulator_ingress,
         })
     }
 }

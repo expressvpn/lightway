@@ -28,6 +28,7 @@ ipnet.workspace = true
 libc.workspace = true
 lightway-core.workspace = true
 metrics.workspace = true
+raptorq = { version = "2.0.0", features = ["serde", "serde_support"] }
 serde.workspace = true
 serde_with = "3.4.0"
 serde_yaml = "0.9.34"
@@ -48,4 +49,5 @@ path = "examples/udprelay.rs"
 async-trait.workspace = true
 async-channel = { version = "2.1.1" }
 pnet.workspace = true
+rand.workspace = true
 test-case.workspace = true
