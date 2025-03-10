@@ -1,20 +1,30 @@
-use anyhow::Result;
 use bytes::BytesMut;
+
+/// Packet Accumulator's trait function's return type
+pub type PacketAccumulatorResult<T> =
+    std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
 
 /// Packet Accumulator trait
 pub trait PacketAccumulation {
     /// Store one packet to the accumulator
-    fn store(&mut self, data: BytesMut) -> Result<AccumulatorState>;
+    fn store(&mut self, data: &BytesMut) -> PacketAccumulatorResult<AccumulatorState>;
 
     /// Retrieve the accumulated packets
-    fn get_accumulated_pkts(&mut self) -> Result<Vec<BytesMut>>;
+    fn get_accumulated_pkts(&mut self) -> PacketAccumulatorResult<Vec<BytesMut>>;
 
     /// For cleaning up any internal stale states
     fn cleanup_stale_states(&mut self);
+
+    /// Get the encoding status (enabled/disabled)
+    fn get_encoding_status(&self) -> bool;
+
+    /// Set the encoding status
+    fn set_encoding_status(&mut self, enabled: bool);
 }
 
 struct NoOpPacketAccumulator {
     pkts: Vec<BytesMut>,
+    encoding_status: bool,
 }
 
 /// Indicates whether the accumulator is ready to be flushed or not
@@ -25,23 +35,30 @@ pub enum AccumulatorState {
     /// Not yet ready to flush
     #[allow(dead_code)]
     Pending,
+
+    /// Accumulator does not accept the packet
+    /// The packet should be sent directly
+    /// Returning the packet altogether
+    #[allow(dead_code)]
+    Skip,
 }
 
 impl NoOpPacketAccumulator {
     pub fn new() -> Self {
         NoOpPacketAccumulator {
             pkts: Vec::with_capacity(1),
+            encoding_status: false,
         }
     }
 }
 
 impl PacketAccumulation for NoOpPacketAccumulator {
-    fn store(&mut self, data: BytesMut) -> Result<AccumulatorState> {
-        self.pkts.push(data);
+    fn store(&mut self, data: &BytesMut) -> PacketAccumulatorResult<AccumulatorState> {
+        self.pkts.push(data.clone());
         Ok(AccumulatorState::ReadyToFlush)
     }
 
-    fn get_accumulated_pkts(&mut self) -> Result<Vec<BytesMut>> {
+    fn get_accumulated_pkts(&mut self) -> PacketAccumulatorResult<Vec<BytesMut>> {
         let moved_pkts = std::mem::replace(&mut self.pkts, Vec::with_capacity(1));
 
         Ok(moved_pkts)
@@ -49,6 +66,14 @@ impl PacketAccumulation for NoOpPacketAccumulator {
 
     fn cleanup_stale_states(&mut self) {
         // Do nothing
+    }
+
+    fn get_encoding_status(&self) -> bool {
+        self.encoding_status
+    }
+
+    fn set_encoding_status(&mut self, enabled: bool) {
+        self.encoding_status = enabled;
     }
 }
 
@@ -119,11 +144,11 @@ mod test {
 
         // Adding packets
         assert!(matches!(
-            no_op_accumulator.store(packet1).unwrap(),
+            no_op_accumulator.store(&packet1).unwrap(),
             AccumulatorState::ReadyToFlush
         ));
         assert!(matches!(
-            no_op_accumulator.store(packet2).unwrap(),
+            no_op_accumulator.store(&packet2).unwrap(),
             AccumulatorState::ReadyToFlush
         ));
 

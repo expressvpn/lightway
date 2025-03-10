@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use lightway_core::{
-    AccumulatorState, PacketAccumulation, PacketAccumulatorFactory, PacketAccumulatorType,
+    AccumulatorState, PacketAccumulation, PacketAccumulatorFactory, PacketAccumulatorResult,
+    PacketAccumulatorType,
 };
 use std::io::Read;
 
@@ -43,6 +44,8 @@ struct RaptorEncoder {
     /// Number of packets in the frame * percentage = number of repair symbols created for the frame.
     /// If the resulting number of repair symbols created is less than min_num_of_repair_symbols, min_num_of_repair_symbols will be used instead.
     repair_symbol_percentage: f64,
+
+    encoding_status: bool,
 }
 
 impl RaptorEncoder {
@@ -60,14 +63,20 @@ impl RaptorEncoder {
             min_num_of_repair_symbols,
             send_buffer_limit_bytes,
             repair_symbol_percentage,
+            encoding_status: false,
         }
     }
 }
 
 impl PacketAccumulation for RaptorEncoder {
     /// Store one packet to the accumulator
-    fn store(&mut self, data: BytesMut) -> Result<AccumulatorState> {
-        self.frame.add_packet(data);
+    fn store(&mut self, data: &BytesMut) -> PacketAccumulatorResult<AccumulatorState> {
+        if !self.encoding_status {
+            // Skipping packet as encoder is not enabled.
+            return Ok(AccumulatorState::Skip);
+        }
+
+        self.frame.add_packet(data.clone());
 
         let current_frame_num_of_bytes = self.frame.get_number_of_bytes();
 
@@ -78,7 +87,7 @@ impl PacketAccumulation for RaptorEncoder {
         }
     }
 
-    fn get_accumulated_pkts(&mut self) -> Result<Vec<BytesMut>> {
+    fn get_accumulated_pkts(&mut self) -> PacketAccumulatorResult<Vec<BytesMut>> {
         if self.frame.is_empty() {
             return Ok(Vec::new());
         }
@@ -128,6 +137,14 @@ impl PacketAccumulation for RaptorEncoder {
 
     fn cleanup_stale_states(&mut self) {
         // Do nothing
+    }
+
+    fn get_encoding_status(&self) -> bool {
+        self.encoding_status
+    }
+
+    fn set_encoding_status(&mut self, enabled: bool) {
+        self.encoding_status = enabled;
     }
 }
 
@@ -206,7 +223,7 @@ impl RaptorDecoder {
 }
 
 impl PacketAccumulation for RaptorDecoder {
-    fn store(&mut self, data: BytesMut) -> Result<AccumulatorState> {
+    fn store(&mut self, data: &BytesMut) -> PacketAccumulatorResult<AccumulatorState> {
         if data.len() < 14 {
             // Frame should be at least 14 bytes long
             // Discarding the packet
@@ -257,7 +274,7 @@ impl PacketAccumulation for RaptorDecoder {
         Ok(self.get_accumulator_state())
     }
 
-    fn get_accumulated_pkts(&mut self) -> Result<Vec<BytesMut>> {
+    fn get_accumulated_pkts(&mut self) -> PacketAccumulatorResult<Vec<BytesMut>> {
         Ok(std::mem::take(&mut self.completed_packets))
     }
 
@@ -267,6 +284,14 @@ impl PacketAccumulation for RaptorDecoder {
             let age = current_time.duration_since(decoder_state.last_updated);
             age <= self.stale_decoder_timeout
         });
+    }
+
+    fn get_encoding_status(&self) -> bool {
+        true
+    }
+
+    fn set_encoding_status(&mut self, _enabled: bool) {
+        // Do nothing.
     }
 }
 
@@ -490,6 +515,7 @@ mod tests {
     fn raptor_encoder_no_packets() {
         let factory = RaptorEncoderFactory::new(1350, 2, 3000, 0.1);
         let mut encoder: Box<dyn PacketAccumulation + Send> = factory.build();
+        encoder.set_encoding_status(true);
 
         assert!(encoder.get_accumulated_pkts().unwrap().is_empty());
     }
@@ -498,9 +524,10 @@ mod tests {
     fn raptor_decoder_no_packets_after_getting_accumulated_pkts() {
         let factory = RaptorEncoderFactory::new(1350, 2, 3000, 0.1);
         let mut encoder: Box<dyn PacketAccumulation + Send> = factory.build();
+        encoder.set_encoding_status(true);
 
         let pkt = BytesMut::zeroed(1408);
-        assert!(encoder.store(pkt.clone()).is_ok());
+        assert!(encoder.store(&pkt).is_ok());
 
         assert!(!encoder.get_accumulated_pkts().unwrap().is_empty());
         assert!(encoder.get_accumulated_pkts().unwrap().is_empty());
@@ -510,18 +537,13 @@ mod tests {
     fn raptor_encoder_byte_limit() {
         let factory = RaptorEncoderFactory::new(1350, 2, 3000, 0.1);
         let mut encoder: Box<dyn PacketAccumulation + Send> = factory.build();
+        encoder.set_encoding_status(true);
 
         let pkt = BytesMut::zeroed(1408);
+        assert!(matches!(encoder.store(&pkt), Ok(AccumulatorState::Pending))); // Total now: 1408 bytes
+        assert!(matches!(encoder.store(&pkt), Ok(AccumulatorState::Pending))); // Total now: 2816 bytes
         assert!(matches!(
-            encoder.store(pkt.clone()),
-            Ok(AccumulatorState::Pending)
-        )); // Total now: 1408 bytes
-        assert!(matches!(
-            encoder.store(pkt.clone()),
-            Ok(AccumulatorState::Pending)
-        )); // Total now: 2816 bytes
-        assert!(matches!(
-            encoder.store(pkt.clone()),
+            encoder.store(&pkt),
             Ok(AccumulatorState::ReadyToFlush)
         )); // Total now: 4224 bytes, which is higher than the byte limit.
     }
@@ -530,9 +552,10 @@ mod tests {
     fn raptor_encoder_minimum_number_of_repair_packets() {
         let factory = RaptorEncoderFactory::new(1350, 3, 1350 * 50, 0.2);
         let mut encoder = factory.build();
+        encoder.set_encoding_status(true);
 
         let pkt = BytesMut::zeroed(1000);
-        assert!(encoder.store(pkt).is_ok());
+        assert!(encoder.store(&pkt).is_ok());
 
         let pkts = encoder
             .get_accumulated_pkts()
@@ -544,12 +567,13 @@ mod tests {
     fn raptor_encoder_percentage_of_repair_packets() {
         let factory = RaptorEncoderFactory::new(1350, 3, 1350 * 50, 0.2);
         let mut encoder = factory.build();
+        encoder.set_encoding_status(true);
 
         // Adding 20 packets with the size of MTU
         // In total there will be 21 source packets as the RaptorFrame serialization adds some extra bytes
         let pkt = BytesMut::zeroed(1350);
         for _ in 0..20 {
-            assert!(encoder.store(pkt.clone()).is_ok());
+            assert!(encoder.store(&pkt).is_ok());
         }
 
         // In total floor(21 * 0.2) = 4 repair packets will be created.
@@ -575,6 +599,7 @@ mod tests {
             String::from("Raptor Q Encoder")
         );
         let mut encoder = encoder_factory.build();
+        encoder.set_encoding_status(true);
 
         let decoder_factory = RaptorDecoderFactory::new(Duration::from_secs_f64(0.5));
         assert_eq!(
@@ -588,14 +613,14 @@ mod tests {
         pkt1.fill(1);
         let mut pkt2 = BytesMut::zeroed(1300);
         pkt2.fill(2);
-        assert!(encoder.store(pkt1.clone()).is_ok());
-        assert!(encoder.store(pkt2.clone()).is_ok());
+        assert!(encoder.store(&pkt1).is_ok());
+        assert!(encoder.store(&pkt2).is_ok());
         let mut encoded_pkts_frame_1 = encoder.get_accumulated_pkts().unwrap();
 
         // Frame 2
         let mut pkt3 = BytesMut::zeroed(1500);
         pkt3.fill(3);
-        assert!(encoder.store(pkt3.clone()).is_ok());
+        assert!(encoder.store(&pkt3).is_ok());
         let mut encoded_pkts_frame_2 = encoder.get_accumulated_pkts().unwrap();
 
         // Shuffle the packets
@@ -605,7 +630,7 @@ mod tests {
         chaotic_network.shuffle(&mut rand::thread_rng());
 
         for encoded_pkt in chaotic_network {
-            assert!(decoder.store(encoded_pkt).is_ok());
+            assert!(decoder.store(&encoded_pkt).is_ok());
         }
 
         // Verify that the packets are re-generated

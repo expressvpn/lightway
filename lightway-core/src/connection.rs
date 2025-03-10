@@ -356,9 +356,6 @@ pub struct Connection<AppState: Send = ()> {
 
     // Inside egress packet accumulator
     pkt_accumulator_egress: PacketAccumulatorType,
-
-    // Is encoding enabled
-    is_encoding_enabled: bool,
 }
 
 /// Information about the new session being established with a new
@@ -423,7 +420,6 @@ impl<AppState: Send> Connection<AppState> {
             is_first_packet_received: false,
             pkt_accumulator_egress: args.pkt_accumulator_egress,
             pkt_accumulator_ingress: args.pkt_accumulator_ingress,
-            is_encoding_enabled: false,
         };
 
         // This will very likely fail since negotiation always needs
@@ -783,15 +779,15 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        if !self.is_encoding_enabled {
-            return self.send_to_outside(pkt, false);
-        }
-
-        // If encoding is enabled, pass the packet to the accumulator.
-        match self.pkt_accumulator_ingress.store(pkt.clone()) {
+        match self.pkt_accumulator_ingress.store(pkt) {
             Ok(AccumulatorState::ReadyToFlush) => self.flush_pkts_to_outside(),
             Ok(AccumulatorState::Pending) => Ok(()),
-            Err(e) => Err(ConnectionError::PacketAccumulatorError(e.into())),
+            Ok(AccumulatorState::Skip) => {
+                // Accumulator does not accept the packet.
+                // Packet should be un-encoded. Sending to inside directly.
+                self.send_to_outside(pkt, false)
+            }
+            Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
         }
     }
 
@@ -802,7 +798,7 @@ impl<AppState: Send> Connection<AppState> {
 
         let pkts = match maybe_pkts {
             Ok(pkts) => pkts,
-            Err(e) => return Err(ConnectionError::PacketAccumulatorError(e.into())),
+            Err(e) => return Err(ConnectionError::PacketAccumulatorError(e)),
         };
 
         for mut pkt in pkts {
@@ -1383,7 +1379,7 @@ impl<AppState: Send> Connection<AppState> {
             return self.send_to_inside_io(inside_bytes);
         }
 
-        match self.pkt_accumulator_egress.store(inside_bytes) {
+        match self.pkt_accumulator_egress.store(&inside_bytes) {
             Ok(AccumulatorState::ReadyToFlush) => {
                 for result in self.flush_pkts_to_inside_io() {
                     result?
@@ -1392,7 +1388,12 @@ impl<AppState: Send> Connection<AppState> {
                 Ok(())
             }
             Ok(AccumulatorState::Pending) => Ok(()),
-            Err(e) => Err(ConnectionError::PacketAccumulatorError(e.into())),
+            Ok(AccumulatorState::Skip) => {
+                // Accumulator does not accept the packet.
+                // Packet should be un-encoded. Sending to inside directly.
+                self.send_to_inside_io(inside_bytes)
+            }
+            Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
         }
     }
 
@@ -1402,7 +1403,7 @@ impl<AppState: Send> Connection<AppState> {
         let maybe_pkts = self.pkt_accumulator_egress.get_accumulated_pkts();
         let pkts = match maybe_pkts {
             Ok(pkts) => pkts,
-            Err(e) => return vec![Err(ConnectionError::PacketAccumulatorError(e.into()))],
+            Err(e) => return vec![Err(ConnectionError::PacketAccumulatorError(e))],
         };
 
         pkts.into_iter()
@@ -1493,7 +1494,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         let new_setting = te.enable;
-        if self.is_encoding_enabled == new_setting {
+        if self.pkt_accumulator_ingress.get_encoding_status() == new_setting {
             // No change.
             return Ok(());
         }
@@ -1504,7 +1505,9 @@ impl<AppState: Send> Connection<AppState> {
         if matches!(self.mode, ConnectionMode::Server { .. }) {
             debug!(
                 "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
-                self.session_id, new_setting, self.is_encoding_enabled
+                self.session_id,
+                new_setting,
+                self.pkt_accumulator_ingress.get_encoding_status()
             );
             self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
         }
@@ -1515,10 +1518,12 @@ impl<AppState: Send> Connection<AppState> {
             });
         }
 
-        self.is_encoding_enabled = new_setting;
+        self.pkt_accumulator_ingress
+            .set_encoding_status(new_setting);
         debug!(
             "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
-            self.session_id, self.is_encoding_enabled
+            self.session_id,
+            self.pkt_accumulator_ingress.get_encoding_status()
         );
 
         Ok(())
