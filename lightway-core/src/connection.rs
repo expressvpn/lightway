@@ -173,6 +173,10 @@ pub enum ConnectionError {
     #[error("WolfSSL Error: {0}")]
     WolfSSL(#[from] wolfssl::Error),
 
+    /// Packet accumulator does not exist
+    #[error("Packet Accumulator Does Not Exist")]
+    PacketAccumulatorDoesNotExist,
+
     /// A Packet Accumulator error occurred
     #[error("Packet Accumulator error: {0}")]
     PacketAccumulatorError(Box<dyn std::error::Error + Sync + Send>),
@@ -199,6 +203,8 @@ impl ConnectionError {
                     AccessDenied => true,
                     Goodbye => true,
                     WireError(_) => true,
+                    PacketAccumulatorDoesNotExist => true,
+                    PacketAccumulatorError(_) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
 
@@ -211,7 +217,6 @@ impl ConnectionError {
                     PacketError(_) => false,
                     DataFragmentError(_) => false,
                     WolfSSL(_) => false,
-                    PacketAccumulatorError(_) => false,
                 }
             }
         }
@@ -352,10 +357,10 @@ pub struct Connection<AppState: Send = ()> {
     is_first_packet_received: bool,
 
     // Inside ingress packet accumulator
-    pkt_accumulator_ingress: PacketAccumulatorType,
+    pkt_accumulator_ingress: Option<PacketAccumulatorType>,
 
     // Inside egress packet accumulator
-    pkt_accumulator_egress: PacketAccumulatorType,
+    pkt_accumulator_egress: Option<PacketAccumulatorType>,
 }
 
 /// Information about the new session being established with a new
@@ -375,8 +380,8 @@ struct NewConnectionArgs<AppState> {
     outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
-    pkt_accumulator_egress: PacketAccumulatorType,
-    pkt_accumulator_ingress: PacketAccumulatorType,
+    pkt_accumulator_egress: Option<PacketAccumulatorType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -779,24 +784,32 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        match self.pkt_accumulator_ingress.store(pkt) {
-            Ok(AccumulatorState::ReadyToFlush) => self.flush_pkts_to_outside(),
-            Ok(AccumulatorState::Pending) => Ok(()),
-            Ok(AccumulatorState::Skip) => {
-                // Accumulator does not accept the packet.
-                // Packet should be un-encoded. Sending to inside directly.
-                self.send_to_outside(pkt, false)
+        if let Some(pkt_accumulator) = &mut self.pkt_accumulator_ingress {
+            match pkt_accumulator.store(pkt) {
+                Ok(AccumulatorState::ReadyToFlush) => self.flush_pkts_to_outside(),
+                Ok(AccumulatorState::Pending) => Ok(()),
+                Ok(AccumulatorState::Skip) => {
+                    // Accumulator does not accept the packet.
+                    // Packet should be un-encoded. Sending to inside directly.
+                    self.send_to_outside(pkt, false)
+                }
+                Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
             }
-            Err(e) => Err(ConnectionError::PacketAccumulatorError(e)),
+        } else {
+            // If no packet accumulator presents, directly send to outside
+            self.send_to_outside(pkt, false)
         }
     }
 
     /// Flush the packets in the pkt accumulator to outside
     /// Called by either inside_io_task or periodic_flush_task
     pub fn flush_pkts_to_outside(&mut self) -> ConnectionResult<()> {
-        let maybe_pkts = self.pkt_accumulator_ingress.get_accumulated_pkts();
+        let pkt_accumulator = match &mut self.pkt_accumulator_ingress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return Err(ConnectionError::PacketAccumulatorDoesNotExist),
+        };
 
-        let pkts = match maybe_pkts {
+        let pkts = match pkt_accumulator.get_accumulated_pkts() {
             Ok(pkts) => pkts,
             Err(e) => return Err(ConnectionError::PacketAccumulatorError(e)),
         };
@@ -1379,7 +1392,15 @@ impl<AppState: Send> Connection<AppState> {
             return self.send_to_inside_io(inside_bytes);
         }
 
-        match self.pkt_accumulator_egress.store(&inside_bytes) {
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => {
+                // No Packet Accumulator exists to process the encoded packet
+                return Err(ConnectionError::PacketAccumulatorDoesNotExist);
+            }
+        };
+
+        match pkt_accumulator.store(&inside_bytes) {
             Ok(AccumulatorState::ReadyToFlush) => {
                 for result in self.flush_pkts_to_inside_io() {
                     result?
@@ -1400,8 +1421,12 @@ impl<AppState: Send> Connection<AppState> {
     /// Flush from pkt accumulator
     /// Called by either handle_outside_data_bytes or periodic_flush_task
     pub fn flush_pkts_to_inside_io(&mut self) -> Vec<ConnectionResult<()>> {
-        let maybe_pkts = self.pkt_accumulator_egress.get_accumulated_pkts();
-        let pkts = match maybe_pkts {
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return vec![Err(ConnectionError::PacketAccumulatorDoesNotExist)],
+        };
+
+        let pkts = match pkt_accumulator.get_accumulated_pkts() {
             Ok(pkts) => pkts,
             Err(e) => return vec![Err(ConnectionError::PacketAccumulatorError(e))],
         };
@@ -1484,7 +1509,12 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Triggers cleaning up stale egress packet accumulator states
     pub fn clean_up_stale_egress_pkt_accumulator_states(&mut self) {
-        self.pkt_accumulator_egress.cleanup_stale_states();
+        let pkt_accumulator = match &mut self.pkt_accumulator_egress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => return, // No accumulator to clean up
+        };
+
+        pkt_accumulator.cleanup_stale_states();
     }
 
     fn process_toggle_encoding_pkt(&mut self, te: wire::ToggleEncoding) -> ConnectionResult<()> {
@@ -1493,11 +1523,26 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
+        let pkt_accumulator = match &mut self.pkt_accumulator_ingress {
+            Some(pkt_accumulator) => pkt_accumulator,
+            None => {
+                debug!("Received ToggleEncoding packet even without an accumulator.");
+                return Ok(()); // No Accumulator. Ignoring the request.
+            }
+        };
+
         let new_setting = te.enable;
-        if self.pkt_accumulator_ingress.get_encoding_status() == new_setting {
+        if pkt_accumulator.get_encoding_status() == new_setting {
             // No change.
             return Ok(());
         }
+
+        pkt_accumulator.set_encoding_status(new_setting);
+        debug!(
+            "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
+            self.session_id,
+            pkt_accumulator.get_encoding_status()
+        );
 
         // Reply to the client.
         // TODO: this is not reliable when the packet loss is high (this toggle packet could be dropped)
@@ -1507,7 +1552,7 @@ impl<AppState: Send> Connection<AppState> {
                 "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
                 self.session_id,
                 new_setting,
-                self.pkt_accumulator_ingress.get_encoding_status()
+                pkt_accumulator.get_encoding_status()
             );
             self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
         }
@@ -1517,14 +1562,6 @@ impl<AppState: Send> Connection<AppState> {
                 enabled: new_setting,
             });
         }
-
-        self.pkt_accumulator_ingress
-            .set_encoding_status(new_setting);
-        debug!(
-            "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
-            self.session_id,
-            self.pkt_accumulator_ingress.get_encoding_status()
-        );
 
         Ok(())
     }

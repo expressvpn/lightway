@@ -249,8 +249,14 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: self.pmtud_timer,
-            pkt_accumulator_egress: self.ctx.pkt_accumulator_egress.build(),
-            pkt_accumulator_ingress: self.ctx.pkt_accumulator_ingress.build(),
+            pkt_accumulator_egress: self
+                .ctx
+                .pkt_accumulator_egress
+                .map(|factory| factory.build()),
+            pkt_accumulator_ingress: self
+                .ctx
+                .pkt_accumulator_ingress
+                .map(|factory| factory.build()),
         })?)
     }
 }
@@ -370,8 +376,16 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: None,
-            pkt_accumulator_egress: self.ctx.pkt_accumulator_egress.build(),
-            pkt_accumulator_ingress: self.ctx.pkt_accumulator_ingress.build(),
+            pkt_accumulator_egress: self
+                .ctx
+                .pkt_accumulator_egress
+                .as_ref()
+                .map(|factory| factory.build()),
+            pkt_accumulator_ingress: self
+                .ctx
+                .pkt_accumulator_ingress
+                .as_ref()
+                .map(|factory| factory.build()),
         })?)
     }
 }

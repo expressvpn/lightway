@@ -159,11 +159,11 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
 
     /// Inside Ingress Packet Accumulator to use
     #[educe(Debug(method(debug_pkt_accumulator_fac)))]
-    pub ingress_pkt_accumulator: PacketAccumulatorFactoryType,
+    pub ingress_pkt_accumulator: Option<PacketAccumulatorFactoryType>,
 
     /// Inside Egress Packet Accumulator to use
     #[educe(Debug(method(debug_pkt_accumulator_fac)))]
-    pub egress_pkt_accumulator: PacketAccumulatorFactoryType,
+    pub egress_pkt_accumulator: Option<PacketAccumulatorFactoryType>,
 
     /// How often the pkt accumulators are flushed
     pub pkt_accumulator_flush_interval: Duration,
@@ -206,10 +206,13 @@ fn debug_fmt_plugin_list(
 }
 
 fn debug_pkt_accumulator_fac(
-    accumulator_fac: &PacketAccumulatorFactoryType,
+    accumulator_fac: &Option<PacketAccumulatorFactoryType>,
     f: &mut std::fmt::Formatter,
 ) -> Result<(), std::fmt::Error> {
-    write!(f, "{}", accumulator_fac.get_accumulator_name())
+    match accumulator_fac {
+        Some(accumulator_fac) => write!(f, "{}", accumulator_fac.get_accumulator_name()),
+        None => write!(f, "No accumulator"),
+    }
 }
 
 pub struct ClientIpConfigCb;

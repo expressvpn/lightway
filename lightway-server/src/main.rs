@@ -14,6 +14,7 @@ use twelf::Layer;
 
 use args::Config;
 use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
+use lightway_core::PacketAccumulatorFactoryType;
 use lightway_server::*;
 
 async fn metrics_debug() {
@@ -118,15 +119,15 @@ async fn main() -> Result<()> {
     let mut tun_config = TunConfig::default();
     tun_config.tun_name(config.tun_name);
 
-    let ingress_pkt_accumulator = Box::new(lightway_app_utils::RaptorEncoderFactory::new(
-        1350,
-        3,
-        1350 * 20,
-        0.2,
+    let ingress_pkt_accumulator: Option<PacketAccumulatorFactoryType> = Some(Box::new(
+        lightway_app_utils::RaptorEncoderFactory::new(1350, 3, 1350 * 20, 0.2),
     ));
-    let egress_pkt_accumulator = Box::new(lightway_app_utils::RaptorDecoderFactory::new(
-        Duration::from_secs_f32(2.0),
+    let egress_pkt_accumulator: Option<PacketAccumulatorFactoryType> = Some(Box::new(
+        lightway_app_utils::RaptorDecoderFactory::new(Duration::from_secs_f32(2.0)),
     ));
+
+    let ingress_pkt_accumulator = None;
+    let egress_pkt_accumulator = None;
 
     let config = ServerConfig {
         connection_type: config.mode.into(),

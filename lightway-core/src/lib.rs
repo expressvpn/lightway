@@ -43,8 +43,8 @@ pub use io::{
 };
 pub use packet::OutsidePacket;
 pub use packet_accumulator::{
-    AccumulatorState, NoopPacketAccumulatorFactory, PacketAccumulation, PacketAccumulatorFactory,
-    PacketAccumulatorFactoryType, PacketAccumulatorResult, PacketAccumulatorType,
+    AccumulatorState, PacketAccumulation, PacketAccumulatorFactory, PacketAccumulatorFactoryType,
+    PacketAccumulatorResult, PacketAccumulatorType,
 };
 pub use plugin::{
     Plugin, PluginFactory, PluginFactoryError, PluginFactoryList, PluginFactoryType, PluginResult,

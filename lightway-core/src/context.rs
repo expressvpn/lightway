@@ -12,7 +12,7 @@ use crate::{
     Version,
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
-    packet_accumulator::{NoopPacketAccumulatorFactory, PacketAccumulatorFactoryType},
+    packet_accumulator::PacketAccumulatorFactoryType,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
     wire,
@@ -105,8 +105,8 @@ pub struct ClientContext<AppState> {
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
-    pub(crate) pkt_accumulator_egress: PacketAccumulatorFactoryType,
-    pub(crate) pkt_accumulator_ingress: PacketAccumulatorFactoryType,
+    pub(crate) pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pub(crate) pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -130,8 +130,8 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
-    pkt_accumulator_egress: PacketAccumulatorFactoryType,
-    pkt_accumulator_ingress: PacketAccumulatorFactoryType,
+    pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -164,8 +164,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
-            pkt_accumulator_egress: Box::new(NoopPacketAccumulatorFactory::default()),
-            pkt_accumulator_ingress: Box::new(NoopPacketAccumulatorFactory::default()),
+            pkt_accumulator_egress: None,
+            pkt_accumulator_ingress: None,
         })
     }
 
@@ -209,7 +209,7 @@ impl<AppState> ClientContextBuilder<AppState> {
     /// See [`PacketAccumulatorFactoryType`].
     pub fn with_egress_pkt_accumulator(
         self,
-        pkt_accumulator: PacketAccumulatorFactoryType,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
     ) -> Self {
         Self {
             pkt_accumulator_egress: pkt_accumulator,
@@ -221,7 +221,7 @@ impl<AppState> ClientContextBuilder<AppState> {
     /// See [`PacketAccumulatorFactoryType`].
     pub fn with_ingress_pkt_accumulator(
         self,
-        pkt_accumulator: PacketAccumulatorFactoryType,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
     ) -> Self {
         Self {
             pkt_accumulator_ingress: pkt_accumulator,
@@ -288,8 +288,8 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
-    pub(crate) pkt_accumulator_egress: PacketAccumulatorFactoryType,
-    pub(crate) pkt_accumulator_ingress: PacketAccumulatorFactoryType,
+    pub(crate) pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pub(crate) pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -344,8 +344,8 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
-    pkt_accumulator_egress: PacketAccumulatorFactoryType,
-    pkt_accumulator_ingress: PacketAccumulatorFactoryType,
+    pkt_accumulator_egress: Option<PacketAccumulatorFactoryType>,
+    pkt_accumulator_ingress: Option<PacketAccumulatorFactoryType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -407,8 +407,8 @@ impl<AppState> ServerContextBuilder<AppState> {
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
-            pkt_accumulator_egress: Box::new(NoopPacketAccumulatorFactory::default()),
-            pkt_accumulator_ingress: Box::new(NoopPacketAccumulatorFactory::default()),
+            pkt_accumulator_egress: None,
+            pkt_accumulator_ingress: None,
         })
     }
 
@@ -484,7 +484,7 @@ impl<AppState> ServerContextBuilder<AppState> {
     /// See [`PacketAccumulatorFactoryType`].
     pub fn with_egress_pkt_accumulator(
         self,
-        pkt_accumulator: PacketAccumulatorFactoryType,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
     ) -> Self {
         Self {
             pkt_accumulator_egress: pkt_accumulator,
@@ -496,7 +496,7 @@ impl<AppState> ServerContextBuilder<AppState> {
     /// See [`PacketAccumulatorFactoryType`].
     pub fn with_ingress_pkt_accumulator(
         self,
-        pkt_accumulator: PacketAccumulatorFactoryType,
+        pkt_accumulator: Option<PacketAccumulatorFactoryType>,
     ) -> Self {
         Self {
             pkt_accumulator_ingress: pkt_accumulator,

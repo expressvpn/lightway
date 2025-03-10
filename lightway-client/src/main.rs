@@ -10,6 +10,7 @@ use lightway_app_utils::{
     TunConfig, Validate, args::ConnectionType, validate_configuration_file_path,
 };
 use lightway_client::*;
+use lightway_core::PacketAccumulatorFactoryType;
 
 mod args;
 use args::Config;
@@ -96,15 +97,15 @@ async fn main() -> Result<()> {
         }
     })?;
 
-    let ingress_pkt_accumulator = Box::new(lightway_app_utils::RaptorEncoderFactory::new(
-        1350,
-        3,
-        1350 * 20,
-        0.2,
+    let ingress_pkt_accumulator: Option<PacketAccumulatorFactoryType> = Some(Box::new(
+        lightway_app_utils::RaptorEncoderFactory::new(1350, 3, 1350 * 20, 0.2),
     ));
-    let egress_pkt_accumulator = Box::new(lightway_app_utils::RaptorDecoderFactory::new(
-        Duration::from_secs_f32(2.0),
+    let egress_pkt_accumulator: Option<PacketAccumulatorFactoryType> = Some(Box::new(
+        lightway_app_utils::RaptorDecoderFactory::new(Duration::from_secs_f32(2.0)),
     ));
+
+    let ingress_pkt_accumulator = None;
+    let egress_pkt_accumulator = None;
 
     let toggle_encode_signals = Signals::new([SIGUSR1, SIGUSR2])?;
     let (toggle_encode_tx, toggle_encode_rx) = tokio::sync::mpsc::channel(1);
