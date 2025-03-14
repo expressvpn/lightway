@@ -262,6 +262,10 @@ pub(crate) enum FrameKind {
     ServerConfig = 14,
     /// Fragmented Data Packet
     DataFrag = 15,
+    /// Encoded Data Packets of data to / from the tunnel
+    EncodedData = 16,
+    /// Encoded Fragmented Data Packet
+    EncodedDataFrag = 17,
 }
 
 /// Encapsulates a single frame.
@@ -297,6 +301,10 @@ pub(crate) enum Frame<'data> {
     ServerConfig(server_config::ServerConfig),
     /// Fragmented Data Packet
     DataFrag(data_frag::DataFrag),
+    /// Encoded packet of data to / from the tunnel
+    EncodedData(data::Data<'data>),
+    /// Encoded Fragmented Data Packet
+    EncodedDataFrag(data_frag::DataFrag),
 }
 
 impl Frame<'_> {
@@ -312,6 +320,8 @@ impl Frame<'_> {
             Self::Goodbye => FrameKind::Goodbye,
             Self::ServerConfig(_) => FrameKind::ServerConfig,
             Self::DataFrag(_) => FrameKind::DataFrag,
+            Self::EncodedData(_) => FrameKind::EncodedData,
+            Self::EncodedDataFrag(_) => FrameKind::EncodedDataFrag,
         }
     }
 
@@ -342,6 +352,8 @@ impl Frame<'_> {
             FrameKind::Goodbye => Self::Goodbye,
             FrameKind::ServerConfig => Self::ServerConfig(ServerConfig::try_from_wire(&mut buf)?),
             FrameKind::DataFrag => Self::DataFrag(DataFrag::try_from_wire(&mut buf)?),
+            FrameKind::EncodedData => Self::EncodedData(Data::try_from_wire(&mut buf)?),
+            FrameKind::EncodedDataFrag => Self::EncodedDataFrag(DataFrag::try_from_wire(&mut buf)?),
         };
 
         buf.commit(); // We've successfully parsed a frame, move the
@@ -366,6 +378,8 @@ impl Frame<'_> {
             Self::Goodbye => {}
             Self::ServerConfig(sc) => sc.append_to_wire(buf),
             Self::DataFrag(df) => df.append_to_wire(buf),
+            Self::EncodedData(data) => data.append_to_wire(buf),
+            Self::EncodedDataFrag(df) => df.append_to_wire(buf),
         }
     }
 }
@@ -485,6 +499,8 @@ mod test_frame_kind {
     #[test_case(FrameKind::Goodbye => 12)]
     #[test_case(FrameKind::ServerConfig => 14)]
     #[test_case(FrameKind::DataFrag => 15)]
+    #[test_case(FrameKind::EncodedData => 16)]
+    #[test_case(FrameKind::EncodedDataFrag => 17)]
     fn into_primitive(ty: FrameKind) -> u8 {
         ty.into()
     }
@@ -504,13 +520,15 @@ mod test_frame_kind {
     #[test_case(13 => panics "TryFromPrimitiveError { number: 13 }")]
     #[test_case(14 => FrameKind::ServerConfig)]
     #[test_case(15 => FrameKind::DataFrag)]
+    #[test_case(16 => FrameKind::EncodedData)]
+    #[test_case(17 => FrameKind::EncodedDataFrag)]
     fn try_from_primitive(b: u8) -> FrameKind {
         FrameKind::try_from(b).unwrap()
     }
 
     #[test]
     fn try_from_primitive_out_of_range() {
-        for b in 16..=255 {
+        for b in 19..=255 {
             assert!(FrameKind::try_from(b).is_err())
         }
     }
@@ -567,6 +585,8 @@ mod test_frame {
     #[test_case(&[0x0c] => Frame::Goodbye; "goodbye")]
     #[test_case(b"\x0e\x00\x0dserver config" => Frame::ServerConfig(ServerConfig{ data: Bytes::from_static(b"server config")}); "server config")]
     #[test_case(b"\x0f\x00\x0b\x12\x34\x2a\xcffragmentary"=> Frame::DataFrag(DataFrag{ id: 0x1234, offset: 0x5678, more_fragments: true, data: Bytes::from_static(b"fragmentary") }) ; "data frag")]
+    #[test_case(&[0x10, 0, 3, 0xfe, 0xbe, 0xaa] => Frame::EncodedData(Data{ data: Cow::Owned(BytesMut::from(&[0xfe, 0xbe, 0xaa][..]))}); "encoded data")]
+    #[test_case(b"\x11\x00\x0b\x12\x34\x2a\xcffragmentary"=> Frame::EncodedDataFrag(DataFrag{ id: 0x1234, offset: 0x5678, more_fragments: true, data: Bytes::from_static(b"fragmentary") }) ; "encoded data frag")]
     fn try_from_wire(buf: &'static [u8]) -> Frame<'static> {
         let mut buf = BytesMut::from(buf);
         let r = Frame::try_from_wire(&mut buf).unwrap();
