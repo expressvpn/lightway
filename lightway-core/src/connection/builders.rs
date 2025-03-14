@@ -249,6 +249,16 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: self.pmtud_timer,
+            inside_pkt_encoder: self
+                .ctx
+                .inside_pkt_codec
+                .as_ref()
+                .map(|factory| factory.build_encoder()),
+            inside_pkt_decoder: self
+                .ctx
+                .inside_pkt_codec
+                .as_ref()
+                .map(|factory| factory.build_decoder()),
         })?)
     }
 }
@@ -368,6 +378,16 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: None,
+            inside_pkt_encoder: self
+                .ctx
+                .inside_pkt_codec
+                .as_ref()
+                .map(|factory| factory.build_encoder()),
+            inside_pkt_decoder: self
+                .ctx
+                .inside_pkt_codec
+                .as_ref()
+                .map(|factory| factory.build_decoder()),
         })?)
     }
 }

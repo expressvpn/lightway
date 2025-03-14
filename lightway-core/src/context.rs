@@ -12,6 +12,7 @@ use crate::{
     Version,
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
+    packet_codec::PacketCodecFactoryType,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
     wire,
@@ -104,6 +105,7 @@ pub struct ClientContext<AppState> {
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
+    pub(crate) inside_pkt_codec: Option<PacketCodecFactoryType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -127,6 +129,7 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
+    inside_pkt_codec: Option<PacketCodecFactoryType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -159,6 +162,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
+            inside_pkt_codec: None,
         })
     }
 
@@ -198,6 +202,15 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
+    /// Sets the Inside Packet Codec which should be used for Lightway connection.
+    /// See [`PacketCodecFactoryType`].
+    pub fn with_inside_pkt_codec(self, inside_pkt_codec: Option<PacketCodecFactoryType>) -> Self {
+        Self {
+            inside_pkt_codec,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -209,6 +222,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
+            inside_pkt_codec: self.inside_pkt_codec,
         }
     }
 }
@@ -255,6 +269,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
+    pub(crate) inside_pkt_codec: Option<PacketCodecFactoryType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -309,6 +324,7 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
+    inside_pkt_codec: Option<PacketCodecFactoryType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -370,6 +386,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
+            inside_pkt_codec: None,
         })
     }
 
@@ -441,6 +458,15 @@ impl<AppState> ServerContextBuilder<AppState> {
         })
     }
 
+    /// Sets the Inside Packet Codec which should be used for Lightway connection.
+    /// See [`PacketCodecFactoryType`].
+    pub fn with_inside_pkt_codec(self, inside_pkt_codec: Option<PacketCodecFactoryType>) -> Self {
+        Self {
+            inside_pkt_codec,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ServerContext`].
     pub fn build(self) -> ContextBuilderResult<ServerContext<AppState>> {
         debug_assert!(self.supported_protocol_versions.valid());
@@ -460,6 +486,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             outside_plugins_instance,
+            inside_pkt_codec: self.inside_pkt_codec,
         })
     }
 }
