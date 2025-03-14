@@ -828,7 +828,8 @@ impl<AppState: Send> Connection<AppState> {
             Err(e) => return Err(ConnectionError::PacketCodecError(e)),
         };
 
-        for mut pkt in pkts {
+        let number_of_pkts = pkts.len();
+        for (index, mut pkt) in pkts.into_iter().enumerate() {
             match self.send_to_outside(&mut pkt, true) {
                 Ok(()) => {
                     // Go on
@@ -840,6 +841,9 @@ impl<AppState: Send> Connection<AppState> {
                     // Ignore invalid inside packet
                 }
                 Err(err) => {
+                    let inside_pkts_dropped = number_of_pkts - index;
+                    metrics::inside_pkt_dropped_due_to_fatal_err(inside_pkts_dropped as u64);
+
                     // Propagate fatal error up
                     return Err(err);
                 }

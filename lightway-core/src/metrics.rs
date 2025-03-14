@@ -10,6 +10,8 @@ static METRIC_INSIDE_IO_SEND_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("inside_io_send_failed"));
 static METRIC_SESSION_ID_MISMATCH: LazyLock<Counter> =
     LazyLock::new(|| counter!("session_id_mismatch"));
+static METRIC_INSIDE_PKT_DROPPED_DUE_TO_FATAL_ERR: LazyLock<Counter> =
+    LazyLock::new(|| counter!("inside packets dropped due to fatal error"));
 
 static TLS_PROTOCOL_VERSION_LABEL: &str = "tls_protocol_version";
 
@@ -34,4 +36,8 @@ pub(crate) fn inside_io_send_failed(err: std::io::Error) {
 /// Server has received a mismatched session_id in the header after the packet content has been validated
 pub(crate) fn session_id_mismatch() {
     METRIC_SESSION_ID_MISMATCH.increment(1);
+}
+
+pub(crate) fn inside_pkt_dropped_due_to_fatal_err(number: u64) {
+    METRIC_INSIDE_PKT_DROPPED_DUE_TO_FATAL_ERR.increment(number);
 }
