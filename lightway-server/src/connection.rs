@@ -13,8 +13,8 @@ use crate::{
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
 use lightway_core::{
     ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType,
-    OutsideIOSendCallbackArg, OutsidePacket, ProtocolVersion, ServerContext, SessionId, State,
-    Version,
+    OutsideIOSendCallbackArg, OutsidePacket, PacketDecoderType, PacketEncoderType, ProtocolVersion,
+    ServerContext, SessionId, State, Version,
 };
 
 pub struct ConnectionState {
@@ -111,6 +111,9 @@ impl Connection {
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
             pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
+
+            pub fn get_inside_packet_encoder(&self) -> Option<Weak<Mutex<PacketEncoderType>>>;
+            pub fn get_inside_packet_decoder(&self) -> Option<Weak<Mutex<PacketDecoderType>>>;
         }
     }
 
@@ -169,6 +172,20 @@ impl Connection {
 
     pub fn finalize_session_id_rotation(self: &Arc<Self>, old: SessionId, new: SessionId) {
         self.manager.finalize_session_id_rotation(self, old, new)
+    }
+
+    pub fn flush_ingress_pkt_accumulator(self: &Arc<Self>) -> ConnectionResult<()> {
+        let mut conn = self.lw_conn.lock().unwrap();
+
+        if conn.state() != State::Online {
+            return Ok(());
+        }
+
+        conn.flush_pkts_to_outside()
+    }
+
+    pub fn get_internal_ip(self: &Arc<Self>) -> Option<Ipv4Addr> {
+        self.lw_conn.lock().unwrap().app_state().internal_ip
     }
 
     // Use this only during shutdown, after clearing all connections from

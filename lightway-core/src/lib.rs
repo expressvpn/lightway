@@ -10,6 +10,7 @@ mod context;
 mod io;
 mod metrics;
 mod packet;
+mod packet_codec;
 mod plugin;
 mod utils;
 mod version;
@@ -41,6 +42,10 @@ pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, OutsideIOSendCallback, OutsideIOSendCallbackArg,
 };
 pub use packet::OutsidePacket;
+pub use packet_codec::{
+    CodecStatus, PacketCodecFactory, PacketCodecFactoryType, PacketCodecResult, PacketDecoder,
+    PacketDecoderType, PacketEncoder, PacketEncoderType,
+};
 pub use plugin::{
     Plugin, PluginFactory, PluginFactoryError, PluginFactoryList, PluginFactoryType, PluginResult,
     PluginType,

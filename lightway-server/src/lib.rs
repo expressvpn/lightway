@@ -1,3 +1,4 @@
+mod codec_list;
 mod connection;
 mod connection_manager;
 mod io;
@@ -6,6 +7,7 @@ pub mod metrics;
 mod statistics;
 
 use bytesize::ByteSize;
+use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
@@ -18,8 +20,8 @@ use anyhow::{Context, Result, anyhow};
 use ipnet::Ipv4Net;
 use lightway_app_utils::{TunConfig, connection_ticker_cb};
 use lightway_core::{
-    AuthMethod, BuilderPredicates, ConnectionError, IOCallbackResult, InsideIpConfig, Secret,
-    ServerContextBuilder, ipv4_update_destination,
+    AuthMethod, BuilderPredicates, ConnectionError, ConnectionResult, IOCallbackResult,
+    InsideIpConfig, PacketCodecFactoryType, Secret, ServerContextBuilder, ipv4_update_destination,
 };
 use pnet::packet::ipv4::Ipv4Packet;
 use std::{
@@ -27,7 +29,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::task::JoinHandle;
@@ -41,11 +43,23 @@ use crate::ip_manager::IpManager;
 use connection_manager::ConnectionManager;
 use io::outside::Server;
 
+use codec_list::{DecoderList, InternalIPToEncoderMap};
+
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
     f: &mut std::fmt::Formatter,
 ) -> Result<(), std::fmt::Error> {
     write!(f, "{} plugins", list.len())
+}
+
+fn debug_pkt_codec_fac(
+    codec_fac: &Option<PacketCodecFactoryType>,
+    f: &mut std::fmt::Formatter,
+) -> Result<(), std::fmt::Error> {
+    match codec_fac {
+        Some(codec_fac) => write!(f, "{}", codec_fac.get_codec_name()),
+        None => write!(f, "No Codec"),
+    }
 }
 
 #[derive(Debug)]
@@ -147,6 +161,16 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub outside_plugins: PluginFactoryList,
 
+    /// Inside packet codec to use
+    #[educe(Debug(method(debug_pkt_codec_fac)))]
+    pub inside_pkt_codec: Option<PacketCodecFactoryType>,
+
+    /// How often the pkt encoder is flushed
+    pub pkt_encoder_flush_interval: Duration,
+
+    /// How often the pkt decoder's states are cleaned up
+    pub pkt_decoder_clean_up_interval: Duration,
+
     /// Address to listen to
     pub bind_address: SocketAddr,
 
@@ -158,6 +182,88 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
     /// UDP Buffer size for the server
     pub udp_buffer_size: ByteSize,
+}
+
+fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionResult<()>) {
+    match result {
+        Ok(()) => {}
+        Err(ConnectionError::InvalidState) => {
+            // Skip forwarding packet when offline
+            metrics::tun_rejected_packet_invalid_state();
+        }
+        Err(ConnectionError::InvalidInsidePacket(_)) => {
+            // Skip processing invalid packet
+            metrics::tun_rejected_packet_invalid_inside_packet();
+        }
+        Err(err) => {
+            let fatal = err.is_fatal(conn.connection_type());
+            metrics::tun_rejected_packet_invalid_other(fatal);
+            if fatal {
+                conn.handle_end_of_stream();
+            }
+        }
+    }
+}
+
+async fn pkt_encoder_flush(
+    ip_manager: Arc<IpManager>,
+    interval: Duration,
+    encoders: Arc<Mutex<InternalIPToEncoderMap>>,
+) -> Result<()> {
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let mut encoders = encoders.lock().unwrap();
+
+        for (internal_ip, encoder) in encoders.clone().into_iter() {
+            let encoder = match encoder.upgrade() {
+                Some(encoder) => encoder,
+                None => {
+                    // Encoder has been dropped when the Connection has disconnected.
+                    encoders.remove(&internal_ip);
+                    continue;
+                }
+            };
+
+            if !encoder.lock().unwrap().should_flush() {
+                // No need to flush now
+                continue;
+            }
+
+            let maybe_conn = ip_manager.find_connection(internal_ip);
+
+            let conn = match maybe_conn {
+                Some(conn) => conn,
+                None => continue,
+            };
+
+            let flush_result = conn.flush_ingress_pkt_accumulator();
+            handle_inside_io_error(conn, flush_result);
+        }
+    }
+}
+
+async fn pkt_decoder_clean_up(interval: Duration, decoders: Arc<Mutex<DecoderList>>) -> Result<()> {
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let mut decoders = decoders.lock().unwrap();
+
+        for decoder in decoders.iter() {
+            let decoder = match decoder.upgrade() {
+                Some(decoder) => decoder,
+                None => {
+                    // Decoder has been dropped when the Connection has disconnected.
+                    continue;
+                }
+            };
+
+            decoder.lock().unwrap().cleanup_stale_states();
+        }
+
+        // Remove decoders with dropped connection
+        decoders.retain(|decoder| decoder.upgrade().is_some());
+    }
 }
 
 pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'static>(
@@ -216,9 +322,13 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
+    .with_inside_pkt_codec(config.inside_pkt_codec)
     .build()?;
 
-    let conn_manager = ConnectionManager::new(ctx);
+    let encoders = Arc::new(Mutex::new(InternalIPToEncoderMap::default()));
+    let decoders = Arc::new(Mutex::new(DecoderList::default()));
+
+    let conn_manager = ConnectionManager::new(ctx, decoders.clone(), encoders.clone());
 
     tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
 
@@ -243,6 +353,8 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         ),
     };
 
+    let ip_manager_clone = ip_manager.clone();
+
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         loop {
             let mut buf = match inside_io.recv_buf().await {
@@ -265,29 +377,24 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             ipv4_update_destination(buf.as_mut(), config.lightway_client_ip);
 
             if let Some(conn) = conn {
-                match conn.inside_data_received(&mut buf) {
-                    Ok(()) => {}
-                    Err(ConnectionError::InvalidState) => {
-                        // Skip forwarding packet when offline
-                        metrics::tun_rejected_packet_invalid_state();
-                    }
-                    Err(ConnectionError::InvalidInsidePacket(_)) => {
-                        // Skip processing invalid packet
-                        metrics::tun_rejected_packet_invalid_inside_packet();
-                    }
-                    Err(err) => {
-                        let fatal = err.is_fatal(conn.connection_type());
-                        metrics::tun_rejected_packet_invalid_other(fatal);
-                        if fatal {
-                            conn.handle_end_of_stream();
-                        }
-                    }
-                }
+                let result = conn.inside_data_received(&mut buf);
+                handle_inside_io_error(conn, result);
             } else {
                 metrics::tun_rejected_packet_no_connection();
             }
         }
     });
+
+    tokio::spawn(pkt_encoder_flush(
+        ip_manager_clone,
+        config.pkt_encoder_flush_interval,
+        encoders,
+    ));
+
+    tokio::spawn(pkt_decoder_clean_up(
+        config.pkt_decoder_clean_up_interval,
+        decoders,
+    ));
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);

@@ -12,7 +12,7 @@ use std::net::AddrParseError;
 use std::num::{NonZeroU16, Wrapping};
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -25,6 +25,7 @@ use crate::{
     TCP_HEADER_SIZE, Version,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     metrics,
+    packet_codec::{CodecStatus, PacketDecoderType, PacketEncoderType},
     plugin::PluginList,
     utils::tcp_clamp_mss,
     wire::{self, AuthMethod},
@@ -120,6 +121,10 @@ pub enum ConnectionError {
     #[error("Invalid Connection Mode")]
     InvalidMode,
 
+    /// Operation is not valid for the connection type (udp vs tcp)
+    #[error("Invalid Connection Type")]
+    InvalidConnectionType,
+
     /// Message contained a rejected session id
     #[error("Rejected Session ID")]
     RejectedSessionID,
@@ -171,6 +176,14 @@ pub enum ConnectionError {
     /// A WolfSSL error occurred
     #[error("WolfSSL Error: {0}")]
     WolfSSL(#[from] wolfssl::Error),
+
+    /// Packet Codec does not exist
+    #[error("Packet Codec Does Not Exist")]
+    PacketCodecDoesNotExist,
+
+    /// A Packet Codec error occurred
+    #[error("Packet Codec error: {0}")]
+    PacketCodecError(Box<dyn std::error::Error + Sync + Send>),
 }
 
 impl ConnectionError {
@@ -189,11 +202,14 @@ impl ConnectionError {
                     Unauthorized => true,
                     InvalidProtocolVersion => true,
                     InvalidMode => true,
+                    InvalidConnectionType => true,
                     NoAvailableClientIp => true,
                     InvalidInsideIpConfig(_) => true,
                     AccessDenied => true,
                     Goodbye => true,
                     WireError(_) => true,
+                    PacketCodecDoesNotExist => true,
+                    PacketCodecError(_) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
 
@@ -344,6 +360,12 @@ pub struct Connection<AppState: Send = ()> {
 
     // Is the first outside packet received
     is_first_packet_received: bool,
+
+    // Inside packet encoder
+    inside_pkt_encoder: Option<Arc<Mutex<PacketEncoderType>>>,
+
+    // Inside packet decoder
+    inside_pkt_decoder: Option<Arc<Mutex<PacketDecoderType>>>,
 }
 
 /// Information about the new session being established with a new
@@ -363,6 +385,8 @@ struct NewConnectionArgs<AppState> {
     outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
+    inside_pkt_encoder: Option<PacketEncoderType>,
+    inside_pkt_decoder: Option<PacketDecoderType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -404,6 +428,12 @@ impl<AppState: Send> Connection<AppState> {
             },
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,
+            inside_pkt_encoder: args
+                .inside_pkt_encoder
+                .map(|encoder| Arc::new(Mutex::new(encoder))),
+            inside_pkt_decoder: args
+                .inside_pkt_decoder
+                .map(|decoder| Arc::new(Mutex::new(decoder))),
         };
 
         // This will very likely fail since negotiation always needs
@@ -763,19 +793,80 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
+        if let Some(encoder) = &mut self.inside_pkt_encoder {
+            let codec_state = encoder.lock().unwrap().store(pkt);
+            match codec_state {
+                Ok(CodecStatus::ReadyToFlush) => self.flush_pkts_to_outside(),
+                Ok(CodecStatus::Pending) => Ok(()),
+                Ok(CodecStatus::SkipPacket) => {
+                    // The encoder does not accept the packet.
+                    // Packet should not be encoded. Sending to inside directly.
+                    self.send_to_outside(pkt, false)
+                }
+                Err(e) => Err(ConnectionError::PacketCodecError(e)),
+            }
+        } else {
+            // If no packet encoder presents, directly send to outside
+            self.send_to_outside(pkt, false)
+        }
+    }
+
+    /// Flush the packets in the pkt encoder to outside.
+    /// Called by either inside_io_task or outside of lightway-core.
+    pub fn flush_pkts_to_outside(&mut self) -> ConnectionResult<()> {
+        let encoder = match &mut self.inside_pkt_encoder {
+            Some(encoder) => encoder,
+            None => {
+                // No need to flush if there is no packet encoder
+                return Ok(());
+            }
+        };
+
+        let encoded_pkts = encoder.lock().unwrap().get_encoded_pkts();
+        let pkts = match encoded_pkts {
+            Ok(pkts) => pkts,
+            Err(e) => return Err(ConnectionError::PacketCodecError(e)),
+        };
+
+        let number_of_pkts = pkts.len();
+        for (index, mut pkt) in pkts.into_iter().enumerate() {
+            match self.send_to_outside(&mut pkt, true) {
+                Ok(()) => {
+                    // Go on
+                }
+                Err(ConnectionError::InvalidState) => {
+                    // Ignore the packet till the connection is online
+                }
+                Err(ConnectionError::InvalidInsidePacket(_)) => {
+                    // Ignore invalid inside packet
+                }
+                Err(err) => {
+                    let inside_pkts_dropped = number_of_pkts - index;
+                    metrics::inside_pkt_dropped_due_to_fatal_err(inside_pkts_dropped as u64);
+
+                    // Propagate fatal error up
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_to_outside(&mut self, pkt: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         if_chain::if_chain! {
             if let Some(pmtu) = &self.pmtud;
             if let Some((data_mps, frag_mps)) = pmtu.maximum_packet_sizes();
             if pkt.len() > data_mps;
             then {
-                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps)
+                self.send_fragmented_outside_data(pkt.clone().freeze(), frag_mps, is_encoded)
             } else {
-                self.send_outside_data(pkt)
+                self.send_outside_data(pkt, is_encoded)
             }
         }
     }
 
-    fn send_outside_data(&mut self, data: &mut BytesMut) -> ConnectionResult<()> {
+    fn send_outside_data(&mut self, data: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         // If PMTUD is not active or the search has not completed then
         // we can only send up to the configured MTU.
         if self.connection_type.is_datagram()
@@ -789,7 +880,11 @@ impl<AppState: Send> Connection<AppState> {
         let inside_pkt = wire::Data {
             data: Cow::Borrowed(data),
         };
-        let msg = wire::Frame::Data(inside_pkt);
+        let msg = if is_encoded {
+            wire::Frame::EncodedData(inside_pkt)
+        } else {
+            wire::Frame::Data(inside_pkt)
+        };
         self.send_frame_or_drop(msg)
     }
 
@@ -802,6 +897,7 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         mut data: Bytes,
         mps: usize,
+        is_encoded: bool,
     ) -> ConnectionResult<()> {
         // NB: pkt.len() is checked vs MAX MTU by the caller so this
         // is currently redundant, but reflects what fragmentation can
@@ -822,7 +918,13 @@ impl<AppState: Send> Connection<AppState> {
                 data: frag,
                 more_fragments: !data.is_empty(),
             };
-            let msg = wire::Frame::DataFrag(frag);
+
+            let msg = if is_encoded {
+                wire::Frame::EncodedDataFrag(frag)
+            } else {
+                wire::Frame::DataFrag(frag)
+            };
+
             self.send_frame_or_drop(msg)?;
             offset += mps;
         }
@@ -1152,12 +1254,17 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::AuthRequest(auth_request) => {
                     self.handle_auth_request(auth_request)?;
                 }
-                wire::Frame::Data(data) => self.handle_outside_data_packet(data)?,
-                wire::Frame::DataFrag(frag) => self.handle_outside_data_fragment(frag)?,
+                wire::Frame::Data(data) => self.handle_outside_data_packet(data, false)?,
+                wire::Frame::DataFrag(frag) => self.handle_outside_data_fragment(frag, false)?,
+                wire::Frame::EncodedData(data) => self.handle_outside_data_packet(data, true)?,
+                wire::Frame::EncodedDataFrag(frag) => {
+                    self.handle_outside_data_fragment(frag, true)?
+                }
                 wire::Frame::AuthSuccessWithConfigV4(cfg) => self.handle_auth_response(cfg)?,
                 wire::Frame::AuthFailure(_) => return Err(ConnectionError::Unauthorized),
                 wire::Frame::Goodbye => return Err(ConnectionError::Goodbye),
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
+                wire::Frame::ToggleEncoding(te) => self.process_toggle_encoding_pkt(te)?,
             };
         }
 
@@ -1295,7 +1402,60 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn handle_outside_data_bytes(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
+    fn handle_outside_data_bytes(
+        &mut self,
+        inside_bytes: BytesMut,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
+        if !is_encoded {
+            return self.send_to_inside_io(inside_bytes);
+        }
+
+        let decoder = match &mut self.inside_pkt_decoder {
+            Some(decoder) => decoder,
+            None => {
+                // No Packet Accumulator exists to process the encoded packet
+                return Err(ConnectionError::PacketCodecDoesNotExist);
+            }
+        };
+
+        let decoder_state = decoder.lock().unwrap().store(&inside_bytes);
+        match decoder_state {
+            Ok(CodecStatus::ReadyToFlush) => {
+                for result in self.flush_pkts_to_inside() {
+                    result?
+                }
+
+                Ok(())
+            }
+            Ok(CodecStatus::Pending) => Ok(()),
+            Ok(CodecStatus::SkipPacket) => {
+                // The decoder does not accept the packet.
+                // Packet should be un-encoded. Sending to inside directly.
+                self.send_to_inside_io(inside_bytes)
+            }
+            Err(e) => Err(ConnectionError::PacketCodecError(e)),
+        }
+    }
+
+    fn flush_pkts_to_inside(&mut self) -> Vec<ConnectionResult<()>> {
+        let decoder = match &mut self.inside_pkt_decoder {
+            Some(decoder) => decoder,
+            None => return vec![Err(ConnectionError::PacketCodecDoesNotExist)],
+        };
+
+        let decoded_pkts = decoder.lock().unwrap().get_decoded_pkts();
+        let pkts = match decoded_pkts {
+            Ok(pkts) => pkts,
+            Err(e) => return vec![Err(ConnectionError::PacketCodecError(e))],
+        };
+
+        pkts.into_iter()
+            .map(|pkt| self.send_to_inside_io(pkt))
+            .collect()
+    }
+
+    fn send_to_inside_io(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::InvalidIpv4Packet;
 
@@ -1320,7 +1480,6 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        // Send packet to inside io
         self.activity.last_data_traffic_from_peer = Instant::now();
         match self.inside_io.send(inside_pkt, &mut self.app_state) {
             IOCallbackResult::Ok(_nr) => {}
@@ -1333,7 +1492,11 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn handle_outside_data_packet(&mut self, data: wire::Data) -> ConnectionResult<()> {
+    fn handle_outside_data_packet(
+        &mut self,
+        data: wire::Data,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
@@ -1341,21 +1504,115 @@ impl<AppState: Send> Connection<AppState> {
         // into_owned should be a NOP here since
         // `wire::Data::try_from_wire` produced a `Cow::Owned`
         // variant.
-        self.handle_outside_data_bytes(data.data.into_owned())
+        self.handle_outside_data_bytes(data.data.into_owned(), is_encoded)
     }
 
-    fn handle_outside_data_fragment(&mut self, frag: wire::DataFrag) -> ConnectionResult<()> {
+    fn handle_outside_data_fragment(
+        &mut self,
+        frag: wire::DataFrag,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
 
         match self.fragment_map.add_fragment(frag) {
             FragmentMapResult::Complete(data) => {
-                self.handle_outside_data_bytes(data)?;
+                self.handle_outside_data_bytes(data, is_encoded)?;
                 Ok(())
             }
             FragmentMapResult::Incomplete => Ok(()),
             FragmentMapResult::Err(err) => Err(err.into()),
         }
+    }
+
+    /// Get a weak pointer to the inside packet encoder
+    pub fn get_inside_packet_encoder(&self) -> Option<Weak<Mutex<PacketEncoderType>>> {
+        self.inside_pkt_encoder.clone().map(|d| Arc::downgrade(&d))
+    }
+
+    /// Get a weak pointer to the inside packet decoder
+    pub fn get_inside_packet_decoder(&self) -> Option<Weak<Mutex<PacketDecoderType>>> {
+        self.inside_pkt_decoder.clone().map(|d| Arc::downgrade(&d))
+    }
+
+    fn process_toggle_encoding_pkt(&mut self, te: wire::ToggleEncoding) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Received toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let encoder = match &mut self.inside_pkt_encoder {
+            Some(encoder) => encoder,
+            None => {
+                debug!("Received ToggleEncoding packet even without an encoder.");
+                return Ok(()); // No Accumulator. Ignoring the request.
+            }
+        };
+
+        if !matches!(self.connection_type, ConnectionType::Datagram) {
+            warn!("Received ToggleEncoding packet in TCP mode.");
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+
+        let new_setting = te.enable;
+
+        let mut encoder_guard = encoder.lock().unwrap();
+        if encoder_guard.get_encoding_state() == new_setting {
+            // No change.
+            return Ok(());
+        }
+
+        encoder_guard.set_encoding_state(new_setting);
+
+        match self.mode {
+            ConnectionMode::Client { .. } => {
+                info!("inside packet encoding state is now set to {}", new_setting)
+            }
+            ConnectionMode::Server { .. } => debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
+                self.session_id,
+                encoder_guard.get_encoding_state()
+            ),
+        }
+
+        drop(encoder_guard);
+
+        // Reply to the client.
+        // TODO: this is not reliable when the packet loss is high (this toggle packet could be dropped)
+        // Is there any other better solution?
+        if matches!(self.mode, ConnectionMode::Server { .. }) {
+            debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
+                self.session_id, new_setting, !new_setting
+            );
+
+            self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
+        }
+
+        Ok(())
+    }
+
+    /// Send a toggle encoding packet to the peer.
+    pub fn toggle_encoding(&mut self, enable: bool) -> ConnectionResult<()> {
+        if self.inside_pkt_encoder.is_none() {
+            return Err(ConnectionError::PacketCodecDoesNotExist);
+        }
+
+        if !matches!(self.state, State::Online) {
+            error!("Attempting to send toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        if !matches!(self.connection_type, ConnectionType::Datagram) {
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+
+        debug!("Attempting to send toggle encoding packet.");
+
+        let toggle_encoding = wire::ToggleEncoding { enable };
+        let msg = wire::Frame::ToggleEncoding(toggle_encoding);
+
+        self.send_frame_or_drop(msg)
     }
 }

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
 
 use metrics_util::debugging::DebuggingRecorder;
+use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 use twelf::Layer;
@@ -137,6 +138,9 @@ async fn main() -> Result<()> {
         key_update_interval: config.key_update_interval.into(),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        inside_pkt_codec: None,
+        pkt_encoder_flush_interval: Duration::from_secs_f64(0.0001),
+        pkt_decoder_clean_up_interval: Duration::from_secs_f64(0.5),
         bind_address: config.bind_address,
         bind_attempts: config.bind_attempts,
         proxy_protocol: config.proxy_protocol,

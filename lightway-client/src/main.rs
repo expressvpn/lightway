@@ -13,6 +13,8 @@ use lightway_client::*;
 mod args;
 use args::Config;
 
+use tokio::time::Duration;
+
 struct EventHandler;
 
 impl EventCallback for EventHandler {
@@ -68,6 +70,10 @@ async fn main() -> Result<()> {
         }
     })?;
 
+    // TODO: create an interface to send a toggle encoding signal
+    #[allow(unused_variables)]
+    let (toggle_encode_tx, toggle_encode_rx) = tokio::sync::mpsc::channel(1);
+
     let config = ClientConfig {
         mode,
         auth,
@@ -97,6 +103,11 @@ async fn main() -> Result<()> {
         server: config.server,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        inside_pkt_codec: None,
+        pkt_encoder_flush_interval: Duration::from_secs_f64(0.0001),
+        pkt_decoder_clean_up_interval: Duration::from_secs_f64(0.5),
+        enable_inside_pkt_encoding_at_connect: config.enable_inside_pkt_encoding,
+        toggle_encoding_signal: toggle_encode_rx,
         stop_signal: ctrlc_rx,
         network_change_signal: None,
         event_handler: Some(EventHandler),
