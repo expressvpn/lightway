@@ -164,6 +164,13 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// How often the packet decoder's states are cleaned up
     pub pkt_decoder_clean_up_interval: Duration,
 
+    /// Enables inside packet encoding when connection is established.
+    pub enable_inside_pkt_encoding_at_connect: bool,
+
+    /// Signal for toggling inside packet encoding
+    #[educe(Debug(ignore))]
+    pub toggle_encoding_signal: tokio::sync::mpsc::Receiver<bool>,
+
     /// Specifies if the program responds to INT/TERM signals
     #[educe(Debug(ignore))]
     pub stop_signal: oneshot::Receiver<()>,
@@ -231,13 +238,28 @@ impl<T: Send + Sync> ConnectionTickerState for ConnectionState<T> {
 async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
+    weak: Weak<Mutex<Connection<ConnectionState>>>,
+    enable_encoding_when_online: bool,
     event_handler: Option<A>,
 ) {
     while let Some(event) = stream.next().await {
         match &event {
             Event::StateChanged(state) => {
                 if matches!(state, State::Online) {
-                    keepalive.online().await
+                    keepalive.online().await;
+
+                    if enable_encoding_when_online {
+                        let Some(conn) = weak.upgrade() else {
+                            break; // Connection disconnected.
+                        };
+
+                        if let Err(e) = conn.lock().unwrap().toggle_encoding(true) {
+                            tracing::error!(
+                                "Error encoutered when trying to toggle encoding. {}",
+                                e
+                            );
+                        }
+                    }
                 }
             }
             Event::KeepaliveReply => keepalive.reply_received().await,
@@ -461,6 +483,23 @@ async fn pkt_decoder_clean_up(weak: Weak<Mutex<Connection<ConnectionState>>>, in
     }
 }
 
+async fn toggle_encode_task(
+    weak: Weak<Mutex<Connection<ConnectionState>>>,
+    mut signal: tokio::sync::mpsc::Receiver<bool>,
+) {
+    while let Some(enable) = signal.recv().await {
+        let Some(conn) = weak.upgrade() else {
+            break; // Connection disconnected.
+        };
+
+        if let Err(e) = conn.lock().unwrap().toggle_encoding(enable) {
+            tracing::error!("Error encoutered when trying to toggle encoding. {}", e);
+        }
+    }
+
+    tracing::info!("toggle encode task has finished");
+}
+
 fn validate_client_config<A: 'static + Send + EventCallback>(
     config: &ClientConfig<'_, A>,
 ) -> Result<()> {
@@ -469,6 +508,21 @@ fn validate_client_config<A: 'static + Send + EventCallback>(
             "Keepalive interval cannot be zero when network change signal is set"
         ));
     }
+
+    if config.inside_pkt_codec.is_none() && config.enable_inside_pkt_encoding_at_connect {
+        return Err(anyhow!(
+            "Cannot enable inside pkt encoding at connect if pkt codec is not set"
+        ));
+    }
+
+    if config.enable_inside_pkt_encoding_at_connect
+        && matches!(config.mode, ClientConnectionType::Stream(_))
+    {
+        return Err(anyhow!(
+            "inside pkt encoding should not be enabled with TCP"
+        ));
+    }
+
     Ok(())
 }
 
@@ -588,6 +642,8 @@ pub async fn client<A: 'static + Send + EventCallback>(
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
+        Arc::downgrade(&conn),
+        config.enable_inside_pkt_encoding_at_connect,
         event_handler,
     ));
 
@@ -624,6 +680,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
     tokio::spawn(pkt_decoder_clean_up(
         Arc::downgrade(&conn),
         config.pkt_decoder_clean_up_interval,
+    ));
+
+    tokio::spawn(toggle_encode_task(
+        Arc::downgrade(&conn),
+        config.toggle_encoding_signal,
     ));
 
     tokio::select! {

@@ -116,6 +116,10 @@ pub struct Config {
     #[clap(short, long, default_value_t)]
     pub server: String,
 
+    /// Enable inside packet encoding
+    #[clap(short, long, default_value_t)]
+    pub enable_inside_pkt_encoding: bool,
+
     /// File path to save wireshark keylog
     #[cfg(feature = "debug")]
     #[clap(long, default_value = None)]
