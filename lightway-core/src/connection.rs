@@ -1260,6 +1260,7 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::AuthFailure(_) => return Err(ConnectionError::Unauthorized),
                 wire::Frame::Goodbye => return Err(ConnectionError::Goodbye),
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
+                wire::Frame::ToggleEncoding(te) => self.process_toggle_encoding_pkt(te)?,
             };
         }
 
@@ -1531,4 +1532,83 @@ impl<AppState: Send> Connection<AppState> {
         self.inside_pkt_decoder.clone().map(|d| Arc::downgrade(&d))
     }
 
+    fn process_toggle_encoding_pkt(&mut self, te: wire::ToggleEncoding) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            error!("Received toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let encoder = match &mut self.inside_pkt_encoder {
+            Some(encoder) => encoder,
+            None => {
+                debug!("Received ToggleEncoding packet even without an encoder.");
+                return Ok(()); // No Accumulator. Ignoring the request.
+            }
+        };
+
+        if !matches!(self.connection_type, ConnectionType::Datagram) {
+            warn!("Received ToggleEncoding packet in TCP mode.");
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+
+        let new_setting = te.enable;
+
+        let mut encoder_guard = encoder.lock().unwrap();
+        if encoder_guard.get_encoding_state() == new_setting {
+            // No change.
+            return Ok(());
+        }
+
+        encoder_guard.set_encoding_state(new_setting);
+
+        match self.mode {
+            ConnectionMode::Client { .. } => {
+                info!("inside packet encoding state is now set to {}", new_setting)
+            }
+            ConnectionMode::Server { .. } => debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received. is_encoder_enabled is set to {}",
+                self.session_id,
+                encoder_guard.get_encoding_state()
+            ),
+        }
+
+        drop(encoder_guard);
+
+        // Reply to the client.
+        // TODO: this is not reliable when the packet loss is high (this toggle packet could be dropped)
+        // Is there any other better solution?
+        if matches!(self.mode, ConnectionMode::Server { .. }) {
+            debug!(
+                "Connection with Client {:?}: ToggleEncoding packet received from the client with option {}. Different from current option {}. Replying to acknowledge.",
+                self.session_id, new_setting, !new_setting
+            );
+
+            self.send_frame_or_drop(wire::Frame::ToggleEncoding(te))?;
+        }
+
+        Ok(())
+    }
+
+    /// Send a toggle encoding packet to the peer.
+    pub fn toggle_encoding(&mut self, enable: bool) -> ConnectionResult<()> {
+        if self.inside_pkt_encoder.is_none() {
+            return Err(ConnectionError::PacketCodecDoesNotExist);
+        }
+
+        if !matches!(self.state, State::Online) {
+            error!("Attempting to send toggle encoding packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        if !matches!(self.connection_type, ConnectionType::Datagram) {
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+
+        debug!("Attempting to send toggle encoding packet.");
+
+        let toggle_encoding = wire::ToggleEncoding { enable };
+        let msg = wire::Frame::ToggleEncoding(toggle_encoding);
+
+        self.send_frame_or_drop(msg)
+    }
 }
