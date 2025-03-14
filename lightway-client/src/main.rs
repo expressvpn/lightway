@@ -13,6 +13,8 @@ use lightway_client::*;
 mod args;
 use args::Config;
 
+use tokio::time::Duration;
+
 struct EventHandler;
 
 impl EventCallback for EventHandler {
@@ -97,6 +99,9 @@ async fn main() -> Result<()> {
         server: config.server,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
+        inside_pkt_codec: None,
+        pkt_encoder_flush_interval: Duration::from_secs_f64(0.0001),
+        pkt_decoder_clean_up_interval: Duration::from_secs_f64(0.5),
         stop_signal: ctrlc_rx,
         network_change_signal: None,
         event_handler: Some(EventHandler),

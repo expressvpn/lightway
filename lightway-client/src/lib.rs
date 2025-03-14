@@ -13,8 +13,8 @@ use lightway_app_utils::{
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIpConfig, OutsidePacket, State,
-    ipv4_update_destination, ipv4_update_source,
+    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIpConfig, OutsidePacket,
+    PacketCodecFactoryType, State, ipv4_update_destination, ipv4_update_source,
 };
 
 // re-export so client app does not need to depend on lightway-core
@@ -154,6 +154,16 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub outside_plugins: PluginFactoryList,
 
+    /// Inside packet encoder to use
+    #[educe(Debug(method(debug_pkt_codec_fac)))]
+    pub inside_pkt_codec: Option<PacketCodecFactoryType>,
+
+    /// How often the packet encoder is flushed
+    pub pkt_encoder_flush_interval: Duration,
+
+    /// How often the packet decoder's states are cleaned up
+    pub pkt_decoder_clean_up_interval: Duration,
+
     /// Specifies if the program responds to INT/TERM signals
     #[educe(Debug(ignore))]
     pub stop_signal: oneshot::Receiver<()>,
@@ -182,6 +192,16 @@ fn debug_fmt_plugin_list(
     f: &mut std::fmt::Formatter,
 ) -> Result<(), std::fmt::Error> {
     write!(f, "{} plugins", list.len())
+}
+
+fn debug_pkt_codec_fac(
+    codec_fac: &Option<PacketCodecFactoryType>,
+    f: &mut std::fmt::Formatter,
+) -> Result<(), std::fmt::Error> {
+    match codec_fac {
+        Some(codec_fac) => write!(f, "{}", codec_fac.get_codec_name()),
+        None => write!(f, "No Codec"),
+    }
 }
 
 pub struct ClientIpConfigCb;
@@ -351,6 +371,96 @@ async fn handle_network_change(
     ClientResult::UserDisconnect
 }
 
+async fn pkt_encoder_flush(
+    weak: Weak<Mutex<lightway_core::Connection<ConnectionState>>>,
+    interval: Duration,
+) -> Result<()> {
+    let conn = match weak.upgrade() {
+        Some(conn) => conn,
+        None => return Ok(()), // Client Disconnected;
+    };
+
+    let maybe_encoder_weak = conn.lock().unwrap().get_inside_packet_encoder();
+
+    let encoder_weak = match maybe_encoder_weak {
+        Some(encoder_weak) => encoder_weak,
+        None => {
+            // encoder is not set. Awaits forever...
+            // Not returning immediately to avoid triggering an exit of the
+            // entire client program.
+            tracing::debug!("Pkt encoder flush task is freezed");
+            let pending_future = futures::future::pending();
+            () = pending_future.await;
+            return Ok(());
+        }
+    };
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let encoder = match encoder_weak.upgrade() {
+            Some(encoder) => encoder,
+            None => return Ok(()), // Decoder dropped with the connection. Time to bail.
+        };
+
+        let encoder = encoder.lock().unwrap();
+        if !encoder.get_encoding_state() {
+            // Encoder is not enabled
+            continue;
+        }
+
+        if !encoder.should_flush() {
+            // Not yet time to flush
+            continue;
+        }
+
+        // call to conn.flush_pkts_to_outside() below tries to lock the encoder to get the packets.
+        // Dropping the encoder here to avoid a deadlock.
+        drop(encoder);
+
+        let conn = match weak.upgrade() {
+            Some(conn) => conn,
+            None => return Ok(()), // Client Disconnected;
+        };
+
+        let mut conn = conn.lock().unwrap();
+        match conn.flush_pkts_to_outside() {
+            Ok(()) => {}
+            Err(ConnectionError::InvalidState) => {
+                // Ignore the packet till the connection is online
+            }
+            Err(ConnectionError::InvalidInsidePacket(_)) => {
+                // Ignore invalid inside packet
+            }
+            Err(err) => {
+                // Fatal error
+                return Err(err.into());
+            }
+        }
+    }
+}
+
+async fn pkt_decoder_clean_up(weak: Weak<Mutex<Connection<ConnectionState>>>, interval: Duration) {
+    let Some(conn) = weak.upgrade() else {
+        return; // Connection disconnected.
+    };
+
+    let maybe_decoder = match conn.lock().unwrap().get_inside_packet_decoder() {
+        Some(decoder) => decoder,
+        None => return, // Decoder is not set
+    };
+
+    loop {
+        tokio::time::sleep(interval).await;
+        let decoder = match maybe_decoder.upgrade() {
+            Some(decoder) => decoder,
+            None => return, // Decoder dropped with the connection. Time to bail.
+        };
+
+        decoder.lock().unwrap().cleanup_stale_states();
+    }
+}
+
 fn validate_client_config<A: 'static + Send + EventCallback>(
     config: &ClientConfig<'_, A>,
 ) -> Result<()> {
@@ -440,6 +550,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
+    .with_inside_pkt_codec(config.inside_pkt_codec)
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
@@ -505,10 +616,21 @@ pub async fn client<A: 'static + Send + EventCallback>(
             None => None.into(),
         };
 
+    let pkt_encoder_flush_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(pkt_encoder_flush(
+        Arc::downgrade(&conn),
+        config.pkt_encoder_flush_interval,
+    ));
+
+    tokio::spawn(pkt_decoder_clean_up(
+        Arc::downgrade(&conn),
+        config.pkt_decoder_clean_up_interval,
+    ));
+
     tokio::select! {
         Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
         io = outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
         io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
+        io = pkt_encoder_flush_task => Err(anyhow!("Inside IO (Pkt encoder flush task) exited: {io:?}")),
         _ = config.stop_signal => {
             info!("client shutting down ..");
             let _ = conn.lock().unwrap().disconnect();
