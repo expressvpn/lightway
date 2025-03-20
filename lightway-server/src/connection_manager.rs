@@ -131,7 +131,9 @@ async fn handle_state_change(state: State, conn: &Weak<Connection>) {
             metrics::connection_online(&conn);
         }
         State::Disconnecting => {}
-        State::Disconnected => {}
+        State::Disconnected => {
+            let _ = conn.disconnect();
+        }
     }
 }
 
