@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
 use crate::max_dtls_mtu;
@@ -594,6 +594,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
+            trace!("Scheduling tick for {:?}", interval);
             if let Some(schedule_tick_cb) = self.schedule_tick_cb {
                 schedule_tick_cb(interval, &mut self.app_state);
 
@@ -629,6 +630,7 @@ impl<AppState: Send> Connection<AppState> {
     /// [`Connection::tick_interval`] for usage.
     pub fn tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
+        trace!(?self.session_id, "Processing connection tick");
 
         match self.state {
             State::Authenticating => {

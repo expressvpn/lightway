@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::mpsc, task::JoinSet};
+use tracing::warn;
 
 /// App state compatible with [`connection_ticker_cb`]
 pub trait ConnectionTickerState {
@@ -44,7 +45,9 @@ impl ConnectionTicker {
         let sender = self.0.clone();
         tokio::spawn(async move {
             tokio::time::sleep(d).await;
-            let _ = sender.send(());
+            if let Err(e) = sender.send(()) {
+                warn!("Ticker send error: {:?}", e);
+            }
         });
     }
 }
@@ -83,7 +86,7 @@ impl ConnectionTickerTask {
         join_set.spawn(async move {
             while let Some(()) = recv.recv().await {
                 let Some(tickable) = weak.upgrade() else {
-                    return;
+                    break;
                 };
 
                 let _ = tickable.tick();
