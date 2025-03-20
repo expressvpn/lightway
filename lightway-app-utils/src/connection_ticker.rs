@@ -77,7 +77,21 @@ pub struct ConnectionTickerTask(mpsc::UnboundedReceiver<()>);
 
 impl ConnectionTickerTask {
     /// Spawn the handler task
-    pub fn spawn<T: Tickable + 'static>(
+    pub fn spawn<T: Tickable + 'static>(self, weak: Weak<T>) -> tokio::task::JoinHandle<()> {
+        let mut recv = self.0;
+        tokio::task::spawn(async move {
+            while let Some(()) = recv.recv().await {
+                let Some(tickable) = weak.upgrade() else {
+                    break;
+                };
+
+                let _ = tickable.tick();
+            }
+        })
+    }
+
+    /// Spawn the handler task in a JoinSet
+    pub fn spawn_in<T: Tickable + 'static>(
         self,
         weak: Weak<T>,
         join_set: &mut JoinSet<()>,
@@ -119,9 +133,8 @@ mod tests {
         }
 
         let conn = Arc::new(Dummy(Mutex::new(Some(tx))));
-        let mut join_set = JoinSet::new();
 
-        ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
+        ticker_task.spawn(Arc::downgrade(&conn));
 
         ticker.schedule(Duration::ZERO);
 
@@ -143,13 +156,12 @@ mod tests {
         }
 
         let conn = Arc::new(Dummy);
-        let mut join_set = JoinSet::new();
 
-        ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
+        let task = ticker_task.spawn(Arc::downgrade(&conn));
 
         drop(ticker);
 
-        while (join_set.join_next().await).is_some() {}
+        task.await.unwrap(); // Task should exit cleanly
     }
 
     #[tokio::test]
@@ -167,9 +179,87 @@ mod tests {
         }
 
         let conn = Arc::new(Dummy);
+
+        let task = ticker_task.spawn(Arc::downgrade(&conn));
+
+        drop(conn);
+
+        ticker.schedule(Duration::ZERO);
+
+        task.await.unwrap(); // Task should exit cleanly
+    }
+
+    #[tokio::test]
+    async fn joinset_ticks() {
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::oneshot;
+
+        let (ticker, ticker_task) = ConnectionTicker::new();
+
+        // We'll "tick" this channel
+        let (tx, rx) = oneshot::channel();
+
+        struct Dummy(Mutex<Option<oneshot::Sender<()>>>);
+
+        impl Tickable for Dummy {
+            fn tick(&self) -> ConnectionResult<()> {
+                self.0.lock().unwrap().take().unwrap().send(()).unwrap();
+                Ok(())
+            }
+        }
+
+        let conn = Arc::new(Dummy(Mutex::new(Some(tx))));
         let mut join_set = JoinSet::new();
 
-        ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        ticker.schedule(Duration::ZERO);
+
+        rx.await.unwrap(); // Should get the tick
+    }
+
+    #[tokio::test]
+    async fn joinset_task_exits_when_ticker_released() {
+        use std::sync::Arc;
+
+        let (ticker, ticker_task) = ConnectionTicker::new();
+
+        struct Dummy;
+
+        impl Tickable for Dummy {
+            fn tick(&self) -> ConnectionResult<()> {
+                panic!("Not expecting to tick");
+            }
+        }
+
+        let conn = Arc::new(Dummy);
+        let mut join_set = JoinSet::new();
+
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        drop(ticker);
+
+        while (join_set.join_next().await).is_some() {}
+    }
+
+    #[tokio::test]
+    async fn joinset_task_exits_when_conn_released() {
+        use std::sync::Arc;
+
+        let (ticker, ticker_task) = ConnectionTicker::new();
+
+        struct Dummy;
+
+        impl Tickable for Dummy {
+            fn tick(&self) -> ConnectionResult<()> {
+                panic!("Not expecting to tick");
+            }
+        }
+
+        let conn = Arc::new(Dummy);
+        let mut join_set = JoinSet::new();
+
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
 
         drop(conn);
 

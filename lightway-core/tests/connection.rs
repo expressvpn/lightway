@@ -210,7 +210,7 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
 
     let mut join_set = JoinSet::new();
 
-    ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
+    ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
     loop {
         tokio::select! {
             // Inside data received
@@ -323,7 +323,7 @@ async fn client<S: TestSock>(
         .unwrap();
     let client = Arc::new(Mutex::new(client));
 
-    ticker_task.spawn(Arc::downgrade(&client), &mut join_set);
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
 
     let event_client = client.clone();
 
