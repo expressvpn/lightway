@@ -11,6 +11,7 @@ use crate::{
     OutsidePacket, PluginResult, RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg,
     Version,
     context::ip_pool::ClientIpConfigArg,
+    encoding_request_states::ScheduleEncodingRequestRetransmitCb,
     packet::OutsidePacketError,
     packet_codec::PacketCodecFactoryType,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
@@ -106,6 +107,7 @@ pub struct ClientContext<AppState> {
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
     pub(crate) inside_pkt_codec: Option<PacketCodecFactoryType>,
+    pub(crate) schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingRequestRetransmitCb>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -130,6 +132,7 @@ pub struct ClientContextBuilder<AppState> {
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
     inside_pkt_codec: Option<PacketCodecFactoryType>,
+    schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingRequestRetransmitCb>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -163,6 +166,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
             inside_pkt_codec: None,
+            schedule_encoding_req_retransmit_cb: None,
         })
     }
 
@@ -211,6 +215,18 @@ impl<AppState> ClientContextBuilder<AppState> {
         }
     }
 
+    /// Sets the schedule encoding request retransmit callback
+    /// See [`ScheduleEncodingRequestRetransmitCb`]
+    pub fn with_schedule_encoding_req_retransmit_cb(
+        self,
+        schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingRequestRetransmitCb>,
+    ) -> Self {
+        Self {
+            schedule_encoding_req_retransmit_cb,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -223,6 +239,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             inside_pkt_codec: self.inside_pkt_codec,
+            schedule_encoding_req_retransmit_cb: self.schedule_encoding_req_retransmit_cb,
         }
     }
 }

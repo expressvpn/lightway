@@ -7,6 +7,7 @@ mod builder_predicates;
 mod cipher;
 mod connection;
 mod context;
+mod encoding_request_states;
 mod io;
 mod metrics;
 mod packet;

@@ -260,7 +260,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
                             break; // Connection disconnected.
                         };
 
-                        if let Err(e) = conn.lock().unwrap().send_encoding_request(true) {
+                        if let Err(e) = conn.lock().unwrap().create_encoding_request(true) {
                             tracing::error!(
                                 "Error encoutered when trying to toggle encoding. {}",
                                 e
@@ -502,7 +502,7 @@ async fn encoding_request_task(
             break; // Connection disconnected.
         };
 
-        if let Err(e) = conn.lock().unwrap().send_encoding_request(enable) {
+        if let Err(e) = conn.lock().unwrap().create_encoding_request(enable) {
             tracing::error!(
                 "Error encoutered when trying to send encoding request. {}",
                 e

@@ -20,7 +20,7 @@ use crate::borrowed_bytesmut::BorrowedBytesMut;
 /// ```
 ///
 /// Frame size is fixed at 48 bytes, with 39 bytes reserved for future use.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub(crate) struct EncodingRequest {
     pub(crate) id: u64,
     pub(crate) enable: bool,

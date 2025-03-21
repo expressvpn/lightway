@@ -19,11 +19,13 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
+use crate::encoding_request_states::ScheduleEncodingRequestRetransmitCb;
 use crate::max_dtls_mtu;
 use crate::{
     ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
     TCP_HEADER_SIZE, Version,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
+    encoding_request_states::EncodingRequestStates,
     metrics,
     packet_codec::{CodecStatus, PacketDecoderType, PacketEncoderType},
     plugin::PluginList,
@@ -63,6 +65,9 @@ pub(crate) use io_adapter::{SendBuffer as IOAdapterSendBuffer, WolfSSLIOAdapter}
 const WOLF_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 
 const WOLF_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
+
+/// Maximum number of retransmissions attempts for each encoding request packet.
+const ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS: u8 = 10;
 
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -369,8 +374,11 @@ pub struct Connection<AppState: Send = ()> {
     // Inside packet decoder
     inside_pkt_decoder: Option<Arc<Mutex<PacketDecoderType>>>,
 
-    // Encoding request packet id counter
-    encoding_request_id_counter: u64,
+    // States for encoding request
+    encoding_request_states: EncodingRequestStates,
+
+    /// Application provided callback to schedule an encoding request retransmission
+    schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingRequestRetransmitCb>,
 }
 
 /// Information about the new session being established with a new
@@ -392,6 +400,7 @@ struct NewConnectionArgs<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     inside_pkt_encoder: Option<PacketEncoderType>,
     inside_pkt_decoder: Option<PacketDecoderType>,
+    schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingRequestRetransmitCb>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -439,7 +448,8 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder: args
                 .inside_pkt_decoder
                 .map(|decoder| Arc::new(Mutex::new(decoder))),
-            encoding_request_id_counter: 0,
+            encoding_request_states: EncodingRequestStates::default(),
+            schedule_encoding_req_retransmit_cb: args.schedule_encoding_req_retransmit_cb,
         };
 
         // This will very likely fail since negotiation always needs
@@ -1644,7 +1654,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Send an encoding request to the server. (Client only)
-    pub fn send_encoding_request(&mut self, enable: bool) -> ConnectionResult<()> {
+    pub fn create_encoding_request(&mut self, enable: bool) -> ConnectionResult<()> {
         if self.inside_pkt_encoder.is_none() {
             return Err(ConnectionError::PacketCodecDoesNotExist);
         }
@@ -1665,20 +1675,62 @@ impl<AppState: Send> Connection<AppState> {
 
         debug!("Attempting to send encoding request packet.");
 
-        // Assign a new request id for each encoding request
-        // Note: the wrapping should rarely, if ever, happen.
-        // The counter is a u64 and it takes 2^64 requests to wrap it.
-        // If one request is made each nanosecond, it takes ~584 years to wrap.
-        self.encoding_request_id_counter = self.encoding_request_id_counter.wrapping_add(1);
-
-        // TODO: this is not reliable when the packet loss is high (this request packet could be dropped)
-        // Is there any other better solution?
+        self.encoding_request_states.id_counter =
+            self.encoding_request_states.id_counter.wrapping_add(1);
         let encoding_request = wire::EncodingRequest {
-            id: self.encoding_request_id_counter,
+            id: self.encoding_request_states.id_counter,
             enable,
         };
+
+        self.encoding_request_states.pending_request_pkt = Some(encoding_request.clone());
+        self.encoding_request_states.retransmissions_counter = 0;
+
         let msg = wire::Frame::EncodingRequest(encoding_request);
 
+        self.send_frame_or_drop(msg)
+    }
+
+    pub fn retransmit_encoding_request(&mut self) -> ConnectionResult<()> {
+        if self.inside_pkt_encoder.is_none() {
+            return Err(ConnectionError::PacketCodecDoesNotExist);
+        }
+
+        if !matches!(self.state, State::Online) {
+            error!("Attempting to send encoding request packet before state is Online");
+            return Err(ConnectionError::InvalidState);
+        }
+
+        if !matches!(self.connection_type, ConnectionType::Datagram) {
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+
+        if !matches!(self.mode, ConnectionMode::Client { .. }) {
+            error!("Attempting to send an EncodingRequest as a server");
+            return Err(ConnectionError::InvalidMode);
+        }
+
+        if self.encoding_request_states.retransmissions_counter
+            >= ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS
+        {
+            warn!("EncodingRequest retransmission max attempts reached");
+
+            // Remove the pending packet
+            self.encoding_request_states.pending_request_pkt = None;
+
+            return Ok(());
+        }
+
+        let pending_request_pkt = match &self.encoding_request_states.pending_request_pkt {
+            Some(pkt) => pkt,
+            None => {
+                // No pending packet
+                return Ok(());
+            }
+        };
+
+        // Callback to schedule another re-transmission
+
+        let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());
         self.send_frame_or_drop(msg)
     }
 }
