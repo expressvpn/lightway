@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
 use crate::max_dtls_mtu;
@@ -108,6 +108,10 @@ pub enum ConnectionError {
     /// Connection timed out
     #[error("TimedOut")]
     TimedOut,
+
+    /// Connection already disconnected
+    #[error("Disconnected")]
+    Disconnected,
 
     /// User is not authorized / authentication failed
     #[error("Unauthorized")]
@@ -209,6 +213,7 @@ impl ConnectionError {
                     Goodbye => true,
                     PacketCodecDoesNotExist => true,
                     PacketCodecError(_) => true,
+                    Disconnected => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
 
@@ -624,6 +629,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
+            trace!("Scheduling tick for {:?}", interval);
             if let Some(schedule_tick_cb) = self.schedule_tick_cb {
                 schedule_tick_cb(interval, &mut self.app_state);
 
@@ -659,6 +665,7 @@ impl<AppState: Send> Connection<AppState> {
     /// [`Connection::tick_interval`] for usage.
     pub fn tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
+        trace!(?self.session_id, "Processing connection tick");
 
         match self.state {
             State::Authenticating => {
@@ -668,6 +675,9 @@ impl<AppState: Send> Connection<AppState> {
                     // Server should never be authenticating.
                     return Err(ConnectionError::InvalidMode);
                 }
+            }
+            State::Disconnecting | State::Disconnected => {
+                return Err(ConnectionError::Disconnected);
             }
             _ if self.connection_type.is_datagram() => match self.session.dtls_has_timed_out() {
                 wolfssl::Poll::Ready(true) => {
@@ -714,6 +724,13 @@ impl<AppState: Send> Connection<AppState> {
     /// In case of UDP, it is almost always one frame per packet. With duplicated
     /// UDP packets, count can be 0.
     pub fn outside_data_received(&mut self, pkt: OutsidePacket) -> ConnectionResult<usize> {
+        // Fatal error:
+        // In case of protocol disconnection instead of explicit disconnect
+        // from Application, notify application that connection is not alive
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
         if !self.is_first_packet_received && matches!(self.mode, ConnectionMode::Client { .. }) {
             self.event(Event::FirstPacketReceived);
             self.is_first_packet_received = true;
@@ -760,6 +777,14 @@ impl<AppState: Send> Connection<AppState> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::{InvalidIpv4Packet, InvalidPacketSize};
 
+        // Fatal error:
+        // In case of protocol disconnection instead of explicit disconnect
+        // from Application, notify application that connection is not alive
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
+        // Not a fatal error, Might be due to packet reordering
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }

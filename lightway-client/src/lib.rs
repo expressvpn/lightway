@@ -667,7 +667,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
         event_handler,
     ));
 
-    ticker_task.spawn(Arc::downgrade(&conn), &mut join_set);
+    ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
     let outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
