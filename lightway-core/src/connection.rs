@@ -676,6 +676,9 @@ impl<AppState: Send> Connection<AppState> {
                     return Err(ConnectionError::InvalidMode);
                 }
             }
+            State::Disconnecting | State::Disconnected => {
+                return Err(ConnectionError::Disconnected);
+            }
             _ if self.connection_type.is_datagram() => match self.session.dtls_has_timed_out() {
                 wolfssl::Poll::Ready(true) => {
                     self.set_state(State::Disconnected)?;
