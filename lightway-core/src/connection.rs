@@ -368,6 +368,9 @@ pub struct Connection<AppState: Send = ()> {
 
     // Inside packet decoder
     inside_pkt_decoder: Option<Arc<Mutex<PacketDecoderType>>>,
+
+    // Encoding request packet id counter
+    encoding_request_id_counter: u64,
 }
 
 /// Information about the new session being established with a new
@@ -436,6 +439,7 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder: args
                 .inside_pkt_decoder
                 .map(|decoder| Arc::new(Mutex::new(decoder))),
+            encoding_request_id_counter: 0,
         };
 
         // This will very likely fail since negotiation always needs
@@ -1591,6 +1595,7 @@ impl<AppState: Send> Connection<AppState> {
         // TODO: this is not reliable when the packet loss is high (this response packet could be dropped)
         // Is there any other better solution?
         let msg = wire::Frame::EncodingResponse(wire::EncodingResponse {
+            id: er.id,
             enable: new_setting,
         });
         self.send_frame_or_drop(msg)
@@ -1660,9 +1665,18 @@ impl<AppState: Send> Connection<AppState> {
 
         debug!("Attempting to send encoding request packet.");
 
+        // Assign a new request id for each encoding request
+        // Note: the wrapping should rarely, if ever, happen.
+        // The counter is a u64 and it takes 2^64 requests to wrap it.
+        // If one request is made each nanosecond, it takes ~584 years to wrap.
+        self.encoding_request_id_counter = self.encoding_request_id_counter.wrapping_add(1);
+
         // TODO: this is not reliable when the packet loss is high (this request packet could be dropped)
         // Is there any other better solution?
-        let encoding_request = wire::EncodingRequest { enable };
+        let encoding_request = wire::EncodingRequest {
+            id: self.encoding_request_id_counter,
+            enable,
+        };
         let msg = wire::Frame::EncodingRequest(encoding_request);
 
         self.send_frame_or_drop(msg)
