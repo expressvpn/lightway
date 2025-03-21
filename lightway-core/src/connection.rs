@@ -108,6 +108,10 @@ pub enum ConnectionError {
     #[error("TimedOut")]
     TimedOut,
 
+    /// Connection already disconnected
+    #[error("Disconnected")]
+    Disconnected,
+
     /// User is not authorized / authentication failed
     #[error("Unauthorized")]
     Unauthorized,
@@ -193,6 +197,7 @@ impl ConnectionError {
                     InvalidInsideIpConfig(_) => true,
                     AccessDenied => true,
                     Goodbye => true,
+                    Disconnected => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
 
@@ -686,6 +691,13 @@ impl<AppState: Send> Connection<AppState> {
     /// In case of UDP, it is almost always one frame per packet. With duplicated
     /// UDP packets, count can be 0.
     pub fn outside_data_received(&mut self, pkt: OutsidePacket) -> ConnectionResult<usize> {
+        // Fatal error:
+        // In case of protocol disconnection instead of explicit disconnect
+        // from Application, notify application that connection is not alive
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
         if !self.is_first_packet_received && matches!(self.mode, ConnectionMode::Client { .. }) {
             self.event(Event::FirstPacketReceived);
             self.is_first_packet_received = true;
@@ -732,6 +744,14 @@ impl<AppState: Send> Connection<AppState> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::{InvalidIpv4Packet, InvalidPacketSize};
 
+        // Fatal error:
+        // In case of protocol disconnection instead of explicit disconnect
+        // from Application, notify application that connection is not alive
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
+        // Not a fatal error, Might be due to packet reordering
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
