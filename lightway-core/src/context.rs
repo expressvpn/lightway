@@ -96,6 +96,20 @@ mod test_connection_type {
 /// wrapped the connection in.
 pub type ScheduleTickCb<AppState> = fn(d: std::time::Duration, state: &mut AppState);
 
+/// Type of the application provided method to schedule a call to
+/// [`crate::Connection::retransmit_pending_encoding_request`] after
+/// an interval.
+/// When this method is called by lightway the application should
+/// arrange to call
+/// [`crate::Connection::retransmit_pending_encoding_request`] after
+/// `wait_time` has elapsed. There is no requirement to cancel any
+/// other pending callback.
+///
+/// Take care if calling [`crate::Connection`] methods from within the
+/// callback to avoid deadlock with any application lock you have
+/// wrapped the connection in.
+pub type ScheduleEncodingReqRetransmitCb<AppState> =
+    fn(d: std::time::Duration, request_id: u64, state: &mut AppState);
 /// The core Lightway Client-side context.
 pub struct ClientContext<AppState> {
     pub(crate) wolfssl: wolfssl::Context,
@@ -106,6 +120,8 @@ pub struct ClientContext<AppState> {
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
     pub(crate) inside_pkt_codec: Option<PacketCodecFactoryType>,
+    pub(crate) schedule_encoding_req_retransmit_cb:
+        Option<ScheduleEncodingReqRetransmitCb<AppState>>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -130,6 +146,7 @@ pub struct ClientContextBuilder<AppState> {
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
     inside_pkt_codec: Option<PacketCodecFactoryType>,
+    schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingReqRetransmitCb<AppState>>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -163,6 +180,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
             inside_pkt_codec: None,
+            schedule_encoding_req_retransmit_cb: None,
         })
     }
 
@@ -211,6 +229,18 @@ impl<AppState> ClientContextBuilder<AppState> {
         }
     }
 
+    /// Sets the schedule encoding request retransmit callback
+    /// See [`ScheduleEncodingReqRetransmitCb`]
+    pub fn with_schedule_encoding_req_retransmit_cb(
+        self,
+        schedule_encoding_req_retransmit_cb: Option<ScheduleEncodingReqRetransmitCb<AppState>>,
+    ) -> Self {
+        Self {
+            schedule_encoding_req_retransmit_cb,
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -223,6 +253,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             inside_pkt_codec: self.inside_pkt_codec,
+            schedule_encoding_req_retransmit_cb: self.schedule_encoding_req_retransmit_cb,
         }
     }
 }
