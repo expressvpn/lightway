@@ -259,6 +259,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
                 .inside_pkt_codec
                 .as_ref()
                 .map(|factory| factory.build_decoder()),
+            schedule_encoding_req_retransmit_cb: self.ctx.schedule_encoding_req_retransmit_cb,
         })?)
     }
 }
@@ -388,6 +389,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
                 .inside_pkt_codec
                 .as_ref()
                 .map(|factory| factory.build_decoder()),
+            schedule_encoding_req_retransmit_cb: None,
         })?)
     }
 }
