@@ -581,7 +581,6 @@ pub async fn client<A: 'static + Send + EventCallback>(
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
-    .with_inside_pkt_codec(config.inside_pkt_codec)
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
@@ -589,6 +588,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     )?
     .with_auth(config.auth)
     .with_event_cb(Box::new(event_cb))
+    .with_inside_pkt_codec(config.inside_pkt_codec)
     .when_some(config.server_dn, |b, sdn| {
         b.with_server_domain_name_validation(sdn)
     })

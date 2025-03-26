@@ -24,7 +24,8 @@ use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback};
 use lightway_core::{
     ConnectionActivity, ConnectionBuilderError, ConnectionError, ContextError, Event,
-    OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State, Version,
+    OutsideIOSendCallbackArg, OutsidePacket, PacketDecoderType, PacketEncoderType, ServerContext,
+    SessionId, State, Version,
 };
 
 use crate::codec_list::InternalIPToEncoderMap;
@@ -229,6 +230,7 @@ fn new_connection(
     protocol_version: Version,
     local_addr: SocketAddr,
     outside_io: OutsideIOSendCallbackArg,
+    inside_io_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     encoders: Arc<Mutex<InternalIPToEncoderMap>>,
 ) -> Result<Arc<Connection>, ConnectionManagerError> {
     metrics::connection_created(&protocol_version);
@@ -242,6 +244,7 @@ fn new_connection(
         protocol_version,
         local_addr,
         outside_io,
+        inside_io_codec,
         event_cb,
     )
     .inspect_err(|err| {
@@ -298,6 +301,7 @@ impl ConnectionManager {
         protocol_version: Version,
         socket_addr: SocketAddr,
         outside_io: OutsideIOSendCallbackArg,
+        inside_io_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     ) -> Result<Arc<Connection>, ConnectionManagerError> {
         let conn = new_connection(
             self.clone(),
@@ -305,6 +309,7 @@ impl ConnectionManager {
             protocol_version,
             socket_addr,
             outside_io,
+            inside_io_codec,
             self.encoders.clone(),
         )?;
         // TODO: what if addr was already present?
@@ -337,6 +342,7 @@ impl ConnectionManager {
         session_id: SessionId,
         local_addr: SocketAddr,
         create_io: F,
+        inside_io_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     ) -> Result<(Arc<Connection>, bool), ConnectionManagerError>
     where
         F: FnOnce() -> OutsideIOSendCallbackArg,
@@ -361,6 +367,7 @@ impl ConnectionManager {
                     protocol_version,
                     local_addr,
                     outside_io,
+                    inside_io_codec,
                     self.encoders.clone(),
                 )?;
                 e.insert(&c)?;

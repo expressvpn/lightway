@@ -14,7 +14,7 @@ use bytesize::ByteSize;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
 use lightway_core::{
     ConnectionType, Header, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback,
-    OutsidePacket, SessionId, Version,
+    OutsidePacket, PacketCodecFactoryType, SessionId, Version,
 };
 use socket2::{MaybeUninitSlice, MsgHdr, MsgHdrMut, SockAddr, SockRef};
 use tokio::io::Interest;
@@ -110,6 +110,7 @@ pub(crate) struct UdpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
+    inside_io_codec_factory: Option<PacketCodecFactoryType>,
 }
 
 impl UdpServer {
@@ -118,6 +119,7 @@ impl UdpServer {
         bind_address: SocketAddr,
         bind_attempts: NonZeroUsize,
         udp_buffer_size: ByteSize,
+        inside_io_codec_factory: Option<PacketCodecFactoryType>,
     ) -> Result<UdpServer> {
         let bind_attempts = bind_attempts.get();
         let mut attempts = 0;
@@ -165,6 +167,7 @@ impl UdpServer {
             conn_manager,
             sock,
             bind_mode,
+            inside_io_codec_factory,
         })
     }
 
@@ -197,6 +200,8 @@ impl UdpServer {
             return;
         }
 
+        let inside_io_codec = self.inside_io_codec_factory.as_ref().map(|f| f.build());
+
         let may_be_conn = self.conn_manager.find_datagram_connection_with(peer_addr);
         let (conn, update_peer_address) = match may_be_conn {
             Some(conn) => (conn, false),
@@ -213,6 +218,7 @@ impl UdpServer {
                             reply_pktinfo,
                         })
                     },
+                    inside_io_codec,
                 );
 
                 match conn_result {

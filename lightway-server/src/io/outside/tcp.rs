@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_core::{
-    ConnectionType, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket, State,
-    Version,
+    ConnectionType, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket,
+    PacketCodecFactoryType, State, Version,
 };
 use socket2::SockRef;
 use tokio::io::AsyncReadExt as _;
@@ -96,6 +96,7 @@ async fn handle_connection(
     local_addr: SocketAddr,
     conn_manager: Arc<ConnectionManager>,
     proxy_protocol: bool,
+    inside_io_codec_factory: Option<&PacketCodecFactoryType>,
 ) {
     if proxy_protocol {
         peer_addr = match handle_proxy_protocol(&mut sock).await {
@@ -110,15 +111,20 @@ async fn handle_connection(
 
     let sock = Arc::new(sock);
 
+    let inside_io_codec = inside_io_codec_factory.map(|f| f.build());
+
     let outside_io = Arc::new(TcpStream {
         sock: sock.clone(),
         peer_addr,
     });
     // TCP has no version indication, default to the minimum
     // supported version.
-    let Ok(conn) =
-        conn_manager.create_streaming_connection(Version::MINIMUM, local_addr, outside_io)
-    else {
+    let Ok(conn) = conn_manager.create_streaming_connection(
+        Version::MINIMUM,
+        local_addr,
+        outside_io,
+        inside_io_codec,
+    ) else {
         return;
     };
 
@@ -259,6 +265,7 @@ impl Server for TcpServer {
                 local_addr,
                 self.conn_manager.clone(),
                 self.proxy_protocol,
+                None,
             ));
         }
     }

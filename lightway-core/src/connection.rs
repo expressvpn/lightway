@@ -402,7 +402,7 @@ impl<AppState: Send> Connection<AppState> {
         let max_fragment_map_entries = args.max_fragment_map_entries;
         let (inside_pkt_encoder, inside_pkt_decoder) = match args.pkt_encoder_decoder {
             Some(e) => (Some(e.0), Some(e.1)),
-            None => (None, None)
+            None => (None, None),
         };
         let mut conn = Connection {
             connection_type: args.connection_type,

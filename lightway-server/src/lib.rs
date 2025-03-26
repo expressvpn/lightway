@@ -299,7 +299,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
-    .with_inside_pkt_codec(config.inside_pkt_codec)
     .build()?;
 
     let encoders = Arc::new(Mutex::new(InternalIPToEncoderMap::default()));
@@ -315,6 +314,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 config.bind_address,
                 config.bind_attempts,
                 config.udp_buffer_size,
+                config.inside_pkt_codec,
             )
             .await?,
         ),
