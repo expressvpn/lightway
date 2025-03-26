@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 pub mod args;
+pub mod encoding_req_retransmit_ticker;
 pub mod sockopt;
 
 #[cfg(feature = "tokio")]
@@ -20,6 +21,11 @@ pub use connection_ticker::{
 };
 #[cfg(feature = "tokio")]
 pub use dplpmtud_timer::{DplpmtudTimer, DplpmtudTimerTask};
+#[cfg(feature = "tokio")]
+pub use encoding_req_retransmit_ticker::{
+    EncodingReqRetransmitState, EncodingReqRetransmitTicker, EncodingReqRetransmitTickerTask,
+    encoding_request_ticker_cb,
+};
 #[cfg(feature = "tokio")]
 pub use event_stream::{EventStream, EventStreamCallback};
 
