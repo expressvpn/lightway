@@ -112,6 +112,8 @@ impl Connection {
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
             pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
+            pub fn send_to_outside(&self, pkt: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()>;
+            pub fn send_to_inside(&self, pkt: BytesMut) -> ConnectionResult<()>;
 
             pub fn get_inside_packet_encoder(&self) -> Option<PacketEncoderType>;
         }

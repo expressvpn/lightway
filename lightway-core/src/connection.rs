@@ -883,7 +883,12 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn send_to_outside(&mut self, pkt: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
+    /// Todo: asdasd
+    pub fn send_to_outside(
+        &mut self,
+        pkt: &mut BytesMut,
+        is_encoded: bool,
+    ) -> ConnectionResult<()> {
         if_chain::if_chain! {
             if let Some(pmtu) = &self.pmtud;
             if let Some((data_mps, frag_mps)) = pmtu.maximum_packet_sizes();
@@ -1439,7 +1444,7 @@ impl<AppState: Send> Connection<AppState> {
         is_encoded: bool,
     ) -> ConnectionResult<()> {
         if !is_encoded {
-            return self.send_to_inside_io(inside_bytes);
+            return self.send_to_inside(inside_bytes);
         }
 
         let decoder = match &mut self.inside_pkt_decoder {
@@ -1463,7 +1468,7 @@ impl<AppState: Send> Connection<AppState> {
             Ok(CodecStatus::SkipPacket) => {
                 // The decoder does not accept the packet.
                 // Packet should be un-encoded. Sending to inside directly.
-                self.send_to_inside_io(inside_bytes)
+                self.send_to_inside(inside_bytes)
             }
             Err(e) => Err(ConnectionError::PacketCodecError(e)),
         }
@@ -1482,11 +1487,12 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         pkts.into_iter()
-            .map(|pkt| self.send_to_inside_io(pkt))
+            .map(|pkt| self.send_to_inside(pkt))
             .collect()
     }
 
-    fn send_to_inside_io(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
+    /// Tdo:
+    pub fn send_to_inside(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::InvalidIpv4Packet;
 

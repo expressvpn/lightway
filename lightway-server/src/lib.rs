@@ -6,6 +6,7 @@ mod ip_manager;
 pub mod metrics;
 mod statistics;
 
+use bytes::BytesMut;
 use bytesize::ByteSize;
 use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
@@ -21,7 +22,8 @@ use ipnet::Ipv4Net;
 use lightway_app_utils::{TunConfig, connection_ticker_cb};
 use lightway_core::{
     AuthMethod, BuilderPredicates, ConnectionError, ConnectionResult, IOCallbackResult,
-    InsideIpConfig, PacketCodecFactoryType, Secret, ServerContextBuilder, ipv4_update_destination,
+    InsideIpConfig, PacketDecoderType, PacketEncoderType, Secret, ServerContextBuilder,
+    ipv4_update_destination,
 };
 use parking_lot::Mutex;
 use pnet::packet::ipv4::Ipv4Packet;
@@ -33,7 +35,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc::Receiver, task::JoinHandle};
 use tracing::{info, warn};
 
 pub use crate::connection::ConnectionState;
@@ -45,6 +47,7 @@ use connection_manager::ConnectionManager;
 use io::outside::Server;
 
 use codec_list::InternalIPToEncoderMap;
+// use futures_util::{pin_mut, Stream, stream, StreamExt};
 
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
@@ -54,7 +57,7 @@ fn debug_fmt_plugin_list(
 }
 
 fn debug_pkt_codec_fac(
-    codec_fac: &Option<PacketCodecFactoryType>,
+    codec_fac: &Option<ServerPacketCodecFactoryType>,
     f: &mut std::fmt::Formatter,
 ) -> Result<(), std::fmt::Error> {
     match codec_fac {
@@ -62,6 +65,26 @@ fn debug_pkt_codec_fac(
         None => write!(f, "No Codec"),
     }
 }
+
+/// Factory to build [`PacketEncoderType`] and [`PacketDecoderType`]
+/// This will be used to build a new instance of [`PacketEncoderType`] and [`PacketDecoderType`] for every connection.
+pub trait ServerPacketCodecFactory {
+    /// Build a new instance of [`PacketEncoderType`] and [`PacketDecoderType`]
+    fn build(
+        &self,
+    ) -> (
+        PacketEncoderType,
+        PacketDecoderType,
+        Receiver<BytesMut>,
+        Receiver<BytesMut>,
+    );
+
+    /// Returns the codec name for debugging purpose
+    fn get_codec_name(&self) -> String;
+}
+
+/// Type for [`PacketCodecFactory`]
+pub type ServerPacketCodecFactoryType = Box<dyn ServerPacketCodecFactory + Send + Sync>;
 
 #[derive(Debug)]
 pub struct AuthState<'a> {
@@ -164,7 +187,7 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
     /// Inside packet codec to use
     #[educe(Debug(method(debug_pkt_codec_fac)))]
-    pub inside_pkt_codec: Option<PacketCodecFactoryType>,
+    pub inside_pkt_codec: Option<ServerPacketCodecFactoryType>,
 
     /// How often the pkt encoder is flushed
     pub pkt_encoder_flush_interval: Duration,
@@ -182,7 +205,7 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     pub udp_buffer_size: ByteSize,
 }
 
-fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionResult<()>) {
+pub(crate) fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionResult<()>) {
     match result {
         Ok(()) => {}
         Err(ConnectionError::InvalidState) => {

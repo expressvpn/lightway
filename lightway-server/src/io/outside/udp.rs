@@ -3,7 +3,7 @@ mod cmsg;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, Weak},
     time::Duration,
 };
 
@@ -14,13 +14,16 @@ use bytesize::ByteSize;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
 use lightway_core::{
     ConnectionType, Header, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback,
-    OutsidePacket, PacketCodecFactoryType, SessionId, Version,
+    OutsidePacket, SessionId, Version,
 };
 use socket2::{MaybeUninitSlice, MsgHdr, MsgHdrMut, SockAddr, SockRef};
-use tokio::io::Interest;
+use tokio::{io::Interest, sync::mpsc::Receiver};
 use tracing::{info, warn};
 
-use crate::{connection_manager::ConnectionManager, metrics};
+use crate::{
+    ServerPacketCodecFactoryType, connection::Connection, connection_manager::ConnectionManager,
+    handle_inside_io_error, metrics,
+};
 
 use super::Server;
 
@@ -110,7 +113,47 @@ pub(crate) struct UdpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
-    inside_io_codec_factory: Option<PacketCodecFactoryType>,
+    inside_io_codec_factory: Option<ServerPacketCodecFactoryType>,
+}
+
+async fn pkt_encoder_flush(conn: Weak<Connection>, rx: Option<Receiver<BytesMut>>) -> Result<()> {
+    let Some(mut rx) = rx else {
+        return Ok(());
+    };
+    loop {
+        let pkt = rx.recv().await;
+
+        let Some(mut pkt) = pkt else {
+            continue;
+        };
+
+        let Some(conn) = conn.upgrade() else {
+            return Ok(());
+        };
+
+        let flush_result = conn.send_to_outside(&mut pkt, true);
+        handle_inside_io_error(conn, flush_result);
+    }
+}
+
+async fn pkt_decoder_flush(conn: Weak<Connection>, rx: Option<Receiver<BytesMut>>) -> Result<()> {
+    let Some(mut rx) = rx else {
+        return Ok(());
+    };
+    loop {
+        let pkt = rx.recv().await;
+
+        let Some(pkt) = pkt else {
+            continue;
+        };
+
+        let Some(conn) = conn.upgrade() else {
+            return Ok(());
+        };
+
+        let flush_result = conn.send_to_inside(pkt);
+        handle_inside_io_error(conn, flush_result);
+    }
 }
 
 impl UdpServer {
@@ -119,7 +162,7 @@ impl UdpServer {
         bind_address: SocketAddr,
         bind_attempts: NonZeroUsize,
         udp_buffer_size: ByteSize,
-        inside_io_codec_factory: Option<PacketCodecFactoryType>,
+        inside_io_codec_factory: Option<ServerPacketCodecFactoryType>,
     ) -> Result<UdpServer> {
         let bind_attempts = bind_attempts.get();
         let mut attempts = 0;
@@ -200,7 +243,15 @@ impl UdpServer {
             return;
         }
 
-        let inside_io_codec = self.inside_io_codec_factory.as_ref().map(|f| f.build());
+        let inside_io_codec = self
+            .inside_io_codec_factory
+            .as_ref()
+            .map(|f| f.build())
+            .map(|f| ((f.0, f.1), f.2, f.3));
+        let (inside_io_codec, enc_oob, dec_oob) = match inside_io_codec {
+            Some(e) => (Some(e.0), Some(e.1), Some(e.2)),
+            None => (None, None, None),
+        };
 
         let may_be_conn = self.conn_manager.find_datagram_connection_with(peer_addr);
         let (conn, update_peer_address) = match may_be_conn {
@@ -230,6 +281,9 @@ impl UdpServer {
                 }
             }
         };
+
+        tokio::spawn(pkt_encoder_flush(Arc::downgrade(&conn), enc_oob));
+        tokio::spawn(pkt_decoder_flush(Arc::downgrade(&conn), dec_oob));
 
         let session = hdr.session;
 
