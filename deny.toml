@@ -65,6 +65,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/expressvpn/wolfssl-rs",
+    "https://gitlab.torproject.org/tpo/core/arti"
 ]
 
 # See https://github.com/briansmith/ring/blob/main/LICENSE Ring
