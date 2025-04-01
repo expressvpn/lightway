@@ -6,6 +6,7 @@ mod io_adapter;
 mod key_update;
 
 use bytes::{Bytes, BytesMut};
+use dplpmtud::BASE_PLPMTU;
 use rand::Rng;
 use std::borrow::Cow;
 use std::net::AddrParseError;
@@ -392,6 +393,7 @@ struct NewConnectionArgs<AppState> {
     outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
+    pmtud_base_mtu: Option<u16>,
     inside_pkt_encoder: Option<PacketEncoderType>,
     inside_pkt_decoder: Option<PacketDecoderType>,
 }
@@ -429,9 +431,13 @@ impl<AppState: Send> Connection<AppState> {
             })),
             pmtud: match args.connection_type {
                 ConnectionType::Stream => None,
-                ConnectionType::Datagram => args
-                    .pmtud_timer
-                    .map(|t| dplpmtud::Dplpmtud::new(max_dtls_mtu(args.outside_mtu) as u16, t)),
+                ConnectionType::Datagram => args.pmtud_timer.map(|t| {
+                    dplpmtud::Dplpmtud::new(
+                        args.pmtud_base_mtu.unwrap_or(BASE_PLPMTU),
+                        max_dtls_mtu(args.outside_mtu) as u16,
+                        t,
+                    )
+                }),
             },
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,

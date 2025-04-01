@@ -60,6 +60,7 @@ pub struct ClientConnectionBuilder<AppState> {
     connection_type: ConnectionType,
     ctx: ClientContext<AppState>,
     outside_mtu: usize,
+    pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
     session_config: wolfssl::SessionConfig<super::WolfSSLIOAdapter>,
     event_cb: Option<EventCallbackArg>,
@@ -109,6 +110,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             event_cb: None,
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
             pmtud_timer: None,
+            pmtud_base_mtu: None,
             outside_plugins,
         })
     }
@@ -210,6 +212,14 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
+    /// Sets the base mtu to use for PMTU discovery ([`ConnectionType::Datagram`] only)
+    pub fn with_pmtud_base_mtu(self, mtu: u16) -> Self {
+        Self {
+            pmtud_base_mtu: Some(mtu),
+            ..self
+        }
+    }
+
     /// Finalize the builder to create a [`Connection`] and begin the connection process.
     pub fn connect(self, app_state: AppState) -> ConnectionBuilderResult<Connection<AppState>> {
         let auth_method = self
@@ -259,6 +269,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
                 .inside_pkt_codec
                 .as_ref()
                 .map(|factory| factory.build_decoder()),
+            pmtud_base_mtu: self.pmtud_base_mtu,
         })?)
     }
 }
@@ -388,6 +399,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
                 .inside_pkt_codec
                 .as_ref()
                 .map(|factory| factory.build_decoder()),
+            pmtud_base_mtu: None,
         })?)
     }
 }

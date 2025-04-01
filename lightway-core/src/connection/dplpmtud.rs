@@ -11,7 +11,7 @@ use more_asserts::*;
 const MAX_PROBES: usize = 3;
 
 /// The BASE_PLPMTU is a configured size expected to work for most paths
-const BASE_PLPMTU: u16 = 1250;
+pub(crate) const BASE_PLPMTU: u16 = 1250;
 
 /// Number of bytes to increase for the next probe
 const PROBE_BIG_STEP: u16 = 32;
@@ -190,13 +190,10 @@ pub(crate) struct Dplpmtud<AppState> {
 }
 
 impl<AppState> Dplpmtud<AppState> {
-    pub(crate) fn new(max_plpmtu: u16, timer: TimerArg<AppState>) -> Self {
-        let base_plpmtu = BASE_PLPMTU;
-
+    pub(crate) fn new(base_plpmtu: u16, max_plpmtu: u16, timer: TimerArg<AppState>) -> Self {
         Self {
             max_plpmtu,
             base_plpmtu,
-
             state: State::Disabled,
             timer,
             plpmtu: base_plpmtu,
@@ -556,7 +553,7 @@ mod tests {
     #[test]
     fn not_using_id_0() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         for id in (0..3 * u16::MAX as usize).map(|_| pmtud.next_probe_id()) {
             assert!(!id.is_zero());
         }
@@ -571,7 +568,7 @@ mod tests {
         plpmtu: u16,
     ) -> Option<(usize, usize, usize)> {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
 
         pmtud.plpmtu = plpmtu;
         pmtud.state = state;
@@ -590,7 +587,7 @@ mod tests {
     #[test_case(3; "third attempt")]
     fn initial_base_probe_ok(n: u16) {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
         assert!(pmtud.pending_probe.is_none());
         assert!(pmtud.effective_pmtu().is_none());
@@ -652,7 +649,7 @@ mod tests {
     #[test]
     fn initial_base_probe_delayed_then_ok() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
         assert!(pmtud.pending_probe.is_none());
         assert!(pmtud.effective_pmtu().is_none());
@@ -728,7 +725,7 @@ mod tests {
     #[test]
     fn initial_base_probe_timeout() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
         assert!(pmtud.pending_probe.is_none());
         let base_id = pmtud.next_probe_id - 1;
@@ -809,7 +806,7 @@ mod tests {
     #[test]
     fn recover_from_error_state_on_probe_success() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
         assert!(pmtud.pending_probe.is_none());
         let base_id = pmtud.next_probe_id - 1;
@@ -851,7 +848,7 @@ mod tests {
     #[test]
     fn recover_from_error_state_on_delayed_success() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
         assert!(pmtud.pending_probe.is_none());
         let base_id = pmtud.next_probe_id - 1;
@@ -921,7 +918,7 @@ mod tests {
     // Note that on return `timer` will have a pending timer for the
     // first search probe.
     fn start_search(timer: &Arc<FakeTimer>) -> (Action, Dplpmtud<()>) {
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
 
         // online, 1st base probe sent and succeeds
         pmtud.online(&mut ());
@@ -1325,7 +1322,7 @@ mod tests {
     #[test]
     fn offline_from_offline() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
 
         pmtud.offline(&mut ());
@@ -1337,7 +1334,7 @@ mod tests {
     #[test]
     fn offline_from_online() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
 
         // online
@@ -1356,7 +1353,7 @@ mod tests {
     #[test]
     fn offline_from_error() {
         let timer = FakeTimer::new();
-        let mut pmtud = Dplpmtud::new(TEST_MAX_PLPMTU, timer.clone());
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
         assert!(matches!(pmtud.state, State::Disabled));
 
         // 3 missed probes => error state
