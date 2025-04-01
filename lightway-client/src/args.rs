@@ -92,6 +92,10 @@ pub struct Config {
     #[clap(long)]
     pub enable_pmtud: bool,
 
+    /// Base MTU to use for PMTU discovery
+    #[clap(long)]
+    pub pmtud_base_mtu: Option<u16>,
+
     /// Enable IO-uring interface for Tunnel
     #[clap(long, default_value_t)]
     pub enable_tun_iouring: bool,
