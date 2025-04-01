@@ -123,11 +123,11 @@ async fn handle_state_change(
     encoders: Arc<Mutex<InternalIPToEncoderMap>>,
 ) {
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!(?state, "Connection has gone away");
         return;
     };
 
-    info!(session = ?conn.session_id(), ?state, "State changed for {:?}", conn.peer_addr(),);
+    info!(session = ?conn.session_id(), ?state, "State changed for {:?}", conn.peer_addr());
 
     match state {
         State::Connecting => {}
@@ -163,7 +163,7 @@ async fn handle_state_change(
 #[instrument(level = "trace", skip_all)]
 fn handle_finalize_session_rotation(conn: &Weak<Connection>, old: SessionId, new: SessionId) {
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!("Connection has gone away");
         return;
     };
 
@@ -176,7 +176,7 @@ fn handle_tls_keys_update_start(conn: &Weak<Connection>) {
 
     // For UDP connections begin a session ID rotation
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!("Connection has gone away");
         return;
     };
 

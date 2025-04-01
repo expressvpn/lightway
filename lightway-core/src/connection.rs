@@ -661,7 +661,7 @@ impl<AppState: Send> Connection<AppState> {
     /// [`Connection::tick_interval`] for usage.
     pub fn tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
-        trace!(?self.session_id, "Processing connection tick");
+        trace!(session_id = ?self.session_id, "Processing connection tick");
 
         match self.state {
             State::Authenticating => {
@@ -677,6 +677,7 @@ impl<AppState: Send> Connection<AppState> {
             }
             _ if self.connection_type.is_datagram() => match self.session.dtls_has_timed_out() {
                 wolfssl::Poll::Ready(true) => {
+                    warn!(session_id = ?self.session_id, "DTLS timed out, disconnecting client");
                     let _ = self.disconnect();
                     return Err(ConnectionError::TimedOut);
                 }
