@@ -110,7 +110,7 @@ async fn evict_expired_connections(manager: Weak<ConnectionManager>) {
 pub(crate) struct ConnectionManager {
     ctx: ServerContext<ConnectionState>,
     connections: Mutex<ConnectionMap<Connection>>,
-    pending_session_id_rotations: Mutex<HashMap<SessionId, Arc<Connection>>>,
+    pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
     encoders: Arc<Mutex<InternalIPToEncoderMap>>,
     /// Total number of sessions there have ever been
     total_sessions: AtomicUsize,
@@ -367,6 +367,10 @@ impl ConnectionManager {
             connection_map::Entry::Vacant(_e) => {
                 // Maybe this is a pending session rotation
                 if let Some(c) = self.pending_session_id_rotations.lock().get(&session_id) {
+                    let Some(c) = c.upgrade() else {
+                        self.pending_session_id_rotations.lock().remove(&session_id);
+                        return Err(ConnectionManagerError::NoActiveSession);
+                    };
                     let update_peer_address = addr != c.peer_addr();
 
                     return Ok((c.clone(), update_peer_address));
@@ -403,7 +407,7 @@ impl ConnectionManager {
     ) {
         self.pending_session_id_rotations
             .lock()
-            .insert(new_session_id, conn.clone());
+            .insert(new_session_id, Arc::downgrade(conn));
 
         metrics::udp_session_rotation_begin();
     }
