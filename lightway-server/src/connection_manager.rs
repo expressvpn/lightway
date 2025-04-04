@@ -35,6 +35,9 @@ pub(crate) const CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::minute
 /// How often to check for connections to expire connections where authentication has expired
 const CONNECTION_AUTH_EXPIRATION_INTERVAL: Duration = Duration::hours(6);
 
+/// How often to check for pending session ids to cleanup
+const PENDING_SESSION_ID_EXPIRATION_INTERVAL: Duration = Duration::hours(6);
+
 /// How long a connection can be idle for
 const CONNECTION_MAX_IDLE_AGE: Duration = Duration::days(1);
 
@@ -107,10 +110,24 @@ async fn evict_expired_connections(manager: Weak<ConnectionManager>) {
     }
 }
 
+async fn cleanup_pending_session_ids(manager: Weak<ConnectionManager>) {
+    let mut ticker = tokio::time::interval(PENDING_SESSION_ID_EXPIRATION_INTERVAL.unsigned_abs());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
+
+    while ticker.next().await.is_some() {
+        let Some(manager) = manager.upgrade() else {
+            info!("Connection Manager has gone away, stopping");
+            return;
+        };
+        manager.cleanup_pending_session_ids();
+    }
+}
+
 pub(crate) struct ConnectionManager {
     ctx: ServerContext<ConnectionState>,
     connections: Mutex<ConnectionMap<Connection>>,
-    pending_session_id_rotations: Mutex<HashMap<SessionId, Arc<Connection>>>,
+    pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
     encoders: Arc<Mutex<InternalIPToEncoderMap>>,
     /// Total number of sessions there have ever been
     total_sessions: AtomicUsize,
@@ -272,6 +289,7 @@ impl ConnectionManager {
 
         tokio::spawn(evict_idle_connections(Arc::downgrade(&conn_manager)));
         tokio::spawn(evict_expired_connections(Arc::downgrade(&conn_manager)));
+        tokio::spawn(cleanup_pending_session_ids(Arc::downgrade(&conn_manager)));
 
         conn_manager
     }
@@ -367,6 +385,10 @@ impl ConnectionManager {
             connection_map::Entry::Vacant(_e) => {
                 // Maybe this is a pending session rotation
                 if let Some(c) = self.pending_session_id_rotations.lock().get(&session_id) {
+                    let Some(c) = c.upgrade() else {
+                        self.pending_session_id_rotations.lock().remove(&session_id);
+                        return Err(ConnectionManagerError::NoActiveSession);
+                    };
                     let update_peer_address = addr != c.peer_addr();
 
                     return Ok((c.clone(), update_peer_address));
@@ -403,7 +425,7 @@ impl ConnectionManager {
     ) {
         self.pending_session_id_rotations
             .lock()
-            .insert(new_session_id, conn.clone());
+            .insert(new_session_id, Arc::downgrade(conn));
 
         metrics::udp_session_rotation_begin();
     }
@@ -472,6 +494,15 @@ impl ConnectionManager {
                 });
             }
         }
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    fn cleanup_pending_session_ids(&self) {
+        tracing::trace!("Cleaning up pending_session_id_rotations");
+
+        self.pending_session_id_rotations
+            .lock()
+            .retain(|_session_id, conn| conn.upgrade().is_some());
     }
 
     pub(crate) fn close_all_connections(&self) {
