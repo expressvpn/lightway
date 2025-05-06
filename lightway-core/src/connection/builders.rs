@@ -265,6 +265,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: self.pmtud_timer,
             inside_pkt_codec: self.inside_pkt_codec,
+            schedule_encoding_req_retransmit_cb: self.ctx.schedule_encoding_req_retransmit_cb,
         })?)
     }
 }
@@ -399,6 +400,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: None,
             inside_pkt_codec: self.inside_pkt_codec,
+            schedule_encoding_req_retransmit_cb: None,
         })?)
     }
 }
