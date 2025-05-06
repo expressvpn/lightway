@@ -848,7 +848,7 @@ impl<AppState: Send> Connection<AppState> {
                 Ok(CodecStatus::PacketAccepted) => Ok(()),
                 Ok(CodecStatus::SkipPacket) => {
                     // The encoder does not accept the packet.
-                    // Packet should not be encoded. Sending to inside directly.
+                    // Packet should not be encoded. Sending to outside directly.
                     self.send_to_outside(pkt, false)
                 }
                 Err(e) => Err(ConnectionError::PacketCodecError(e)),
@@ -1430,7 +1430,7 @@ impl<AppState: Send> Connection<AppState> {
         let decoder = match &mut self.inside_pkt_decoder {
             Some(decoder) => decoder,
             None => {
-                // No Packet Accumulator exists to process the encoded packet
+                // No decoder exists to process the encoded packet
                 return Err(ConnectionError::PacketCodecDoesNotExist);
             }
         };
@@ -1440,7 +1440,7 @@ impl<AppState: Send> Connection<AppState> {
             Ok(CodecStatus::PacketAccepted) => Ok(()),
             Ok(CodecStatus::SkipPacket) => {
                 // The decoder does not accept the packet.
-                // Packet should be un-encoded. Sending to inside directly.
+                // Packet should not be decoded. Sending to inside directly.
                 self.send_to_inside(inside_bytes)
             }
             Err(e) => Err(ConnectionError::PacketCodecError(e)),
