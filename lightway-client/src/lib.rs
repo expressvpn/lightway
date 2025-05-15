@@ -126,6 +126,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
+    /// Base MTU for PMTU discovery
+    pub pmtud_base_mtu: Option<u16>,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -612,6 +615,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     .with_auth(config.auth)
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
+    .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
     .when_some(config.server_dn, |b, sdn| {
         b.with_server_domain_name_validation(sdn)
     })

@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
         enable_pmtud: config.enable_pmtud,
+        pmtud_base_mtu: config.pmtud_base_mtu,
         #[cfg(feature = "io-uring")]
         enable_tun_iouring: config.enable_tun_iouring,
         #[cfg(feature = "io-uring")]

@@ -96,7 +96,7 @@ pub(crate) struct ConnectionManager {
 #[instrument(level = "trace", skip_all)]
 async fn handle_state_change(state: State, conn: &Weak<Connection>) {
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!(?state, "Connection has gone away");
         return;
     };
 
@@ -119,7 +119,7 @@ async fn handle_state_change(state: State, conn: &Weak<Connection>) {
 #[instrument(level = "trace", skip_all)]
 fn handle_finalize_session_rotation(conn: &Weak<Connection>, old: SessionId, new: SessionId) {
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!("Connection has gone away");
         return;
     };
 
@@ -132,7 +132,7 @@ fn handle_tls_keys_update_start(conn: &Weak<Connection>) {
 
     // For UDP connections begin a session ID rotation
     let Some(conn) = conn.upgrade() else {
-        info!("Connection has gone away, stopping");
+        info!("Connection has gone away");
         return;
     };
 
