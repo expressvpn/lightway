@@ -582,8 +582,8 @@ mod test_frame {
     #[test_case(Frame::Goodbye => FrameKind::Goodbye)]
     #[test_case(Frame::ServerConfig(ServerConfig{ data: Default::default() }) => FrameKind::ServerConfig)]
     #[test_case(Frame::DataFrag(DataFrag{ id: 0, offset: 0, more_fragments: true, data: Default::default() }) => FrameKind::DataFrag)]
-    #[test_case(Frame::EncodingRequest(EncodingRequest{enable: true}) => FrameKind::EncodingRequest)]
-    #[test_case(Frame::EncodingResponse(EncodingResponse{enable: true}) => FrameKind::EncodingResponse)]
+    #[test_case(Frame::EncodingRequest(EncodingRequest{ id: 513, enable: true }) => FrameKind::EncodingRequest)]
+    #[test_case(Frame::EncodingResponse(EncodingResponse{ id: 513, enable: true }) => FrameKind::EncodingResponse)]
     fn frame_kind(f: Frame) -> FrameKind {
         f.kind()
     }
@@ -600,8 +600,8 @@ mod test_frame {
     #[test_case(Frame::Goodbye => vec![0x0c]; "goodbye")]
     #[test_case(Frame::ServerConfig(ServerConfig{ data: Bytes::from_static(b"server config")}) => b"\x0e\x00\x0dserver config".to_vec(); "server config")]
     #[test_case(Frame::DataFrag(DataFrag{ id: 0x1234, offset: 0x5678, more_fragments: true, data: Bytes::from_static(b"fragmentary") }) => b"\x0f\x00\x0b\x12\x34\x2a\xcffragmentary".to_vec() ; "data frag")]
-    #[test_case(Frame::EncodingRequest(EncodingRequest{enable: true}) => b"\x12\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(); "encoding request")]
-    #[test_case(Frame::EncodingResponse(EncodingResponse{enable: true}) => b"\x13\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(); "encoding response")]
+    #[test_case(Frame::EncodingRequest(EncodingRequest{ id: 513, enable: true}) => b"\x12\x00\x00\x00\x00\x00\x00\x02\x01\x01".to_vec(); "encoding request")]
+    #[test_case(Frame::EncodingResponse(EncodingResponse{ id: 513, enable: true}) => b"\x13\x00\x00\x00\x00\x00\x00\x02\x01\x01".to_vec(); "encoding response")]
     fn into_wire(f: Frame) -> Vec<u8> {
         let mut buf = BytesMut::new();
         f.append_to_wire(&mut buf);
@@ -622,8 +622,8 @@ mod test_frame {
     #[test_case(b"\x0f\x00\x0b\x12\x34\x2a\xcffragmentary"=> Frame::DataFrag(DataFrag{ id: 0x1234, offset: 0x5678, more_fragments: true, data: Bytes::from_static(b"fragmentary") }) ; "data frag")]
     #[test_case(&[0x10, 0, 3, 0xfe, 0xbe, 0xaa] => Frame::EncodedData(Data{ data: Cow::Owned(BytesMut::from(&[0xfe, 0xbe, 0xaa][..]))}); "encoded data")]
     #[test_case(b"\x11\x00\x0b\x12\x34\x2a\xcffragmentary"=> Frame::EncodedDataFrag(DataFrag{ id: 0x1234, offset: 0x5678, more_fragments: true, data: Bytes::from_static(b"fragmentary") }) ; "encoded data frag")]
-    #[test_case(b"\x12\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"=> Frame::EncodingRequest(EncodingRequest{enable: true}) ; "encoding request")]
-    #[test_case(b"\x13\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"=> Frame::EncodingResponse(EncodingResponse{enable: true}) ; "encoding response")]
+    #[test_case(b"\x12\x00\x00\x00\x00\x00\x00\x02\x01\x01"=> Frame::EncodingRequest(EncodingRequest{id: 513, enable: true}) ; "encoding request")]
+    #[test_case(b"\x13\x00\x00\x00\x00\x00\x00\x02\x02\x00"=> Frame::EncodingResponse(EncodingResponse{id: 514, enable: false}) ; "encoding response")]
     fn try_from_wire(buf: &'static [u8]) -> Frame<'static> {
         let mut buf = BytesMut::from(buf);
         let r = Frame::try_from_wire(&mut buf).unwrap();

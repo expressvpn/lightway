@@ -137,5 +137,8 @@ request looks like this:
 The encoding request and encoding response packets could be lost since the inside packet codec is only used with Lightway UDP. Hence, a retransmission 
 mechanism is in place to ensure that the requests and responses can reach the peer.
 
-**TODO:** 
-- Update this section when this PR is reviewed and approved: [Pull Request #175]
+Each new and unique encoding request from the client is incrementally assigned a unique integer id. Lightway server only commits and gives responses 
+to encoding requests with its id higher or equal to the id of the most recently committed request.
+
+The number of re-transmission is limited by a constant to avoid wasting network resources in case the server does not have encoding enabled. If the client
+cannot receive a response after the maximum number of re-transmissions has been attempted, the request is considered as failed.

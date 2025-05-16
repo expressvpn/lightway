@@ -8,8 +8,9 @@ use bytesize::ByteSize;
 use futures::future::OptionFuture;
 use keepalive::Keepalive;
 use lightway_app_utils::{
-    ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    CodecTicker, CodecTickerState, ConnectionTicker, ConnectionTickerState, DplpmtudTimer,
+    EventStream, EventStreamCallback, PacketCodecFactoryType, TunConfig, args::Cipher,
+    codec_ticker_cb, connection_ticker_cb,
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
@@ -228,6 +229,8 @@ pub struct ConnectionState<T: Send + Sync = ()> {
     pub ticker: ConnectionTicker,
     /// InsideIpConfig received from server
     pub ip_config: Option<InsideIpConfig>,
+    /// Encoding request retransmit ticker
+    pub codec_ticker: Option<CodecTicker>,
     /// Other extended state
     pub extended: T,
 }
@@ -235,6 +238,12 @@ pub struct ConnectionState<T: Send + Sync = ()> {
 impl<T: Send + Sync> ConnectionTickerState for ConnectionState<T> {
     fn connection_ticker(&self) -> &ConnectionTicker {
         &self.ticker
+    }
+}
+
+impl<T: Send + Sync> CodecTickerState for ConnectionState<T> {
+    fn ticker(&self) -> Option<&CodecTicker> {
+        self.codec_ticker.as_ref()
     }
 }
 
@@ -256,7 +265,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
                             break; // Connection disconnected.
                         };
 
-                        if let Err(e) = conn.lock().unwrap().send_encoding_request(true) {
+                        if let Err(e) = conn.lock().unwrap().set_encoding(true) {
                             tracing::error!(
                                 "Error encoutered when trying to toggle encoding. {}",
                                 e
@@ -474,7 +483,7 @@ pub async fn encoding_request_task<T: Send + Sync>(
             break; // Connection disconnected.
         };
 
-        if let Err(e) = conn.lock().unwrap().send_encoding_request(enable) {
+        if let Err(e) = conn.lock().unwrap().set_encoding(enable) {
             tracing::error!(
                 "Error encoutered when trying to send encoding request. {}",
                 e
@@ -568,10 +577,20 @@ pub async fn client<A: 'static + Send + EventCallback>(
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
+    let has_inside_pkt_codec = config.inside_pkt_codec.is_some();
+
+    let (codec_ticker, codec_ticker_task) = if has_inside_pkt_codec {
+        let (ticker, ticker_task) = CodecTicker::new();
+        (Some(ticker), Some(ticker_task))
+    } else {
+        (None, None)
+    };
+
     let (ticker, ticker_task) = ConnectionTicker::new();
     let state = ConnectionState {
         ticker,
         ip_config: None,
+        codec_ticker,
         extended: (),
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
@@ -602,6 +621,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     )?
     .with_cipher(config.cipher.into())?
     .with_schedule_tick_cb(connection_ticker_cb)
+    .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
     .build()
@@ -652,6 +672,10 @@ pub async fn client<A: 'static + Send + EventCallback>(
 
     ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
+
+    if let Some(codec_ticker_task) = codec_ticker_task {
+        codec_ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+    }
 
     let outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),

@@ -7,6 +7,7 @@ mod builder_predicates;
 mod cipher;
 mod connection;
 mod context;
+mod encoding_request_states;
 mod io;
 mod metrics;
 mod packet;
@@ -33,8 +34,9 @@ pub use connection::{
     ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer,
 };
 pub use context::{
-    ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleTickCb, ServerAuth,
-    ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext, ServerContextBuilder,
+    ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleCodecTickCb,
+    ScheduleTickCb, ServerAuth, ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext,
+    ServerContextBuilder,
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
 pub use io::{
