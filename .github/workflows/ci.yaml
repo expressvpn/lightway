@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [test, test-miri, test-arm64, build, build-arm64, fmt, lint, check-dependencies]
+        target: [test, test-miri, test-arm64, test-riscv64, build, build-arm64, build-riscv64, fmt, lint, check-dependencies]
     runs-on: ubuntu-latest
     env:
       EARTHLY_TOKEN: "${{ secrets.EARTHLY_TOKEN }}"

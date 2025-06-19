@@ -1,3 +1,7 @@
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 runner = ["qemu-aarch64-static"] # use qemu user emulation for cargo run and test
+
+[target.riscv64gc-unknown-linux-gnu]
+runner = "qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64"
+linker = "riscv64-linux-gnu-gcc"

@@ -20,7 +20,9 @@ install-build-dependencies:
         libc6:arm64 \
         libtool-bin \
         qemu-user-static \
-        shellcheck
+        shellcheck \ 
+        g++-riscv64-linux-gnu \ 
+        gcc-riscv64-linux-gnu
 
     # Note this must be done before `lib-rust+INIT` overrides `$CARGO_HOME`.
     RUN rustup toolchain install nightly
@@ -31,6 +33,7 @@ install-build-dependencies:
     RUN rustup component add rustfmt
     RUN rustup component add llvm-tools-preview
     RUN rustup target add aarch64-unknown-linux-gnu
+    RUN rustup target add riscv64gc-unknown-linux-gnu
 
     RUN rustup +nightly component add miri
     RUN rustup +nightly component add rust-src
@@ -50,6 +53,8 @@ build:
 
     IF [ "$ARCH" = "arm64" ]
         SET target = "aarch64-unknown-linux-gnu"
+    ELSE IF [ "$ARCH" = "riscv64gc" ]
+        SET target = "riscv64gc-unknown-linux-gnu"
     END
 
     DO lib-rust+CARGO --args="build --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
@@ -61,6 +66,9 @@ build:
 build-arm64:
     BUILD +build --ARCH="arm64"
 
+build-riscv64:
+    BUILD +build --ARCH="riscv64gc"
+
 build-kyber-client:
     FROM +source
     ARG ARCH=$(dpkg --print-architecture)
@@ -68,7 +76,10 @@ build-kyber-client:
 
     IF [ "$ARCH" = "arm64" ]
         SET target = "aarch64-unknown-linux-gnu" 
+    ELSE IF [ "$ARCH" = "riscv64gc" ]
+        SET target = "riscv64gc-unknown-linux-gnu"
     END
+
     DO lib-rust+CARGO --args="build --release --features kyber_only --target=$target --bin lightway-client --target-dir ./lightway-client-kyber" --output="lightway-client-kyber/$target/release/lightway-client"
     SAVE ARTIFACT ./lightway-client-kyber/$target/release/lightway-client AS LOCAL ./target/$target/release/lightway-client-kyber
 
@@ -80,6 +91,8 @@ test:
 
     IF [ "$ARCH" = "arm64" ]
         SET target = "aarch64-unknown-linux-gnu" 
+    ELSE IF [ "$ARCH" = "riscv64gc" ]
+        SET target = "riscv64gc-unknown-linux-gnu"
     END
 
     DO lib-rust+CARGO --args="test --target=$target"
@@ -97,6 +110,10 @@ test-miri:
 # test-arm64 executes all unit and integration tests via Cargo for arm64. Support running from an amd64 or arm64 host
 test-arm64:
     BUILD +test --ARCH="arm64"
+
+# test-riscv64 executes all unit and integration tests via Cargo for riscv64gc. Support running from an amd64 or arm64 host
+test-riscv64:
+    BUILD +test --ARCH="riscv64gc"
 
 # e2e runs all end-to-end tests, must be run with `--allow-privileged`
 e2e:
