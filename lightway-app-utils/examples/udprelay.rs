@@ -1,18 +1,16 @@
 use self::channel::Channel;
 
+#[cfg(feature = "io-uring")]
 use lightway_app_utils::IOUring;
 
 use anyhow::Result;
 use async_channel::{Receiver, Sender, bounded};
 use bytes::BytesMut;
 use clap::Parser;
-use lightway_core::IOCallbackResult;
 use pnet::packet::ipv4::MutableIpv4Packet;
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::UdpSocket;
 use tun::{AsyncDevice as Tun, Configuration as TunConfig};
 
@@ -29,6 +27,7 @@ use clap::ValueEnum;
 enum TunBackend {
     Direct,
     Channel,
+    #[cfg(feature = "io-uring")]
     IoRing,
 }
 
@@ -132,8 +131,9 @@ async fn main() -> Result<()> {
     let tun: Arc<dyn TunAdapter> = match args.tun_backend {
         TunBackend::Direct => Arc::new(tun),
         TunBackend::Channel => Arc::new(TunChannel::new(tun, args.channel_size)?),
+        #[cfg(feature = "io-uring")]
         TunBackend::IoRing => {
-            Arc::new(TunIOUring::new(tun, args.ring_size, args.channel_size).await?)
+            Arc::new(super::iourin::TunIOUring::new(tun, args.ring_size, args.channel_size).await?)
         }
     };
 
@@ -192,46 +192,53 @@ impl TunAdapter for TunChannel {
     }
 }
 
-struct WrappedTun(Tun);
-impl AsRawFd for WrappedTun {
-    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
-        self.0.as_raw_fd()
-    }
-}
+#[cfg(feature = "io-uring")]
+mod iouring {
+    use lightway_core::IOCallbackResult;
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
 
-#[allow(dead_code)]
-struct TunIOUring {
-    tun_iouring: IOUring<WrappedTun>,
-}
-
-impl TunIOUring {
-    async fn new(tun: Tun, ring_size: usize, channel_size: usize) -> Result<Self> {
-        let tun_iouring = IOUring::new(
-            Arc::new(WrappedTun(tun)),
-            ring_size,
-            channel_size,
-            TUN_MTU,
-            Duration::from_millis(100),
-        )
-        .await?;
-
-        Ok(Self { tun_iouring })
-    }
-}
-
-#[async_trait::async_trait]
-impl TunAdapter for TunIOUring {
-    async fn send_to_tun(&self, buf: BytesMut) -> Result<()> {
-        // TODO Check async version of send
-        match self.tun_iouring.try_send(buf) {
-            IOCallbackResult::Ok(_) => Ok(()),
-            IOCallbackResult::WouldBlock => Ok(()),
-            IOCallbackResult::Err(err) => Err(err.into()),
+    struct WrappedTun(Tun);
+    impl AsRawFd for WrappedTun {
+        fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+            self.0.as_raw_fd()
         }
     }
 
-    async fn recv_from_tun(&self) -> Result<BytesMut> {
-        self.tun_iouring.recv().await.map_err(anyhow::Error::msg)
+    #[allow(dead_code)]
+    struct TunIOUring {
+        tun_iouring: IOUring<WrappedTun>,
+    }
+
+    impl TunIOUring {
+        async fn new(tun: Tun, ring_size: usize, channel_size: usize) -> Result<Self> {
+            let tun_iouring = IOUring::new(
+                Arc::new(WrappedTun(tun)),
+                ring_size,
+                channel_size,
+                TUN_MTU,
+                Duration::from_millis(100),
+            )
+            .await?;
+
+            Ok(Self { tun_iouring })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TunAdapter for TunIOUring {
+        async fn send_to_tun(&self, buf: BytesMut) -> Result<()> {
+            // TODO Check async version of send
+            match self.tun_iouring.try_send(buf) {
+                IOCallbackResult::Ok(_) => Ok(()),
+                IOCallbackResult::WouldBlock => Ok(()),
+                IOCallbackResult::Err(err) => Err(err.into()),
+            }
+        }
+
+        async fn recv_from_tun(&self) -> Result<BytesMut> {
+            self.tun_iouring.recv().await.map_err(anyhow::Error::msg)
+        }
     }
 }
 
