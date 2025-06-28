@@ -1,9 +1,7 @@
 #![allow(unsafe_code)]
 
-#[cfg(not(target_vendor = "apple"))]
 use std::os::fd::AsRawFd;
 
-#[cfg(not(target_vendor = "apple"))]
 /// Enable IP_PKTINFO sockopt.
 pub fn socket_enable_pktinfo(sock: &impl AsRawFd) -> std::io::Result<()> {
     let level: i32;

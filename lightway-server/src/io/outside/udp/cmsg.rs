@@ -80,6 +80,16 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
             self.cursor = unsafe { libc::CMSG_NXTHDR(&self.msghdr, self.cursor) };
 
             Some(match (item.cmsg_level, item.cmsg_type) {
+                #[cfg(target_vendor = "apple")]
+                (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
+                    // SAFETY: `item` is a valid `cmsghdr` from a
+                    // prior call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
+                    let data = unsafe { libc::CMSG_DATA(item) as *const libc::in_pktinfo };
+                    // SAFETY: we constructed `data` above
+                    let pi = unsafe { &*data };
+                    Message::IpPktinfo(pi)
+                }
+                #[cfg(not(target_vendor = "apple"))]
                 (libc::SOL_IP, libc::IP_PKTINFO) => {
                     // SAFETY: `item` is a valid `cmsghdr` from a
                     // prior call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.

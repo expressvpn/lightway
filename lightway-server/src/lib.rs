@@ -229,14 +229,17 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     let connection_type = config.connection_type;
     let auth = Arc::new(AuthAdapter(config.auth));
 
-    let iouring = if config.enable_tun_iouring {
-        Some((config.iouring_entry_count, config.iouring_sqpoll_idle_time))
-    } else {
-        None
-    };
     let inside_io: Arc<dyn InsideIO> = match config.inside_io.take() {
         Some(io) => io,
-        None => Arc::new(io::inside::Tun::new(config.tun_config, iouring).await?),
+        None => {
+            use io::inside::Tun;
+            #[cfg(feature = "io-uring")]
+            let tun = Tun::new_with_iouring(config.tun_config, (config.iouring_entry_count, config.iouring_sqpoll_idle_time)).await.context("Tun creation")?;
+            #[cfg(not(feature = "io-uring"))]
+            let tun = Tun::new(config.tun_config).await?;
+
+            Arc::new(tun)
+        }
     };
 
     let ctx = ServerContextBuilder::new(

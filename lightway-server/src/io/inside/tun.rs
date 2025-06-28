@@ -13,18 +13,21 @@ use lightway_core::{
 };
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
+#[cfg(feature = "io-uring")]
 use std::time::Duration;
 
 pub(crate) struct Tun(AppUtilsTun);
 
 impl Tun {
-    pub async fn new(tun: TunConfig, iouring: Option<(usize, Duration)>) -> Result<Self> {
-        let tun = match iouring {
-            Some((ring_size, sqpoll_idle_time)) => {
-                AppUtilsTun::iouring(tun, ring_size, sqpoll_idle_time).await?
-            }
-            None => AppUtilsTun::direct(tun).await?,
-        };
+    pub async fn new(tun: TunConfig) -> Result<Self> {
+        let tun = AppUtilsTun::direct(tun).await?;
+        Ok(Tun(tun))
+    }
+
+    #[cfg(feature = "io-uring")]
+    pub async fn new_with_iouring(tun: TunConfig, iouring: (usize, Duration)) -> Result<Self> {
+        let (ring_size, sqpoll_idle_time) = iouring;
+        let tun = AppUtilsTun::iouring(tun, ring_size, sqpoll_idle_time).await?;
         Ok(Tun(tun))
     }
 }
