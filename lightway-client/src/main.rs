@@ -63,6 +63,12 @@ async fn main() -> Result<()> {
         tun_config.mtu(*inside_mtu);
     }
 
+    tun_config
+        .address(&config.tun_local_ip)
+        .destination(&config.tun_peer_ip)
+        .netmask("0.0.0.0")
+        .platform_config(|d| { d.enable_routing(true); });
+
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
     ctrlc::set_handler(move || {

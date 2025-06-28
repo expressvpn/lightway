@@ -144,7 +144,13 @@ async fn main() -> Result<()> {
     if let Some(tun_name) = config.tun_name {
         tun_config.tun_name(tun_name);
     }
-    println!("Tun config: {tun_config:?}");
+
+    if let Some(address) = &config.tun_ip {
+        tun_config.address(address);
+        tun_config.destination(address);
+        tun_config.netmask("255.255.0.0");
+        tun_config.platform_config(|d| { d.enable_routing(true); });
+    }
 
     let config = ServerConfig {
         connection_type: config.mode.into(),
