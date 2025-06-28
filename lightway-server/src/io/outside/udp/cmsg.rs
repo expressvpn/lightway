@@ -16,7 +16,7 @@ impl<const N: usize> Buffer<N> {
     ///
     /// `control_len` must have been set to the number of bytes of the
     /// buffer which have been initialized.
-    pub(crate) unsafe fn iter(&self, control_len: usize) -> Iter<N> {
+    pub(crate) unsafe fn iter(&self, control_len: libc::socklen_t) -> Iter<N> {
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.
@@ -133,7 +133,7 @@ impl<const N: usize> BufferMut<N> {
             msg_iov: std::ptr::null_mut(),
             msg_iovlen: 0,
             msg_control: self.0.as_mut_ptr() as *mut _,
-            msg_controllen: self.0.len(),
+            msg_controllen: self.0.len() as libc::socklen_t,
             msg_flags: 0,
         };
         // SAFETY: We constructed a sufficiently valid `msghdr` above.
@@ -189,7 +189,7 @@ impl<const N: usize> BufferBuilder<'_, N> {
         let data_size = std::mem::size_of::<T>();
 
         // SAFETY: `CMSG_LEN` is always safe
-        let cmsg_len = unsafe { libc::CMSG_LEN(data_size as libc::c_uint) as libc::size_t };
+        let cmsg_len = unsafe { libc::CMSG_LEN(data_size as libc::c_uint) as libc::socklen_t };
         // SAFETY:
         //
         // The pointer is valid. It was produced by a previous call to
@@ -220,7 +220,7 @@ impl<const N: usize> BufferBuilder<'_, N> {
 
         // Check that we have sufficient space remaining. `CMSG_DATA`
         // does not do this.
-        let max = self.msghdr.msg_control as usize + self.msghdr.msg_controllen;
+        let max = self.msghdr.msg_control as usize + self.msghdr.msg_controllen as usize;
         let end = cmsg_data as usize + data_size;
 
         if end > max {
