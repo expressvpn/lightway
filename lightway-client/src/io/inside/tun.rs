@@ -32,14 +32,10 @@ impl Tun {
         tun: TunConfig,
         ip: Ipv4Addr,
         dns_ip: Ipv4Addr,
-        iouring: Option<(usize, Duration)>,
+        iouring_ring_size: usize,
+        iouring_sqpoll_idle_time: Duration,
     ) -> Result<Self> {
-        let tun = match iouring {
-            Some((ring_size, sqpoll_idle_time)) => {
-                AppUtilsTun::iouring(tun, ring_size, sqpoll_idle_time).await?
-            }
-            None => AppUtilsTun::direct(tun).await?,
-        };
+        let tun = AppUtilsTun::iouring(tun, iouring_ring_size, iouring_sqpoll_idle_time).await?;
         Ok(Tun { tun, ip, dns_ip })
     }
 }

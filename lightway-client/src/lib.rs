@@ -560,19 +560,13 @@ pub async fn client<A: 'static + Send + EventCallback>(
     }
 
     #[cfg(feature = "io-uring")]
-    let iouring = if config.enable_tun_iouring {
-        Some((config.iouring_entry_count, config.iouring_sqpoll_idle_time))
-    } else {
-        None
-    };
-
-    #[cfg(feature = "io-uring")]
     let inside_io = Arc::new(
         io::inside::Tun::new_with_iouring(
             config.tun_config,
             config.tun_local_ip,
             config.tun_dns_ip,
-            iouring,
+            config.iouring_entry_count,
+            config.iouring_sqpoll_idle_time,
         )
         .await
         .context("Tun creation")?,
