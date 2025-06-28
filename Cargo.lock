@@ -1300,6 +1300,7 @@ dependencies = [
  "pnet",
  "rand 0.9.1",
  "rand_core 0.9.3",
+ "socket2",
  "test-case",
  "thiserror 2.0.12",
  "tokio",

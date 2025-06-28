@@ -655,6 +655,11 @@ async fn run_test<S: TestSock>(
 async fn test_datagram_connection(cipher: Option<Cipher>, pqc: PQCrypto, enable_codec: bool) {
     // Communicate over a local datagram socket for simplicity
     let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let socket = socket2::SockRef::from(&client_sock);
+    socket.set_recv_buffer_size(1024*256).unwrap();
+    let socket = socket2::SockRef::from(&server_sock);
+    socket.set_recv_buffer_size(1024*256).unwrap();
+
     let server_sock = Arc::new(TestDatagramSock(server_sock));
     let client_sock = Arc::new(TestDatagramSock(client_sock));
 
