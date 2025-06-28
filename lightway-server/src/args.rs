@@ -39,8 +39,8 @@ pub struct Config {
     pub server_key: PathBuf,
 
     /// Tun device name to use
-    #[clap(long, default_value = "lightway")]
-    pub tun_name: String,
+    #[clap(long, default_value = None)]
+    pub tun_name: Option<String>,
 
     /// IP pool to assign clients
     #[clap(long, default_value = "10.125.0.0/16")]
