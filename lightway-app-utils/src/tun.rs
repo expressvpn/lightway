@@ -4,14 +4,13 @@ use lightway_core::IOCallbackResult;
 
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
-use std::{
-    ops::Deref,
-    os::fd::{AsRawFd, RawFd},
-};
+use std::{os::fd::{AsRawFd, RawFd}};
 
-use tun::{AbstractDevice, AsyncDevice as TokioTun};
+// use tun::{AbstractDevice, AsyncDevice as TokioTun};
+// pub use tun::Configuration as TunConfig;
 
-pub use tun::Configuration as TunConfig;
+use tun_rs::AsyncDevice as TokioTun;
+pub use tun_rs::DeviceBuilder as TunConfig;
 
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
@@ -94,17 +93,13 @@ pub struct TunDirect {
 impl TunDirect {
     /// Create a new `Tun` struct
     pub fn new(config: TunConfig) -> Result<Self> {
-        #[cfg(target_os = "macos")]
-        let mut config = config;
-        #[cfg(target_os = "macos")]
-        config.platform_config(|config| {
-            config.enable_routing(false);
-        });
-        let tun = tun::create_as_async(&config)?;
+        let tun = config.build_async()?;
+
+        // let tun = tun::create_as_async(&config)?;
         let fd = tun.as_raw_fd();
         let mtu = tun.mtu()?;
 
-        Ok(TunDirect { tun, mtu, fd })
+        Ok(TunDirect { tun, mtu , fd })
     }
 
     /// Recv from Tun
@@ -127,7 +122,7 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        let try_send_res = self.tun.deref().send(&buf[..]);
+        let try_send_res = self.tun.try_send(&buf[..]);
         match try_send_res {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {

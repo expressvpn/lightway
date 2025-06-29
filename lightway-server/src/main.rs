@@ -142,14 +142,12 @@ async fn main() -> Result<()> {
 
     let mut tun_config = TunConfig::default();
     if let Some(tun_name) = config.tun_name {
-        tun_config.tun_name(tun_name);
+        tun_config = tun_config.name(tun_name);
     }
 
+
     if let Some(address) = &config.tun_ip {
-        tun_config.address(address);
-        tun_config.destination(address);
-        tun_config.netmask("255.255.0.0");
-        tun_config.platform_config(|d| { d.enable_routing(true); });
+        tun_config = tun_config.ipv4(*address, 16, None);
     }
 
     let config = ServerConfig {

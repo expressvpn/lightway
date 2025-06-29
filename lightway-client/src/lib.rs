@@ -91,6 +91,7 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     pub inside_mtu: Option<u16>,
 
     /// Tun device to use
+    #[educe(Debug(ignore))]
     pub tun_config: TunConfig,
 
     /// Local IP to use in Tun device

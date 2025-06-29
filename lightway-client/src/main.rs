@@ -54,20 +54,16 @@ async fn main() -> Result<()> {
 
     let root_ca_cert = RootCertificate::PemFileOrDirectory(&config.ca_cert);
 
-    let mut tun_config = TunConfig::default();
+    let mut tun_config = TunConfig::new();
 
     if let Some(tun_name) = config.tun_name {
-        tun_config.tun_name(tun_name);
+        tun_config = tun_config.name(tun_name);
     }
     if let Some(inside_mtu) = &config.inside_mtu {
-        tun_config.mtu(*inside_mtu);
+        tun_config = tun_config.mtu(*inside_mtu);
     }
 
-    tun_config
-        .address(&config.tun_local_ip)
-        .destination(&config.tun_peer_ip)
-        .netmask("0.0.0.0")
-        .platform_config(|d| { d.enable_routing(true); });
+    tun_config = tun_config.ipv4(config.tun_local_ip, 0, Some(config.tun_peer_ip));
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
