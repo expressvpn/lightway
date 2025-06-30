@@ -32,6 +32,7 @@ exceptions = [
     { name = "lightway-core", allow = ["AGPL-3.0"], version = "*" },
     { name = "lightway-server", allow = ["AGPL-3.0"], version = "*" },
     { name = "lightway-app-utils", allow = ["AGPL-3.0"], version = "*" },
+    { name = "lightway-man", allow = ["AGPL-3.0"], version = "*" },
 ]
 
 [licenses.private]

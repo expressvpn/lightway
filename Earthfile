@@ -43,7 +43,7 @@ source:
     FROM +install-build-dependencies
     COPY --keep-ts Cargo.toml Cargo.lock ./
     COPY --keep-ts deny.toml ./
-    COPY --keep-ts --dir lightway-core lightway-app-utils lightway-client lightway-server .cargo ./
+    COPY --keep-ts --dir lightway-core lightway-app-utils lightway-client lightway-server lightway-man .cargo ./
 
 # build builds with the Cargo release profile
 build:
@@ -82,6 +82,12 @@ build-kyber-client:
 
     DO lib-rust+CARGO --args="build --release --features kyber_only --target=$target --bin lightway-client --target-dir ./lightway-client-kyber" --output="lightway-client-kyber/$target/release/lightway-client"
     SAVE ARTIFACT ./lightway-client-kyber/$target/release/lightway-client AS LOCAL ./target/$target/release/lightway-client-kyber
+
+build-man:
+    FROM +source
+    DO lib-rust+CARGO --args="run --bin lightway-man"
+    SAVE ARTIFACT ./man/lightway-client.1 AS LOCAL ./target/man/
+    SAVE ARTIFACT ./man/lightway-server.1 AS LOCAL ./target/man/
 
 # test executes all unit and integration tests via Cargo, in the host's native platform
 test:
