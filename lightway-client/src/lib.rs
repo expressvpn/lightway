@@ -1,6 +1,7 @@
 mod debug;
 pub mod io;
 pub mod keepalive;
+mod routing_table;
 
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
