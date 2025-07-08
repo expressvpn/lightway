@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use route_manager::{AsyncRouteManager, Route, RouteManager};
+use serde::{Serialize, Deserialize};
 use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
 use tracing::warn;
 
-#[derive(Debug, PartialEq)]
-pub enum RoutingMode {
+#[derive(Debug, PartialEq, Copy, Clone, clap::ValueEnum, Serialize, Deserialize)]
+pub enum RouteMode {
     Default,
     Lan,
     NoExec,
@@ -32,7 +33,7 @@ pub enum RoutingTableError {
 }
 
 pub struct RoutingTable {
-    routing_mode: RoutingMode,
+    routing_mode: RouteMode,
     route_manager: RouteManager,
     route_manager_async: AsyncRouteManager,
     route_store: Vec<Route>,
@@ -40,7 +41,7 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    pub fn new(routing_mode: RoutingMode) -> Result<Self, RoutingTableError> {
+    pub fn new(routing_mode: RouteMode) -> Result<Self, RoutingTableError> {
         let route_manager =
             RouteManager::new().map_err(|e| RoutingTableError::RoutingManagerError(e))?;
         let route_manager_async =
@@ -139,7 +140,7 @@ impl RoutingTable {
         tun_peer_ip: &IpAddr,
         tun_dns_ip: &IpAddr,
     ) -> Result<()> {
-        if self.routing_mode == RoutingMode::NoExec {
+        if self.routing_mode == RouteMode::NoExec {
             return Ok(());
         }
 
@@ -155,7 +156,7 @@ impl RoutingTable {
             .await
             .context("Adding VPN Server IP Route")?;
 
-        if self.routing_mode == RoutingMode::Lan {
+        if self.routing_mode == RouteMode::Lan {
             todo!()
         }
 
@@ -210,7 +211,7 @@ mod tests {
     async fn test_single_route_add_and_cleanup(
         add_method: RouteAddMethod,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut routing_table = RoutingTable::new(RoutingMode::Default).unwrap();
+        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
 
         // Get initial route count from the system
         let initial_routes = routing_table.route_manager.list().unwrap();
@@ -311,30 +312,30 @@ mod tests {
 
     #[test]
     fn test_new_routing_table_default_mode() {
-        let result = RoutingTable::new(RoutingMode::Default);
+        let result = RoutingTable::new(RouteMode::Default);
         assert!(result.is_ok());
         let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RoutingMode::Default);
+        assert_eq!(routing_table.routing_mode, RouteMode::Default);
         assert_eq!(routing_table.route_store.len(), 0);
         assert!(routing_table.server_route.is_none());
     }
 
     #[test]
     fn test_new_routing_table_lan_mode() {
-        let result = RoutingTable::new(RoutingMode::Lan);
+        let result = RoutingTable::new(RouteMode::Lan);
         assert!(result.is_ok());
         let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RoutingMode::Lan);
+        assert_eq!(routing_table.routing_mode, RouteMode::Lan);
         assert_eq!(routing_table.route_store.len(), 0);
         assert!(routing_table.server_route.is_none());
     }
 
     #[test]
     fn test_new_routing_table_noexec_mode() {
-        let result = RoutingTable::new(RoutingMode::NoExec);
+        let result = RoutingTable::new(RouteMode::NoExec);
         assert!(result.is_ok());
         let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RoutingMode::NoExec);
+        assert_eq!(routing_table.routing_mode, RouteMode::NoExec);
         assert_eq!(routing_table.route_store.len(), 0);
         assert!(routing_table.server_route.is_none());
     }
@@ -342,7 +343,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(routing_table)]
     async fn test_cleanup_empty_routes() {
-        let mut routing_table = RoutingTable::new(RoutingMode::Default).unwrap();
+        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
 
         // Get initial route count from the system
         // let initial_routes = routing_table.route_manager.list().unwrap_or_default();
@@ -381,7 +382,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(routing_table)]
     async fn test_initialize_routing_table_and_cleanup() {
-        let mut routing_table = RoutingTable::new(RoutingMode::Default).unwrap();
+        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
 
         // Get initial system state
         let initial_routes = routing_table.route_manager.list().unwrap();
@@ -503,7 +504,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(routing_table)]
     async fn test_find_server_route_with_added_routes() {
-        let mut routing_table = RoutingTable::new(RoutingMode::Default).unwrap();
+        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
 
         // Create a TUN device for testing
         let tun_name = "test_tun";
