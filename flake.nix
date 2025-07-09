@@ -61,7 +61,7 @@
                 # Some tests rely on debug_assert! and fail in release.
                 checkType = "debug";
                 cargoLock.outputHashes = {
-                  "wolfssl-3.0.0" = "sha256-ToCpJ8moKMT2rMiBmMQLnPNAme3F2VVzHQ0jVXx3kTs=";
+                  "wolfssl-3.0.0" = "sha256-4nCoGOIhiGC7aTDvdXpVNTBzMl4dkNCJxtcuODumW2Q=";
                 };
               };
 

@@ -23,7 +23,7 @@ workspace = true
 [dependencies]
 bytes.workspace = true
 delegate.workspace = true
-lru = "0.15.0"
+lru = "0.16.0"
 metrics.workspace = true
 more-asserts.workspace = true
 num_enum = "0.7.0"

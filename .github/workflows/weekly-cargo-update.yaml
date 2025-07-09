@@ -28,6 +28,13 @@ jobs:
       run: |
         cargo update 2>&1 | tee /tmp/update.log
 
+        # Check if wolfssl was updated
+        if grep -q "wolfssl" /tmp/update.log; then
+          echo "wolfssl_updated=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "wolfssl_updated=false" >> "$GITHUB_OUTPUT"
+        fi
+
         title="[auto] Update cargo dependencies"
         body=$(
             echo '```console'
@@ -53,6 +60,33 @@ jobs:
         echo ""                >> "$GITHUB_OUTPUT"
         echo "$body"           >> "$GITHUB_OUTPUT"
         echo "$EOF"            >> "$GITHUB_OUTPUT"
+
+    - uses: cachix/install-nix-action@v31
+      if: steps.update.outputs.wolfssl_updated == 'true'
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Update wolfssl hash in flake.nix
+      if: steps.update.outputs.wolfssl_updated == 'true'
+      run: |
+        echo "wolfssl was updated, updating flake.nix hash..."
+
+        # Try to build and capture the expected hash from the error message
+        set +e
+        nix_output=$(nix build .#lightway-client 2>&1)
+        set -e
+
+        # Extract the expected hash from nix error message
+        expected_hash=$(echo "$nix_output" | grep -oP 'got:\s*sha256-\K[A-Za-z0-9+/=]+' | head -1)
+
+        if [ -n "$expected_hash" ]; then
+          # Update with the correct hash
+          sed -i 's/"wolfssl-3.0.0" = "sha256-[^"]*"/"wolfssl-3.0.0" = "sha256-'$expected_hash'"/' flake.nix
+          echo "Updated wolfssl hash in flake.nix to: sha256-$expected_hash"
+        else
+          echo "Warning: Could not determine correct wolfssl hash from nix build output"
+          echo "Nix output: $nix_output"
+        fi
 
     - uses: peter-evans/create-pull-request@v6
       id: pr
