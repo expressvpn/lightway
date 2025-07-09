@@ -62,6 +62,10 @@ async fn main() -> Result<()> {
     if let Some(inside_mtu) = &config.inside_mtu {
         tun_config.mtu(*inside_mtu);
     }
+    tun_config
+        .address(&config.tun_local_ip)
+        .destination(&config.tun_peer_ip)
+        .up();
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);

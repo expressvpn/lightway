@@ -577,7 +577,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     } else {
         io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await
     };
-
+    info!("TUN CREATED");
     let inside_io = Arc::new(inside_io.context("Tun creation")?);
 
     let (event_cb, event_stream) = EventStreamCallback::new();
@@ -691,8 +691,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
         keepalive.clone(),
     ));
 
-    let inside_io_loop: JoinHandle<anyhow::Result<()>> =
-        tokio::spawn(inside_io_task(conn.clone(), inside_io, config.tun_dns_ip));
+    let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(inside_io_task(
+        conn.clone(),
+        inside_io.clone(),
+        config.tun_dns_ip,
+    ));
 
     let network_change_task: OptionFuture<JoinHandle<ClientResult>> =
         match config.network_change_signal {

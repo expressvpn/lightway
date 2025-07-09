@@ -49,6 +49,7 @@ const TUNNEL_ROUTES: [(IpAddr, u8, &str); 2] = [
 ];
 
 #[derive(Debug, PartialEq, Copy, Clone, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RouteMode {
     Default,
     Lan,
@@ -170,7 +171,11 @@ impl RoutingTable {
     }
 
     /// Adds standard LAN routes (RFC 1918 private networks + link-local + multicast)
-    pub async fn add_standard_lan_routes(&mut self, interface_name: &str, gateway: IpAddr) -> Result<(), RoutingTableError> {
+    pub async fn add_standard_lan_routes(
+        &mut self,
+        interface_name: &str,
+        gateway: IpAddr,
+    ) -> Result<(), RoutingTableError> {
         for (network, prefix, _description) in LAN_NETWORKS {
             let lan_route = Route::new(network, prefix)
                 .with_gateway(gateway)
@@ -182,7 +187,11 @@ impl RoutingTable {
     }
 
     /// Adds standard tunnel routes (high priority default routing)
-    pub async fn add_standard_tunnel_routes(&mut self, interface_name: &str, gateway: IpAddr) -> Result<(), RoutingTableError> {
+    pub async fn add_standard_tunnel_routes(
+        &mut self,
+        interface_name: &str,
+        gateway: IpAddr,
+    ) -> Result<(), RoutingTableError> {
         for (network, prefix, _description) in TUNNEL_ROUTES {
             let tunnel_route = Route::new(network, prefix)
                 .with_gateway(gateway)
@@ -260,7 +269,8 @@ impl RoutingTable {
         }
 
         // Add standard tunnel routes (high priority default routing)
-        self.add_standard_tunnel_routes(tun_name, *tun_peer_ip).await?;
+        self.add_standard_tunnel_routes(tun_name, *tun_peer_ip)
+            .await?;
 
         // Add DNS route separately since it's not a constant
         let dns_route = Route::new(*tun_dns_ip, 32)
