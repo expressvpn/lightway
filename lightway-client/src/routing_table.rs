@@ -239,11 +239,40 @@ impl RoutingTable {
         }
     }
 
-    async fn initialize_routing_table(
+    /// Clean up for program unwind
+    pub fn cleanup_sync(&mut self) {
+        for route in &self.vpn_routes {
+            if let Err(e) = self.route_manager.delete(route) {
+                warn!(
+                    "Failed to delete VPN route during drop: {}, error: {}",
+                    route, e
+                );
+            }
+        }
+
+        for route in &self.lan_routes {
+            if let Err(e) = self.route_manager.delete(route) {
+                warn!(
+                    "Failed to delete LAN route during drop: {}, error: {}",
+                    route, e
+                );
+            }
+        }
+
+        if let Some(route) = &self.server_route {
+            if let Err(e) = self.route_manager.delete(route) {
+                warn!(
+                    "Failed to delete server route during drop: {}, error: {}",
+                    route, e
+                );
+            }
+        }
+    }
+
+    pub async fn initialize_routing_table(
         &mut self,
         server_ip: &IpAddr,
         tun_name: &str,
-        _tun_local_ip: &IpAddr,
         tun_peer_ip: &IpAddr,
         tun_dns_ip: &IpAddr,
     ) -> Result<()> {
@@ -283,6 +312,13 @@ impl RoutingTable {
         Ok(())
     }
 }
+
+impl Drop for RoutingTable {
+    fn drop(&mut self) {
+        self.cleanup_sync();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

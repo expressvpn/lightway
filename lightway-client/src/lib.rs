@@ -20,6 +20,11 @@ use lightway_core::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[cfg(feature = "debug")]
+use crate::debug::WiresharkKeyLogger;
+use crate::routing_table::{RouteMode, RoutingTable};
+#[cfg(feature = "debug")]
+use lightway_app_utils::wolfssl_tracing_callback;
 pub use lightway_core::{
     AuthMethod, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, PluginFactoryError, PluginFactoryList,
     RootCertificate, Version,
@@ -28,11 +33,7 @@ pub use lightway_core::{
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet::packet::ipv4::Ipv4Packet;
-
-#[cfg(feature = "debug")]
-use crate::debug::WiresharkKeyLogger;
-#[cfg(feature = "debug")]
-use lightway_app_utils::wolfssl_tracing_callback;
+use scopeguard::defer;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::{
@@ -124,6 +125,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     pub sndbuf: Option<ByteSize>,
     /// Socket receive buffer size
     pub rcvbuf: Option<ByteSize>,
+
+    /// Route Mode
+    pub route_mode: RouteMode,
 
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
@@ -559,6 +563,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
     if let Some(size) = config.rcvbuf {
         outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
     }
+    config
+        .tun_config
+        .address(&config.tun_local_ip)
+        .destination(&config.tun_peer_ip)
+        .up();
 
     #[cfg(not(feature = "io-uring"))]
     let inside_io =
@@ -577,7 +586,32 @@ pub async fn client<A: 'static + Send + EventCallback>(
     } else {
         io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await
     };
-    info!("TUN CREATED");
+
+    let tun_name = match inside_io.as_ref() {
+        Ok(tun) => tun.name()?.clone(),
+        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+    };
+    info!("tun_name {:?}", &tun_name);
+    let mut route_table = RoutingTable::new(config.route_mode)?;
+    let server_ip = config
+        .server
+        .split(":")
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Invalid server IP format"))?
+        .parse()?;
+    route_table
+        .initialize_routing_table(
+            &server_ip,
+            &tun_name,
+            &config.tun_peer_ip.into(),
+            &config.tun_dns_ip.into(),
+        )
+        .await?;
+    defer! {
+        // Ensures the route table is reset when program unwinds or panics
+        route_table.cleanup_sync();
+    }
+
     let inside_io = Arc::new(inside_io.context("Tun creation")?);
 
     let (event_cb, event_stream) = EventStreamCallback::new();

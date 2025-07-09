@@ -9,7 +9,6 @@ use lightway_app_utils::{
     TunConfig, Validate, args::ConnectionType, validate_configuration_file_path,
 };
 use lightway_client::*;
-
 mod args;
 use args::Config;
 
@@ -62,10 +61,6 @@ async fn main() -> Result<()> {
     if let Some(inside_mtu) = &config.inside_mtu {
         tun_config.mtu(*inside_mtu);
     }
-    tun_config
-        .address(&config.tun_local_ip)
-        .destination(&config.tun_peer_ip)
-        .up();
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
@@ -93,6 +88,7 @@ async fn main() -> Result<()> {
         continuous_keepalive: true,
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
+        route_mode: config.route_mode,
         enable_pmtud: config.enable_pmtud,
         pmtud_base_mtu: config.pmtud_base_mtu,
         #[cfg(feature = "io-uring")]

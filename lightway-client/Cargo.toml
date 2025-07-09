@@ -43,6 +43,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true}
 tun.workspace = true
 twelf.workspace = true
+scopeguard.workspace = true
 
 [dev-dependencies]
 more-asserts.workspace = true
