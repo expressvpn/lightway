@@ -240,6 +240,7 @@ impl RoutingTable {
     }
 
     /// Clean up for program unwind
+    /// Will not cleanup the Vec
     pub fn cleanup_sync(&mut self) {
         for route in &self.vpn_routes {
             if let Err(e) = self.route_manager.delete(route) {
@@ -323,28 +324,35 @@ impl Drop for RoutingTable {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use test_case::test_case;
     use tokio;
 
-    fn create_test_tun(
+    async fn create_test_tun(
         name: &str,
-        ip: &str,
-    ) -> Result<(tun::Device, IpAddr), Box<dyn std::error::Error>> {
+        local_ip: IpAddr,
+    ) -> Result<tun::Device, Box<dyn std::error::Error>> {
         let mut config = tun::Configuration::default();
         config
             .tun_name(name)
-            .address(ip)
+            .address(local_ip.to_string())
             .netmask("255.255.255.0")
             .up();
 
         let tun_device = tun::create(&config)?;
-        let ip_addr = ip.parse::<IpAddr>()?;
-        Ok((tun_device, ip_addr))
+        
+        // Add 50ms sleep to allow TUN device to be fully initialized
+        // NOTE: This sometimes adds an additional route after the tests have stored the initial route
+        //       which may lead to inaccurate tests. 5ms is eternity and enough to stabilise this.
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        
+        Ok(tun_device)
     }
 
     #[derive(Debug)]
     enum RouteAddMethod {
-        Store,
+        Standard,
         Server,
+        Lan,
     }
 
     async fn test_single_route_add_and_cleanup(
@@ -372,8 +380,9 @@ mod tests {
 
         // Test adding route using the specified method
         let result1 = match add_method {
-            RouteAddMethod::Store => routing_table.add_vpn_route(route1.clone()).await,
+            RouteAddMethod::Standard => routing_table.add_vpn_route(route1.clone()).await,
             RouteAddMethod::Server => routing_table.add_route_server(route1.clone()).await,
+            RouteAddMethod::Lan => routing_table.add_route_lan(route1.clone()).await,
         };
         match result1 {
             Ok(_) => {
@@ -387,7 +396,7 @@ mod tests {
                     routes_after_add1.len()
                 );
                 match add_method {
-                    RouteAddMethod::Store => {
+                    RouteAddMethod::Standard => {
                         assert_eq!(
                             routing_table.vpn_routes.len(),
                             1,
@@ -404,6 +413,12 @@ mod tests {
                             "Server route should be None, but is {:?}",
                             routing_table.server_route
                         );
+                        assert_eq!(
+                            routing_table.lan_routes.len(),
+                            0,
+                            "LAN routes should have 0 routes, but has {}",
+                            routing_table.lan_routes.len()
+                        );
                     }
                     RouteAddMethod::Server => {
                         assert_eq!(
@@ -417,6 +432,36 @@ mod tests {
                             Some(route1.clone()),
                             "Server route should be set, but is {:?}",
                             routing_table.server_route
+                        );
+                        assert_eq!(
+                            routing_table.lan_routes.len(),
+                            0,
+                            "LAN routes should have 0 routes, but has {}",
+                            routing_table.lan_routes.len()
+                        );
+                    }
+                    RouteAddMethod::Lan => {
+                        assert_eq!(
+                            routing_table.vpn_routes.len(),
+                            0,
+                            "VPN routes should have 0 routes, but has {}",
+                            routing_table.vpn_routes.len()
+                        );
+                        assert!(
+                            routing_table.server_route.is_none(),
+                            "Server route should be None, but is {:?}",
+                            routing_table.server_route
+                        );
+                        assert_eq!(
+                            routing_table.lan_routes.len(),
+                            1,
+                            "LAN routes should have 1 route, but has {}",
+                            routing_table.lan_routes.len()
+                        );
+                        assert_eq!(
+                            routing_table.lan_routes[0], route1,
+                            "LAN routes should have: {:?} but has {:?}",
+                            route1, routing_table.lan_routes[0]
                         );
                     }
                 }
@@ -458,6 +503,7 @@ mod tests {
         let before_cleanup_count = routes_before_cleanup.len();
         let vpn_routes_count = routing_table.vpn_routes.len();
         let route_server_count = routing_table.server_route.is_some() as usize;
+        let lan_routes_count = routing_table.lan_routes.len();
 
         // Test cleanup
         routing_table.cleanup().await;
@@ -480,10 +526,10 @@ mod tests {
         let after_cleanup_count = routes_after_cleanup.len();
         assert_eq!(
             after_cleanup_count,
-            before_cleanup_count - vpn_routes_count - route_server_count,
+            before_cleanup_count - vpn_routes_count - route_server_count - lan_routes_count,
             "System routes should be reduced from {} to {} (difference: {}), but got {}",
             before_cleanup_count,
-            before_cleanup_count - vpn_routes_count - route_server_count,
+            before_cleanup_count - vpn_routes_count - route_server_count - lan_routes_count,
             vpn_routes_count,
             after_cleanup_count
         );
@@ -491,34 +537,14 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_new_routing_table_default_mode() {
-        let result = RoutingTable::new(RouteMode::Default);
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::NoExec)]
+    fn test_new_routing_table(route_mode: RouteMode) {
+        let result = RoutingTable::new(route_mode);
         assert!(result.is_ok());
         let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RouteMode::Default);
-        assert_eq!(routing_table.vpn_routes.len(), 0);
-        assert_eq!(routing_table.lan_routes.len(), 0);
-        assert!(routing_table.server_route.is_none());
-    }
-
-    #[test]
-    fn test_new_routing_table_lan_mode() {
-        let result = RoutingTable::new(RouteMode::Lan);
-        assert!(result.is_ok());
-        let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RouteMode::Lan);
-        assert_eq!(routing_table.vpn_routes.len(), 0);
-        assert_eq!(routing_table.lan_routes.len(), 0);
-        assert!(routing_table.server_route.is_none());
-    }
-
-    #[test]
-    fn test_new_routing_table_noexec_mode() {
-        let result = RoutingTable::new(RouteMode::NoExec);
-        assert!(result.is_ok());
-        let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, RouteMode::NoExec);
+        assert_eq!(routing_table.routing_mode, route_mode);
         assert_eq!(routing_table.vpn_routes.len(), 0);
         assert_eq!(routing_table.lan_routes.len(), 0);
         assert!(routing_table.server_route.is_none());
@@ -548,46 +574,22 @@ mod tests {
         assert!(routing_table.server_route.is_none());
     }
 
+    #[test_case(RouteAddMethod::Standard)]
+    #[test_case(RouteAddMethod::Server)]
+    #[test_case(RouteAddMethod::Lan)]
     #[tokio::test]
     #[serial_test::serial(routing_table)]
-    async fn test_add_single_vpn_route_and_cleanup() {
-        test_single_route_add_and_cleanup(RouteAddMethod::Store)
+    async fn test_add_single_route_and_cleanup(add_method: RouteAddMethod) {
+        test_single_route_add_and_cleanup(add_method)
             .await
             .unwrap();
     }
 
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::NoExec)]
     #[tokio::test]
     #[serial_test::serial(routing_table)]
-    async fn test_add_single_route_server_and_cleanup() {
-        test_single_route_add_and_cleanup(RouteAddMethod::Server)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_initialize_routing_table_and_cleanup_lan_mode() {
-        test_initialize_routing_table_and_cleanup(RouteMode::Lan)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_initialize_routing_table_and_cleanup_default_mode() {
-        test_initialize_routing_table_and_cleanup(RouteMode::Default)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_initialize_routing_table_and_cleanup_noexec_mode() {
-        test_initialize_routing_table_and_cleanup(RouteMode::NoExec)
-            .await
-            .unwrap();
-    }
-
     async fn test_initialize_routing_table_and_cleanup(
         route_mode: RouteMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -595,12 +597,14 @@ mod tests {
 
         // Create a TUN device for testing
         let tun_name = "init_test_tun";
-        let (tun_device, tun_local_ip) = match create_test_tun(tun_name, "10.49.0.1") {
-            Ok((device, ip)) => (device, ip),
+        let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 1));
+        let tun_device = match create_test_tun(tun_name, tun_local_ip).await {
+            Ok(device) => device,
             Err(e) => {
-                panic!("WARNING: Cannot create TUN device: {}, error: ", e);
+                panic!("Cannot create TUN device: {}, error: ", e);
             }
         };
+        let tun_peer_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 2));
 
         // Get initial system state AFTER TUN device creation
         let initial_routes = routing_table.route_manager.list().unwrap();
@@ -608,7 +612,6 @@ mod tests {
 
         // Set up parameters for initialization
         let server_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-        let tun_peer_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 2));
         let tun_dns_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4));
 
         // Test initialize_routing_table
@@ -616,7 +619,6 @@ mod tests {
             .initialize_routing_table(
                 &server_ip,
                 tun_name,
-                &tun_local_ip,
                 &tun_peer_ip,
                 &tun_dns_ip,
             )
@@ -880,30 +882,11 @@ mod tests {
         Ok(())
     }
 
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::NoExec)]
     #[tokio::test]
     #[serial_test::serial(routing_table)]
-    async fn test_find_server_route_with_added_routes_lan_mode() {
-        test_find_server_route_with_added_routes(RouteMode::Lan)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_find_server_route_with_added_routes_default_mode() {
-        test_find_server_route_with_added_routes(RouteMode::Default)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_find_server_route_with_added_routes_noexec_mode() {
-        test_find_server_route_with_added_routes(RouteMode::NoExec)
-            .await
-            .unwrap();
-    }
-
     async fn test_find_server_route_with_added_routes(
         route_mode: RouteMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -911,8 +894,9 @@ mod tests {
 
         // Create a TUN device for testing
         let tun_name = "test_tun";
-        let (tun_device, _) = match create_test_tun(tun_name, "10.47.0.1") {
-            Ok((device, ip)) => (device, ip),
+        let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1));
+        let tun_device = match create_test_tun(tun_name, tun_local_ip).await {
+            Ok(device) => device,
             Err(e) => {
                 panic!("Cannot create TUN device: {}.", e);
             }
@@ -1038,5 +1022,128 @@ mod tests {
         drop(tun_device);
 
         Ok(())
+    }
+
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::NoExec)]
+    #[serial_test::serial(routing_table)]
+    fn test_cleanup_sync(route_mode: RouteMode) {
+        let mut routing_table = RoutingTable::new(route_mode).unwrap();
+
+        // Get initial route count from the system
+        let initial_routes = routing_table.route_manager.list().unwrap();
+        let initial_count = initial_routes.len();
+
+        // Create test routes - use simple host routes to specific IPs
+        let external_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let default_route = routing_table
+            .find_route(&external_ip)
+            .expect("Could not find default gateway for test");
+
+        let gateway_ip = default_route
+            .gateway()
+            .expect("Default route has no gateway");
+
+        let target_ip1 = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 1));
+        let target_ip2 = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 2));
+        let target_ip3 = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 3));
+
+        let vpn_route = Route::new(target_ip1, 32).with_gateway(gateway_ip);
+        let lan_route = Route::new(target_ip2, 32).with_gateway(gateway_ip);
+        let server_route = Route::new(target_ip3, 32).with_gateway(gateway_ip);
+
+        // Add routes directly to the sync route manager and store them
+        match routing_table.route_manager.add(&vpn_route) {
+            Ok(_) => {
+                routing_table.vpn_routes.push(vpn_route.clone());
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    panic!(
+                        "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
+                    );
+                } else {
+                    panic!("Failed to add VPN route: {}", e);
+                }
+            }
+        }
+
+        match routing_table.route_manager.add(&lan_route) {
+            Ok(_) => {
+                routing_table.lan_routes.push(lan_route.clone());
+            }
+            Err(e) => {
+                // Clean up already added routes before panicking
+                let _ = routing_table.route_manager.delete(&vpn_route);
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    panic!(
+                        "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
+                    );
+                } else {
+                    panic!("Failed to add LAN route: {}", e);
+                }
+            }
+        }
+
+        match routing_table.route_manager.add(&server_route) {
+            Ok(_) => {
+                routing_table.server_route = Some(server_route.clone());
+            }
+            Err(e) => {
+                // Clean up already added routes before panicking
+                let _ = routing_table.route_manager.delete(&vpn_route);
+                let _ = routing_table.route_manager.delete(&lan_route);
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    panic!(
+                        "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
+                    );
+                } else {
+                    panic!("Failed to add server route: {}", e);
+                }
+            }
+        }
+
+        // Verify routes were added to the system
+        let routes_after_add = routing_table.route_manager.list().unwrap();
+        let routes_added = routes_after_add.len() - initial_count;
+        assert_eq!(
+            routes_added, 3,
+            "Should have added 3 routes, but added {}",
+            routes_added
+        );
+
+        // Verify internal state
+        assert_eq!(routing_table.vpn_routes.len(), 1);
+        assert_eq!(routing_table.lan_routes.len(), 1);
+        assert!(routing_table.server_route.is_some());
+
+        // Test cleanup_sync
+        routing_table.cleanup_sync();
+
+        // Verify routes were removed from the system
+        let routes_after_cleanup = routing_table.route_manager.list().unwrap();
+        let final_count = routes_after_cleanup.len();
+        assert_eq!(
+            final_count, initial_count,
+            "System routes should be back to initial count {} after cleanup_sync, but got {}",
+            initial_count, final_count
+        );
+
+        // Verify internal state is unchanged (cleanup_sync doesn't modify internal vectors)
+        assert_eq!(
+            routing_table.vpn_routes.len(),
+            1,
+            "cleanup_sync should not modify vpn_routes length"
+        );
+        assert_eq!(
+            routing_table.lan_routes.len(),
+            1,
+            "cleanup_sync should not modify lan_routes length"
+        );
+        assert!(
+            routing_table.server_route.is_some(),
+            "cleanup_sync should not modify server_route"
+        );
     }
 }

@@ -591,7 +591,6 @@ pub async fn client<A: 'static + Send + EventCallback>(
         Ok(tun) => tun.name()?.clone(),
         Err(e) => return Err(anyhow::anyhow!("{}", e)),
     };
-    info!("tun_name {:?}", &tun_name);
     let mut route_table = RoutingTable::new(config.route_mode)?;
     let server_ip = config
         .server
