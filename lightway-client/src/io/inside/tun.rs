@@ -38,6 +38,10 @@ impl Tun {
         let tun = AppUtilsTun::iouring(tun, iouring_ring_size, iouring_sqpoll_idle_time).await?;
         Ok(Tun { tun, ip, dns_ip })
     }
+
+    pub fn name(&self) -> Result<String> {
+        self.tun.name()
+    }
 }
 
 #[async_trait]

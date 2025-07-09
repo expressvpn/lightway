@@ -72,6 +72,15 @@ impl Tun {
             Tun::IoUring(t) => t.mtu(),
         }
     }
+
+    /// Name of `Tun` interface
+    pub fn name(&self) -> Result<String> {
+        match self {
+            Tun::Direct(t) => t.name(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.name(),
+        }
+    }
 }
 
 impl AsRawFd for Tun {
@@ -141,6 +150,11 @@ impl TunDirect {
     pub fn mtu(&self) -> usize {
         self.mtu as usize
     }
+
+    /// Name of Tun
+    pub fn name(&self) -> Result<String> {
+        Ok(self.tun.tun_name()?)
+    }
 }
 
 impl AsRawFd for TunDirect {
@@ -187,6 +201,11 @@ impl TunIoUring {
     /// MTU of tun
     pub fn mtu(&self) -> usize {
         self.tun_io_uring.owned_fd().mtu()
+    }
+
+    /// Name of tun
+    pub fn name(&self) -> Result<String> {
+        Ok(self.tun_io_uring.owned_fd().name()?)
     }
 }
 
