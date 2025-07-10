@@ -33,7 +33,6 @@ pub use lightway_core::{
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet::packet::ipv4::Ipv4Packet;
-use scopeguard::defer;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::{
@@ -587,8 +586,13 @@ pub async fn client<A: 'static + Send + EventCallback>(
         io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await
     };
 
-    let tun_name = match inside_io.as_ref() {
-        Ok(tun) => tun.name()?.clone(),
+    let tun_index: u32 = match inside_io.as_ref() {
+        Ok(tun) => tun.tun_index()?.try_into().map_err(|e| {
+            anyhow::anyhow!(
+                "tun index was negative but expected a positive number, error: {}",
+                e
+            )
+        })?,
         Err(e) => return Err(anyhow::anyhow!("{}", e)),
     };
     let mut route_table = RoutingTable::new(config.route_mode)?;
@@ -601,7 +605,7 @@ pub async fn client<A: 'static + Send + EventCallback>(
     route_table
         .initialize_routing_table(
             &server_ip,
-            &tun_name,
+            tun_index,
             &config.tun_peer_ip.into(),
             &config.tun_dns_ip.into(),
         )

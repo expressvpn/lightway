@@ -42,6 +42,10 @@ impl Tun {
     pub fn name(&self) -> Result<String> {
         self.tun.name()
     }
+
+    pub fn tun_index(&self) -> Result<i32> {
+        self.tun.tun_index()
+    }
 }
 
 #[async_trait]

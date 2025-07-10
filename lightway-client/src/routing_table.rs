@@ -64,8 +64,8 @@ pub enum RoutingTableError {
     AddRouteError(std::io::Error),
     #[error("Default interface not found: {0}")]
     DefaultInterfaceNotFound(std::io::Error),
-    #[error("Interface name not found")]
-    InterfaceNameNotFound,
+    #[error("Interface index not found")]
+    InterfaceIndexNotFound,
     #[error("Interface gateway not found")]
     InterfaceGatewayNotFound,
     #[error(
@@ -119,19 +119,18 @@ impl RoutingTable {
     }
 
     /// Identifies default interface by finding the route to be used to access server_ip
-    fn find_default_interface_name_and_gateway(
+    fn find_default_interface_index_and_gateway(
         &mut self,
         server_ip: &IpAddr,
-    ) -> Result<(String, IpAddr), RoutingTableError> {
+    ) -> Result<(u32, IpAddr), RoutingTableError> {
         let default_route = self.find_route(server_ip)?;
-        let default_interface_name = default_route
-            .if_name()
-            .ok_or(RoutingTableError::InterfaceNameNotFound)?
-            .to_string();
+        let default_interface_index = default_route
+            .if_index()
+            .ok_or(RoutingTableError::InterfaceIndexNotFound)?;
         let default_interface_gateway = default_route
             .gateway()
             .ok_or(RoutingTableError::InterfaceGatewayNotFound)?;
-        Ok((default_interface_name, default_interface_gateway))
+        Ok((default_interface_index, default_interface_gateway))
     }
 
     /// Adds Route
@@ -173,13 +172,13 @@ impl RoutingTable {
     /// Adds standard LAN routes (RFC 1918 private networks + link-local + multicast)
     pub async fn add_standard_lan_routes(
         &mut self,
-        interface_name: &str,
+        interface_index: u32,
         gateway: IpAddr,
     ) -> Result<(), RoutingTableError> {
         for (network, prefix, _description) in LAN_NETWORKS {
             let lan_route = Route::new(network, prefix)
                 .with_gateway(gateway)
-                .with_if_name(interface_name.to_string());
+                .with_if_index(interface_index);
 
             self.add_route_lan(lan_route).await?;
         }
@@ -189,13 +188,13 @@ impl RoutingTable {
     /// Adds standard tunnel routes (high priority default routing)
     pub async fn add_standard_tunnel_routes(
         &mut self,
-        interface_name: &str,
+        interface_index: u32,
         gateway: IpAddr,
     ) -> Result<(), RoutingTableError> {
         for (network, prefix, _description) in TUNNEL_ROUTES {
             let tunnel_route = Route::new(network, prefix)
                 .with_gateway(gateway)
-                .with_if_name(interface_name.to_string());
+                .with_if_index(interface_index);
 
             self.add_vpn_route(tunnel_route).await?;
         }
@@ -273,7 +272,7 @@ impl RoutingTable {
     pub async fn initialize_routing_table(
         &mut self,
         server_ip: &IpAddr,
-        tun_name: &str,
+        tun_index: u32,
         tun_peer_ip: &IpAddr,
         tun_dns_ip: &IpAddr,
     ) -> Result<()> {
@@ -282,34 +281,37 @@ impl RoutingTable {
         }
 
         // Setting up VPN Server Routes
-        let (default_interface_name, default_interface_gateway) =
-            self.find_default_interface_name_and_gateway(server_ip)?;
+        let (default_interface_index, default_interface_gateway) =
+            self.find_default_interface_index_and_gateway(server_ip)?;
 
         let server_route = Route::new(*server_ip, 32)
             .with_gateway(default_interface_gateway)
-            .with_if_name(default_interface_name.clone());
+            .with_if_index(default_interface_index);
 
         self.add_route_server(server_route)
             .await
             .context("Adding VPN Server IP Route")?;
 
         if self.routing_mode == RouteMode::Lan {
-            self.add_standard_lan_routes(&default_interface_name, default_interface_gateway)
+            self.add_standard_lan_routes(default_interface_index, default_interface_gateway)
                 .await?;
         }
 
         // Add standard tunnel routes (high priority default routing)
-        self.add_standard_tunnel_routes(tun_name, *tun_peer_ip)
+        self.add_standard_tunnel_routes(tun_index, *tun_peer_ip)
             .await?;
 
         // Add DNS route separately since it's not a constant
         let dns_route = Route::new(*tun_dns_ip, 32)
             .with_gateway(*tun_peer_ip)
-            .with_if_name(tun_name.to_string());
+            .with_if_index(tun_index);
 
-        self.add_vpn_route(dns_route)
-            .await
-            .with_context(|| format!("Adding tunnel route for Tunnel DNS server"))?;
+        self.add_vpn_route(dns_route).await.with_context(|| {
+            format!(
+                "Adding tunnel route for Tunnel DNS server on interface {}",
+                tun_index
+            )
+        })?;
         Ok(())
     }
 }
@@ -326,11 +328,12 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use test_case::test_case;
     use tokio;
+    use tun::AbstractDevice;
 
     async fn create_test_tun(
         name: &str,
         local_ip: IpAddr,
-    ) -> Result<tun::Device, Box<dyn std::error::Error>> {
+    ) -> Result<(tun::Device, u32), Box<dyn std::error::Error>> {
         let mut config = tun::Configuration::default();
         config
             .tun_name(name)
@@ -339,13 +342,16 @@ mod tests {
             .up();
 
         let tun_device = tun::create(&config)?;
-        
+
         // Add 50ms sleep to allow TUN device to be fully initialized
         // NOTE: This sometimes adds an additional route after the tests have stored the initial route
-        //       which may lead to inaccurate tests. 5ms is eternity and enough to stabilise this.
+        //       which may lead to inaccurate tests. 50ms is eternity and enough to stabilise this.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        
-        Ok(tun_device)
+
+        // Get interface index - unwrap if not available
+        let if_index = tun_device.tun_index().unwrap() as u32;
+
+        Ok((tun_device, if_index))
     }
 
     #[derive(Debug)]
@@ -580,9 +586,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(routing_table)]
     async fn test_add_single_route_and_cleanup(add_method: RouteAddMethod) {
-        test_single_route_add_and_cleanup(add_method)
-            .await
-            .unwrap();
+        test_single_route_add_and_cleanup(add_method).await.unwrap();
     }
 
     #[test_case(RouteMode::Lan)]
@@ -598,8 +602,8 @@ mod tests {
         // Create a TUN device for testing
         let tun_name = "init_test_tun";
         let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 1));
-        let tun_device = match create_test_tun(tun_name, tun_local_ip).await {
-            Ok(device) => device,
+        let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
+            Ok((device, index)) => (device, index),
             Err(e) => {
                 panic!("Cannot create TUN device: {}, error: ", e);
             }
@@ -616,12 +620,7 @@ mod tests {
 
         // Test initialize_routing_table
         let result = routing_table
-            .initialize_routing_table(
-                &server_ip,
-                tun_name,
-                &tun_peer_ip,
-                &tun_dns_ip,
-            )
+            .initialize_routing_table(&server_ip, tun_index, &tun_peer_ip, &tun_dns_ip)
             .await;
 
         match result {
@@ -696,12 +695,12 @@ mod tests {
                                 r.destination() == network
                                     && r.prefix() == prefix
                                     && r.gateway() == Some(tun_peer_ip)
-                                    && r.if_name() == Some(&tun_name.to_string())
+                                    && r.if_index() == Some(tun_index)
                             });
                             assert!(
                                 route_found,
                                 "Expected tunnel route {}/{} via {} dev {} not found in vpn_routes",
-                                network, prefix, tun_peer_ip, tun_name
+                                network, prefix, tun_peer_ip, tun_index
                             );
                         }
 
@@ -710,12 +709,12 @@ mod tests {
                             r.destination() == tun_dns_ip
                                 && r.prefix() == 32
                                 && r.gateway() == Some(tun_peer_ip)
-                                && r.if_name() == Some(&tun_name.to_string())
+                                && r.if_index() == Some(tun_index)
                         });
                         assert!(
                             dns_route_found,
                             "Expected DNS route {}/32 via {} dev {} not found in vpn_routes",
-                            tun_dns_ip, tun_peer_ip, tun_name
+                            tun_dns_ip, tun_peer_ip, tun_index
                         );
                     }
                     RouteMode::Lan => {
@@ -770,7 +769,7 @@ mod tests {
 
                         // Find default gateway for LAN routes verification
                         let (_, default_gateway) = routing_table
-                            .find_default_interface_name_and_gateway(&server_ip)
+                            .find_default_interface_index_and_gateway(&server_ip)
                             .unwrap();
 
                         // Verify the LAN routes in lan_routes
@@ -793,12 +792,12 @@ mod tests {
                                 r.destination() == network
                                     && r.prefix() == prefix
                                     && r.gateway() == Some(tun_peer_ip)
-                                    && r.if_name() == Some(&tun_name.to_string())
+                                    && r.if_index() == Some(tun_index)
                             });
                             assert!(
                                 tunnel_route_found,
                                 "Expected tunnel route {}/{} via {} dev {} not found in vpn_routes",
-                                network, prefix, tun_peer_ip, tun_name
+                                network, prefix, tun_peer_ip, tun_index
                             );
                         }
 
@@ -807,12 +806,12 @@ mod tests {
                             r.destination() == tun_dns_ip
                                 && r.prefix() == 32
                                 && r.gateway() == Some(tun_peer_ip)
-                                && r.if_name() == Some(&tun_name.to_string())
+                                && r.if_index() == Some(tun_index)
                         });
                         assert!(
                             dns_route_found,
                             "Expected DNS route {}/32 via {} dev {} not found in vpn_routes",
-                            tun_dns_ip, tun_peer_ip, tun_name
+                            tun_dns_ip, tun_peer_ip, tun_index
                         );
                     }
                 }
@@ -895,8 +894,8 @@ mod tests {
         // Create a TUN device for testing
         let tun_name = "test_tun";
         let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1));
-        let tun_device = match create_test_tun(tun_name, tun_local_ip).await {
-            Ok(device) => device,
+        let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
+            Ok((device, index)) => (device, index),
             Err(e) => {
                 panic!("Cannot create TUN device: {}.", e);
             }
@@ -907,10 +906,10 @@ mod tests {
         // Create test routes and IP addresses for testing
         let route1 = Route::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1)
             .with_gateway(tun_peer_ip)
-            .with_if_name(tun_name.to_string());
+            .with_if_index(tun_index);
         let route2 = Route::new(IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1)
             .with_gateway(tun_peer_ip)
-            .with_if_name(tun_name.to_string());
+            .with_if_index(tun_index);
 
         // Test IP addresses that should route through our added routes
         let test_ip1 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)); // Should match to route1 (0.0.0.0/1)
