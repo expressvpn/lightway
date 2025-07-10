@@ -343,7 +343,7 @@ mod tests {
         // Add 50ms sleep to allow TUN device to be fully initialized
         // NOTE: This sometimes adds an additional route after the tests have stored the initial route
         //       which may lead to inaccurate tests. 5ms is eternity and enough to stabilise this.
-        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         
         Ok(tun_device)
     }

@@ -606,10 +606,6 @@ pub async fn client<A: 'static + Send + EventCallback>(
             &config.tun_dns_ip.into(),
         )
         .await?;
-    defer! {
-        // Ensures the route table is reset when program unwinds or panics
-        route_table.cleanup_sync();
-    }
 
     let inside_io = Arc::new(inside_io.context("Tun creation")?);
 
