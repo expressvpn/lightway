@@ -327,12 +327,10 @@ mod tests {
     use tun::AbstractDevice;
 
     async fn create_test_tun(
-        name: &str,
         local_ip: IpAddr,
     ) -> Result<(tun::Device, u32), Box<dyn std::error::Error>> {
         let mut config = tun::Configuration::default();
         config
-            .tun_name(name)
             .address(local_ip.to_string())
             .netmask("255.255.255.0")
             .up();
@@ -596,9 +594,8 @@ mod tests {
         let mut routing_table = RoutingTable::new(route_mode).unwrap();
 
         // Create a TUN device for testing
-        let tun_name = "init_test_tun";
         let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 1));
-        let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
+        let (tun_device, tun_index) = match create_test_tun(tun_local_ip).await {
             Ok((device, index)) => (device, index),
             Err(e) => {
                 panic!("Cannot create TUN device: {e}");
@@ -879,9 +876,8 @@ mod tests {
         let mut routing_table = RoutingTable::new(route_mode).unwrap();
 
         // Create a TUN device for testing
-        let tun_name = "test_tun";
         let tun_local_ip = IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1));
-        let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
+        let (tun_device, tun_index) = match create_test_tun(tun_local_ip).await {
             Ok((device, index)) => (device, index),
             Err(e) => {
                 panic!("Cannot create TUN device: {e}.");
