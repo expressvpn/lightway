@@ -219,12 +219,12 @@ impl TunIoUring {
 
     /// Name of tun
     pub fn name(&self) -> Result<String> {
-        Ok(self.tun_io_uring.owned_fd().name()?)
+        self.tun_io_uring.owned_fd().name()
     }
 
     /// Interface index of tun
     pub fn tun_index(&self) -> Result<i32> {
-        Ok(self.tun_io_uring.owned_fd().tun_index()?)
+        self.tun_io_uring.owned_fd().tun_index()
     }
 }
 

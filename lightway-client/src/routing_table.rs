@@ -89,10 +89,9 @@ pub struct RoutingTable {
 
 impl RoutingTable {
     pub fn new(routing_mode: RouteMode) -> Result<Self, RoutingTableError> {
-        let route_manager =
-            RouteManager::new().map_err(|e| RoutingTableError::RoutingManagerError(e))?;
+        let route_manager = RouteManager::new().map_err(RoutingTableError::RoutingManagerError)?;
         let route_manager_async =
-            AsyncRouteManager::new().map_err(|e| RoutingTableError::AsyncRoutingManagerError(e))?;
+            AsyncRouteManager::new().map_err(RoutingTableError::AsyncRoutingManagerError)?;
         Ok(Self {
             routing_mode,
             route_manager,
@@ -114,7 +113,7 @@ impl RoutingTable {
         Ok(self
             .route_manager
             .find_route(server_ip)
-            .map_err(|e| RoutingTableError::DefaultInterfaceNotFound(e))?
+            .map_err(RoutingTableError::DefaultInterfaceNotFound)?
             .unwrap())
     }
 
@@ -217,7 +216,7 @@ impl RoutingTable {
     pub async fn cleanup_server_routes(&mut self) {
         if let Some(r) = &self.server_route {
             self.route_manager_async
-                .delete(&r)
+                .delete(r)
                 .await
                 .unwrap_or_else(|e| {
                     warn!("Failed to delete server route: {r}, error: {e}");
@@ -307,10 +306,7 @@ impl RoutingTable {
             .with_if_index(tun_index);
 
         self.add_vpn_route(dns_route).await.with_context(|| {
-            format!(
-                "Adding tunnel route for Tunnel DNS server on interface {}",
-                tun_index
-            )
+            format!("Adding tunnel route for Tunnel DNS server on interface {tun_index}")
         })?;
         Ok(())
     }
@@ -500,7 +496,7 @@ mod tests {
                         "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification. \n Consider running with sudo -E cargo test"
                     );
                 }
-                _ => panic!("Unexpected error type: {:?}", e),
+                _ => panic!("Unexpected error type: {e:?}"),
             },
         }
 
@@ -605,7 +601,7 @@ mod tests {
         let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
             Ok((device, index)) => (device, index),
             Err(e) => {
-                panic!("Cannot create TUN device: {}, error: ", e);
+                panic!("Cannot create TUN device: {e}");
             }
         };
         let tun_peer_ip = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 2));
@@ -635,8 +631,7 @@ mod tests {
                         // NOTE: This test occasionally fails without discernable reason
                         assert_eq!(
                             routes_added, 0,
-                            "NoExec mode should not add any routes, but added {}",
-                            routes_added
+                            "NoExec mode should not add any routes, but added {routes_added}"
                         );
                         assert_eq!(
                             routing_table.vpn_routes.len(),
@@ -652,7 +647,7 @@ mod tests {
                     RouteMode::Default => {
                         // Default mode should add at least (1 server + TUNNEL_ROUTES + 1 DNS) routes
                         assert!(
-                            routes_added >= 1 + TUNNEL_ROUTES.len() + 1,
+                            routes_added > 1 + TUNNEL_ROUTES.len(),
                             "Default mode should have added at least {} routes (1 server + {} tunnel routes + 1 DNS), but added {}",
                             1 + TUNNEL_ROUTES.len() + 1,
                             TUNNEL_ROUTES.len(),
@@ -699,8 +694,7 @@ mod tests {
                             });
                             assert!(
                                 route_found,
-                                "Expected tunnel route {}/{} via {} dev {} not found in vpn_routes",
-                                network, prefix, tun_peer_ip, tun_index
+                                "Expected tunnel route {network}/{prefix} via {tun_peer_ip} dev {tun_index} not found in vpn_routes"
                             );
                         }
 
@@ -713,14 +707,13 @@ mod tests {
                         });
                         assert!(
                             dns_route_found,
-                            "Expected DNS route {}/32 via {} dev {} not found in vpn_routes",
-                            tun_dns_ip, tun_peer_ip, tun_index
+                            "Expected DNS route {tun_dns_ip}/32 via {tun_peer_ip} dev {tun_index} not found in vpn_routes"
                         );
                     }
                     RouteMode::Lan => {
                         // Lan mode should add at least (1 server + LAN_NETWORKS + TUNNEL_ROUTES + 1 DNS) routes
                         assert!(
-                            routes_added >= 1 + LAN_NETWORKS.len() + TUNNEL_ROUTES.len() + 1,
+                            routes_added > 1 + LAN_NETWORKS.len() + TUNNEL_ROUTES.len(),
                             "Lan mode should have added at least {} routes (1 server + {} LAN + {} tunnel routes + 1 DNS), but added {}",
                             1 + LAN_NETWORKS.len() + TUNNEL_ROUTES.len() + 1,
                             LAN_NETWORKS.len(),
@@ -781,8 +774,7 @@ mod tests {
                             });
                             assert!(
                                 lan_route_found,
-                                "Expected LAN route {}/{} via {} not found in lan_routes",
-                                network, prefix, default_gateway
+                                "Expected LAN route {network}/{prefix} via {default_gateway} not found in lan_routes"
                             );
                         }
 
@@ -796,8 +788,7 @@ mod tests {
                             });
                             assert!(
                                 tunnel_route_found,
-                                "Expected tunnel route {}/{} via {} dev {} not found in vpn_routes",
-                                network, prefix, tun_peer_ip, tun_index
+                                "Expected tunnel route {network}/{prefix} via {tun_peer_ip} dev {tun_index} not found in vpn_routes"
                             );
                         }
 
@@ -810,8 +801,7 @@ mod tests {
                         });
                         assert!(
                             dns_route_found,
-                            "Expected DNS route {}/32 via {} dev {} not found in vpn_routes",
-                            tun_dns_ip, tun_peer_ip, tun_index
+                            "Expected DNS route {tun_dns_ip}/32 via {tun_peer_ip} dev {tun_index} not found in vpn_routes"
                         );
                     }
                 }
@@ -819,10 +809,7 @@ mod tests {
             Err(e) => {
                 routing_table.cleanup().await;
                 drop(tun_device);
-                panic!(
-                    "Unexpected error during routing table initialization: {:?}",
-                    e
-                );
+                panic!("Unexpected error during routing table initialization: {e:?}");
             }
         }
 
@@ -897,7 +884,7 @@ mod tests {
         let (tun_device, tun_index) = match create_test_tun(tun_name, tun_local_ip).await {
             Ok((device, index)) => (device, index),
             Err(e) => {
-                panic!("Cannot create TUN device: {}.", e);
+                panic!("Cannot create TUN device: {e}.");
             }
         };
 
@@ -925,13 +912,13 @@ mod tests {
                 drop(tun_device);
                 match e {
                     RoutingTableError::AddRouteError(_) => {
-                        panic!("Failed to add route error: {:?}", e);
+                        panic!("Failed to add route error: {e:?}");
                     }
                     RoutingTableError::InsufficientPermissions => {
                         panic!("WARNING: Cannot add routes due to insufficient permissions");
                     }
                     _ => {
-                        panic!("Unexpected error type: {:?}", e);
+                        panic!("Unexpected error type: {e:?}");
                     }
                 }
             }
@@ -964,13 +951,13 @@ mod tests {
                 drop(tun_device);
                 match e {
                     RoutingTableError::AddRouteError(_) => {
-                        panic!("Failed to add second route error: {:?}", e);
+                        panic!("Failed to add second route error: {e:?}");
                     }
                     RoutingTableError::InsufficientPermissions => {
                         panic!("WARNING: Cannot add second route due to insufficient permissions");
                     }
                     _ => {
-                        panic!("Unexpected error type: {:?}", e);
+                        panic!("Unexpected error type: {e:?}");
                     }
                 }
             }
@@ -1063,7 +1050,7 @@ mod tests {
                         "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
                     );
                 } else {
-                    panic!("Failed to add VPN route: {}", e);
+                    panic!("Failed to add VPN route: {e}");
                 }
             }
         }
@@ -1080,7 +1067,7 @@ mod tests {
                         "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
                     );
                 } else {
-                    panic!("Failed to add LAN route: {}", e);
+                    panic!("Failed to add LAN route: {e}");
                 }
             }
         }
@@ -1098,7 +1085,7 @@ mod tests {
                         "WARNING: Insufficient permissions to modify routing table. Run tests with sudo/administrator privileges to test route modification."
                     );
                 } else {
-                    panic!("Failed to add server route: {}", e);
+                    panic!("Failed to add server route: {e}");
                 }
             }
         }
@@ -1108,8 +1095,7 @@ mod tests {
         let routes_added = routes_after_add.len() - initial_count;
         assert_eq!(
             routes_added, 3,
-            "Should have added 3 routes, but added {}",
-            routes_added
+            "Should have added 3 routes, but added {routes_added}"
         );
 
         // Verify internal state
@@ -1125,8 +1111,7 @@ mod tests {
         let final_count = routes_after_cleanup.len();
         assert_eq!(
             final_count, initial_count,
-            "System routes should be back to initial count {} after cleanup_sync, but got {}",
-            initial_count, final_count
+            "System routes should be back to initial count {initial_count} after cleanup_sync, but got {final_count}"
         );
 
         // Verify internal state is unchanged (cleanup_sync doesn't modify internal vectors)

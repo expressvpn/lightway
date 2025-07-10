@@ -564,8 +564,8 @@ pub async fn client<A: 'static + Send + EventCallback>(
     }
     config
         .tun_config
-        .address(&config.tun_local_ip)
-        .destination(&config.tun_peer_ip)
+        .address(config.tun_local_ip)
+        .destination(config.tun_peer_ip)
         .up();
 
     #[cfg(not(feature = "io-uring"))]

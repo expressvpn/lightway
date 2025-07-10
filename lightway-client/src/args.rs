@@ -1,3 +1,4 @@
+use super::routing_table::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use clap::Parser;
@@ -5,7 +6,6 @@ use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use std::{net::Ipv4Addr, path::PathBuf};
 use twelf::config;
-use super::routing_table::RouteMode;
 
 #[config]
 #[derive(Parser, Debug)]
@@ -87,7 +87,7 @@ pub struct Config {
 
     /// Setup of route table
     #[clap(long, value_enum, default_value_t = RouteMode::Default)]
-    pub route_mode: RouteMode, 
+    pub route_mode: RouteMode,
 
     /// Log level to use
     #[clap(long, value_enum, default_value_t = LogLevel::Info)]
