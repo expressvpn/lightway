@@ -95,8 +95,12 @@ test:
         SET target = "riscv64gc-unknown-linux-gnu"
     END
 
-    DO lib-rust+CARGO --args="test --target=$target"
-    DO lib-rust+CARGO --args="test --features kyber_only --target=$target"
+    # Run all tests except routing_table tests (which need sudo)
+    DO lib-rust+CARGO --args="test --target=$target -- --skip routing_table"
+    DO lib-rust+CARGO --args="test --features kyber_only --target=$target -- --skip routing_table"
+    
+    # Run routing_table tests with sudo permissions
+    RUN --privileged cargo test --package lightway-client --target=$target routing_table
 
 # test-miri runs tests for modules which make use of `unsafe` under Miri.
 test-miri:
