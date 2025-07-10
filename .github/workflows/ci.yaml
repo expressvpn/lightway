@@ -21,7 +21,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [test, test-miri, test-arm64, test-riscv64, build, build-arm64, build-riscv64, fmt, lint, check-dependencies]
+        include:
+          - target: test
+            privileged: true
+          - target: test-miri
+            privileged: false
+          - target: test-arm64
+            privileged: true
+          - target: test-riscv64
+            privileged: true
+          - target: build
+            privileged: false
+          - target: build-arm64
+            privileged: false
+          - target: build-riscv64
+            privileged: false
+          - target: fmt
+            privileged: false
+          - target: lint
+            privileged: false
+          - target: check-dependencies
+            privileged: false
     runs-on: ubuntu-latest
     env:
       EARTHLY_TOKEN: "${{ secrets.EARTHLY_TOKEN }}"
@@ -33,7 +53,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4
       - name: Run +${{ matrix.target }} on Earthly satellite
-        run: earthly --ci --org expressvpn --satellite lightway +${{ matrix.target }}
+        run: earthly --ci --org expressvpn --satellite lightway ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
   e2e:
     runs-on: ubuntu-latest
     env:
@@ -65,7 +85,7 @@ jobs:
       - name: Run +coverage on Earthly satellite
         id: coverage
         run: |
-          earthly --ci --org expressvpn --satellite lightway --artifact +coverage/* output/
+          earthly --ci --org expressvpn --satellite lightway --allow-privileged --artifact +coverage/* output/
 
           cat output/summary.txt
 
