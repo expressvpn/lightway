@@ -36,7 +36,7 @@ use pnet::packet::ipv4::Ipv4Packet;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::{
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -153,8 +153,11 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// Server domain name to validate
     pub server_dn: Option<String>,
 
-    /// Server to connect to
-    pub server: String,
+    /// Server IP address to connect to
+    pub server_ip: IpAddr,
+
+    /// Server port to connect to
+    pub server_port: u16,
 
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
@@ -541,14 +544,16 @@ pub async fn client<A: 'static + Send + EventCallback>(
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match config.mode {
             ClientConnectionType::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(&config.server, maybe_sock)
+                let server_addr = format!("{}:{}", config.server_ip, config.server_port);
+                let sock = io::outside::Udp::new(&server_addr, maybe_sock)
                     .await
                     .context("Outside IO UDP")?;
 
                 (ConnectionType::Datagram, sock)
             }
             ClientConnectionType::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(&config.server, maybe_sock)
+                let server_addr = format!("{}:{}", config.server_ip, config.server_port);
+                let sock = io::outside::Tcp::new(&server_addr, maybe_sock)
                     .await
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
@@ -596,15 +601,9 @@ pub async fn client<A: 'static + Send + EventCallback>(
         Err(e) => return Err(anyhow::anyhow!("{}", e)),
     };
     let mut route_table = RoutingTable::new(config.route_mode)?;
-    let server_ip = config
-        .server
-        .split(":")
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Invalid server IP format"))?
-        .parse()?;
     route_table
         .initialize_routing_table(
-            &server_ip,
+            &config.server_ip,
             tun_index,
             &config.tun_peer_ip.into(),
             &config.tun_dns_ip.into(),
