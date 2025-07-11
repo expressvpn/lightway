@@ -1,6 +1,7 @@
 mod debug;
 pub mod io;
 pub mod keepalive;
+pub mod routing_table;
 
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
@@ -19,6 +20,11 @@ use lightway_core::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[cfg(feature = "debug")]
+use crate::debug::WiresharkKeyLogger;
+use crate::routing_table::{RouteMode, RoutingTable};
+#[cfg(feature = "debug")]
+use lightway_app_utils::wolfssl_tracing_callback;
 pub use lightway_core::{
     AuthMethod, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, PluginFactoryError, PluginFactoryList,
     RootCertificate, Version,
@@ -27,15 +33,10 @@ pub use lightway_core::{
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet::packet::ipv4::Ipv4Packet;
-
-#[cfg(feature = "debug")]
-use crate::debug::WiresharkKeyLogger;
-#[cfg(feature = "debug")]
-use lightway_app_utils::wolfssl_tracing_callback;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::{
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -124,6 +125,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// Socket receive buffer size
     pub rcvbuf: Option<ByteSize>,
 
+    /// Route Mode
+    pub route_mode: RouteMode,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -149,8 +153,11 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
     /// Server domain name to validate
     pub server_dn: Option<String>,
 
-    /// Server to connect to
-    pub server: String,
+    /// Server IP address to connect to
+    pub server_ip: IpAddr,
+
+    /// Server port to connect to
+    pub server_port: u16,
 
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
@@ -537,14 +544,16 @@ pub async fn client<A: 'static + Send + EventCallback>(
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match config.mode {
             ClientConnectionType::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(&config.server, maybe_sock)
+                let server_addr = format!("{}:{}", config.server_ip, config.server_port);
+                let sock = io::outside::Udp::new(&server_addr, maybe_sock)
                     .await
                     .context("Outside IO UDP")?;
 
                 (ConnectionType::Datagram, sock)
             }
             ClientConnectionType::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(&config.server, maybe_sock)
+                let server_addr = format!("{}:{}", config.server_ip, config.server_port);
+                let sock = io::outside::Tcp::new(&server_addr, maybe_sock)
                     .await
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
@@ -558,6 +567,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
     if let Some(size) = config.rcvbuf {
         outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
     }
+    config
+        .tun_config
+        .address(config.tun_local_ip)
+        .destination(config.tun_peer_ip)
+        .up();
 
     #[cfg(not(feature = "io-uring"))]
     let inside_io =
@@ -576,6 +590,25 @@ pub async fn client<A: 'static + Send + EventCallback>(
     } else {
         io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await
     };
+
+    let tun_index: u32 = match inside_io.as_ref() {
+        Ok(tun) => tun.tun_index()?.try_into().map_err(|e| {
+            anyhow::anyhow!(
+                "tun index was negative but expected a positive number, error: {}",
+                e
+            )
+        })?,
+        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+    };
+    let mut route_table = RoutingTable::new(config.route_mode)?;
+    route_table
+        .initialize_routing_table(
+            &config.server_ip,
+            tun_index,
+            &config.tun_peer_ip.into(),
+            &config.tun_dns_ip.into(),
+        )
+        .await?;
 
     let inside_io = Arc::new(inside_io.context("Tun creation")?);
 
@@ -690,8 +723,11 @@ pub async fn client<A: 'static + Send + EventCallback>(
         keepalive.clone(),
     ));
 
-    let inside_io_loop: JoinHandle<anyhow::Result<()>> =
-        tokio::spawn(inside_io_task(conn.clone(), inside_io, config.tun_dns_ip));
+    let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(inside_io_task(
+        conn.clone(),
+        inside_io.clone(),
+        config.tun_dns_ip,
+    ));
 
     let network_change_task: OptionFuture<JoinHandle<ClientResult>> =
         match config.network_change_signal {

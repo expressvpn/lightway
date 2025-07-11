@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
@@ -9,7 +9,6 @@ use lightway_app_utils::{
     TunConfig, Validate, args::ConnectionType, validate_configuration_file_path,
 };
 use lightway_client::*;
-
 mod args;
 use args::Config;
 
@@ -71,6 +70,22 @@ async fn main() -> Result<()> {
         }
     })?;
 
+    // Parse server address into IP and port
+    let (server_ip, server_port) = if let Some((ip_str, port_str)) = config.server.split_once(':') {
+        let ip: IpAddr = ip_str
+            .parse()
+            .with_context(|| format!("Invalid server IP: {ip_str}"))?;
+        let port: u16 = port_str
+            .parse()
+            .with_context(|| format!("Invalid server port: {port_str}"))?;
+        (ip, port)
+    } else {
+        return Err(anyhow!(
+            "Server must be in format 'ip:port', got: {}",
+            config.server
+        ));
+    };
+
     let config = ClientConfig {
         mode,
         auth,
@@ -89,6 +104,7 @@ async fn main() -> Result<()> {
         continuous_keepalive: true,
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
+        route_mode: config.route_mode,
         enable_pmtud: config.enable_pmtud,
         pmtud_base_mtu: config.pmtud_base_mtu,
         #[cfg(feature = "io-uring")]
@@ -98,7 +114,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
         server_dn: config.server_dn,
-        server: config.server,
+        server_ip,
+        server_port,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         inside_pkt_codec: None,

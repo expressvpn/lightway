@@ -72,6 +72,24 @@ impl Tun {
             Tun::IoUring(t) => t.mtu(),
         }
     }
+
+    /// Name of `Tun` interface
+    pub fn name(&self) -> Result<String> {
+        match self {
+            Tun::Direct(t) => t.name(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.name(),
+        }
+    }
+
+    /// Interface index of 'Tun' interface
+    pub fn tun_index(&self) -> Result<i32> {
+        match self {
+            Tun::Direct(t) => t.tun_index(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.tun_index(),
+        }
+    }
 }
 
 impl AsRawFd for Tun {
@@ -141,6 +159,16 @@ impl TunDirect {
     pub fn mtu(&self) -> usize {
         self.mtu as usize
     }
+
+    /// Name of Tun
+    pub fn name(&self) -> Result<String> {
+        Ok(self.tun.tun_name()?)
+    }
+
+    /// Interface inde of Tun
+    pub fn tun_index(&self) -> Result<i32> {
+        Ok(self.tun.tun_index()?)
+    }
 }
 
 impl AsRawFd for TunDirect {
@@ -187,6 +215,16 @@ impl TunIoUring {
     /// MTU of tun
     pub fn mtu(&self) -> usize {
         self.tun_io_uring.owned_fd().mtu()
+    }
+
+    /// Name of tun
+    pub fn name(&self) -> Result<String> {
+        self.tun_io_uring.owned_fd().name()
+    }
+
+    /// Interface index of tun
+    pub fn tun_index(&self) -> Result<i32> {
+        self.tun_io_uring.owned_fd().tun_index()
     }
 }
 

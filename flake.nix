@@ -60,6 +60,10 @@
                 cargoBuildFlags = "-p ${package}";
                 # Some tests rely on debug_assert! and fail in release.
                 checkType = "debug";
+                checkFlags = [
+                  # These tests need permission to create tun interface
+                  "--skip=routing_table::tests"
+                ];
                 cargoLock.outputHashes = {
                   "wolfssl-3.0.0" = "sha256-4nCoGOIhiGC7aTDvdXpVNTBzMl4dkNCJxtcuODumW2Q=";
                 };

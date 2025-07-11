@@ -10,7 +10,7 @@ log_level: info
 server_dn: goaway.com
 user: user
 password: password
-# inside_mtu: 1350 # Requires CAP_SYS_ADMIN
+inside_mtu: 1350 # Requires CAP_SYS_ADMIN
 outside_mtu: 1500
 cipher: aes256
 enable_pqc: false
@@ -22,3 +22,4 @@ keepalive_timeout: 0s
 enable_pmtud: false
 # sndbuf: 1.5 MiB
 # rcvbuf: 1.5 MiB
+route_mode: default
