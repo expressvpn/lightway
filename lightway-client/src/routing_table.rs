@@ -118,17 +118,18 @@ impl RoutingTable {
     }
 
     /// Identifies default interface by finding the route to be used to access server_ip
+    /// Returns the interface index and optional gateway. Gateway is None for direct routes
+    /// (common in Docker containers and direct network connections).
     fn find_default_interface_index_and_gateway(
         &mut self,
         server_ip: &IpAddr,
-    ) -> Result<(u32, IpAddr), RoutingTableError> {
+    ) -> Result<(u32, Option<IpAddr>), RoutingTableError> {
         let default_route = self.find_route(server_ip)?;
         let default_interface_index = default_route
             .if_index()
             .ok_or(RoutingTableError::InterfaceIndexNotFound)?;
-        let default_interface_gateway = default_route
-            .gateway()
-            .ok_or(RoutingTableError::InterfaceGatewayNotFound)?;
+        // Gateway is optional - None for direct routes (e.g., in containers)
+        let default_interface_gateway = default_route.gateway();
         Ok((default_interface_index, default_interface_gateway))
     }
 
@@ -169,17 +170,28 @@ impl RoutingTable {
     }
 
     /// Adds standard LAN routes (RFC 1918 private networks + link-local + multicast)
+    /// with optional gateway. Gateway is None for direct routes (e.g., in Docker containers)
     pub async fn add_standard_lan_routes(
         &mut self,
         interface_index: u32,
-        gateway: IpAddr,
+        gateway: Option<IpAddr>,
     ) -> Result<(), RoutingTableError> {
-        for (network, prefix, _description) in LAN_NETWORKS {
-            let lan_route = Route::new(network, prefix)
-                .with_gateway(gateway)
-                .with_if_index(interface_index);
-
-            self.add_route_lan(lan_route).await?;
+        // Gateway is invariant for all LAN routes, so match once outside the loop
+        match gateway {
+            Some(gw) => {
+                for (network, prefix, _description) in LAN_NETWORKS {
+                    let lan_route = Route::new(network, prefix)
+                        .with_gateway(gw)
+                        .with_if_index(interface_index);
+                    self.add_route_lan(lan_route).await?;
+                }
+            }
+            None => {
+                for (network, prefix, _description) in LAN_NETWORKS {
+                    let lan_route = Route::new(network, prefix).with_if_index(interface_index);
+                    self.add_route_lan(lan_route).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -283,9 +295,14 @@ impl RoutingTable {
         let (default_interface_index, default_interface_gateway) =
             self.find_default_interface_index_and_gateway(server_ip)?;
 
-        let server_route = Route::new(*server_ip, 32)
-            .with_gateway(default_interface_gateway)
-            .with_if_index(default_interface_index);
+        // Create server route with optional gateway - handles both direct routes (containers)
+        // and routed networks (host systems with gateways)
+        let server_route = match default_interface_gateway {
+            Some(gateway) => Route::new(*server_ip, 32)
+                .with_gateway(gateway)
+                .with_if_index(default_interface_index),
+            None => Route::new(*server_ip, 32).with_if_index(default_interface_index),
+        };
 
         self.add_route_server(server_route)
             .await
@@ -767,11 +784,15 @@ mod tests {
                             let lan_route_found = routing_table.lan_routes.iter().any(|r| {
                                 r.destination() == network
                                     && r.prefix() == prefix
-                                    && r.gateway() == Some(default_gateway)
+                                    && r.gateway() == default_gateway // Now matches Option<IpAddr>
                             });
+                            let gateway_str = match default_gateway {
+                                Some(gw) => format!("via {gw}"),
+                                None => "direct".to_string(),
+                            };
                             assert!(
                                 lan_route_found,
-                                "Expected LAN route {network}/{prefix} via {default_gateway} not found in lan_routes"
+                                "Expected LAN route {network}/{prefix} {gateway_str} not found in lan_routes"
                             );
                         }
 
