@@ -372,9 +372,49 @@ mod tests {
         Lan,
     }
 
-    async fn test_single_route_add_and_cleanup(
-        add_method: RouteAddMethod,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::NoExec)]
+    fn test_new_routing_table(route_mode: RouteMode) {
+        let result = RoutingTable::new(route_mode);
+        assert!(result.is_ok());
+        let routing_table = result.unwrap();
+        assert_eq!(routing_table.routing_mode, route_mode);
+        assert_eq!(routing_table.vpn_routes.len(), 0);
+        assert_eq!(routing_table.lan_routes.len(), 0);
+        assert!(routing_table.server_route.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(routing_table)]
+    async fn test_cleanup_empty_routes() {
+        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
+
+        // Get initial route count from the system
+        // let initial_routes = routing_table.route_manager.list().unwrap_or_default();
+        let initial_routes = routing_table.route_manager.list().unwrap();
+        let initial_count = initial_routes.len();
+
+        // Cleanup should not change system routes since vpn_routes is empty
+        routing_table.cleanup().await;
+
+        // Check that vpn_routes remains empty
+        assert_eq!(routing_table.vpn_routes.len(), 0);
+        assert_eq!(routing_table.lan_routes.len(), 0);
+
+        // Check that system routes are unchanged
+        let final_routes = routing_table.route_manager.list().unwrap();
+        let final_count = final_routes.len();
+        assert_eq!(initial_count, final_count);
+        assert!(routing_table.server_route.is_none());
+    }
+
+    #[test_case(RouteAddMethod::Standard)]
+    #[test_case(RouteAddMethod::Server)]
+    #[test_case(RouteAddMethod::Lan)]
+    #[tokio::test]
+    #[serial_test::serial(routing_table)]
+    async fn test_add_single_route_and_cleanup(add_method: RouteAddMethod) {
         let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
 
         // Get initial route count from the system
@@ -550,54 +590,6 @@ mod tests {
             vpn_routes_count,
             after_cleanup_count
         );
-
-        Ok(())
-    }
-
-    #[test_case(RouteMode::Default)]
-    #[test_case(RouteMode::Lan)]
-    #[test_case(RouteMode::NoExec)]
-    fn test_new_routing_table(route_mode: RouteMode) {
-        let result = RoutingTable::new(route_mode);
-        assert!(result.is_ok());
-        let routing_table = result.unwrap();
-        assert_eq!(routing_table.routing_mode, route_mode);
-        assert_eq!(routing_table.vpn_routes.len(), 0);
-        assert_eq!(routing_table.lan_routes.len(), 0);
-        assert!(routing_table.server_route.is_none());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_cleanup_empty_routes() {
-        let mut routing_table = RoutingTable::new(RouteMode::Default).unwrap();
-
-        // Get initial route count from the system
-        // let initial_routes = routing_table.route_manager.list().unwrap_or_default();
-        let initial_routes = routing_table.route_manager.list().unwrap();
-        let initial_count = initial_routes.len();
-
-        // Cleanup should not change system routes since vpn_routes is empty
-        routing_table.cleanup().await;
-
-        // Check that vpn_routes remains empty
-        assert_eq!(routing_table.vpn_routes.len(), 0);
-        assert_eq!(routing_table.lan_routes.len(), 0);
-
-        // Check that system routes are unchanged
-        let final_routes = routing_table.route_manager.list().unwrap();
-        let final_count = final_routes.len();
-        assert_eq!(initial_count, final_count);
-        assert!(routing_table.server_route.is_none());
-    }
-
-    #[test_case(RouteAddMethod::Standard)]
-    #[test_case(RouteAddMethod::Server)]
-    #[test_case(RouteAddMethod::Lan)]
-    #[tokio::test]
-    #[serial_test::serial(routing_table)]
-    async fn test_add_single_route_and_cleanup(add_method: RouteAddMethod) {
-        test_single_route_add_and_cleanup(add_method).await.unwrap();
     }
 
     #[test_case(RouteMode::Lan)]
@@ -605,9 +597,7 @@ mod tests {
     #[test_case(RouteMode::NoExec)]
     #[tokio::test]
     #[serial_test::serial(routing_table)]
-    async fn test_initialize_routing_table_and_cleanup(
-        route_mode: RouteMode,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_initialize_routing_table_and_cleanup(route_mode: RouteMode) {
         let mut routing_table = RoutingTable::new(route_mode).unwrap();
 
         // Create a TUN device for testing
@@ -882,8 +872,6 @@ mod tests {
 
         // Cleanup TUN device
         drop(tun_device);
-
-        Ok(())
     }
 
     #[test_case(RouteMode::Lan)]
@@ -891,9 +879,7 @@ mod tests {
     #[test_case(RouteMode::NoExec)]
     #[tokio::test]
     #[serial_test::serial(routing_table)]
-    async fn test_find_server_route_with_added_routes(
-        route_mode: RouteMode,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_find_server_route_with_added_routes(route_mode: RouteMode) {
         let mut routing_table = RoutingTable::new(route_mode).unwrap();
 
         // Create a TUN device for testing
@@ -1023,8 +1009,6 @@ mod tests {
 
         // TUN device will be automatically cleaned up when dropped
         drop(tun_device);
-
-        Ok(())
     }
 
     #[test_case(RouteMode::Default)]
