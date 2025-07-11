@@ -47,6 +47,8 @@ services:
     command: ${CLIENT_ARGS}
     stop_signal: SIGTERM
     stop_grace_period: 10s
+    environment:
+      - SERVER_PORT=${SERVER_PORT}
     sysctls:
       # Ensure that `$new_ip` becomes the primary when `$current_ip`
       # is removed. Otherwise all addresses are removed which breaks

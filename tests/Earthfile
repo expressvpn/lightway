@@ -24,7 +24,8 @@ TEST:
     ARG KYBER_CLIENT
 
     ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace --mode ${MODE} ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
-    ARG CLIENT_ARGS="--config-file client_config.yaml --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
+    ARG CLIENT_ARGS="--config-file client_config.yaml --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS}"
+    # ARG CLIENT_ARGS="--config-file client_config.yaml --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
 
     LET CLIENT_IMAGE_CMD="./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian"
     IF [ "$KYBER_CLIENT" = "true" ]
@@ -40,7 +41,7 @@ TEST:
         --load lightway-test-server:latest=$SERVER_IMAGE \
         --load lightway-test-nginx:latest=$NGINX_IMAGE \
         --load lightway-test-iperf:latest=$IPERF_IMAGE
-        RUN --no-cache ./run-with-compose-stack.sh $TEST_SCRIPT
+        RUN --no-cache SERVER_PORT=$SERVER_PORT ./run-with-compose-stack.sh $TEST_SCRIPT
     END
 
 # run-tcp-aes256-test runs e2e test using TCP and AES256 cipher
