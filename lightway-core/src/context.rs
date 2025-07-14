@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::{
-    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError,
+    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError, ExpresslaneCbType,
     InsideIOSendCallbackArg, OutsideIOSendCallbackArg, OutsidePacket, PluginResult,
     RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg, Version,
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
-    wire,
+    wire::{self, ExpresslaneConfig},
 };
 pub use server_auth::{ServerAuth, ServerAuthArg, ServerAuthHandle, ServerAuthResult};
 
@@ -83,12 +83,18 @@ mod test_connection_type {
     }
 }
 
+/// Struct to control [`ExpresslaneConfig`] visibility
+/// Without this, [`ExpresslaneConfig`] has to be made pub
+pub struct ExpresslaneTickData(pub(crate) ExpresslaneConfig);
+
 /// Tick type
 pub enum TickType {
     /// Ticks for connection management
     ConnectionTick,
     /// Ticks for inside packet codec
     PktCodecTick(u64),
+    /// Ticks for Expresslane key sharing
+    ExpresslaneKeyShareTick(ExpresslaneTickData),
 }
 
 /// Type of the application provided method to schedule a call to
@@ -112,6 +118,8 @@ pub struct ClientContext<AppState> {
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
+    pub(crate) rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -135,6 +143,7 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -163,6 +172,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
+            expresslane_cb: None,
         })
     }
 
@@ -193,6 +203,14 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
+    /// Sets callback for expresslane key update
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+        Self {
+            expresslane_cb: Some(cb),
+            ..self
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -204,6 +222,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
+            rng: Arc::new(Mutex::new(rand::rngs::StdRng::from_os_rng())),
+            expresslane_cb: self.expresslane_cb,
         }
     }
 }
@@ -250,6 +270,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -304,6 +325,7 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -366,6 +388,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
+            expresslane_cb: None,
         })
     }
 
@@ -419,6 +442,14 @@ impl<AppState> ServerContextBuilder<AppState> {
         }
     }
 
+    /// Sets callback for expresslane key update
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+        Self {
+            expresslane_cb: Some(cb),
+            ..self
+        }
+    }
+
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
@@ -447,6 +478,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             outside_plugins_instance,
+            expresslane_cb: self.expresslane_cb,
         })
     }
 }

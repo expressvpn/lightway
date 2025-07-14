@@ -15,7 +15,7 @@ pub enum OutsidePacket<'pkt> {
 }
 
 impl<'pkt> OutsidePacket<'pkt> {
-    pub(crate) fn into_payload(self) -> Option<&'pkt BytesMut> {
+    pub(crate) fn into_payload(self) -> Option<&'pkt mut BytesMut> {
         match self {
             Self::Wire(_, _) => None,
             Self::TcpFrame(buf) => Some(buf),

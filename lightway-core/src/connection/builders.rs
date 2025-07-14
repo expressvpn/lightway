@@ -246,6 +246,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
                 auth_method,
                 ip_config_cb: self.ctx.ip_config,
             },
+            rng: self.ctx.rng.clone(),
             inside_io: self.ctx.inside_io,
             schedule_tick_cb: self.ctx.schedule_tick_cb,
             event_cb: self.event_cb,
@@ -255,6 +256,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             pmtud_timer: self.pmtud_timer,
             pmtud_base_mtu: self.pmtud_base_mtu,
             inside_pkt_codec: self.inside_pkt_codec,
+            expresslane_cb: self.ctx.expresslane_cb.clone(),
         })?)
     }
 }
@@ -377,9 +379,9 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
                 auth_handle: None,
                 ip_pool: self.ip_pool,
                 key_update: key_update::State::new(self.ctx.key_update_interval),
-                rng: self.ctx.rng.clone(),
                 pending_session_id: None,
             },
+            rng: self.ctx.rng.clone(),
             outside_mtu: MAX_OUTSIDE_MTU,
             inside_io: Some(self.ctx.inside_io.clone()),
             schedule_tick_cb: self.ctx.schedule_tick_cb,
@@ -390,6 +392,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             pmtud_timer: None,
             pmtud_base_mtu: None,
             inside_pkt_codec: self.inside_pkt_codec,
+            expresslane_cb: self.ctx.expresslane_cb.clone(),
         })?)
     }
 }
