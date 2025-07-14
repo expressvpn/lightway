@@ -52,6 +52,8 @@ mod data;
 mod data_frag;
 mod encoding_request;
 mod encoding_response;
+mod expresslane_config;
+mod expresslane_data;
 mod ping;
 mod pong;
 mod server_config;
@@ -65,6 +67,7 @@ pub(crate) use data::Data;
 pub(crate) use data_frag::DataFrag;
 pub(crate) use encoding_request::EncodingRequest;
 pub(crate) use encoding_response::EncodingResponse;
+pub(crate) use expresslane_config::ExpresslaneConfig;
 pub(crate) use ping::Ping;
 pub(crate) use pong::Pong;
 pub(crate) use server_config::ServerConfig;
@@ -98,6 +101,12 @@ pub enum FromWireError {
     /// The toggle option is not a boolean
     #[error("Invalid toggle option: is not a boolean")]
     InvalidBool,
+    /// Invalid express data path
+    #[error("Invalid express data path")]
+    InvalidExpressDataPath,
+    /// Invalid express data
+    #[error("Invalid express data")]
+    InvalidExpressData,
 }
 
 /// The result of an attempted wire decode.
@@ -285,6 +294,8 @@ pub(crate) enum FrameKind {
     EncodingRequest = 18,
     /// Encoding Response
     EncodingResponse = 19,
+    /// Express Data
+    ExpresslaneConfig = 20,
 }
 
 /// Encapsulates a single frame.
@@ -328,6 +339,8 @@ pub(crate) enum Frame<'data> {
     EncodingRequest(encoding_request::EncodingRequest),
     /// Encoding Response
     EncodingResponse(encoding_response::EncodingResponse),
+    /// Expresslane config
+    ExpresslaneConfig(expresslane_config::ExpresslaneConfig),
 }
 
 impl Frame<'_> {
@@ -347,6 +360,7 @@ impl Frame<'_> {
             Self::EncodedDataFrag(_) => FrameKind::EncodedDataFrag,
             Self::EncodingRequest(_) => FrameKind::EncodingRequest,
             Self::EncodingResponse(_) => FrameKind::EncodingResponse,
+            Self::ExpresslaneConfig(_) => FrameKind::ExpresslaneConfig,
         }
     }
 
@@ -384,6 +398,9 @@ impl Frame<'_> {
             FrameKind::EncodingResponse => {
                 Self::EncodingResponse(EncodingResponse::try_from_wire(&mut buf)?)
             }
+            FrameKind::ExpresslaneConfig => {
+                Self::ExpresslaneConfig(ExpresslaneConfig::try_from_wire(&mut buf)?)
+            }
         };
 
         buf.commit(); // We've successfully parsed a frame, move the
@@ -412,6 +429,7 @@ impl Frame<'_> {
             Self::EncodedDataFrag(df) => df.append_to_wire(buf),
             Self::EncodingRequest(er) => er.append_to_wire(buf),
             Self::EncodingResponse(er) => er.append_to_wire(buf),
+            Self::ExpresslaneConfig(conf) => conf.append_to_wire(buf),
         }
     }
 }
@@ -560,13 +578,14 @@ mod test_frame_kind {
     #[test_case(17 => FrameKind::EncodedDataFrag)]
     #[test_case(18 => FrameKind::EncodingRequest)]
     #[test_case(19 => FrameKind::EncodingResponse)]
+    #[test_case(20 => FrameKind::ExpresslaneConfig)]
     fn try_from_primitive(b: u8) -> FrameKind {
         FrameKind::try_from(b).unwrap()
     }
 
     #[test]
     fn try_from_primitive_out_of_range() {
-        for b in 20..=255 {
+        for b in 21..=255 {
             assert!(FrameKind::try_from(b).is_err())
         }
     }

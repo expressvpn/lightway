@@ -1320,6 +1320,7 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
                 wire::Frame::EncodingRequest(er) => self.process_encoding_request_pkt(er)?,
                 wire::Frame::EncodingResponse(er) => self.process_encoding_response_pkt(er)?,
+                wire::Frame::ExpresslaneConfig(_config) => todo!(),
             };
         }
 

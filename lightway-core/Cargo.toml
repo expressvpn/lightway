@@ -22,6 +22,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bitfield-struct = "0.8.0"
 bytes.workspace = true
 delegate.workspace = true
 lru = "0.16.0"
