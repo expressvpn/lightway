@@ -137,12 +137,13 @@ impl WolfSSLIOAdapter {
         }
     }
 
-    fn udp_send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+    pub(crate) fn udp_send(&self, buf: &[u8], expresslane_data: bool) -> IOCallbackResult<usize> {
         // Prepend our `wire::Header` to the data we've been asked to
         // send.
         let h = wire::Header {
             version: self.protocol_version,
             aggressive_mode: false,
+            expresslane_data,
             session: self.session_id,
         };
 
@@ -291,7 +292,7 @@ impl wolfssl::IOCallbacks for WolfSSLIOAdapter {
     fn send(&mut self, buf: &[u8]) -> IOCallbackResult<usize> {
         match self.connection_type {
             ConnectionType::Stream => self.tcp_send(buf),
-            ConnectionType::Datagram => self.udp_send(buf),
+            ConnectionType::Datagram => self.udp_send(buf, false),
         }
     }
 }
@@ -385,7 +386,7 @@ mod tests {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let plugins = PluginList::from(plugins);
         let a = make_adapter(ConnectionType::Datagram, FakeOutsideIOSend::new(), plugins);
-        a.udp_send(b"abc")
+        a.udp_send(b"abc", false)
     }
 
     // Reminder: `udp_send` adds a 16 byte [`wire::Header`].
@@ -396,7 +397,7 @@ mod tests {
     fn udp_send_io(fakes: Vec<IOCallbackResult<usize>>) -> (IOCallbackResult<usize>, Vec<u8>) {
         let io = FakeOutsideIOSend::with_fakes(fakes.into());
         let a = make_adapter(ConnectionType::Datagram, io.clone(), Default::default());
-        let r = a.udp_send(b"abcdefghi");
+        let r = a.udp_send(b"abcdefghi", false);
 
         let (fakes, sent) = &*io.0.lock().unwrap();
         assert!(fakes.is_empty());
@@ -417,7 +418,7 @@ mod tests {
         let mut a = make_adapter(ConnectionType::Datagram, io.clone(), Default::default());
         a.aggressive_send = true;
 
-        let r = a.udp_send(b"a");
+        let r = a.udp_send(b"a", false);
 
         let (fakes, sent) = &*io.0.lock().unwrap();
         assert!(fakes.is_empty());

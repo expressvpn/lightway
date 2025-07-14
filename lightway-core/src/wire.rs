@@ -169,7 +169,7 @@ impl std::fmt::Debug for SessionId {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |   ASCII 'H'   |   ASCII 'e'   | major_version | minor_version |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |   aggressive  |                   RESERVED                    |
+/// |   aggressive  | express data  |          RESERVED             |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                            Session                            |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -182,6 +182,8 @@ pub struct Header {
     pub version: crate::Version,
     /// Request aggressive mode
     pub aggressive_mode: bool,
+    /// Expresslane data
+    pub expresslane_data: bool,
     /// Session identifier (opaque cookie)
     pub session: SessionId,
 }
@@ -207,7 +209,8 @@ impl Header {
         let minor_version = buf.get_u8();
 
         let aggressive_mode = buf.get_u8() != 0;
-        buf.advance(3); // RESERVED
+        let expresslane_data = buf.get_u8() != 0;
+        buf.advance(2); // RESERVED
 
         let mut session = SessionId::EMPTY;
         buf.copy_to_slice(session.as_mut_slice());
@@ -219,6 +222,7 @@ impl Header {
         Ok(Header {
             version,
             aggressive_mode,
+            expresslane_data,
             session,
         })
     }
@@ -233,7 +237,8 @@ impl Header {
         buf.put_u8(self.version.minor());
 
         buf.put_u8(self.aggressive_mode as u8);
-        buf.put_bytes(0, 3); // RESERVED
+        buf.put_u8(self.expresslane_data as u8);
+        buf.put_bytes(0, 2); // RESERVED
 
         buf.put(self.session.as_slice());
 
@@ -461,6 +466,7 @@ mod test_header {
             Header {
                 version: crate::Version::try_new(1, 2).unwrap(),
                 aggressive_mode: true,
+                expresslane_data: false,
                 session: SessionId([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]),
             },
         );
@@ -496,6 +502,7 @@ mod test_header {
         let h = Header {
             version: crate::Version::try_new(1, 2).unwrap(),
             aggressive_mode: true,
+            expresslane_data: false,
             session: SessionId([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]),
         };
 
