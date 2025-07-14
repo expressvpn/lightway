@@ -110,6 +110,7 @@ impl Connection {
             pub fn activity(&self) -> ConnectionActivity;
             pub fn tick(&self, t: TickType) -> ConnectionResult<()>;
             pub fn authentication_expired(&self) -> ConnectionResult<bool>;
+            pub fn rotate_expresslane_key(&self) -> ConnectionResult<()>;
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
             pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;

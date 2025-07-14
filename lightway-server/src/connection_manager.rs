@@ -187,6 +187,20 @@ async fn handle_stale(conn: Weak<Connection>) {
 }
 
 #[instrument(level = "trace", skip_all)]
+async fn expresslane_key_rotation(conn: Weak<Connection>) {
+    const EXPRESSLANE_REFRESH_KEYS: std::time::Duration = std::time::Duration::from_secs(60 * 15);
+
+    loop {
+        tokio::time::sleep(EXPRESSLANE_REFRESH_KEYS).await;
+        if let Some(conn) = conn.upgrade()
+            && matches!(conn.state(), State::Online)
+        {
+            let _ = conn.rotate_expresslane_key();
+        };
+    }
+}
+
+#[instrument(level = "trace", skip_all)]
 async fn handle_encoded_pkt_send(conn: Weak<Connection>, mut rx: UnboundedReceiver<BytesMut>) {
     loop {
         let Some(encoded_packet) = rx.recv().await else {
@@ -260,6 +274,7 @@ fn new_connection(
 
     tokio::spawn(handle_events(event_stream, Arc::downgrade(&conn)));
     tokio::spawn(handle_stale(Arc::downgrade(&conn)));
+    tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
 
     if let Some((encoded_pkt_receiver, decoded_pkt_receiver)) = pkt_receivers {
         tokio::spawn(handle_encoded_pkt_send(
