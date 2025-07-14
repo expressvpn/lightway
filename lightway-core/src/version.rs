@@ -7,7 +7,7 @@ impl Version {
     pub const MINIMUM: Version = Version(1, 1);
 
     /// The maximum supported protocol version
-    pub const MAXIMUM: Version = Version(1, 2);
+    pub const MAXIMUM: Version = Version(1, 3);
 
     /// Validate and create a new [`Version`].
     pub fn try_new(major: u8, minor: u8) -> Option<Self> {
@@ -47,7 +47,8 @@ mod version_tests {
     #[test_case(1, 0 => false)]
     #[test_case(1, 1 => true)]
     #[test_case(1, 2 => true)]
-    #[test_case(1, 3 => false)]
+    #[test_case(1, 3 => true)]
+    #[test_case(1, 4 => false)]
     #[test_case(2, 0 => false)]
     #[test_case(2, 1 => false)]
     #[test_case(2, 2 => false)]
@@ -130,6 +131,7 @@ mod version_range_inclusive_tests {
     const V_1_1: Version = Version(1, 1);
     const V_1_2: Version = Version(1, 2);
     const V_1_3: Version = Version(1, 3);
+    const V_1_4: Version = Version(1, 4);
 
     #[test_case(V_1_0, V_1_1 => true)]
     #[test_case(V_1_1, V_1_1 => true)]
@@ -168,7 +170,8 @@ mod version_range_inclusive_tests {
     #[test_case(V_1_0 => panics "Maximum version 1.0 is lower than current minimum version 1.1")]
     #[test_case(V_1_1 => VersionRangeInclusive(V_1_1, V_1_1))]
     #[test_case(V_1_2 => VersionRangeInclusive(V_1_1, V_1_2))]
-    #[test_case(V_1_3 => panics "Maximum version 1.3 is greater than highest supported version 1.2")]
+    #[test_case(V_1_3 => VersionRangeInclusive(V_1_1, V_1_3))]
+    #[test_case(V_1_4 => panics "Maximum version 1.4 is greater than highest supported version 1.3")]
     fn set_maximum(v: Version) -> VersionRangeInclusive {
         let r = VersionRangeInclusive(V_1_1, V_1_1);
 

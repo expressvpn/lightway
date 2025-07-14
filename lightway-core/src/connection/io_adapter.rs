@@ -389,8 +389,8 @@ mod tests {
     }
 
     // Reminder: `udp_send` adds a 16 byte [`wire::Header`].
-    #[test_case(vec![] => matches(IOCallbackResult::Ok(n), v) if n == 9 && v == b"He\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefabcdefghi"; "send all")]
-    #[test_case(vec![IOCallbackResult::Ok(10)] => matches(IOCallbackResult::Ok(n), v) if n == 0 && v == b"He\x01\x02\x00\x00\x00\x00\xde\xad"; "less than header")]
+    #[test_case(vec![] => matches(IOCallbackResult::Ok(n), v) if n == 9 && v == b"He\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefabcdefghi"; "send all")]
+    #[test_case(vec![IOCallbackResult::Ok(10)] => matches(IOCallbackResult::Ok(n), v) if n == 0 && v == b"He\x01\x03\x00\x00\x00\x00\xde\xad"; "less than header")]
     #[test_case(vec![IOCallbackResult::WouldBlock] => matches(IOCallbackResult::WouldBlock, v) if v.is_empty(); "would block")]
     #[test_case(vec![IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v.is_empty(); "error")]
     fn udp_send_io(fakes: Vec<IOCallbackResult<usize>>) -> (IOCallbackResult<usize>, Vec<u8>) {
@@ -407,9 +407,9 @@ mod tests {
     // Reminder: `udp_send` adds a 16 byte [`wire::Header`].
     #[test_case(vec![IOCallbackResult::WouldBlock] => matches(IOCallbackResult::WouldBlock, v) if v.is_empty(); "first would block")]
     #[test_case(vec![IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v.is_empty(); "first error")]
-    #[test_case(vec![IOCallbackResult::Ok(16+1), IOCallbackResult::WouldBlock] => matches(IOCallbackResult::WouldBlock, v) if v == b"He\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "second would block")]
-    #[test_case(vec![IOCallbackResult::Ok(16+1), IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v == b"He\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "second error")]
-    #[test_case(vec![] => matches(IOCallbackResult::Ok(n), v) if n == 1 && v == b"He\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefaHe\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefaHe\x01\x02\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "send all ok")]
+    #[test_case(vec![IOCallbackResult::Ok(16+1), IOCallbackResult::WouldBlock] => matches(IOCallbackResult::WouldBlock, v) if v == b"He\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "second would block")]
+    #[test_case(vec![IOCallbackResult::Ok(16+1), IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v == b"He\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "second error")]
+    #[test_case(vec![] => matches(IOCallbackResult::Ok(n), v) if n == 1 && v == b"He\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefaHe\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefaHe\x01\x03\x00\x00\x00\x00\xde\xad\xbe\xef\xde\xad\xbe\xefa"; "send all ok")]
     fn udp_send_io_aggressive(
         fakes: Vec<IOCallbackResult<usize>>,
     ) -> (IOCallbackResult<usize>, Vec<u8>) {
