@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
@@ -8,7 +8,7 @@ use twelf::Layer;
 use lightway_app_utils::{
     TunConfig, Validate, args::ConnectionType, validate_configuration_file_path,
 };
-use lightway_client::*;
+use lightway_client::{io::inside::InsideIO, *};
 
 mod args;
 use args::Config;
@@ -71,11 +71,14 @@ async fn main() -> Result<()> {
         }
     })?;
 
+    let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
+
     let config = ClientConfig {
         mode,
         auth,
         root_ca_cert,
         outside_mtu: config.outside_mtu,
+        inside_io,
         tun_config,
         tun_local_ip: config.tun_local_ip,
         tun_peer_ip: config.tun_peer_ip,

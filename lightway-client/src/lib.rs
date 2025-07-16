@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures::future::OptionFuture;
+pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
     CodecTicker, CodecTickerState, ConnectionTicker, ConnectionTickerState, DplpmtudTimer,
@@ -31,7 +32,6 @@ use pnet::packet::ipv4::Ipv4Packet;
 
 #[cfg(feature = "debug")]
 use crate::debug::WiresharkKeyLogger;
-use crate::io::inside::InsideIO;
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
 #[cfg(feature = "debug")]
@@ -74,7 +74,7 @@ pub enum ClientResult {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
+pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync> {
     /// Connection mode
     pub mode: ClientConnectionMode,
 
@@ -88,6 +88,11 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback> {
 
     /// Outside (wire) MTU
     pub outside_mtu: usize,
+
+    /// Alternate Inside IO to use
+    /// When this is supplied, tun_config will not be used for creating tun interface
+    #[educe(Debug(ignore))]
+    pub inside_io: Option<Arc<dyn InsideIO<T>>>,
 
     /// Tun device to use
     pub tun_config: TunConfig,
@@ -498,8 +503,8 @@ pub async fn encoding_request_task<T: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
-fn validate_client_config<A: 'static + Send + EventCallback>(
-    config: &ClientConfig<'_, A>,
+fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
+    config: &ClientConfig<'_, A, T>,
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
         return Err(anyhow!(
@@ -526,8 +531,8 @@ fn validate_client_config<A: 'static + Send + EventCallback>(
     Ok(())
 }
 
-pub async fn client<A: 'static + Send + EventCallback>(
-    mut config: ClientConfig<'_, A>,
+pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
+    mut config: ClientConfig<'_, A, T>,
 ) -> Result<ClientResult> {
     println!("Client starting with config:\n{:#?}", &config);
 
@@ -560,25 +565,23 @@ pub async fn client<A: 'static + Send + EventCallback>(
         outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
     }
 
-    #[cfg(not(feature = "io-uring"))]
-    let inside_io =
-        io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await;
-
-    #[cfg(feature = "io-uring")]
-    let inside_io = if config.enable_tun_iouring {
-        io::inside::Tun::new_with_iouring(
-            config.tun_config,
-            config.tun_local_ip,
-            config.tun_dns_ip,
-            config.iouring_entry_count,
-            config.iouring_sqpoll_idle_time,
-        )
-        .await
-    } else {
-        io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await
+    let inside_io = match config.inside_io {
+        Some(io) => io,
+        #[cfg(feature = "io-uring")]
+        None if config.enable_tun_iouring => Arc::new(
+            io::inside::Tun::new_with_iouring(
+                config.tun_config,
+                config.tun_local_ip,
+                config.tun_dns_ip,
+                config.iouring_entry_count,
+                config.iouring_sqpoll_idle_time,
+            )
+            .await?,
+        ),
+        None => Arc::new(
+            io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await?,
+        ),
     };
-
-    let inside_io: Arc<dyn InsideIO<()>> = Arc::new(inside_io.context("Tun creation")?);
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
