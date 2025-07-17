@@ -534,7 +534,7 @@ pub async fn encoding_request_task<T: Send + Sync>(
 
 fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
     config: &ClientConfig<'_, T>,
-    server_config: &ClientConnectionConfig<EventHandler>,
+    servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
         return Err(anyhow!(
@@ -542,19 +542,29 @@ fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send 
         ));
     }
 
-    if server_config.inside_pkt_codec.is_some() != server_config.inside_pkt_codec_config.is_some() {
-        return Err(anyhow!(
-            "Inside packet codec has to be provided together with its config, vice versa."
-        ));
+    if servers.is_empty() {
+        return Err(anyhow!("At least one server should be specified"));
     }
 
-    if let Some(inside_pkt_codec_config) = &server_config.inside_pkt_codec_config {
-        if inside_pkt_codec_config.enable_encoding_at_connect
-            && matches!(server_config.mode, ClientConnectionMode::Stream(_))
+    for server_config in servers {
+        if server_config.inside_pkt_codec.is_some()
+            != server_config.inside_pkt_codec_config.is_some()
         {
             return Err(anyhow!(
-                "inside pkt encoding should not be enabled with TCP"
+                "Inside packet codec has to be provided together with its config, vice versa. (Server: {})",
+                server_config.server
             ));
+        }
+
+        if let Some(inside_pkt_codec_config) = &server_config.inside_pkt_codec_config {
+            if inside_pkt_codec_config.enable_encoding_at_connect
+                && matches!(server_config.mode, ClientConnectionMode::Stream(_))
+            {
+                return Err(anyhow!(
+                    "inside pkt encoding should not be enabled with TCP. (Server: {})",
+                    server_config.server
+                ));
+            }
         }
     }
 
@@ -563,13 +573,16 @@ fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send 
 
 pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
     config: ClientConfig<'_, T>,
-    mut server_config: ClientConnectionConfig<EventHandler>,
+    servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
     println!("Client starting with config:\n{:#?}", &config);
 
-    validate_client_config(&config, &server_config)?;
+    validate_client_config(&config, &servers)?;
 
     let mut join_set = JoinSet::new();
+
+    // Use the first server for now
+    let mut server_config = servers.into_iter().next().unwrap();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match server_config.mode {
