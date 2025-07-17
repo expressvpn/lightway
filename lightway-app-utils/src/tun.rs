@@ -1,14 +1,18 @@
 use anyhow::Result;
 use bytes::BytesMut;
+use educe::Educe;
 use lightway_core::IOCallbackResult;
 
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
 use std::{
+    mem::ManuallyDrop,
     net::{IpAddr, Ipv4Addr},
     os::fd::{AsRawFd, IntoRawFd, RawFd},
 };
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::os::fd::FromRawFd;
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
 use tun_rs::AsyncDevice;
@@ -22,7 +26,8 @@ use crate::IOUring;
 ///
 /// This struct provides a builder-like interface for configuring TUN interfaces
 /// with various network settings including address assignment, routing, and MTU.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug, Educe)]
+#[educe(Default)]
 pub struct TunConfig {
     /// Optional name for the TUN interface (e.g., "utun3" on macOS)
     pub tun_name: Option<String>,
@@ -36,6 +41,11 @@ pub struct TunConfig {
     pub mtu: Option<u16>,
     /// Whether the interface should be brought up after creation
     pub enabled: bool,
+    /// File Descriptor of the Tunnel
+    pub fd: Option<RawFd>,
+    /// Whether to close the file descriptor when the TUN device is dropped
+    #[educe(Default = true)]
+    pub close_fd_on_drop: bool,
 }
 
 impl TunConfig {
@@ -76,6 +86,20 @@ impl TunConfig {
         self.enabled = true;
         self
     }
+    /// Set the file descriptor
+    pub fn raw_fd(&mut self, fd: RawFd) -> &mut Self {
+        self.fd = Some(fd);
+        self
+    }
+    /// Set whether to close the received raw file descriptor on drop or not.
+    /// The default behaviour is to close the received or tun generated file descriptor.
+    /// Note: If this is set to true, it is up to the caller to ensure the
+    /// file descriptor (obtainable via [`AsRawFd::as_raw_fd`]) is properly closed.
+    pub fn close_fd_on_drop(&mut self, value: bool) -> &mut Self {
+        self.close_fd_on_drop = value;
+        self
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -115,6 +139,24 @@ impl TunConfig {
                 }
             }
         }
+        Ok(device)
+    }
+    /// Creates an async device based on TunConfig
+    #[allow(unsafe_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
+        let device = match self.fd {
+            Some(fd) => {
+                // SAFETY: The caller must ensure `fd` is a valid TUN device file descriptor
+                // and transfer exclusive ownership to this function. The AsyncDevice will
+                // properly close the fd when dropped.
+                unsafe { tun_rs::AsyncDevice::from_raw_fd(fd) }
+            }
+            None => {
+                return Err(std::io::Error::other("Unable to create device without fd"));
+            }
+        };
+
         Ok(device)
     }
 }
@@ -195,9 +237,10 @@ impl AsRawFd for Tun {
 
 /// Tun struct
 pub struct TunDirect {
-    tun: AsyncDevice,
+    tun: ManuallyDrop<AsyncDevice>,
     mtu: u16,
     fd: RawFd,
+    close_fd_on_drop: bool,
 }
 
 impl TunDirect {
@@ -209,7 +252,14 @@ impl TunDirect {
         let mtu = tun_device.mtu()?;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mtu = 1350;
-        Ok(TunDirect { tun, mtu, fd })
+        let tun = ManuallyDrop::new(tun_device);
+
+        Ok(TunDirect {
+            tun,
+            mtu,
+            fd,
+            close_fd_on_drop: config.close_fd_on_drop,
+        })
     }
 
     /// Recv from Tun
@@ -258,6 +308,34 @@ impl TunDirect {
 impl AsRawFd for TunDirect {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
+    }
+}
+
+impl IntoRawFd for TunDirect {
+    fn into_raw_fd(mut self) -> RawFd {
+        // Alters state to prevent drop from closing fd
+        self.close_fd_on_drop = false;
+        self.fd
+    }
+}
+
+impl Drop for TunDirect {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        if self.close_fd_on_drop {
+            // Manually drop the AsyncDevice (closes the fd)
+            // SAFETY: This is the final drop of TunDirect, so we have exclusive access to self.tun.
+            // ManuallyDrop::drop is safe here because we never access self.tun again after this call.
+            unsafe {
+                ManuallyDrop::drop(&mut self.tun);
+            }
+        } else {
+            // Take ownership and call into_raw_fd (prevents fd closure)
+            // SAFETY: This is the final drop of TunDirect, so we have exclusive access to self.tun.
+            // ManuallyDrop::take is safe here because we immediately consume the value and never access self.tun again.
+            let tun = unsafe { ManuallyDrop::take(&mut self.tun) };
+            let _ = tun.into_raw_fd();
+        }
     }
 }
 
