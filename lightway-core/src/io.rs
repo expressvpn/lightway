@@ -16,7 +16,7 @@ pub trait InsideIOSendCallback<AppState> {
     fn mtu(&self) -> usize;
 
     /// Interface Index of tun
-    fn if_index(&self) -> std::io::Result<i32>;
+    fn if_index(&self) -> std::io::Result<u32>;
 }
 
 /// Convenience type to use as function arguments

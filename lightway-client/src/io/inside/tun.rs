@@ -22,14 +22,14 @@ pub struct Tun {
 }
 
 impl Tun {
-    pub async fn new(tun: &TunConfig, ip: Ipv4Addr, dns_ip: Ipv4Addr) -> Result<Self> {
+    pub async fn new(tun: TunConfig, ip: Ipv4Addr, dns_ip: Ipv4Addr) -> Result<Self> {
         let tun = AppUtilsTun::direct(tun).await?;
         Ok(Tun { tun, ip, dns_ip })
     }
 
     #[cfg(feature = "io-uring")]
     pub async fn new_with_iouring(
-        tun: &TunConfig,
+        tun: TunConfig,
         ip: Ipv4Addr,
         dns_ip: Ipv4Addr,
         iouring_ring_size: usize,
@@ -39,7 +39,7 @@ impl Tun {
         Ok(Tun { tun, ip, dns_ip })
     }
 
-    pub fn if_index(&self) -> std::io::Result<i32> {
+    pub fn if_index(&self) -> std::io::Result<u32> {
         self.tun.if_index()
     }
 }
@@ -103,7 +103,7 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
         self.tun.mtu()
     }
 
-    fn if_index(&self) -> std::io::Result<i32> {
+    fn if_index(&self) -> std::io::Result<u32> {
         self.if_index()
     }
 }
