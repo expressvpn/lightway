@@ -5,19 +5,119 @@ use lightway_core::IOCallbackResult;
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
 use std::{
-    ops::Deref,
-    os::fd::{AsRawFd, RawFd},
+    net::{IpAddr, Ipv4Addr},
+    os::fd::{AsRawFd, IntoRawFd, RawFd},
 };
-
-use tun::{AbstractDevice, AsyncDevice as TokioTun};
-
-pub use tun::Configuration as TunConfig;
 
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
+use tun_rs::AsyncDevice;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use tun_rs::DeviceBuilder;
 
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
+
+/// Configuration options for creating a interface
+///
+/// This struct provides a builder-like interface for configuring TUN interfaces
+/// with various network settings including address assignment, routing, and MTU.
+#[derive(Clone, Default, Debug)]
+pub struct TunConfig {
+    /// Optional name for the TUN interface (e.g., "utun3" on macOS)
+    pub tun_name: Option<String>,
+    /// IP address to assign to the TUN interface (IPv4 or IPv6)
+    pub address: Option<IpAddr>,
+    /// Destination/gateway address for the TUN interface
+    pub destination: Option<Ipv4Addr>,
+    /// Network mask for the assigned address (defaults to host route if not specified)
+    pub prefix: Option<u8>,
+    /// Maximum transmission unit size in bytes
+    pub mtu: Option<u16>,
+    /// Whether the interface should be brought up after creation
+    pub enabled: bool,
+}
+
+impl TunConfig {
+    /// Set the tun name.
+    /// # Note:
+    /// On macOS, the tun name must be the form `utunx` where `x` is a number, such as `utun3`
+    pub fn tun_name<T: Into<String>>(&mut self, tun_name: T) -> &mut Self {
+        self.tun_name = Some(tun_name.into());
+        self
+    }
+
+    /// Set the gateway address.
+    pub fn address(&mut self, value: IpAddr) -> &mut Self {
+        self.address = Some(value);
+        self
+    }
+
+    /// Set the destination address.
+    pub fn destination(&mut self, value: Ipv4Addr) -> &mut Self {
+        self.destination = Some(value);
+        self
+    }
+
+    /// Set the netmask for address
+    pub fn prefix(&mut self, prefix: u8) -> &mut Self {
+        self.prefix = Some(prefix);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(&mut self, value: u16) -> &mut Self {
+        self.mtu = Some(value);
+        self
+    }
+
+    /// Set the interface to be enabled once created.
+    pub fn up(&mut self) -> &mut Self {
+        self.enabled = true;
+        self
+    }
+    /// Creates an async device based on TunConfig
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
+        let mut builder = DeviceBuilder::new();
+        if let Some(name) = self.tun_name.as_ref() {
+            builder = builder.name(name);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.associate_route(false);
+        }
+        let device = builder.build_async()?;
+
+        if let Some(mtu) = self.mtu {
+            device.set_mtu(mtu)?;
+        }
+
+        device.enabled(self.enabled)?;
+
+        if let Some(address) = self.address {
+            match address {
+                IpAddr::V4(ipv4_addr) => {
+                    let netmask = self
+                        .prefix
+                        .map(|x| x.min(Ipv4Addr::BITS as u8))
+                        .unwrap_or(Ipv4Addr::BITS as u8);
+                    device.set_network_address(ipv4_addr, netmask, self.destination)?;
+                }
+                IpAddr::V6(ipv6_addr) => {
+                    use std::net::Ipv6Addr;
+
+                    let netmask = self
+                        .prefix
+                        .map(|x| x.min(Ipv6Addr::BITS as u8))
+                        .unwrap_or(Ipv6Addr::BITS as u8);
+                    device.add_address_v6(ipv6_addr, netmask)?;
+                }
+            }
+        }
+        Ok(device)
+    }
+}
 
 /// Tun enum interface to read/write packets
 pub enum Tun {
@@ -95,7 +195,7 @@ impl AsRawFd for Tun {
 
 /// Tun struct
 pub struct TunDirect {
-    tun: TokioTun,
+    tun: AsyncDevice,
     mtu: u16,
     fd: RawFd,
 }
@@ -103,10 +203,12 @@ pub struct TunDirect {
 impl TunDirect {
     /// Create a new `Tun` struct
     pub fn new(config: &TunConfig) -> Result<Self> {
-        let tun = tun::create_as_async(config)?;
-        let fd = tun.as_raw_fd();
-        let mtu = tun.mtu()?;
-
+        let tun_device = config.create_as_async()?;
+        let fd = tun_device.as_raw_fd();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mtu = tun_device.mtu()?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let mtu = 1350;
         Ok(TunDirect { tun, mtu, fd })
     }
 
@@ -130,8 +232,7 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        let try_send_res = self.tun.deref().send(&buf[..]);
-        match try_send_res {
+        match self.tun.try_send(&buf[..]) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
