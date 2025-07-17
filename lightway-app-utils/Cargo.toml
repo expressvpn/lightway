@@ -39,7 +39,7 @@ tokio-stream = { workspace = true, optional = true }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
-tun.workspace = true 
+tun-rs.workspace = true 
 
 [[example]]
 name = "udprelay"

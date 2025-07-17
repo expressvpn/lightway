@@ -547,7 +547,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
     ) -> Result<()> {
-        let tun_index = self.inside_io.if_index().map(|i| i as u32)?;
+        let tun_index = self.inside_io.if_index()?;
 
         let mut route_table = RoutingTable::new(route_mode)?;
         tracing::trace!(
@@ -908,16 +908,6 @@ fn validate_client_config<
     Ok(())
 }
 
-fn apply_platform_specific_config(
-    #[allow(unused_variables)] // macOS specific
-    config: &mut TunConfig,
-) {
-    #[cfg(target_os = "macos")]
-    config.platform_config(|config| {
-        config.enable_routing(false);
-    });
-}
-
 /// Launches connections concurrently and waits for the first one to complete.
 /// If `config.preferred_connection_wait_interval` is set, it will wait that
 /// duration after the first connection completes before returning the highest
@@ -936,14 +926,13 @@ pub async fn client<
     );
 
     validate_client_config(&config, &servers)?;
-    apply_platform_specific_config(&mut config.tun_config);
 
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),
         #[cfg(feature = "io-uring")]
         None if config.enable_tun_iouring => Arc::new(
             io::inside::Tun::new_with_iouring(
-                &config.tun_config,
+                config.tun_config.clone(),
                 config.tun_local_ip,
                 config.tun_dns_ip,
                 config.iouring_entry_count,
@@ -952,8 +941,12 @@ pub async fn client<
             .await?,
         ),
         None => Arc::new(
-            io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
-                .await?,
+            io::inside::Tun::new(
+                config.tun_config.clone(),
+                config.tun_local_ip,
+                config.tun_dns_ip,
+            )
+            .await?,
         ),
     };
 
