@@ -4,6 +4,7 @@ use bytesize::ByteSize;
 use clap::Parser;
 use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
+use serde::Serialize;
 use std::{net::Ipv4Addr, path::PathBuf};
 use twelf::config;
 
@@ -15,9 +16,37 @@ pub struct Config {
     #[clap(short, long)]
     pub config_file: PathBuf,
 
+    /// Servers to attempt to connect to. Configuration is only supported in
+    /// config file, not command line or environment variable
+    #[clap(skip)]
+    #[serde(default)]
+    pub servers: Vec<ConnectionConfig>,
+
+    /// Server to connect to in <hostname>:<port> format
+    /// Only used if `servers` is empty
+    #[clap(short, long, default_value_t)]
+    pub server: String,
+
     /// Connection mode
+    /// Only used if `servers` is empty
     #[clap(short, long, value_enum, default_value_t = ConnectionType::Tcp)]
     pub mode: ConnectionType,
+
+    /// Server domain name
+    /// Only used if `servers` is empty
+    #[clap(long, default_value = None)]
+    pub server_dn: Option<String>,
+
+    /// Cipher to use for encryption
+    /// Only used if `servers` is empty
+    #[clap(long, value_enum, default_value_t = Cipher::Aes256)]
+    pub cipher: Cipher,
+
+    /// Enable inside packet encoding once lightway connects
+    /// Only used if a codec is set
+    /// Only used if `servers` is empty
+    #[clap(short, long, default_value_t)]
+    pub enable_inside_pkt_encoding_at_connect: bool,
 
     /// Auth token
     /// If both token and user/pass are provided, token auth will
@@ -56,10 +85,6 @@ pub struct Config {
     /// DNS IP to use in Tun device
     #[clap(long, default_value = "100.64.0.1")]
     pub tun_dns_ip: Ipv4Addr,
-
-    /// Cipher to use for encryption
-    #[clap(long, value_enum, default_value_t = Cipher::Aes256)]
-    pub cipher: Cipher,
 
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
@@ -124,19 +149,6 @@ pub struct Config {
     #[clap(long, default_value = "100ms")]
     pub iouring_sqpoll_idle_time: Duration,
 
-    /// Server domain name
-    #[clap(long, default_value = None)]
-    pub server_dn: Option<String>,
-
-    /// Server to connect to
-    #[clap(short, long, default_value_t)]
-    pub server: String,
-
-    /// Enable inside packet encoding once lightway connects
-    /// Only used if a codec is set
-    #[clap(short, long, default_value_t)]
-    pub enable_inside_pkt_encoding_at_connect: bool,
-
     /// File path to save wireshark keylog
     #[cfg(feature = "debug")]
     #[clap(long, default_value = None)]
@@ -157,5 +169,49 @@ impl Config {
                 "Either a token or username and password is required"
             )),
         }
+    }
+}
+
+#[config]
+#[derive(Parser, Debug, Serialize)]
+pub struct ConnectionConfig {
+    /// Server to connect to in <hostname>:<port> format
+    pub server: String,
+
+    /// Connection mode
+    #[serde(default)]
+    pub mode: ConnectionType,
+
+    /// Server domain name
+    #[serde(default)]
+    pub server_dn: Option<String>,
+
+    /// Cipher to use for encryption
+    #[serde(default)]
+    pub cipher: Cipher,
+
+    /// Enable inside packet encoding once lightway connects
+    /// Only used if a codec is set
+    #[serde(default)]
+    pub enable_inside_pkt_encoding_at_connect: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+    use clap::CommandFactory;
+    use test_case::test_case;
+    use twelf::Layer;
+
+    #[test_case("../tests/client/client_config.yaml")]
+    #[test_case("../tests/client/client_config.parallel_connect.yaml")]
+    fn test_parse_config(config_file: &str) {
+        let matches =
+            Config::command().get_matches_from(["lightway-client", "--config-file", config_file]);
+        let config_file = PathBuf::from_str(config_file).unwrap();
+        let _config =
+            Config::with_layers(&[Layer::Yaml(config_file), Layer::Clap(matches)]).unwrap();
     }
 }
