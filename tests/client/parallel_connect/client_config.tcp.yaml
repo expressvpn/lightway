@@ -1,0 +1,72 @@
+---
+servers:
+  # Wrong port 1
+  - server: server:27691
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 2
+  - server: server:27692
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 3
+  - server: server:27693
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 4
+  - server: server:27694
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 5
+  - server: server:27695
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 6
+  - server: server:27696
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 7
+  - server: server:27697
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong port 8
+  - server: server:27698
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Right server 1
+  - server: server:27690
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Right server 2
+  - server: server:27690
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+ca_cert: "tests/certs/ca.crt"
+tun_name: lightway
+tun_local_ip: 100.64.0.6
+tun_peer_ip: 100.64.0.5
+tun_dns_ip: 100.64.0.1
+log_level: info
+user: user
+password: password
+outside_mtu: 1500
+enable_pqc: false
+enable_tun_iouring: false
+# iouring_sqpoll_idle_time: 100ms
+iouring_entry_count: 1024
+keepalive_interval: 0s
+keepalive_timeout: 0s
+enable_pmtud: false
+# sndbuf: 1.5 MiB
+# rcvbuf: 1.5 MiB
+route_mode: default
+preferred_connection_wait_interval: 2s
