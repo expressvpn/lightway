@@ -72,7 +72,7 @@ impl<T> InsideIOSendCallback<T> for ChannelTun {
         1350
     }
 
-    fn if_index(&self) -> Result<i32> {
+    fn if_index(&self) -> Result<u32> {
         Err(anyhow!("Not Implemented"))
     }
 }

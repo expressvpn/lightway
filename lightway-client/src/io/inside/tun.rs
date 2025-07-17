@@ -39,7 +39,7 @@ impl Tun {
         Ok(Tun { tun, ip, dns_ip })
     }
 
-    pub fn if_index(&self) -> Result<i32> {
+    pub fn if_index(&self) -> Result<u32> {
         self.tun.if_index()
     }
 }
@@ -97,7 +97,7 @@ impl<T: Send + Sync> InsideIOSendCallback<ConnectionState<T>> for Tun {
         self.tun.mtu()
     }
 
-    fn if_index(&self) -> Result<i32> {
+    fn if_index(&self) -> Result<u32> {
         self.if_index()
     }
 }

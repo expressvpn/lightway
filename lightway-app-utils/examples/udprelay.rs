@@ -9,7 +9,7 @@ use pnet::packet::ipv4::MutableIpv4Packet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tun::{AsyncDevice as Tun, Configuration as TunConfig};
+use tun_rs::{AsyncDevice as Tun, Configuration as TunConfig};
 
 const PORT: u16 = 40890;
 const CHANNEL_SIZE: usize = 32 * 1024;
