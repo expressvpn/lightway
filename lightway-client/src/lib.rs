@@ -569,13 +569,24 @@ fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send 
     Ok(())
 }
 
+fn apply_platform_specific_config(
+    #[allow(unused_variables)] // macOS specific
+    config: &mut TunConfig,
+) {
+    #[cfg(target_os = "macos")]
+    config.platform_config(|config| {
+        config.enable_routing(false);
+    });
+}
+
 pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
-    config: ClientConfig<'_, T>,
+    mut config: ClientConfig<'_, T>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
     println!("Client starting with config:\n{:#?}", &config);
 
     validate_client_config(&config, &servers)?;
+    apply_platform_specific_config(&mut config.tun_config);
 
     let mut join_set = JoinSet::new();
 
@@ -612,7 +623,7 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
         #[cfg(feature = "io-uring")]
         None if config.enable_tun_iouring => Arc::new(
             io::inside::Tun::new_with_iouring(
-                config.tun_config,
+                &config.tun_config,
                 config.tun_local_ip,
                 config.tun_dns_ip,
                 config.iouring_entry_count,
@@ -621,7 +632,8 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
             .await?,
         ),
         None => Arc::new(
-            io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await?,
+            io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
+                .await?,
         ),
     };
 
