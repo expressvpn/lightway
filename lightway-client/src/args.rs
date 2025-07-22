@@ -22,7 +22,7 @@ pub struct Config {
     #[serde(default)]
     pub servers: Vec<ConnectionConfig>,
 
-    /// Server to connect to
+    /// Server to connect to in <hostname>:<port> format
     /// Only used if `servers` is empty
     #[clap(short, long, default_value_t)]
     pub server: String,

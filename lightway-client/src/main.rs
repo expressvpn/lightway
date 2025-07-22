@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
         iouring_entry_count: config.iouring_entry_count,
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        stop_signal: ctrlc_rx,
+        stop_signal: Some(ctrlc_rx),
         network_change_signal: None,
         #[cfg(feature = "debug")]
         tls_debug: config.tls_debug,

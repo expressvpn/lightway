@@ -78,6 +78,24 @@ pub enum RoutingTableError {
     ServerRouteAlreadyExists,
 }
 
+pub struct RouteConfig {
+    pub server_ip: IpAddr,
+    pub tun_index: u32,
+    pub tun_peer_ip: IpAddr,
+    pub tun_dns_ip: IpAddr,
+}
+
+impl RouteConfig {
+    pub fn new(server_ip: IpAddr, tun_index: u32, tun_peer_ip: IpAddr, tun_dns_ip: IpAddr) -> Self {
+        Self {
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+        }
+    }
+}
+
 pub struct RoutingTable {
     routing_mode: RouteMode,
     route_manager: RouteManager,
