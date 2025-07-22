@@ -37,7 +37,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
-tracing.workspace = true
+tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true}
 twelf.workspace = true
 
