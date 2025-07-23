@@ -2,5 +2,12 @@ VERSION 0.8
 
 build-container:
     FROM earthly/dind:ubuntu
-    COPY docker-compose.yml run-with-compose-stack.sh run-simple-test.sh run-udp-floating-test.sh .
+    COPY \
+        docker-compose.yml \
+        docker-compose.parallel_connect.yml \
+        run-with-compose-stack.sh \
+        run-simple-test.sh \
+        run-udp-floating-test.sh \
+        run-parallel-connect-test.sh \
+        .
 
