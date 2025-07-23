@@ -8,7 +8,13 @@ echo ""
 echo "====================================================================="
 echo "Ping server"
 echo "====================================================================="
-ping -W 1 -c 3 server
+
+config_file=$(echo "$@" | grep -oP '(?<=--config-file )\S+')
+echo "Using config file: $config_file"
+# Take the first entry of `servers` or the top-level `server` field
+server=$(grep -m1 'server: ' "$config_file" | sed -E 's/^[- ]*server: *(.+):.+$/\1/')
+echo "Server found: $server"
+ping -W 1 -c 3 "$server"
 
 echo ""
 echo "====================================================================="

@@ -39,11 +39,10 @@ function on_exit() {
     echo "CONTAINER LOGS"
     echo "====================================================================="
 
-    docker compose logs client
-    echo ""
-    docker compose logs server
-    echo ""
-    docker compose logs nginx
+    for service in $(docker compose --file "$compose_file" config --services); do
+        docker compose logs "$service"
+        echo ""
+    done
 
     run_hooks pre-compose-down
     echo ""
@@ -62,10 +61,12 @@ function on_exit() {
 }
 
 if [ $# -lt 1 ] ; then
-    echo "A test script to be run is required"
+    echo "Usage: $0 <compose_file> <test_script> [<args>]"
     exit 1
 fi
-test_script="$1" ; shift
+compose_file="$1"
+test_script="$2"
+args=( "${@:3}" )
 
 trap on_exit EXIT
 
@@ -74,7 +75,7 @@ echo ""
 echo "====================================================================="
 echo "SETUP COMPOSE STACK"
 echo "====================================================================="
-docker compose up --detach --wait --wait-timeout 15
+docker compose --file "$compose_file" up --detach --wait --wait-timeout 15
 run_hooks post-compose-up
 
 echo ""
@@ -86,5 +87,5 @@ echo ""
 echo "====================================================================="
 echo "RUNNING $test_script $*"
 echo "====================================================================="
-$test_script "$@"
+"$test_script" "${args[@]}"
 run_hooks post-test

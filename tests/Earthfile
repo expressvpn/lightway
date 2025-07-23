@@ -19,12 +19,21 @@ TEST:
     ARG SERVER_PORT
     ARG SERVER_EXTRA_ARGS=""
     ARG CLIENT_EXTRA_ARGS=""
+    ARG CLIENT_CONFIG_FILE="client_config.yaml"
+    ARG COMPOSE_FILE="./docker-compose.yml"
     ARG TEST_SCRIPT=./run-simple-test.sh
 
     ARG KYBER_CLIENT
 
-    ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace --mode ${MODE} ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
-    ARG CLIENT_ARGS="--config-file client_config.yaml --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
+    ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
+    ARG CLIENT_ARGS="--config-file ${CLIENT_CONFIG_FILE} --log-level trace ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
+
+    LET SERVER_ARGS=$SERVER_ARGS
+    LET CLIENT_ARGS=$CLIENT_ARGS
+    IF [ -n "$MODE" ]
+        SET SERVER_ARGS="$SERVER_ARGS --mode=$MODE"
+        SET CLIENT_ARGS="$CLIENT_ARGS --mode=$MODE"
+    END
 
     LET CLIENT_IMAGE_CMD="./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian"
     IF [ "$KYBER_CLIENT" = "true" ]
@@ -40,7 +49,7 @@ TEST:
         --load lightway-test-server:latest=$SERVER_IMAGE \
         --load lightway-test-nginx:latest=$NGINX_IMAGE \
         --load lightway-test-iperf:latest=$IPERF_IMAGE
-        RUN --no-cache ./run-with-compose-stack.sh $TEST_SCRIPT
+        RUN --no-cache ./run-with-compose-stack.sh $COMPOSE_FILE $TEST_SCRIPT
     END
 
 # run-tcp-aes256-test runs e2e test using TCP and AES256 cipher
@@ -107,6 +116,22 @@ run-udp-single-threaded-test:
 run-tcp-single-threaded-test:
     DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_TOKIO_WORKER_THREADS=1 --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-pmtud"
 
+# run-tcp-parallel-connect-test runs e2e test of client connecting to multiple wrong servers and one TCP server
+run-tcp-parallel-connect-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="parallel_connect/client_config.tcp.yaml" --TEST_SCRIPT="./run-simple-test.sh server_tcp"
+
+# run-udp-parallel-connect-test runs e2e test of client connecting to multiple wrong servers and one UDP server
+run-udp-parallel-connect-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="parallel_connect/client_config.udp.yaml" --TEST_SCRIPT="./run-simple-test.sh server_udp"
+
+# run-tcp-then-udp-parallel-connect-test runs e2e test of client connecting to a TCP and UDP server, with the TCP server as priority
+run-tcp-then-udp-parallel-connect-test:
+    DO +TEST --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="parallel_connect/client_config.tcp_then_udp.yaml" --COMPOSE_FILE="docker-compose.parallel_connect.yml" --TEST_SCRIPT="./run-parallel-connect-test.sh server_tcp"
+
+# run-udp-then-tcp-parallel-connect-test runs e2e test of client connecting to a UDP and TCP server, with the UDP server as priority
+run-udp-then-tcp-parallel-connect-test:
+    DO +TEST --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="parallel_connect/client_config.udp_then_tcp.yaml" --COMPOSE_FILE="docker-compose.parallel_connect.yml" --TEST_SCRIPT="./run-parallel-connect-test.sh server_udp"
+
 # run-token-auth-test runs a test of the token auth
 run-token-auth-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQ4ODMxMTM0MTZ9.gb0U7xTwxl7GDeKftKSZvnkkIDnoz8NmzJ4etukCjtZWzA4kSNbt84iTKOE14paRZdfE67tLGfcLsqA9uh-zuA_-ecZbiC4znz2CVVjhD2CIrW_0LQbHRbzYlOozjc108pct-VivtiPr7SqcIgRTjH59HTCDXtgp0kELhhr3NNfYP0-6DtadXQ_Twn2tcC3A-rTpfjwo7HDqnc43niCALXFhqR0F4DkEC3amKuOiP9afQ6dFmWVAzWXWEpQ_kK-EsCeBZ6K89GaF5quIErrV3U_FSwbX8biFB7S8VhkLqCoyabRKKprwp_mi24e91URgGqNvbCrXs2zrJMat-1zUvw" --SERVER_EXTRA_ARGS="--token-rsa-pub-key-pem /token.pub"
@@ -129,3 +154,7 @@ run-all-tests:
     BUILD +run-tcp-keepalive-test
     BUILD +run-udp-single-threaded-test
     BUILD +run-tcp-single-threaded-test
+    BUILD +run-tcp-parallel-connect-test
+    BUILD +run-udp-parallel-connect-test
+    BUILD +run-tcp-then-udp-parallel-connect-test
+    BUILD +run-udp-then-tcp-parallel-connect-test
