@@ -210,7 +210,7 @@ mod tests {
     use twelf::Layer;
 
     #[test_case("../tests/client/client_config.yaml")]
-    #[test_case("../tests/client/client_config.parallel_connect.yaml")]
+    #[test_case("../tests/client/client_config.parallel_connect.tcp.yaml")]
     fn test_parse_config(config_file: &str) {
         let matches =
             Config::command().get_matches_from(["lightway-client", "--config-file", config_file]);

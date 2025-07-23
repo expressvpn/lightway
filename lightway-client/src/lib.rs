@@ -557,9 +557,12 @@ async fn handle_first_connection_online(
 ) -> Option<usize> {
     let mut best_connection_index = connected_rx.recv().await?;
 
+    tracing::debug!("First connection is online: {best_connection_index}");
+
     if !defer_connect_timeout.is_zero() {
         tokio::time::sleep(defer_connect_timeout).await;
         while let Ok(index) = connected_rx.try_recv() {
+            tracing::debug!("Connection is online: {index}");
             best_connection_index = best_connection_index.min(index);
         }
     }
@@ -633,7 +636,7 @@ fn apply_platform_specific_config(
 
 #[tracing::instrument(
     level = "info",
-    fields(server = server_config.server.to_string(), index = server_index),
+    fields(server = server_config.server.to_string()),
     skip(
         config,
         server_config,
@@ -952,6 +955,8 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
     }));
 
     let mut best_connection_index = None;
+
+    tracing::trace!("Waiting for first connection...");
 
     tokio::select! {
         index = handle_first_connection_online(connected_rx, stop_signal, stop_txs, config.defer_connect_timeout) => {

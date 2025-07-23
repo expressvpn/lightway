@@ -11,7 +11,11 @@ build-container:
         COPY (../..+build/lightway-client --debian=$debian) .
     END
     COPY --dir ../certs+client/* tests/certs/
-    COPY --dir --chmod 0600 client_config.yaml .
+    COPY --dir --chmod 0600 \
+        client_config.yaml \
+        client_config.parallel_connect.tcp.yaml \
+        client_config.parallel_connect.udp.yaml \
+        .
     COPY --dir docker-entrypoint.sh run-test-inside.sh .
     HEALTHCHECK --interval=1s --timeout=1s --start-period=0s --retries=30 CMD ping -c1 nginx
     IF [ -n "$TOKIO_WORKER_THREADS" ]

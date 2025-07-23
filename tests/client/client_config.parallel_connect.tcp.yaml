@@ -1,9 +1,26 @@
 ---
 servers:
+  # Invalid server hostname
   - server: invalid_server:27690
     mode: tcp
     server_dn: goaway.com
     cipher: aes256
+  # Wrong port
+  - server: server:27691
+    mode: tcp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong protocol
+  - server: server:27691
+    mode: udp
+    server_dn: goaway.com
+    cipher: aes256
+  # Wrong dn
+  - server: server:27690
+    mode: tcp
+    server_dn: example.com
+    cipher: aes256
+  # Right server
   - server: server:27690
     mode: tcp
     server_dn: goaway.com
@@ -27,3 +44,4 @@ enable_pmtud: false
 # sndbuf: 1.5 MiB
 # rcvbuf: 1.5 MiB
 route_mode: default
+
