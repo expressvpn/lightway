@@ -99,6 +99,10 @@ pub struct Config {
     #[clap(long, default_value = "0s")]
     pub keepalive_timeout: Duration,
 
+    /// Defer connect timeout
+    #[clap(long, default_value = "0s")]
+    pub defer_connect_timeout: Duration,
+
     /// Socket send buffer size
     #[clap(long)]
     pub sndbuf: Option<ByteSize>,

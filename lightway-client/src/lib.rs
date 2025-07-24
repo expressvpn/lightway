@@ -132,6 +132,10 @@ pub struct ClientConfig<'cert, T: Send + Sync> {
     /// of only during network change events
     pub continuous_keepalive: bool,
 
+    /// How long to wait for the first connection goes online before choosing
+    /// the best connection
+    pub defer_connect_timeout: Duration,
+
     /// Socket send buffer size
     pub sndbuf: Option<ByteSize>,
     /// Socket receive buffer size
@@ -541,14 +545,24 @@ pub async fn encoding_request_task<T: Send + Sync>(
 
 /// Returns the index of the best connection
 /// When the first connection is established, we need to:
-/// 1. Disconnect all other connections
-/// 2. Forward the stop signal to the remaining connection
+/// 1. Wait for the defer connect timeout
+/// 2. Find the best connection
+/// 3. Disconnect all connections
+/// 4. Forward the stop signal to the best connection
 async fn handle_first_connection_online(
     mut connected_rx: mpsc::Receiver<usize>,
     mut stop_signal: Option<oneshot::Receiver<()>>,
     mut stop_txs: Vec<oneshot::Sender<()>>,
+    defer_connect_timeout: Duration,
 ) -> Option<usize> {
-    let best_connection_index = connected_rx.recv().await?;
+    let mut best_connection_index = connected_rx.recv().await?;
+
+    if !defer_connect_timeout.is_zero() {
+        tokio::time::sleep(defer_connect_timeout).await;
+        while let Ok(index) = connected_rx.try_recv() {
+            best_connection_index = best_connection_index.min(index);
+        }
+    }
 
     let stop_tx = stop_txs.swap_remove(best_connection_index);
 
@@ -837,6 +851,9 @@ pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Send + Syn
 }
 
 /// Launches connections concurrently and waits for the first one to complete.
+/// If `config.defer_connect_timeout`` is set, it will wait that duration after
+/// the first connection completes before returning the highest priority
+/// connection (in the specified array order).
 pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
     mut config: ClientConfig<'_, T>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
@@ -937,7 +954,7 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
     let mut best_connection_index = None;
 
     tokio::select! {
-        index = handle_first_connection_online(connected_rx, stop_signal, stop_txs) => {
+        index = handle_first_connection_online(connected_rx, stop_signal, stop_txs, config.defer_connect_timeout) => {
             if let Some(index) = index {
                 best_connection_index = Some(index);
             }
@@ -955,6 +972,8 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
     let Some(best_connection_index) = best_connection_index else {
         return Err(anyhow!("All servers failed to connect."));
     };
+
+    tracing::debug!("Best connection index: {}", best_connection_index);
 
     #[cfg(any(
         target_os = "freebsd",
