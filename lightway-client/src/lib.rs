@@ -132,6 +132,9 @@ pub struct ClientConfig<'cert, T: Send + Sync> {
     /// of only during network change events
     pub continuous_keepalive: bool,
 
+    /// How long to wait before selecting the preferred connection
+    pub preferred_connection_wait_interval: Duration,
+
     /// Socket send buffer size
     pub sndbuf: Option<ByteSize>,
     /// Socket receive buffer size
@@ -823,14 +826,34 @@ pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Send + Syn
 }
 
 /// Returns the index of the preferred connection
+/// If `config.preferred_connection_wait_interval` is set, it will wait that
+/// duration before returning the highest priority connection (in the specified
+/// array order).
+/// If there is only one connection, or the preferred connection
+/// is the first to connect, it will not wait.
 async fn find_preferred_connection(
     mut connected_signals: Vec<oneshot::Receiver<()>>,
-) -> Option<usize> {
-    let (_, preferred_connection_index, _) = select_all(&mut connected_signals).await;
+    preferred_connection_wait_interval: Duration,
+) -> usize {
+    let wait_timer_task = tokio::time::sleep(preferred_connection_wait_interval);
 
+    let (_, mut preferred_connection_index, _) = select_all(&mut connected_signals).await;
     tracing::trace!("First connection is online: {preferred_connection_index}");
 
-    Some(preferred_connection_index)
+    // If the highest priority connection is already online, we don't need to wait
+    if preferred_connection_index == 0 {
+        return preferred_connection_index;
+    }
+
+    wait_timer_task.await;
+    for (i, signal) in connected_signals.iter_mut().enumerate() {
+        if let Ok(()) = signal.try_recv() {
+            preferred_connection_index = preferred_connection_index.min(i);
+            break;
+        }
+    }
+
+    preferred_connection_index
 }
 
 fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
@@ -883,6 +906,9 @@ fn apply_platform_specific_config(
 }
 
 /// Launches connections concurrently and waits for the first one to complete.
+/// If `config.defer_connect_timeout`` is set, it will wait that duration after
+/// the first connection completes before returning the highest priority
+/// connection (in the specified array order).
 pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
     mut config: ClientConfig<'_, T>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
@@ -932,6 +958,7 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
     let preferred_connection_index = tokio::select! {
         index = find_preferred_connection(
             connections.iter_mut().map(|c| c.connected_signal.take().unwrap()).collect(),
+            config.preferred_connection_wait_interval
         ) => {
             index
         }
@@ -945,11 +972,7 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
         }
     };
 
-    let Some(preferred_connection_index) = preferred_connection_index else {
-        return Err(anyhow!("All servers failed to connect."));
-    };
-
-    tracing::trace!("Best connection selected: {preferred_connection_index}");
+    tracing::trace!("Preferred connection selected: {preferred_connection_index}");
 
     for (i, conn) in connections.iter_mut().enumerate() {
         if i == preferred_connection_index {
@@ -988,4 +1011,61 @@ pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync
         .await?;
 
     connection.task.await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_case::test_case;
+
+    #[test_case(1, vec![] => None)]
+    #[test_case(1, vec![0] => Some(0))]
+    #[test_case(2, vec![] => None)]
+    #[test_case(2, vec![0] => Some(0))]
+    #[test_case(2, vec![1] => Some(1))]
+    #[test_case(2, vec![0, 1] => Some(0))]
+    #[test_case(2, vec![1, 0] => Some(0))]
+    #[test_case(3, vec![2] => Some(2))]
+    #[test_case(3, vec![2, 1] => Some(1))]
+    #[test_case(3, vec![1, 2] => Some(1))]
+    #[test_case(3, vec![2, 1, 0] => Some(0))]
+    #[test_case(3, vec![1, 2, 0] => Some(0))]
+    #[test_case(3, vec![0, 1, 2] => Some(0))]
+    #[tokio::test]
+    async fn test_find_preferred_connection(
+        signals_len: usize,
+        connected_signal_order: Vec<usize>,
+    ) -> Option<usize> {
+        let (mut connected_txs, connected_rxs): (
+            Vec<Option<oneshot::Sender<()>>>,
+            Vec<oneshot::Receiver<()>>,
+        ) = (0..signals_len)
+            .map(|_| {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                (Some(tx), rx)
+            })
+            .unzip();
+
+        let task = tokio::spawn(find_preferred_connection(
+            connected_rxs,
+            Duration::from_millis(100),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        for i in connected_signal_order {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let tx = connected_txs[i].take().unwrap();
+            // Will fail preferred connection is already found and channel is closed
+            let _ = tx.send(());
+        }
+
+        tokio::select! {
+            index = task => {
+                Some(index.unwrap())
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => None
+        }
+    }
 }
