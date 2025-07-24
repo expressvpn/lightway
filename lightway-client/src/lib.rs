@@ -13,7 +13,7 @@ pub mod routing_table;
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::future::{join_all, select_all};
+use futures::{FutureExt, future::join_all};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
@@ -60,7 +60,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::{JoinHandle, JoinSet},
 };
-use tokio_stream::StreamExt;
+use tokio_stream::{StreamExt, StreamMap};
 use tracing::info;
 
 /// Connection type
@@ -130,6 +130,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Enables keepalives to be sent constantly instead
     /// of only during network change events
     pub continuous_keepalive: bool,
+
+    /// How long to wait before selecting the preferred connection
+    pub preferred_connection_wait_interval: Duration,
 
     /// Socket send buffer size
     pub sndbuf: Option<ByteSize>,
@@ -827,12 +830,56 @@ pub async fn connect<
 }
 
 /// Returns the index of the best connection
-async fn find_best_connection(mut connected_signals: Vec<oneshot::Receiver<()>>) -> usize {
-    let (_, best_connection_index, _) = select_all(&mut connected_signals).await;
+/// If `config.preferred_connection_wait_interval` is set, it will wait that
+/// duration before returning the highest priority connection (in the specified
+/// array order).
+/// If there is only one connection, or the preferred connection
+/// is the first to connect, it will not wait.
+async fn find_best_connection(
+    connected_signals: Vec<oneshot::Receiver<()>>,
+    preferred_connection_wait_interval: Duration,
+) -> Result<usize> {
+    let mut wait_timer_task = tokio::spawn(tokio::time::sleep(preferred_connection_wait_interval));
 
-    tracing::trace!("First connection is online: {best_connection_index}");
+    let mut connected_stream = StreamMap::with_capacity(connected_signals.len());
+    for (i, rx) in connected_signals.into_iter().enumerate() {
+        connected_stream.insert(i, rx.into_stream());
+    }
 
-    best_connection_index
+    let mut best_connection_index: Option<usize> = None;
+    loop {
+        tokio::select! {
+            _ = &mut wait_timer_task, if !wait_timer_task.is_finished() => {
+                if let Some(index) = best_connection_index {
+                    tracing::debug!("Preferred connection wait finished, using best connection so far: {index}");
+                    return Ok(index);
+                }
+                tracing::debug!("Preferred connection wait finished, but no connection so far. Waiting for next connection.");
+            }
+            Some((index, result)) = connected_stream.next() => {
+                if let Err(e) = result {
+                    tracing::debug!("Connection {index} is offline: {e:?}");
+                    continue;
+                }
+
+                tracing::debug!("Connection {index} is online");
+
+                if wait_timer_task.is_finished() {
+                    tracing::debug!("Preferred connection wait finished, using only connection so far: {index}");
+                    return Ok(index);
+                }
+
+                // We don't defer connection if it's the preferred connection
+                if index == 0 {
+                    tracing::debug!("Preferred connection is online, using it.");
+                    return Ok(index);
+                }
+
+                best_connection_index = Some(best_connection_index.map_or(index, |i| i.min(index)));
+            }
+            else => return Err(anyhow!("All connections disconnected")),
+        }
+    }
 }
 
 fn validate_client_config<
@@ -875,6 +922,9 @@ fn apply_platform_specific_config(
 }
 
 /// Launches connections concurrently and waits for the first one to complete.
+/// If `config.preferred_connection_wait_interval` is set, it will wait that
+/// duration after the first connection completes before returning the highest
+/// priority connection (in the specified array order).
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
@@ -927,8 +977,9 @@ pub async fn client<
     let best_connection_index = tokio::select! {
         index = find_best_connection(
             connections.iter_mut().map(|c| c.connected_signal.take().unwrap()).collect(),
+            config.preferred_connection_wait_interval
         ) => {
-            index
+            index?
         }
         results = join_all(connections.iter_mut().map(|c| &mut c.task)) => {
             for result in results {
@@ -992,4 +1043,94 @@ pub async fn client<
         .await?;
 
     connection.task.await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_case::test_case;
+
+    #[test_case(1, vec![], false => None)]
+    #[test_case(1, vec![0], true => Some(0))]
+    #[test_case(2, vec![], false => None)]
+    #[test_case(2, vec![0], true => Some(0))]
+    #[test_case(2, vec![1], false => Some(1))]
+    #[test_case(2, vec![0, 1], true => Some(0))]
+    #[test_case(2, vec![1, 0], true => Some(0))]
+    #[test_case(3, vec![2], false => Some(2))]
+    #[test_case(3, vec![2, 1], false => Some(1))]
+    #[test_case(3, vec![1, 2], false => Some(1))]
+    #[test_case(3, vec![2, 1, 0], true => Some(0))]
+    #[test_case(3, vec![1, 2, 0], true => Some(0))]
+    #[test_case(3, vec![0, 1, 2], true => Some(0))]
+    #[tokio::test]
+    async fn test_find_best_connection(
+        signals_len: usize,
+        connected_signal_order: Vec<usize>,
+        should_connect_before_wait_finishes: bool,
+    ) -> Option<usize> {
+        let (mut connected_txs, connected_rxs): (
+            Vec<Option<oneshot::Sender<()>>>,
+            Vec<oneshot::Receiver<()>>,
+        ) = (0..signals_len)
+            .map(|_| {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                (Some(tx), rx)
+            })
+            .unzip();
+
+        let task = tokio::spawn(find_best_connection(
+            connected_rxs,
+            Duration::from_millis(200),
+        ));
+
+        tokio::spawn(async move {
+            for i in connected_signal_order {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let tx = connected_txs[i].take().unwrap();
+                // Will fail if preferred connection is already found and channel is closed
+                let _ = tx.send(());
+            }
+        });
+
+        let wait_duration = if should_connect_before_wait_finishes {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(300)
+        };
+
+        tokio::select! {
+            index = task => {
+                index.unwrap().ok()
+            }
+            _ = tokio::time::sleep(wait_duration) => None
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_best_connection_connects_after_wait_finishes() {
+        let (_, rx0) = tokio::sync::oneshot::channel::<()>();
+        let (tx1, rx1) = tokio::sync::oneshot::channel::<()>();
+
+        let task = tokio::spawn(find_best_connection(
+            vec![rx0, rx1],
+            Duration::from_millis(200),
+        ));
+
+        tokio::spawn(async move {
+            // Wait for after `preferred_connection_wait_interval`
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = tx1.send(());
+        });
+
+        let best_connection_index = tokio::select! {
+            index = task => {
+                Some(index.unwrap().unwrap())
+            }
+            _ = tokio::time::sleep(Duration::from_millis(400)) => None
+        };
+
+        assert_eq!(best_connection_index, Some(1));
+    }
 }
