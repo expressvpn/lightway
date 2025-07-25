@@ -13,7 +13,7 @@ pub mod routing_table;
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::future::OptionFuture;
+use futures::future::{OptionFuture, join_all};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
@@ -27,7 +27,7 @@ use lightway_core::{
     InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, State, ipv4_update_destination,
     ipv4_update_source,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 
 #[cfg(feature = "debug")]
 use crate::debug::WiresharkKeyLogger;
@@ -62,7 +62,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_stream::StreamExt;
-use tracing::info;
+use tracing::{error, info};
 
 /// Connection type
 /// Applications can also attach socket for library to use directly,
@@ -89,10 +89,7 @@ pub enum ClientResult {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync> {
-    /// Connection mode
-    pub mode: ClientConnectionMode,
-
+pub struct ClientConfig<'cert, T: Send + Sync> {
     /// Auth parameters to use for connection
     #[educe(Debug(ignore))]
     pub auth: AuthMethod,
@@ -121,9 +118,6 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     /// DNS IP to use in Tun device
     pub tun_dns_ip: Ipv4Addr,
 
-    /// Cipher to use for encryption
-    pub cipher: Cipher,
-
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
     pub enable_pqc: bool,
@@ -137,6 +131,10 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     /// Enables keepalives to be sent constantly instead
     /// of only during network change events
     pub continuous_keepalive: bool,
+
+    /// How long to wait for the first connection goes online before choosing
+    /// the best connection
+    pub defer_connect_timeout: Duration,
 
     /// Socket send buffer size
     pub sndbuf: Option<ByteSize>,
@@ -175,6 +173,34 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     #[cfg(feature = "io-uring")]
     pub iouring_sqpoll_idle_time: Duration,
 
+    /// Specifies if the program responds to INT/TERM signals
+    #[educe(Debug(ignore))]
+    pub stop_signal: Option<oneshot::Receiver<()>>,
+
+    /// Signal for notifying a network change event
+    /// network change being defined as a change in
+    /// wifi networks or a change of network interfaces
+    #[educe(Debug(ignore))]
+    pub network_change_signal: Option<mpsc::Receiver<()>>,
+
+    /// Enable WolfSsl debugging
+    #[cfg(feature = "debug")]
+    pub tls_debug: bool,
+
+    /// File path to save wireshark keylog
+    #[cfg(feature = "debug")]
+    pub keylog: Option<PathBuf>,
+}
+
+#[derive(educe::Educe)]
+#[educe(Debug)]
+pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
+    /// Connection mode
+    pub mode: ClientConnectionMode,
+
+    /// Cipher to use for encryption
+    pub cipher: Cipher,
+
     /// Server domain name to validate
     pub server_dn: Option<String>,
 
@@ -196,27 +222,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     /// Inside packet codec's config
     pub inside_pkt_codec_config: Option<ClientInsidePacketCodecConfig>,
 
-    /// Specifies if the program responds to INT/TERM signals
-    #[educe(Debug(ignore))]
-    pub stop_signal: oneshot::Receiver<()>,
-
-    /// Signal for notifying a network change event
-    /// network change being defined as a change in
-    /// wifi networks or a change of network interfaces
-    #[educe(Debug(ignore))]
-    pub network_change_signal: Option<mpsc::Receiver<()>>,
-
     /// Allow injection of a custom handler for event callback
     #[educe(Debug(ignore))]
-    pub event_handler: Option<A>,
-
-    /// Enable WolfSsl debugging
-    #[cfg(feature = "debug")]
-    pub tls_debug: bool,
-
-    /// File path to save wireshark keylog
-    #[cfg(feature = "debug")]
-    pub keylog: Option<PathBuf>,
+    pub event_handler: Option<EventHandler>,
 }
 
 #[derive(educe::Educe)]
@@ -279,6 +287,7 @@ impl<T: Send + Sync> CodecTickerState for ConnectionState<T> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
@@ -286,11 +295,14 @@ async fn handle_events<A: 'static + Send + EventCallback>(
     enable_encoding_when_online: bool,
     event_handler: Option<A>,
     inside_io: Arc<dyn InsideIOSendCallback<ConnectionState> + Send + Sync>,
+    connected_signal: mpsc::Sender<usize>,
+    server_index: usize,
 ) {
     while let Some(event) = stream.next().await {
         match &event {
             Event::StateChanged(state) => {
                 if matches!(state, State::Online) {
+                    connected_signal.send(server_index).await.ok();
                     keepalive.online().await;
                     let Some(conn) = weak.upgrade() else {
                         break; // Connection disconnected.
@@ -416,10 +428,13 @@ pub async fn inside_io_task<T: Send + Sync>(
 
 async fn handle_network_change(
     keepalive: Keepalive,
-    mut network_change_signal: mpsc::Receiver<()>,
+    mut network_change_signal: broadcast::Receiver<()>,
     weak: Weak<Mutex<lightway_core::Connection<ConnectionState>>>,
 ) -> ClientResult {
-    while (network_change_signal.recv().await).is_some() {
+    while !matches!(
+        network_change_signal.recv().await,
+        Err(broadcast::error::RecvError::Closed)
+    ) {
         let Some(conn) = weak.upgrade() else {
             return ClientResult::UserDisconnect;
         };
@@ -528,8 +543,51 @@ pub async fn encoding_request_task<T: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
-fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
-    config: &ClientConfig<'_, A, T>,
+/// Returns the index of the best connection
+/// When the first connection is established, we need to:
+/// 1. Wait for the defer connect timeout
+/// 2. Find the best connection
+/// 3. Disconnect all connections
+/// 4. Forward the stop signal to the best connection
+async fn handle_first_connection_online(
+    mut connected_rx: mpsc::Receiver<usize>,
+    mut stop_signal: Option<oneshot::Receiver<()>>,
+    mut stop_txs: Vec<oneshot::Sender<()>>,
+    defer_connect_timeout: Duration,
+) -> Option<usize> {
+    let mut best_connection_index = connected_rx.recv().await?;
+
+    tracing::debug!("First connection is online: {best_connection_index}");
+
+    if !defer_connect_timeout.is_zero() {
+        tokio::time::sleep(defer_connect_timeout).await;
+        while let Ok(index) = connected_rx.try_recv() {
+            tracing::debug!("Connection is online: {index}");
+            best_connection_index = best_connection_index.min(index);
+        }
+    }
+
+    let stop_tx = stop_txs.swap_remove(best_connection_index);
+
+    for tx in stop_txs {
+        let _ = tx.send(());
+    }
+
+    if let Some(stop_signal) = stop_signal.take() {
+        tokio::spawn(async move {
+            if let Err(e) = stop_signal.await {
+                error!("Stop signal closed: {e}");
+            }
+            let _ = stop_tx.send(());
+        });
+    }
+
+    Some(best_connection_index)
+}
+
+fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+    config: &ClientConfig<'_, T>,
+    servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
         return Err(anyhow!(
@@ -537,45 +595,81 @@ fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
         ));
     }
 
-    if config.inside_pkt_codec.is_some() != config.inside_pkt_codec_config.is_some() {
-        return Err(anyhow!(
-            "Inside packet codec has to be provided together with its config, vice versa."
-        ));
+    if servers.is_empty() {
+        return Err(anyhow!("At least one server should be specified"));
     }
 
-    if let Some(inside_pkt_codec_config) = &config.inside_pkt_codec_config {
-        if inside_pkt_codec_config.enable_encoding_at_connect
-            && matches!(config.mode, ClientConnectionMode::Stream(_))
+    for server_config in servers {
+        if server_config.inside_pkt_codec.is_some()
+            != server_config.inside_pkt_codec_config.is_some()
         {
             return Err(anyhow!(
-                "inside pkt encoding should not be enabled with TCP"
+                "Inside packet codec has to be provided together with its config, vice versa. (Server: {})",
+                server_config.server
             ));
+        }
+
+        if let Some(inside_pkt_codec_config) = &server_config.inside_pkt_codec_config {
+            if inside_pkt_codec_config.enable_encoding_at_connect
+                && matches!(server_config.mode, ClientConnectionMode::Stream(_))
+            {
+                return Err(anyhow!(
+                    "inside pkt encoding should not be enabled with TCP. (Server: {})",
+                    server_config.server
+                ));
+            }
         }
     }
 
     Ok(())
 }
 
-pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
-    mut config: ClientConfig<'_, A, T>,
-) -> Result<ClientResult> {
-    println!("Client starting with config:\n{:#?}", &config);
+fn apply_platform_specific_config(
+    #[allow(unused_variables)] // macOS specific
+    config: &mut TunConfig,
+) {
+    #[cfg(target_os = "macos")]
+    config.platform_config(|config| {
+        config.enable_routing(false);
+    });
+}
 
-    validate_client_config(&config)?;
+#[tracing::instrument(
+    level = "info",
+    fields(server = server_config.server.to_string()),
+    skip(
+        config,
+        server_config,
+        inside_io,
+        network_change_signal,
+        connected_signal,
+        stop_signal
+    )
+)]
+pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+    config: &ClientConfig<'_, T>,
+    mut server_config: ClientConnectionConfig<EventHandler>,
+    inside_io: Arc<dyn io::inside::InsideIORecv>,
+    network_change_signal: Option<broadcast::Receiver<()>>,
+    connected_signal: mpsc::Sender<usize>,
+    stop_signal: oneshot::Receiver<()>,
+    server_index: usize,
+) -> Result<ClientResult> {
+    tracing::info!("Connection starting with config:\n{:#?}", &server_config);
 
     let mut join_set = JoinSet::new();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match config.mode {
+        match server_config.mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(config.server, maybe_sock)
+                let sock = io::outside::Udp::new(server_config.server, maybe_sock)
                     .await
                     .context("Outside IO UDP")?;
 
                 (ConnectionType::Datagram, sock)
             }
             ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(config.server, maybe_sock)
+                let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
                     .await
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
@@ -590,52 +684,9 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
     }
 
-    let inside_io = match config.inside_io {
-        Some(io) => io,
-        #[cfg(feature = "io-uring")]
-        None if config.enable_tun_iouring => Arc::new(
-            io::inside::Tun::new_with_iouring(
-                config.tun_config,
-                config.tun_local_ip,
-                config.tun_dns_ip,
-                config.iouring_entry_count,
-                config.iouring_sqpoll_idle_time,
-            )
-            .await?,
-        ),
-        None => Arc::new(
-            io::inside::Tun::new(config.tun_config, config.tun_local_ip, config.tun_dns_ip).await?,
-        ),
-    };
-
-    let tun_index: u32 = inside_io.if_index()?.try_into()?;
-    #[cfg(any(
-        target_os = "freebsd",
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "openbsd",
-        target_os = "windows"
-    ))]
-    let mut route_table = RoutingTable::new(config.route_mode)?;
-    #[cfg(any(
-        target_os = "freebsd",
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "openbsd",
-        target_os = "windows"
-    ))]
-    route_table
-        .initialize_routing_table(
-            &config.server.ip(),
-            tun_index,
-            &config.tun_peer_ip.into(),
-            &config.tun_dns_ip.into(),
-        )
-        .await?;
-
     let (event_cb, event_stream) = EventStreamCallback::new();
 
-    let has_inside_pkt_codec = config.inside_pkt_codec.is_some();
+    let has_inside_pkt_codec = server_config.inside_pkt_codec.is_some();
 
     let (codec_ticker, codec_ticker_task) = if has_inside_pkt_codec {
         let (ticker, ticker_task) = CodecTicker::new();
@@ -659,7 +710,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     }
 
     let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) =
-        match &config.inside_pkt_codec {
+        match &server_config.inside_pkt_codec {
             Some(codec_factory) => {
                 let codec = codec_factory.build();
                 (
@@ -677,21 +728,21 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         None,
         Arc::new(ClientIpConfigCb),
     )?
-    .with_cipher(config.cipher.into())?
+    .with_cipher(server_config.cipher.into())?
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
-    .with_inside_plugins(config.inside_plugins)
-    .with_outside_plugins(config.outside_plugins)
+    .with_inside_plugins(server_config.inside_plugins)
+    .with_outside_plugins(server_config.outside_plugins)
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
         config.outside_mtu,
     )?
-    .with_auth(config.auth)
+    .with_auth(config.auth.clone())
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
-    .when_some(config.server_dn, |b, sdn| {
+    .when_some(server_config.server_dn, |b, sdn| {
         b.with_server_domain_name_validation(sdn)
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
@@ -702,7 +753,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     let conn_builder = conn_builder.when(config.enable_pqc, |b| b.with_pq_crypto());
 
     #[cfg(feature = "debug")]
-    let conn_builder = conn_builder.when_some(config.keylog, |b, k| {
+    let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {
         b.with_key_logger(WiresharkKeyLogger::new(k))
     });
 
@@ -717,19 +768,21 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         Arc::downgrade(&conn),
     );
 
-    let event_handler = config.event_handler.take();
+    let event_handler = server_config.event_handler.take();
     let event_inside_io: InsideIOSendCallbackArg<ConnectionState> =
         inside_io.clone().into_io_send_callback();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
         Arc::downgrade(&conn),
-        config
+        server_config
             .inside_pkt_codec_config
             .as_ref()
             .is_some_and(|x| x.enable_encoding_at_connect),
         event_handler,
         event_inside_io,
+        connected_signal,
+        server_index,
     ));
 
     ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
@@ -750,16 +803,15 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     let inside_io_loop: JoinHandle<anyhow::Result<()>> =
         tokio::spawn(inside_io_task(conn.clone(), inside_io, config.tun_dns_ip));
 
-    let network_change_task: OptionFuture<JoinHandle<ClientResult>> =
-        match config.network_change_signal {
-            Some(network_change_signal) => Some(tokio::spawn(handle_network_change(
-                keepalive,
-                network_change_signal,
-                Arc::downgrade(&conn),
-            )))
-            .into(),
-            None => None.into(),
-        };
+    let network_change_task: OptionFuture<JoinHandle<ClientResult>> = match network_change_signal {
+        Some(network_change_signal) => Some(tokio::spawn(handle_network_change(
+            keepalive,
+            network_change_signal,
+            Arc::downgrade(&conn),
+        )))
+        .into(),
+        None => None.into(),
+    };
 
     let encoded_pkt_send_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(
         handle_encoded_pkt_send(Arc::downgrade(&conn), encoded_pkt_receiver),
@@ -769,7 +821,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         handle_decoded_pkt_send(Arc::downgrade(&conn), decoded_pkt_receiver),
     );
 
-    if let Some(pkt_codec_config) = config.inside_pkt_codec_config {
+    if let Some(pkt_codec_config) = server_config.inside_pkt_codec_config {
         tokio::spawn(encoding_request_task(
             Arc::downgrade(&conn),
             pkt_codec_config.encoding_request_signal,
@@ -777,16 +829,16 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     };
 
     tokio::select! {
-        Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
-        io = outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
-        io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
-        io = encoded_pkt_send_task, if config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
-        io = decoded_pkt_send_task, if config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
-        _ = config.stop_signal => {
+        _ = stop_signal => {
             info!("client shutting down ..");
             let _ = conn.lock().unwrap().disconnect();
             Ok(ClientResult::UserDisconnect)
         },
+        Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
+        io = outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
+        io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
+        io = encoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
+        io = decoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
         Some(result) = network_change_task => {
             match result {
                 Ok(client_result) => {
@@ -799,4 +851,160 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
             }
         },
     }
+}
+
+/// Launches connections concurrently and waits for the first one to complete.
+/// If `config.defer_connect_timeout`` is set, it will wait that duration after
+/// the first connection completes before returning the highest priority
+/// connection (in the specified array order).
+pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+    mut config: ClientConfig<'_, T>,
+    servers: Vec<ClientConnectionConfig<EventHandler>>,
+) -> Result<ClientResult> {
+    tracing::info!(
+        "Client starting with config:\n{:#?}, servers:\n{:#?}",
+        &config,
+        &servers
+    );
+
+    validate_client_config(&config, &servers)?;
+    apply_platform_specific_config(&mut config.tun_config);
+
+    let inside_io = match &config.inside_io {
+        Some(io) => Arc::clone(io),
+        #[cfg(feature = "io-uring")]
+        None if config.enable_tun_iouring => Arc::new(
+            io::inside::Tun::new_with_iouring(
+                &config.tun_config,
+                config.tun_local_ip,
+                config.tun_dns_ip,
+                config.iouring_entry_count,
+                config.iouring_sqpoll_idle_time,
+            )
+            .await?,
+        ),
+        None => Arc::new(
+            io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
+                .await?,
+        ),
+    };
+
+    let network_change_signal = if let Some(mut signal) = config.network_change_signal.take() {
+        let (tx, rx) = broadcast::channel(1);
+        tokio::spawn(async move {
+            while signal.recv().await.is_some() {
+                if let Err(e) = tx.send(()) {
+                    error!("Failed to broadcast network change signal: {e}");
+                }
+            }
+        });
+        Some(rx)
+    } else {
+        None
+    };
+
+    let (connected_tx, connected_rx) = mpsc::channel::<usize>(servers.len());
+
+    let stop_signal = config.stop_signal.take();
+    let (stop_txs, mut stop_rxs) = (0..servers.len())
+        .map(|_| {
+            let (tx, rx) = oneshot::channel();
+            (tx, Some(rx))
+        })
+        .collect::<(Vec<_>, Vec<_>)>();
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "openbsd",
+        target_os = "windows"
+    ))]
+    let route_configs = servers
+        .iter()
+        .map(|server_config| {
+            use crate::routing_table::RouteConfig;
+            let tun_index = inside_io
+                .if_index()
+                .map(|i| i as u32)
+                .map_err(|e| error!("Failed to get if_index: {e}"))
+                .ok()?;
+
+            Some(RouteConfig::new(
+                server_config.server.ip(),
+                tun_index,
+                config.tun_peer_ip.into(),
+                config.tun_dns_ip.into(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let mut connections = join_all(servers.into_iter().enumerate().map(|(i, server_config)| {
+        let network_change_signal = network_change_signal
+            .as_ref()
+            .map(broadcast::Receiver::resubscribe);
+        connect(
+            &config,
+            server_config,
+            inside_io.clone(),
+            network_change_signal,
+            connected_tx.clone(),
+            stop_rxs[i].take().unwrap(),
+            i,
+        )
+    }));
+
+    let mut best_connection_index = None;
+
+    tracing::trace!("Waiting for first connection...");
+
+    tokio::select! {
+        index = handle_first_connection_online(connected_rx, stop_signal, stop_txs, config.defer_connect_timeout) => {
+            if let Some(index) = index {
+                best_connection_index = Some(index);
+            }
+        }
+        results = &mut connections => {
+            for result in results {
+                if let Err(e) = result {
+                    tracing::error!("Connection failed: {e}");
+                }
+            }
+            return Err(anyhow!("All connections failed to connect."));
+        }
+    }
+
+    let Some(best_connection_index) = best_connection_index else {
+        return Err(anyhow!("All servers failed to connect."));
+    };
+
+    tracing::debug!("Best connection index: {}", best_connection_index);
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "openbsd",
+        target_os = "windows"
+    ))]
+    let mut route_table = RoutingTable::new(config.route_mode)?;
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "openbsd",
+        target_os = "windows"
+    ))]
+    if let Some(route_config) = &route_configs[best_connection_index] {
+        route_table
+            .initialize_routing_table(
+                &route_config.server_ip,
+                route_config.tun_index,
+                &route_config.tun_peer_ip,
+                &route_config.tun_dns_ip,
+            )
+            .await?;
+    }
+
+    connections.await.swap_remove(best_connection_index)
 }

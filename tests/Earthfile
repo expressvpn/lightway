@@ -19,12 +19,13 @@ TEST:
     ARG SERVER_PORT
     ARG SERVER_EXTRA_ARGS=""
     ARG CLIENT_EXTRA_ARGS=""
+    ARG CLIENT_CONFIG_FILE="client_config.yaml"
     ARG TEST_SCRIPT=./run-simple-test.sh
 
     ARG KYBER_CLIENT
 
     ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace --mode ${MODE} ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
-    ARG CLIENT_ARGS="--config-file client_config.yaml --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
+    ARG CLIENT_ARGS="--config-file ${CLIENT_CONFIG_FILE} --log-level trace --mode ${MODE} ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
 
     LET CLIENT_IMAGE_CMD="./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian"
     IF [ "$KYBER_CLIENT" = "true" ]
@@ -107,6 +108,14 @@ run-udp-single-threaded-test:
 run-tcp-single-threaded-test:
     DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_TOKIO_WORKER_THREADS=1 --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-pmtud"
 
+# run-tcp-parallel-connect-test runs e2e test of client connecting to multiple servers
+run-tcp-parallel-connect-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="client_config.parallel_connect.tcp.yaml" --TEST_SCRIPT=./run-simple-test.sh
+
+# run-udp-parallel-connect-test runs e2e test of client connecting to multiple servers
+run-udp-parallel-connect-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_CONFIG_FILE="client_config.parallel_connect.udp.yaml" --TEST_SCRIPT=./run-simple-test.sh
+
 # run-token-auth-test runs a test of the token auth
 run-token-auth-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQ4ODMxMTM0MTZ9.gb0U7xTwxl7GDeKftKSZvnkkIDnoz8NmzJ4etukCjtZWzA4kSNbt84iTKOE14paRZdfE67tLGfcLsqA9uh-zuA_-ecZbiC4znz2CVVjhD2CIrW_0LQbHRbzYlOozjc108pct-VivtiPr7SqcIgRTjH59HTCDXtgp0kELhhr3NNfYP0-6DtadXQ_Twn2tcC3A-rTpfjwo7HDqnc43niCALXFhqR0F4DkEC3amKuOiP9afQ6dFmWVAzWXWEpQ_kK-EsCeBZ6K89GaF5quIErrV3U_FSwbX8biFB7S8VhkLqCoyabRKKprwp_mi24e91URgGqNvbCrXs2zrJMat-1zUvw" --SERVER_EXTRA_ARGS="--token-rsa-pub-key-pem /token.pub"
@@ -129,3 +138,5 @@ run-all-tests:
     BUILD +run-tcp-keepalive-test
     BUILD +run-udp-single-threaded-test
     BUILD +run-tcp-single-threaded-test
+    BUILD +run-tcp-parallel-connect-test
+    BUILD +run-udp-parallel-connect-test

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use lightway_core::Tls13SecretCallbacks;
 
+#[derive(Debug, Clone)]
 pub(crate) struct WiresharkKeyLogger(pub(crate) PathBuf);
 
 impl WiresharkKeyLogger {
