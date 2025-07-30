@@ -48,4 +48,4 @@ tun.workspace = true
 serial_test = "3.2.0"
 
 [target.'cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos", target_os = "openbsd", target_os = "windows"))'.dependencies]
-route_manager = { version = "0.2.0", features = ["async"] }
+route_manager = { git = "https://github.com/kp-brandon-chew/route_manager.git", branch = "fix-macos-missing-host-and-gateway-flags", features = ["async"] }
