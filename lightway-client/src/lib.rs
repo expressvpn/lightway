@@ -89,10 +89,7 @@ pub enum ClientResult {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync> {
-    /// Connection mode
-    pub mode: ClientConnectionMode,
-
+pub struct ClientConfig<'cert, T: Send + Sync> {
     /// Auth parameters to use for connection
     #[educe(Debug(ignore))]
     pub auth: AuthMethod,
@@ -120,9 +117,6 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
 
     /// DNS IP to use in Tun device
     pub tun_dns_ip: Ipv4Addr,
-
-    /// Cipher to use for encryption
-    pub cipher: Cipher,
 
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
@@ -175,6 +169,34 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     #[cfg(feature = "io-uring")]
     pub iouring_sqpoll_idle_time: Duration,
 
+    /// Specifies if the program responds to INT/TERM signals
+    #[educe(Debug(ignore))]
+    pub stop_signal: oneshot::Receiver<()>,
+
+    /// Signal for notifying a network change event
+    /// network change being defined as a change in
+    /// wifi networks or a change of network interfaces
+    #[educe(Debug(ignore))]
+    pub network_change_signal: Option<mpsc::Receiver<()>>,
+
+    /// Enable WolfSsl debugging
+    #[cfg(feature = "debug")]
+    pub tls_debug: bool,
+
+    /// File path to save wireshark keylog
+    #[cfg(feature = "debug")]
+    pub keylog: Option<PathBuf>,
+}
+
+#[derive(educe::Educe)]
+#[educe(Debug)]
+pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
+    /// Connection mode
+    pub mode: ClientConnectionMode,
+
+    /// Cipher to use for encryption
+    pub cipher: Cipher,
+
     /// Server domain name to validate
     pub server_dn: Option<String>,
 
@@ -196,27 +218,9 @@ pub struct ClientConfig<'cert, A: 'static + Send + EventCallback, T: Send + Sync
     /// Inside packet codec's config
     pub inside_pkt_codec_config: Option<ClientInsidePacketCodecConfig>,
 
-    /// Specifies if the program responds to INT/TERM signals
-    #[educe(Debug(ignore))]
-    pub stop_signal: oneshot::Receiver<()>,
-
-    /// Signal for notifying a network change event
-    /// network change being defined as a change in
-    /// wifi networks or a change of network interfaces
-    #[educe(Debug(ignore))]
-    pub network_change_signal: Option<mpsc::Receiver<()>>,
-
     /// Allow injection of a custom handler for event callback
     #[educe(Debug(ignore))]
-    pub event_handler: Option<A>,
-
-    /// Enable WolfSsl debugging
-    #[cfg(feature = "debug")]
-    pub tls_debug: bool,
-
-    /// File path to save wireshark keylog
-    #[cfg(feature = "debug")]
-    pub keylog: Option<PathBuf>,
+    pub event_handler: Option<EventHandler>,
 }
 
 #[derive(educe::Educe)]
@@ -528,8 +532,9 @@ pub async fn encoding_request_task<T: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
-fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
-    config: &ClientConfig<'_, A, T>,
+fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+    config: &ClientConfig<'_, T>,
+    server_config: &ClientConnectionConfig<EventHandler>,
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
         return Err(anyhow!(
@@ -537,15 +542,15 @@ fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
         ));
     }
 
-    if config.inside_pkt_codec.is_some() != config.inside_pkt_codec_config.is_some() {
+    if server_config.inside_pkt_codec.is_some() != server_config.inside_pkt_codec_config.is_some() {
         return Err(anyhow!(
             "Inside packet codec has to be provided together with its config, vice versa."
         ));
     }
 
-    if let Some(inside_pkt_codec_config) = &config.inside_pkt_codec_config {
+    if let Some(inside_pkt_codec_config) = &server_config.inside_pkt_codec_config {
         if inside_pkt_codec_config.enable_encoding_at_connect
-            && matches!(config.mode, ClientConnectionMode::Stream(_))
+            && matches!(server_config.mode, ClientConnectionMode::Stream(_))
         {
             return Err(anyhow!(
                 "inside pkt encoding should not be enabled with TCP"
@@ -556,26 +561,27 @@ fn validate_client_config<A: 'static + Send + EventCallback, T: Send + Sync>(
     Ok(())
 }
 
-pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
-    mut config: ClientConfig<'_, A, T>,
+pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+    config: ClientConfig<'_, T>,
+    mut server_config: ClientConnectionConfig<EventHandler>,
 ) -> Result<ClientResult> {
     println!("Client starting with config:\n{:#?}", &config);
 
-    validate_client_config(&config)?;
+    validate_client_config(&config, &server_config)?;
 
     let mut join_set = JoinSet::new();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match config.mode {
+        match server_config.mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(config.server, maybe_sock)
+                let sock = io::outside::Udp::new(server_config.server, maybe_sock)
                     .await
                     .context("Outside IO UDP")?;
 
                 (ConnectionType::Datagram, sock)
             }
             ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(config.server, maybe_sock)
+                let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
                     .await
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
@@ -635,7 +641,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
-    let has_inside_pkt_codec = config.inside_pkt_codec.is_some();
+    let has_inside_pkt_codec = server_config.inside_pkt_codec.is_some();
 
     let (codec_ticker, codec_ticker_task) = if has_inside_pkt_codec {
         let (ticker, ticker_task) = CodecTicker::new();
@@ -659,7 +665,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     }
 
     let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) =
-        match &config.inside_pkt_codec {
+        match &server_config.inside_pkt_codec {
             Some(codec_factory) => {
                 let codec = codec_factory.build();
                 (
@@ -677,11 +683,11 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         None,
         Arc::new(ClientIpConfigCb),
     )?
-    .with_cipher(config.cipher.into())?
+    .with_cipher(server_config.cipher.into())?
     .with_schedule_tick_cb(connection_ticker_cb)
     .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
-    .with_inside_plugins(config.inside_plugins)
-    .with_outside_plugins(config.outside_plugins)
+    .with_inside_plugins(server_config.inside_plugins)
+    .with_outside_plugins(server_config.outside_plugins)
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
@@ -691,7 +697,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
-    .when_some(config.server_dn, |b, sdn| {
+    .when_some(server_config.server_dn, |b, sdn| {
         b.with_server_domain_name_validation(sdn)
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
@@ -717,14 +723,14 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         Arc::downgrade(&conn),
     );
 
-    let event_handler = config.event_handler.take();
+    let event_handler = server_config.event_handler.take();
     let event_inside_io: InsideIOSendCallbackArg<ConnectionState> =
         inside_io.clone().into_io_send_callback();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
         Arc::downgrade(&conn),
-        config
+        server_config
             .inside_pkt_codec_config
             .as_ref()
             .is_some_and(|x| x.enable_encoding_at_connect),
@@ -769,7 +775,7 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         handle_decoded_pkt_send(Arc::downgrade(&conn), decoded_pkt_receiver),
     );
 
-    if let Some(pkt_codec_config) = config.inside_pkt_codec_config {
+    if let Some(pkt_codec_config) = server_config.inside_pkt_codec_config {
         tokio::spawn(encoding_request_task(
             Arc::downgrade(&conn),
             pkt_codec_config.encoding_request_signal,
@@ -780,8 +786,8 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
         Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
         io = outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
         io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
-        io = encoded_pkt_send_task, if config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
-        io = decoded_pkt_send_task, if config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
+        io = encoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
+        io = decoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
         _ = config.stop_signal => {
             info!("client shutting down ..");
             let _ = conn.lock().unwrap().disconnect();
