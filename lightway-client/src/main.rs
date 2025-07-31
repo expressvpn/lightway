@@ -86,8 +86,18 @@ async fn main() -> Result<()> {
         .next()
         .ok_or_else(|| anyhow!("No addresses resolved for server: {}", config.server))?;
 
-    let config = ClientConfig {
+    let server_config = ClientConnectionConfig {
+        server: server_addr,
         mode,
+        server_dn: config.server_dn,
+        cipher: config.cipher,
+        inside_plugins: Default::default(),
+        outside_plugins: Default::default(),
+        inside_pkt_codec: None,
+        event_handler: Some(EventHandler),
+    };
+
+    let config = ClientConfig {
         auth,
         root_ca_cert,
         outside_mtu: config.outside_mtu,
@@ -96,7 +106,6 @@ async fn main() -> Result<()> {
         tun_local_ip: config.tun_local_ip,
         tun_peer_ip: config.tun_peer_ip,
         tun_dns_ip: config.tun_dns_ip,
-        cipher: config.cipher,
         #[cfg(feature = "postquantum")]
         enable_pqc: config.enable_pqc,
         keepalive_interval: config.keepalive_interval.into(),
@@ -120,20 +129,14 @@ async fn main() -> Result<()> {
         iouring_entry_count: config.iouring_entry_count,
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        server_dn: config.server_dn,
-        server: server_addr,
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
         inside_pkt_codec_config: None,
         stop_signal: ctrlc_rx,
         network_change_signal: None,
-        event_handler: Some(EventHandler),
         #[cfg(feature = "debug")]
         tls_debug: config.tls_debug,
         #[cfg(feature = "debug")]
         keylog: config.keylog,
     };
 
-    client(config).await.map(|_| ())
+    client(config, server_config).await.map(|_| ())
 }
