@@ -17,9 +17,22 @@ networks:
         - subnet: 10.0.0.0/16
 
 services:
-  server:
+  server_udp:
     image: lightway-test-server:latest
-    command: ${SERVER_ARGS} --mode ${MODE}
+    command: ${SERVER_ARGS} --mode udp
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    networks:
+      - frontend
+      - backend
+
+  server_tcp:
+    image: lightway-test-server:latest
+    command: ${SERVER_ARGS} --mode tcp
     stop_signal: SIGTERM
     stop_grace_period: 10s
     cap_add:
@@ -44,7 +57,7 @@ services:
 
   client:
     image: lightway-test-client:latest
-    command: ${CLIENT_ARGS} --mode ${MODE}
+    command: ${CLIENT_ARGS}
     stop_signal: SIGTERM
     stop_grace_period: 10s
     sysctls:
@@ -57,7 +70,9 @@ services:
     devices:
       - "/dev/net/tun:/dev/net/tun"
     depends_on:
-      server:
+      server_udp:
+        condition: service_healthy
+      server_tcp:
         condition: service_healthy
       nginx:
         condition: service_healthy

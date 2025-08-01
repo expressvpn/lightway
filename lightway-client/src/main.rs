@@ -16,6 +16,8 @@ use lightway_client::{io::inside::InsideIO, *};
 mod args;
 use args::Config;
 
+use crate::args::ConnectionConfig;
+
 struct EventHandler;
 
 impl EventCallback for EventHandler {
@@ -24,6 +26,35 @@ impl EventCallback for EventHandler {
             tracing::debug!("State changed to {:?}", state);
         }
     }
+}
+
+/// Creates a ClientConnectionConfig from a ConnectionConfig. Resolving the
+/// hostname blocks, so it should be done in a separate thread if needed
+fn make_client_connection_config(
+    config: ConnectionConfig,
+) -> Result<ClientConnectionConfig<EventHandler>> {
+    let server_addr: SocketAddr = config
+        .server
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow!("No addresses resolved for server: {}", config.server))?;
+
+    let mode = match config.mode {
+        ConnectionType::Tcp => ClientConnectionMode::Stream(None),
+        ConnectionType::Udp => ClientConnectionMode::Datagram(None),
+    };
+
+    Ok(ClientConnectionConfig {
+        mode,
+        cipher: config.cipher,
+        server_dn: config.server_dn,
+        server: server_addr,
+        inside_plugins: Default::default(),
+        outside_plugins: Default::default(),
+        inside_pkt_codec: None,
+        inside_pkt_codec_config: None,
+        event_handler: Some(EventHandler),
+    })
 }
 
 #[tokio::main(worker_threads = 1)]
@@ -50,11 +81,6 @@ async fn main() -> Result<()> {
 
     let auth = config.take_auth()?;
 
-    let mode = match config.mode {
-        ConnectionType::Tcp => ClientConnectionMode::Stream(None),
-        ConnectionType::Udp => ClientConnectionMode::Datagram(None),
-    };
-
     let root_ca_cert = RootCertificate::PemFileOrDirectory(&config.ca_cert);
 
     let mut tun_config = TunConfig::default();
@@ -80,14 +106,26 @@ async fn main() -> Result<()> {
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
-    let server_addr: SocketAddr = config
-        .server
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("No addresses resolved for server: {}", config.server))?;
+    let servers = if config.servers.is_empty() {
+        vec![ConnectionConfig {
+            server: config.server,
+            mode: config.mode,
+            server_dn: config.server_dn,
+            cipher: config.cipher,
+            enable_inside_pkt_encoding_at_connect: config.enable_inside_pkt_encoding_at_connect,
+        }]
+    } else {
+        config.servers
+    };
+
+    let servers = servers
+        .into_iter()
+        .flat_map(|server_config| {
+            make_client_connection_config(server_config).map_err(|e| tracing::error!("{e}"))
+        })
+        .collect::<Vec<_>>();
 
     let config = ClientConfig {
-        mode,
         auth,
         root_ca_cert,
         outside_mtu: config.outside_mtu,
@@ -96,12 +134,12 @@ async fn main() -> Result<()> {
         tun_local_ip: config.tun_local_ip,
         tun_peer_ip: config.tun_peer_ip,
         tun_dns_ip: config.tun_dns_ip,
-        cipher: config.cipher,
         #[cfg(feature = "postquantum")]
         enable_pqc: config.enable_pqc,
         keepalive_interval: config.keepalive_interval.into(),
         keepalive_timeout: config.keepalive_timeout.into(),
         continuous_keepalive: true,
+        preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
         #[cfg(any(
@@ -120,20 +158,13 @@ async fn main() -> Result<()> {
         iouring_entry_count: config.iouring_entry_count,
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        server_dn: config.server_dn,
-        server: server_addr,
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
-        inside_pkt_codec_config: None,
         stop_signal: ctrlc_rx,
         network_change_signal: None,
-        event_handler: Some(EventHandler),
         #[cfg(feature = "debug")]
         tls_debug: config.tls_debug,
         #[cfg(feature = "debug")]
         keylog: config.keylog,
     };
 
-    client(config).await.map(|_| ())
+    client(config, servers).await.map(|_| ())
 }
