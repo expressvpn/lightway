@@ -553,17 +553,6 @@ fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send 
                 server_config.server
             ));
         }
-
-        if let Some(inside_pkt_codec_config) = &config.inside_pkt_codec_config {
-            if inside_pkt_codec_config.enable_encoding_at_connect
-                && matches!(server_config.mode, ClientConnectionMode::Stream(_))
-            {
-                return Err(anyhow!(
-                    "inside pkt encoding should not be enabled with TCP. (Server: {})",
-                    server_config.server
-                ));
-            }
-        }
     }
 
     Ok(())
