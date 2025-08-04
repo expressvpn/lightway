@@ -23,9 +23,8 @@ use lightway_app_utils::{
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallback,
-    InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, State, ipv4_update_destination,
-    ipv4_update_source,
+    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
+    InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -104,7 +103,7 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Alternate Inside IO to use
     /// When this is supplied, tun_config will not be used for creating tun interface
     #[educe(Debug(ignore))]
-    pub inside_io: Option<Arc<dyn InsideIO<T>>>,
+    pub inside_io: Option<Arc<dyn InsideIO<ExtAppState>>>,
 
     /// Tun device to use
     pub tun_config: TunConfig,
@@ -289,7 +288,6 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
     weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     enable_encoding_when_online: bool,
     event_handler: Option<A>,
-    inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<ExtAppState>> + Send + Sync>,
     connected_signal: oneshot::Sender<()>,
 ) {
     let mut connected_signal = Some(connected_signal);
@@ -304,8 +302,6 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
                     let Some(conn) = weak.upgrade() else {
                         break; // Connection disconnected.
                     };
-
-                    conn.lock().unwrap().inside_io(inside_io.clone());
 
                     if enable_encoding_when_online {
                         if let Err(e) = conn.lock().unwrap().set_encoding(true) {
@@ -538,8 +534,9 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
 }
 
 /// Represents a connection to a server. When dropped, the route table will be removed.
-pub struct ClientConnection<T> {
+pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
+    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
     outside_io: Arc<dyn io::outside::OutsideIO>,
     connected_signal: Option<oneshot::Receiver<()>>,
@@ -583,6 +580,12 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             self.route_table = Some(route_table);
         }
         Ok(())
+    }
+
+    pub fn set_connection_inside_io(&self) {
+        let inside_io: InsideIOSendCallbackArg<ConnectionState<ExtAppState>> =
+            self.inside_io.clone().into_io_send_callback();
+        self.conn.lock().unwrap().inside_io(inside_io);
     }
 }
 
@@ -717,8 +720,6 @@ pub async fn connect<
     let (connected_tx, connected_rx) = oneshot::channel();
 
     let event_handler = server_config.event_handler.take();
-    let event_inside_io: InsideIOSendCallbackArg<ConnectionState<ExtAppState>> =
-        inside_io.clone().into_io_send_callback();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
@@ -728,7 +729,6 @@ pub async fn connect<
             .as_ref()
             .is_some_and(|x| x.enable_encoding_at_connect),
         event_handler,
-        event_inside_io,
         connected_tx,
     ));
 
@@ -776,12 +776,13 @@ pub async fn connect<
 
     let (stop_tx, stop_rx) = oneshot::channel();
 
+    let stop_conn = conn.clone();
     let task = tokio::spawn(async move {
         let _join_set = join_set;
         let result = tokio::select! {
             _ = stop_rx => {
                 info!("client shutting down ..");
-                let _ = conn.lock().unwrap().disconnect();
+                let _ = stop_conn.lock().unwrap().disconnect();
                 Ok(ClientResult::UserDisconnect)
             },
             Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
@@ -813,6 +814,7 @@ pub async fn connect<
 
     Ok(ClientConnection {
         task,
+        conn,
         inside_io,
         outside_io,
         connected_signal: Some(connected_rx),
@@ -978,6 +980,8 @@ pub async fn client<
             tracing::error!("Failed to send stop signal");
         }
     });
+
+    connection.set_connection_inside_io();
 
     connection
         .initialize_routes(
