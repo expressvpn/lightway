@@ -283,13 +283,13 @@ impl<T: Send + Sync> CodecTickerState for ConnectionState<T> {
     }
 }
 
-async fn handle_events<A: 'static + Send + EventCallback>(
+async fn handle_events<A: 'static + Send + EventCallback, T: Send + Sync>(
     mut stream: EventStream,
     keepalive: Keepalive,
-    weak: Weak<Mutex<Connection<ConnectionState>>>,
+    weak: Weak<Mutex<Connection<ConnectionState<T>>>>,
     enable_encoding_when_online: bool,
     event_handler: Option<A>,
-    inside_io: Arc<dyn InsideIOSendCallback<ConnectionState> + Send + Sync>,
+    inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<T>> + Send + Sync>,
     connected_signal: oneshot::Sender<()>,
 ) {
     let mut connected_signal = Some(connected_signal);
@@ -374,7 +374,7 @@ pub async fn outside_io_task<T: Send + Sync>(
 
 pub async fn inside_io_task<T: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
-    inside_io: Arc<dyn io::inside::InsideIORecv>,
+    inside_io: Arc<dyn io::inside::InsideIORecv<T>>,
     tun_dns_ip: Ipv4Addr,
 ) -> Result<()> {
     loop {
@@ -423,10 +423,10 @@ pub async fn inside_io_task<T: Send + Sync>(
     }
 }
 
-async fn handle_network_change(
+async fn handle_network_change<T: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
-    weak: Weak<Mutex<lightway_core::Connection<ConnectionState>>>,
+    weak: Weak<Mutex<lightway_core::Connection<ConnectionState<T>>>>,
 ) -> ClientResult {
     while (network_change_signal.recv().await).is_some() {
         let Some(conn) = weak.upgrade() else {
@@ -595,7 +595,10 @@ impl<T: Send + Sync> ClientConnection<T> {
         inside_io,
     )
 )]
-pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Default + Send + Sync>(
+pub async fn connect<
+    EventHandler: 'static + Send + EventCallback,
+    T: 'static + Default + Send + Sync,
+>(
     config: &ClientConfig<'_, T>,
     mut server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
@@ -714,7 +717,7 @@ pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Default + 
     let (connected_tx, connected_rx) = oneshot::channel();
 
     let event_handler = server_config.event_handler.take();
-    let event_inside_io: InsideIOSendCallbackArg<ConnectionState> =
+    let event_inside_io: InsideIOSendCallbackArg<ConnectionState<T>> =
         inside_io.clone().into_io_send_callback();
     join_set.spawn(handle_events(
         event_stream,
@@ -867,7 +870,10 @@ fn apply_platform_specific_config(
 }
 
 /// Launches connections concurrently and waits for the first one to complete.
-pub async fn client<EventHandler: 'static + Send + EventCallback, T: Default + Send + Sync>(
+pub async fn client<
+    EventHandler: 'static + Send + EventCallback,
+    T: 'static + Default + Send + Sync,
+>(
     mut config: ClientConfig<'_, T>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {

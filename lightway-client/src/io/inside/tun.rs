@@ -45,7 +45,7 @@ impl Tun {
 }
 
 #[async_trait]
-impl InsideIORecv for Tun {
+impl<T: Send + Sync> InsideIORecv<T> for Tun {
     async fn recv_buf(&self) -> IOCallbackResult<BytesMut> {
         self.tun.recv_buf().await
     }
@@ -70,7 +70,7 @@ impl InsideIORecv for Tun {
         Ok(pkt_len)
     }
 
-    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState<()>> {
+    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState<T>> {
         self
     }
 }
