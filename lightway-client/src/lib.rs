@@ -595,7 +595,7 @@ impl<T: Send + Sync> ClientConnection<T> {
         inside_io,
     )
 )]
-pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Default + Send + Sync>(
     config: &ClientConfig<'_, T>,
     mut server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
@@ -643,7 +643,7 @@ pub async fn connect<EventHandler: 'static + Send + EventCallback, T: Send + Syn
         ticker,
         ip_config: None,
         codec_ticker,
-        extended: (),
+        extended: Default::default(),
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 
@@ -867,7 +867,7 @@ fn apply_platform_specific_config(
 }
 
 /// Launches connections concurrently and waits for the first one to complete.
-pub async fn client<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
+pub async fn client<EventHandler: 'static + Send + EventCallback, T: Default + Send + Sync>(
     mut config: ClientConfig<'_, T>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
