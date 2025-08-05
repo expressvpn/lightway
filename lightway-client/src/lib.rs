@@ -89,7 +89,7 @@ pub enum ClientResult {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, T: Send + Sync> {
+pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Auth parameters to use for connection
     #[educe(Debug(ignore))]
     pub auth: AuthMethod,
@@ -253,14 +253,14 @@ fn debug_pkt_codec_fac(
 
 pub struct ClientIpConfigCb;
 
-impl<T: Send + Sync> ClientIpConfig<ConnectionState<T>> for ClientIpConfigCb {
-    fn ip_config(&self, state: &mut ConnectionState<T>, ip_config: InsideIpConfig) {
+impl<ExtAppState: Send + Sync> ClientIpConfig<ConnectionState<ExtAppState>> for ClientIpConfigCb {
+    fn ip_config(&self, state: &mut ConnectionState<ExtAppState>, ip_config: InsideIpConfig) {
         tracing::debug!("Got IP from server: {ip_config:?}");
         state.ip_config = Some(ip_config);
     }
 }
 
-pub struct ConnectionState<T: Send + Sync = ()> {
+pub struct ConnectionState<ExtAppState: Send + Sync = ()> {
     /// Handler for tick callbacks.
     pub ticker: ConnectionTicker,
     /// InsideIpConfig received from server
@@ -268,28 +268,28 @@ pub struct ConnectionState<T: Send + Sync = ()> {
     /// Encoding request retransmit ticker
     pub codec_ticker: Option<CodecTicker>,
     /// Other extended state
-    pub extended: T,
+    pub extended: ExtAppState,
 }
 
-impl<T: Send + Sync> ConnectionTickerState for ConnectionState<T> {
+impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppState> {
     fn connection_ticker(&self) -> &ConnectionTicker {
         &self.ticker
     }
 }
 
-impl<T: Send + Sync> CodecTickerState for ConnectionState<T> {
+impl<ExtAppState: Send + Sync> CodecTickerState for ConnectionState<ExtAppState> {
     fn ticker(&self) -> Option<&CodecTicker> {
         self.codec_ticker.as_ref()
     }
 }
 
-async fn handle_events<A: 'static + Send + EventCallback, T: Send + Sync>(
+async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sync>(
     mut stream: EventStream,
     keepalive: Keepalive,
-    weak: Weak<Mutex<Connection<ConnectionState<T>>>>,
+    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     enable_encoding_when_online: bool,
     event_handler: Option<A>,
-    inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<T>> + Send + Sync>,
+    inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<ExtAppState>> + Send + Sync>,
     connected_signal: oneshot::Sender<()>,
 ) {
     let mut connected_signal = Some(connected_signal);
@@ -335,8 +335,8 @@ async fn handle_events<A: 'static + Send + EventCallback, T: Send + Sync>(
     }
 }
 
-pub async fn outside_io_task<T: Send + Sync>(
-    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+pub async fn outside_io_task<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
     connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
@@ -372,9 +372,9 @@ pub async fn outside_io_task<T: Send + Sync>(
     }
 }
 
-pub async fn inside_io_task<T: Send + Sync>(
-    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
-    inside_io: Arc<dyn io::inside::InsideIORecv<T>>,
+pub async fn inside_io_task<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    inside_io: Arc<dyn io::inside::InsideIORecv<ExtAppState>>,
     tun_dns_ip: Ipv4Addr,
 ) -> Result<()> {
     loop {
@@ -423,10 +423,10 @@ pub async fn inside_io_task<T: Send + Sync>(
     }
 }
 
-async fn handle_network_change<T: Send + Sync>(
+async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
-    weak: Weak<Mutex<lightway_core::Connection<ConnectionState<T>>>>,
+    weak: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
 ) -> ClientResult {
     while (network_change_signal.recv().await).is_some() {
         let Some(conn) = weak.upgrade() else {
@@ -448,8 +448,8 @@ async fn handle_network_change<T: Send + Sync>(
     ClientResult::UserDisconnect
 }
 
-pub async fn handle_encoded_pkt_send<T: Send + Sync>(
-    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<T>>>>,
+pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
+    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
 ) -> Result<()> {
     let Some(mut rx) = rx else {
@@ -486,8 +486,8 @@ pub async fn handle_encoded_pkt_send<T: Send + Sync>(
     Ok(())
 }
 
-pub async fn handle_decoded_pkt_send<T: Send + Sync>(
-    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<T>>>>,
+pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
+    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
 ) -> Result<()> {
     let Some(mut rx) = rx else {
@@ -517,8 +517,8 @@ pub async fn handle_decoded_pkt_send<T: Send + Sync>(
     Ok(())
 }
 
-pub async fn encoding_request_task<T: Send + Sync>(
-    weak: Weak<Mutex<Connection<ConnectionState<T>>>>,
+pub async fn encoding_request_task<ExtAppState: Send + Sync>(
+    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mut signal: tokio::sync::mpsc::Receiver<bool>,
 ) {
     while let Some(enable) = signal.recv().await {
@@ -550,7 +550,7 @@ pub struct ClientConnection<T> {
     route_table: Option<RoutingTable>,
 }
 
-impl<T: Send + Sync> ClientConnection<T> {
+impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
@@ -597,12 +597,12 @@ impl<T: Send + Sync> ClientConnection<T> {
 )]
 pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
-    T: 'static + Default + Send + Sync,
+    ExtAppState: 'static + Default + Send + Sync,
 >(
-    config: &ClientConfig<'_, T>,
+    config: &ClientConfig<'_, ExtAppState>,
     mut server_config: ClientConnectionConfig<EventHandler>,
-    inside_io: Arc<dyn io::inside::InsideIO<T>>,
-) -> Result<ClientConnection<T>> {
+    inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
+) -> Result<ClientConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
@@ -717,7 +717,7 @@ pub async fn connect<
     let (connected_tx, connected_rx) = oneshot::channel();
 
     let event_handler = server_config.event_handler.take();
-    let event_inside_io: InsideIOSendCallbackArg<ConnectionState<T>> =
+    let event_inside_io: InsideIOSendCallbackArg<ConnectionState<ExtAppState>> =
         inside_io.clone().into_io_send_callback();
     join_set.spawn(handle_events(
         event_stream,
@@ -833,8 +833,11 @@ async fn find_best_connection(mut connected_signals: Vec<oneshot::Receiver<()>>)
     best_connection_index
 }
 
-fn validate_client_config<EventHandler: 'static + Send + EventCallback, T: Send + Sync>(
-    config: &ClientConfig<'_, T>,
+fn validate_client_config<
+    EventHandler: 'static + Send + EventCallback,
+    ExtAppState: Send + Sync,
+>(
+    config: &ClientConfig<'_, ExtAppState>,
     servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
@@ -872,9 +875,9 @@ fn apply_platform_specific_config(
 /// Launches connections concurrently and waits for the first one to complete.
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
-    T: 'static + Default + Send + Sync,
+    ExtAppState: 'static + Default + Send + Sync,
 >(
-    mut config: ClientConfig<'_, T>,
+    mut config: ClientConfig<'_, ExtAppState>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
     tracing::info!(

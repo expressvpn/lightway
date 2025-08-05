@@ -45,7 +45,7 @@ impl Tun {
 }
 
 #[async_trait]
-impl<T: Send + Sync> InsideIORecv<T> for Tun {
+impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
     async fn recv_buf(&self) -> IOCallbackResult<BytesMut> {
         self.tun.recv_buf().await
     }
@@ -70,13 +70,19 @@ impl<T: Send + Sync> InsideIORecv<T> for Tun {
         Ok(pkt_len)
     }
 
-    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState<T>> {
+    fn into_io_send_callback(
+        self: Arc<Self>,
+    ) -> InsideIOSendCallbackArg<ConnectionState<ExtAppState>> {
         self
     }
 }
 
-impl<T: Send + Sync> InsideIOSendCallback<ConnectionState<T>> for Tun {
-    fn send(&self, mut buf: BytesMut, state: &mut ConnectionState<T>) -> IOCallbackResult<usize> {
+impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>> for Tun {
+    fn send(
+        &self,
+        mut buf: BytesMut,
+        state: &mut ConnectionState<ExtAppState>,
+    ) -> IOCallbackResult<usize> {
         // Update destination IP from server provided inside ip to TUN device ip
         ipv4_update_destination(buf.as_mut(), self.ip);
 
