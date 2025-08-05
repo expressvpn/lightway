@@ -1,6 +1,8 @@
 mod debug;
 pub mod io;
 pub mod keepalive;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "macos",))]
 pub mod routing_table;
 
@@ -25,6 +27,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(feature = "debug")]
 use crate::debug::WiresharkKeyLogger;
+#[cfg(target_os = "macos")]
+use crate::macos::dns_manager::DnsManager;
 #[cfg(any(target_os = "linux", target_os = "macos",))]
 use crate::routing_table::{RouteMode, RoutingTable};
 #[cfg(feature = "debug")]
@@ -602,6 +606,11 @@ pub async fn client<A: 'static + Send + EventCallback, T: Send + Sync>(
             &config.tun_dns_ip.into(),
         )
         .await?;
+
+    #[cfg(target_os = "macos")]
+    let mut macos_scutils_dns_config = DnsManager::new();
+    #[cfg(target_os = "macos")]
+    macos_scutils_dns_config.set_dns(&config.tun_dns_ip.to_string())?;
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
