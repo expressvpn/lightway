@@ -33,7 +33,9 @@ use crate::{
     utils::tcp_clamp_mss,
     wire::{self, AuthMethod},
 };
-use crate::{LightwayFeature, OutsideIOSendCallbackArg, dtls_required_outside_mtu, max_dtls_mtu};
+use crate::{
+    LightwayFeature, OutsideIOSendCallbackArg, TickType, dtls_required_outside_mtu, max_dtls_mtu,
+};
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
@@ -680,7 +682,11 @@ impl<AppState: Send> Connection<AppState> {
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
             trace!("Scheduling tick for {:?}", interval);
-            (self.schedule_tick_cb)(interval, &mut self.app_state);
+            (self.schedule_tick_cb)(
+                interval,
+                &mut self.app_state,
+                crate::TickType::ConnectionTick,
+            );
 
             self.is_tick_timer_running = true;
         }
@@ -705,7 +711,7 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Inject a tick to the connection. See
     /// [`Connection::tick_interval`] for usage.
-    pub fn tick(&mut self) -> ConnectionResult<()> {
+    pub fn tick(&mut self, _tick_type: TickType) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
         trace!(session_id = ?self.session_id, "Processing connection tick");
 

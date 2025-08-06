@@ -37,7 +37,7 @@ pub use connection::{
 pub use context::{
     ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleCodecTickCb,
     ScheduleTickCb, ServerAuth, ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext,
-    ServerContextBuilder,
+    ServerContextBuilder, TickType,
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
 pub use features::LightwayFeature;

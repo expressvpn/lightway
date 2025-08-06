@@ -83,6 +83,12 @@ mod test_connection_type {
     }
 }
 
+/// Tick type
+pub enum TickType {
+    /// Ticks for connection management
+    ConnectionTick,
+}
+
 /// Type of the application provided method to schedule a call to
 /// [`crate::Connection::tick`] after an interval. When this method is
 /// called by lightway the application should arrange to call
@@ -92,7 +98,8 @@ mod test_connection_type {
 /// Take care if calling [`crate::Connection`] methods from within the
 /// callback to avoid deadlock with any application lock you have
 /// wrapped the connection in.
-pub type ScheduleTickCb<AppState> = fn(d: std::time::Duration, state: &mut AppState);
+pub type ScheduleTickCb<AppState> =
+    fn(d: std::time::Duration, state: &mut AppState, tick_type: TickType);
 
 /// Type of the application provided method to schedule a call to
 /// [`crate::Connection::codec_tick`] after
