@@ -14,9 +14,8 @@ use futures::{FutureExt, future::join_all};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
-    CodecTicker, CodecTickerState, ConnectionTicker, ConnectionTickerState, DplpmtudTimer,
-    EventStream, EventStreamCallback, PacketCodecFactoryType, TunConfig, args::Cipher,
-    codec_ticker_cb, connection_ticker_cb,
+    ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
+    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
@@ -268,8 +267,6 @@ pub struct ConnectionState<ExtAppState: Send + Sync = ()> {
     pub ticker: ConnectionTicker,
     /// InsideIpConfig received from server
     pub ip_config: Option<InsideIpConfig>,
-    /// Encoding request retransmit ticker
-    pub codec_ticker: Option<CodecTicker>,
     /// Other extended state
     pub extended: ExtAppState,
 }
@@ -277,12 +274,6 @@ pub struct ConnectionState<ExtAppState: Send + Sync = ()> {
 impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppState> {
     fn connection_ticker(&self) -> &ConnectionTicker {
         &self.ticker
-    }
-}
-
-impl<ExtAppState: Send + Sync> CodecTickerState for ConnectionState<ExtAppState> {
-    fn ticker(&self) -> Option<&CodecTicker> {
-        self.codec_ticker.as_ref()
     }
 }
 
@@ -688,20 +679,10 @@ pub async fn connect<
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
-    let has_inside_pkt_codec = server_config.inside_pkt_codec.is_some();
-
-    let (codec_ticker, codec_ticker_task) = if has_inside_pkt_codec {
-        let (ticker, ticker_task) = CodecTicker::new();
-        (Some(ticker), Some(ticker_task))
-    } else {
-        (None, None)
-    };
-
     let (ticker, ticker_task) = ConnectionTicker::new();
     let state = ConnectionState {
         ticker,
         ip_config: None,
-        codec_ticker,
         extended: Default::default(),
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
@@ -732,7 +713,6 @@ pub async fn connect<
         connection_ticker_cb,
     )?
     .with_cipher(server_config.cipher.into())?
-    .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)
     .build()
@@ -789,10 +769,6 @@ pub async fn connect<
 
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
-
-    if let Some(codec_ticker_task) = codec_ticker_task {
-        codec_ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
-    }
 
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),

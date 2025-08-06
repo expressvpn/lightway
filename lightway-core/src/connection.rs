@@ -23,9 +23,7 @@ use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 use crate::{
     ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
     TCP_HEADER_SIZE, Version,
-    context::{
-        ScheduleCodecTickCb, ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult,
-    },
+    context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
     metrics,
     packet_codec::{CodecStatus, PacketDecoderType, PacketEncoderType},
@@ -288,8 +286,6 @@ enum ConnectionMode<AppState> {
         auth_method: AuthMethod,
         /// Callback to notify about inside ip config
         ip_config_cb: ClientIpConfigArg<AppState>,
-        /// Application provided callback to schedule an encoding request retransmission tick
-        schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
     },
     Server {
         /// Authentication oracle.
@@ -711,7 +707,16 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Inject a tick to the connection. See
     /// [`Connection::tick_interval`] for usage.
-    pub fn tick(&mut self, _tick_type: TickType) -> ConnectionResult<()> {
+    pub fn tick(&mut self, tick_type: TickType) -> ConnectionResult<()> {
+        match tick_type {
+            TickType::ConnectionTick => self.connection_tick(),
+            TickType::PktCodecTick(request_id) => self.codec_tick(request_id),
+        }
+    }
+
+    /// Inject a tick to the connection. See
+    /// [`Connection::tick_interval`] for usage.
+    pub fn connection_tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
         trace!(session_id = ?self.session_id, "Processing connection tick");
 
@@ -1711,27 +1716,6 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn get_codec_tick_cb(&self) -> ConnectionResult<ScheduleCodecTickCb<AppState>> {
-        match self.mode {
-            ConnectionMode::Server { .. } => {
-                error!("Attempting to send an EncodingRequest as a server");
-                Err(ConnectionError::InvalidMode)
-            }
-            ConnectionMode::Client {
-                schedule_codec_tick_cb,
-                ..
-            } => match schedule_codec_tick_cb {
-                Some(cb) => Ok(cb),
-                None => {
-                    error!(
-                        "Failed to retransmit as schedule encoding request retransmit cb is not set."
-                    );
-                    Err(ConnectionError::EncodingReqRetransmitCbDoesNotExist)
-                }
-            },
-        }
-    }
-
     /// Get the current encoding state from the encoder
     pub fn is_encoding_enabled(&self) -> bool {
         self.inside_pkt_encoder
@@ -1755,8 +1739,6 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidConnectionType);
         }
 
-        let schedule_codec_tick_cb = self.get_codec_tick_cb()?;
-
         self.encoding_request_states.id_counter =
             self.encoding_request_states.id_counter.wrapping_add(1);
         let encoding_request = wire::EncodingRequest {
@@ -1770,10 +1752,10 @@ impl<AppState: Send> Connection<AppState> {
         let msg = wire::Frame::EncodingRequest(encoding_request);
 
         // Callback to schedule a re-transmission
-        schedule_codec_tick_cb(
+        (self.schedule_tick_cb)(
             self.encoding_request_states.retransmit_wait_time(),
-            self.encoding_request_states.id_counter,
             &mut self.app_state,
+            TickType::PktCodecTick(self.encoding_request_states.id_counter),
         );
 
         debug!(
@@ -1803,8 +1785,6 @@ impl<AppState: Send> Connection<AppState> {
             error!("Attempting to send an EncodingRequest as a server");
             return Err(ConnectionError::InvalidMode);
         }
-
-        let schedule_codec_tick_cb = self.get_codec_tick_cb()?;
 
         let pending_request_pkt = match &self.encoding_request_states.pending_request_pkt {
             Some(pkt) => pkt,
@@ -1846,10 +1826,10 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         // Callback to schedule another re-transmission
-        schedule_codec_tick_cb(
+        (self.schedule_tick_cb)(
             self.encoding_request_states.retransmit_wait_time(),
-            self.encoding_request_states.id_counter,
             &mut self.app_state,
+            TickType::PktCodecTick(self.encoding_request_states.id_counter),
         );
 
         let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());

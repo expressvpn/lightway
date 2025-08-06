@@ -87,6 +87,8 @@ mod test_connection_type {
 pub enum TickType {
     /// Ticks for connection management
     ConnectionTick,
+    /// Ticks for inside packet codec
+    PktCodecTick(u64),
 }
 
 /// Type of the application provided method to schedule a call to
@@ -101,20 +103,6 @@ pub enum TickType {
 pub type ScheduleTickCb<AppState> =
     fn(d: std::time::Duration, state: &mut AppState, tick_type: TickType);
 
-/// Type of the application provided method to schedule a call to
-/// [`crate::Connection::codec_tick`] after
-/// an interval.
-/// When this method is called by lightway the application should
-/// arrange to call
-/// [`crate::Connection::codec_tick`] after
-/// `wait_time` has elapsed. There is no requirement to cancel any
-/// other pending callback.
-///
-/// Take care if calling [`crate::Connection`] methods from within the
-/// callback to avoid deadlock with any application lock you have
-/// wrapped the connection in.
-pub type ScheduleCodecTickCb<AppState> =
-    fn(d: std::time::Duration, request_id: u64, state: &mut AppState);
 /// The core Lightway Client-side context.
 pub struct ClientContext<AppState> {
     pub(crate) wolfssl: wolfssl::Context,
@@ -124,7 +112,6 @@ pub struct ClientContext<AppState> {
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
-    pub(crate) schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -148,7 +135,6 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
-    schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -177,7 +163,6 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
-            schedule_codec_tick_cb: None,
         })
     }
 
@@ -208,18 +193,6 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
-    /// Sets the schedule inside packet codec's encoding request retransmit tick callback
-    /// See [`ScheduleCodecTickCb`]
-    pub fn with_schedule_codec_tick_cb(
-        self,
-        schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
-    ) -> Self {
-        Self {
-            schedule_codec_tick_cb,
-            ..self
-        }
-    }
-
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let wolfssl = self.wolfssl.build();
@@ -231,7 +204,6 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
-            schedule_codec_tick_cb: self.schedule_codec_tick_cb,
         }
     }
 }

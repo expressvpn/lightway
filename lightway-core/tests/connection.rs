@@ -16,8 +16,8 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use lightway_app_utils::{
-    CodecTicker, CodecTickerState, ConnectionTicker, ConnectionTickerState, EventStreamCallback,
-    PacketCodecFactory, codec_ticker_cb, connection_ticker_cb,
+    ConnectionTicker, ConnectionTickerState, EventStreamCallback, PacketCodecFactory,
+    connection_ticker_cb,
 };
 use lightway_core::*;
 
@@ -343,18 +343,11 @@ impl ClientIpConfig<ConnectionState> for Client {
 
 struct ConnectionState {
     pub ticker: ConnectionTicker,
-    pub codec_ticker: CodecTicker,
 }
 
 impl ConnectionTickerState for ConnectionState {
     fn connection_ticker(&self) -> &ConnectionTicker {
         &self.ticker
-    }
-}
-
-impl CodecTickerState for ConnectionState {
-    fn ticker(&self) -> Option<&CodecTicker> {
-        Some(&self.codec_ticker)
     }
 }
 
@@ -404,12 +397,8 @@ async fn client<S: TestSock>(
     };
 
     let (ticker, ticker_task) = ConnectionTicker::new();
-    let (codec_ticker, codec_ticker_task) = CodecTicker::new();
 
-    let state = ConnectionState {
-        ticker,
-        codec_ticker,
-    };
+    let state = ConnectionState { ticker };
 
     let client = ClientContextBuilder::new(
         sock.connection_type(),
@@ -419,7 +408,6 @@ async fn client<S: TestSock>(
         connection_ticker_cb,
     )
     .unwrap()
-    .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
     .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
     .build()
     .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
@@ -436,7 +424,6 @@ async fn client<S: TestSock>(
     let client = Arc::new(Mutex::new(client));
 
     ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
-    codec_ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
 
     let event_client = client.clone();
 

@@ -245,7 +245,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             mode: ConnectionMode::Client {
                 auth_method,
                 ip_config_cb: self.ctx.ip_config,
-                schedule_codec_tick_cb: self.ctx.schedule_codec_tick_cb,
             },
             inside_io: self.ctx.inside_io,
             schedule_tick_cb: self.ctx.schedule_tick_cb,
