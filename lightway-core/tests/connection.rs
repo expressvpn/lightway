@@ -225,9 +225,9 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
         auth,
         ip_pool,
         Arc::new(tun),
+        connection_ticker_cb,
     )
     .unwrap()
-    .with_schedule_tick_cb(connection_ticker_cb)
     .with_minimum_protocol_version(Version::MAXIMUM)
     .unwrap()
     .with_maximum_protocol_version(Version::MAXIMUM)
@@ -411,24 +411,28 @@ async fn client<S: TestSock>(
         codec_ticker,
     };
 
-    let client =
-        ClientContextBuilder::new(sock.connection_type(), ca_cert, Some(Arc::new(tun)), client)
-            .unwrap()
-            .with_schedule_tick_cb(connection_ticker_cb)
-            .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
-            .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
-            .build()
-            .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
-            .unwrap()
-            .with_auth_token("LET ME IN")
-            .with_event_cb(Box::new(event_cb))
-            .with_inside_pkt_codec(packet_codec)
-            .when(pqc.enable_client(), |b| b.with_pq_crypto())
-            .when_some(server_dn, |b, sdn| {
-                b.with_server_domain_name_validation(sdn.to_string())
-            })
-            .connect(state)
-            .unwrap();
+    let client = ClientContextBuilder::new(
+        sock.connection_type(),
+        ca_cert,
+        Some(Arc::new(tun)),
+        client,
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
+    .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
+    .build()
+    .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_event_cb(Box::new(event_cb))
+    .with_inside_pkt_codec(packet_codec)
+    .when(pqc.enable_client(), |b| b.with_pq_crypto())
+    .when_some(server_dn, |b, sdn| {
+        b.with_server_domain_name_validation(sdn.to_string())
+    })
+    .connect(state)
+    .unwrap();
     let client = Arc::new(Mutex::new(client));
 
     ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);

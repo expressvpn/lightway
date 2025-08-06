@@ -18,8 +18,7 @@ pub trait ConnectionTickerState {
 }
 
 /// Callback for use with
-/// [`lightway_core::ClientContextBuilder::with_schedule_tick_cb`] and
-/// [`lightway_core::ServerContextBuilder::with_schedule_tick_cb`].
+/// [`lightway_core::Connection::schedule_tick_cb`] and
 pub fn connection_ticker_cb<AppState: ConnectionTickerState>(
     d: std::time::Duration,
     state: &mut AppState,

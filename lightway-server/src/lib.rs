@@ -307,8 +307,8 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         auth,
         ip_manager.clone(),
         inside_io.clone().into_io_send_callback(),
+        connection_ticker_cb,
     )?
-    .with_schedule_tick_cb(connection_ticker_cb)
     .with_key_update_interval(config.key_update_interval)
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)

@@ -113,7 +113,7 @@ pub struct ClientContext<AppState> {
     pub(crate) wolfssl: wolfssl::Context,
     pub(crate) connection_type: ConnectionType,
     pub(crate) inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    pub(crate) schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
@@ -137,7 +137,7 @@ pub struct ClientContextBuilder<AppState> {
     wolfssl: wolfssl::ContextBuilder,
     connection_type: ConnectionType,
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
@@ -151,6 +151,7 @@ impl<AppState> ClientContextBuilder<AppState> {
         root_ca: RootCertificate,
         inside_io: Option<InsideIOSendCallbackArg<AppState>>,
         ip_config: ClientIpConfigArg<AppState>,
+        schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => wolfssl::Method::TlsClientV1_3,
@@ -165,21 +166,12 @@ impl<AppState> ClientContextBuilder<AppState> {
             wolfssl,
             connection_type,
             inside_io,
-            schedule_tick_cb: None,
+            schedule_tick_cb,
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
             schedule_codec_tick_cb: None,
         })
-    }
-
-    /// Sets the function that will be called when Lightway needs to
-    /// schedule a callback. See [`ScheduleTickCb`].
-    pub fn with_schedule_tick_cb(self, schedule_tick_cb: ScheduleTickCb<AppState>) -> Self {
-        Self {
-            schedule_tick_cb: Some(schedule_tick_cb),
-            ..self
-        }
     }
 
     /// Sets the inside plugins list which should be used for Lightway connection.
@@ -269,7 +261,7 @@ pub enum ContextError {
 pub struct ServerContext<AppState = ()> {
     pub(crate) wolfssl: wolfssl::Context,
     pub(crate) connection_type: ConnectionType,
-    pub(crate) schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
     pub(crate) inside_io: InsideIOSendCallbackArg<AppState>,
     pub(crate) auth: ServerAuthArg<AppState>,
     pub(crate) ip_pool: ServerIpPoolArg<AppState>,
@@ -325,7 +317,7 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
 pub struct ServerContextBuilder<AppState> {
     wolfssl: wolfssl::ContextBuilder,
     connection_type: ConnectionType,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     inside_io: InsideIOSendCallbackArg<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
@@ -363,6 +355,7 @@ impl<AppState> ServerContextBuilder<AppState> {
         auth: ServerAuthArg<AppState>,
         ip_pool: ServerIpPoolArg<AppState>,
         inside_io: InsideIOSendCallbackArg<AppState>,
+        schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => wolfssl::Method::TlsServerV1_3,
@@ -389,21 +382,12 @@ impl<AppState> ServerContextBuilder<AppState> {
             auth,
             ip_pool,
             inside_io,
-            schedule_tick_cb: None,
+            schedule_tick_cb,
             supported_protocol_versions: VersionRangeInclusive::all(),
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
         })
-    }
-
-    /// Sets the function that will be called when Lightway needs to
-    /// schedule a callback. See [`ScheduleTickCb`].
-    pub fn with_schedule_tick_cb(self, schedule_tick_cb: ScheduleTickCb<AppState>) -> Self {
-        Self {
-            schedule_tick_cb: Some(schedule_tick_cb),
-            ..self
-        }
     }
 
     /// Sets the inside plugins list which should be used for Lightway connection.

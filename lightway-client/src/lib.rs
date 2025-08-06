@@ -729,9 +729,9 @@ pub async fn connect<
         config.root_ca_cert,
         None,
         Arc::new(ClientIpConfigCb),
+        connection_ticker_cb,
     )?
     .with_cipher(server_config.cipher.into())?
-    .with_schedule_tick_cb(connection_ticker_cb)
     .with_schedule_codec_tick_cb(Some(codec_ticker_cb))
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)

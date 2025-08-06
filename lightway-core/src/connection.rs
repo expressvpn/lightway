@@ -360,7 +360,7 @@ pub struct Connection<AppState: Send = ()> {
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
 
     /// Application provided callback to schedule a tick
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
 
     /// Application provided callback to notify events
     event_cb: Option<EventCallbackArg>,
@@ -425,7 +425,7 @@ struct NewConnectionArgs<AppState> {
     mode: ConnectionMode<AppState>,
     outside_mtu: usize,
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     event_cb: Option<EventCallbackArg>,
     inside_plugins: PluginList,
     outside_plugins: Arc<PluginList>,
@@ -680,11 +680,9 @@ impl<AppState: Send> Connection<AppState> {
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
             trace!("Scheduling tick for {:?}", interval);
-            if let Some(schedule_tick_cb) = self.schedule_tick_cb {
-                schedule_tick_cb(interval, &mut self.app_state);
+            (self.schedule_tick_cb)(interval, &mut self.app_state);
 
-                self.is_tick_timer_running = true;
-            }
+            self.is_tick_timer_running = true;
         }
     }
 
@@ -697,12 +695,6 @@ impl<AppState: Send> Connection<AppState> {
     /// to tell Lightway when a certain amount of time has passed. Because
     /// D/TLS implements exponential back off, the amount of waiting time
     /// can change after every read.
-    ///
-    /// Applications may prefer to use
-    /// [`crate::context::ClientContextBuilder::with_schedule_tick_cb`]
-    /// or
-    /// [`crate::context::ServerContextBuilder::with_schedule_tick_cb`]
-    /// to get a callback when a tick is required.
     ///
     /// If in use this should be called after every read cycle and, if
     /// `Some(_)`, [`Connection::tick`] should be called that amount
