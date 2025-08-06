@@ -15,12 +15,14 @@ use crate::ConnectionState;
 #[async_trait]
 /// Trait for InsideIORecv
 /// This will be used client app to fetch inside packets
-pub trait InsideIORecv: Sync + Send {
+pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
     async fn recv_buf(&self) -> IOCallbackResult<BytesMut>;
 
     fn try_send(&self, pkt: BytesMut, ip_config: Option<InsideIpConfig>) -> Result<usize>;
 
-    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState>;
+    fn into_io_send_callback(
+        self: Arc<Self>,
+    ) -> InsideIOSendCallbackArg<ConnectionState<ExtAppState>>;
 }
 
 /// Trait for InsideIO
@@ -28,15 +30,19 @@ pub trait InsideIORecv: Sync + Send {
 /// This is a super trait which includes both InsideIORecv and InsideIOSendCallback
 /// A default blanket implementation is provided, so users has to only implement
 /// InsideIORecv and InsideIOSendCallback in their data structures.
-pub trait InsideIO<T: Send + Sync = ()>:
-    InsideIORecv + InsideIOSendCallback<ConnectionState<T>>
+pub trait InsideIO<ExtAppState: Send + Sync = ()>:
+    InsideIORecv<ExtAppState> + InsideIOSendCallback<ConnectionState<ExtAppState>>
 {
 }
 
 /// Default blanket implementation for InsideIO
 impl<
-    T: Send + Sync,
-    U: Send + Sync + Sized + InsideIOSendCallback<ConnectionState<T>> + InsideIORecv,
-> InsideIO<T> for U
+    ExtAppState: Send + Sync,
+    U: Send
+        + Sync
+        + Sized
+        + InsideIOSendCallback<ConnectionState<ExtAppState>>
+        + InsideIORecv<ExtAppState>,
+> InsideIO<ExtAppState> for U
 {
 }

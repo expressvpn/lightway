@@ -280,17 +280,17 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         None => {
             use io::inside::Tun;
             #[cfg(not(feature = "io-uring"))]
-            let tun = Tun::new(config.tun_config).await;
+            let tun = Tun::new(&config.tun_config).await;
             #[cfg(feature = "io-uring")]
             let tun = if config.enable_tun_iouring {
                 Tun::new_with_iouring(
-                    config.tun_config,
+                    &config.tun_config,
                     config.iouring_entry_count,
                     config.iouring_sqpoll_idle_time,
                 )
                 .await
             } else {
-                Tun::new(config.tun_config).await
+                Tun::new(&config.tun_config).await
             };
 
             let tun = tun.context("Tun creation")?;

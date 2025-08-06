@@ -30,14 +30,14 @@ pub enum Tun {
 
 impl Tun {
     /// Create new `Tun` instance with direct read/write
-    pub async fn direct(config: TunConfig) -> Result<Self> {
+    pub async fn direct(config: &TunConfig) -> Result<Self> {
         Ok(Self::Direct(TunDirect::new(config)?))
     }
 
     /// Create new `Tun` instance with iouring read/write
     #[cfg(feature = "io-uring")]
     pub async fn iouring(
-        config: TunConfig,
+        config: &TunConfig,
         ring_size: usize,
         sqpoll_idle_time: Duration,
     ) -> Result<Self> {
@@ -102,14 +102,8 @@ pub struct TunDirect {
 
 impl TunDirect {
     /// Create a new `Tun` struct
-    pub fn new(config: TunConfig) -> Result<Self> {
-        #[cfg(target_os = "macos")]
-        let mut config = config;
-        #[cfg(target_os = "macos")]
-        config.platform_config(|config| {
-            config.enable_routing(false);
-        });
-        let tun = tun::create_as_async(&config)?;
+    pub fn new(config: &TunConfig) -> Result<Self> {
+        let tun = tun::create_as_async(config)?;
         let fd = tun.as_raw_fd();
         let mtu = tun.mtu()?;
 
@@ -173,7 +167,7 @@ pub struct TunIoUring {
 impl TunIoUring {
     /// Create `TunIoUring` struct
     pub async fn new(
-        config: TunConfig,
+        config: &TunConfig,
         ring_size: usize,
         sqpoll_idle_time: Duration,
     ) -> Result<Self> {
