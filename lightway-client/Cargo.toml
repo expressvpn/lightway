@@ -49,3 +49,7 @@ serial_test = "3.2.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 route_manager = { version = "0.2.6", features = ["async"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9.4"
+system-configuration = "0.6.1"

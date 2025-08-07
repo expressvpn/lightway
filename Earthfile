@@ -96,8 +96,8 @@ test:
     END
 
     # Run all tests except privileged tests
-    DO lib-rust+CARGO --args="test --target=$target -- --skip test_privileged"
-    DO lib-rust+CARGO --args="test --features kyber_only --target=$target -- --skip test_privileged"
+    DO lib-rust+CARGO --args="test --target=$target"
+    DO lib-rust+CARGO --args="test --features kyber_only --target=$target"
     
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored
@@ -129,7 +129,7 @@ coverage:
     RUN mkdir /tmp/coverage
     DO lib-rust+SET_CACHE_MOUNTS_ENV
     RUN --mount=$EARTHLY_RUST_CARGO_HOME_CACHE --mount=$EARTHLY_RUST_TARGET_CACHE \
-        cargo llvm-cov test --no-report -- --skip test_privileged
+        cargo llvm-cov test --no-report
     
     # Run privileged tests with sudo for coverage
     RUN --privileged --mount=$EARTHLY_RUST_CARGO_HOME_CACHE --mount=$EARTHLY_RUST_TARGET_CACHE \
