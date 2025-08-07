@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-build]
+    needs: [earthly, e2e, coverage, nix-build, nix-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -186,3 +186,26 @@ jobs:
 
       - name: Build lightway server
         run: nix build .#lightway-server
+
+  nix-test:
+    name: Nix Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix flake check
+
+      - name: Run cargo tests
+        run: nix develop --command cargo test
+
+      - name: Run cargo tests with kyber_only feature
+        run: nix develop --command cargo test --features kyber_only
+
+      - name: Run privileged tests
+        run: sudo nix develop --command cargo test test_privileged -- --ignored
