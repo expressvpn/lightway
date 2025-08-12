@@ -169,7 +169,9 @@ impl DnsSetup for DnsManager {
             .store
             .set(primary_service_path.as_str(), dns_dictionary)
         {
-            return Err(DnsManagerError::FailedToSetDnsConfig);
+            return Err(DnsManagerError::FailedToSetDnsConfig(
+                "Failed to set DNS Dictionary".to_string(),
+            ));
         }
         self.flush_dns_cache()?;
         Ok(())

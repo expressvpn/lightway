@@ -14,8 +14,8 @@ pub enum DnsConfigMode {
 pub enum DnsManagerError {
     #[error("Unable to find primary service ID")]
     PrimaryServiceNotFound,
-    #[error("Failed to set DNS configuration")]
-    FailedToSetDnsConfig,
+    #[error("Failed to set DNS configuration: {0}")]
+    FailedToSetDnsConfig(String),
     #[error("Failed to remove DNS configuration")]
     FailedToRemoveDnsConfig,
     #[error("DNS cache flush failed: {0}")]
@@ -24,6 +24,15 @@ pub enum DnsManagerError {
     VersionDetectionFailed(String),
     #[error("Invalid system data type")]
     InvalidSystemData,
+    #[error("Unable to find backup to restore resolv.conf")]
+    #[cfg(target_os = "linux")]
+    NoResolvConfBackup,
+    #[error("Failed to restore DNS configuration: {0}")]
+    #[cfg(target_os = "linux")]
+    FailedToRestoreDnsConfig(String),
+    #[error("DNS has already been configured")]
+    #[cfg(target_os = "linux")]
+    DnsAlreadyConfigured,
 }
 
 pub trait DnsSetup {

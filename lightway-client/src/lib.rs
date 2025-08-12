@@ -1051,6 +1051,9 @@ pub async fn client<
     connection.set_connection_inside_io();
 
     #[cfg(any(target_os = "linux", target_os = "macos",))]
+    connection.set_dns(config.dns_config_mode, config.tun_dns_ip)?;
+
+    #[cfg(any(target_os = "linux", target_os = "macos",))]
     connection
         .initialize_routes(
             config.route_mode,
@@ -1058,9 +1061,6 @@ pub async fn client<
             config.tun_dns_ip.into(),
         )
         .await?;
-
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
-    connection.set_dns(config.dns_config_mode, config.tun_dns_ip)?;
 
     connection.task.await?
 }
