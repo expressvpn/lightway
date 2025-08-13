@@ -21,7 +21,6 @@ allow = [
     "MIT",
     "NCSA",
     "Unicode-3.0",
-    "WTFPL",
     "Zlib",
 ]
 confidence-threshold = 0.8
