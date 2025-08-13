@@ -2848,7 +2848,7 @@ dependencies = [
  "ipnet",
  "libc",
  "log",
- "nix",
+ "nix 0.30.1",
  "thiserror 2.0.15",
  "tokio",
  "tokio-util",

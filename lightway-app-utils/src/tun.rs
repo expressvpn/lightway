@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::{
     mem::ManuallyDrop,
     net::{IpAddr, Ipv4Addr},
-    os::fd::{AsRawFd, IntoRawFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
 };
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
@@ -36,6 +36,8 @@ pub struct TunConfig {
     pub mtu: Option<u16>,
     /// Whether the interface should be brought up after creation
     pub enabled: Option<bool>,
+    /// File Descriptor of the Tunnel
+    pub fd: Option<RawFd>,
     /// Whether to close the file descriptor when the TUN device is dropped
     pub close_fd_on_drop: Option<bool>,
 }
@@ -80,6 +82,11 @@ impl TunConfig {
         self.enabled = Some(true);
         self
     }
+    /// Set the file descriptor
+    pub fn raw_fd(&mut self, fd: RawFd) -> &mut Self {
+        self.fd = Some(fd);
+        self
+    }
     /// Set whether to close the received raw file descriptor on drop or not.
     /// The default behaviour is to close the received or tun generated file descriptor.
     /// Note: If this is set to false, it is up to the caller to ensure the
@@ -90,19 +97,33 @@ impl TunConfig {
     }
 
     /// Creates an async device based on TunConfig
+    #[allow(unsafe_code)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
-        let mut device = DeviceBuilder::new();
+        let device = match self.fd {
+            Some(fd) => {
+                unsafe {
+                    tun_rs::AsyncDevice::from_raw_fd(fd)
+                }
+            },
+            None => {
+                let mut builder = DeviceBuilder::new();
+                if let Some(name) = self.tun_name.as_ref() {
+                    builder = builder.name(name);
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    builder = builder.associate_route(false);
+                }
+                builder.build_async()?
+            },
+        };
+
         if let Some(mtu) = self.mtu {
-            device = device.mtu(mtu);
+            device.set_mtu(mtu)?;
         }
-        if let Some(name) = self.tun_name.as_ref() {
-            device = device.name(name);
-        }
-        device = device.enable(self.enabled.unwrap_or(false));
-        #[cfg(target_os = "macos")]
-        {
-            device = device.associate_route(false);
-        }
+
+        device.enabled(self.enabled.unwrap_or(false))?;
+
         if let Some(address) = self.address {
             match address {
                 IpAddr::V4(ipv4_addr) => {
@@ -110,18 +131,18 @@ impl TunConfig {
                         .prefix
                         .map(|x| x.min(MAX_PREFIX_LEN_IPV4))
                         .unwrap_or(MAX_PREFIX_LEN_IPV4);
-                    device = device.ipv4(ipv4_addr, netmask, self.destination);
+                    device.set_network_address(ipv4_addr, netmask, self.destination)?;
                 }
                 IpAddr::V6(ipv6_addr) => {
                     let netmask = self
                         .prefix
                         .map(|x| x.min(MAX_PREFIX_LEN_IPV6))
                         .unwrap_or(MAX_PREFIX_LEN_IPV6);
-                    device = device.ipv6(ipv6_addr, netmask);
+                    device.add_address_v6(ipv6_addr, netmask)?;
                 }
             }
         }
-        device.build_async()
+        Ok(device)
     }
 }
 
