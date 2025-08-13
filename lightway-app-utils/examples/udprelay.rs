@@ -9,7 +9,7 @@ use pnet::packet::ipv4::MutableIpv4Packet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tun::{AsyncDevice as Tun, Configuration as TunConfig};
+use tun_rs::{AsyncDevice as Tun, DeviceBuilder};
 
 const PORT: u16 = 40890;
 const CHANNEL_SIZE: usize = 32 * 1024;
@@ -54,14 +54,12 @@ fn tun_peer_addr() -> Ipv4Addr {
 }
 
 async fn build_tun(name: String) -> Result<Tun> {
-    let mut tun_config = TunConfig::default();
-    tun_config
-        .tun_name(&name[..])
-        .mtu(TUN_MTU as _)
-        .address(tun_local_addr())
-        .destination(tun_peer_addr())
-        .up();
-    let tun = tun::create_as_async(&tun_config)?;
+    let tun = DeviceBuilder::new()
+        .name(&name)
+        .mtu(TUN_MTU as u16)
+        .ipv4(tun_local_addr(), 32, Some(tun_peer_addr()))
+        .enable(true)
+        .build_async()?;
     Ok(tun)
 }
 
@@ -144,7 +142,7 @@ async fn main() -> Result<()> {
 #[async_trait::async_trait]
 impl TunAdapter for Tun {
     async fn send_to_tun(&self, buf: BytesMut) -> Result<()> {
-        let _ = self.send(&buf[..]).await;
+        let _ = self.send(&buf[..]).await?;
         Ok(())
     }
 
@@ -246,7 +244,7 @@ mod channel {
     use anyhow::Result;
     use async_channel::{Receiver, Sender};
     use bytes::BytesMut;
-    use tun::AsyncDevice as Tun;
+    use tun_rs::AsyncDevice as Tun;
 
     use super::TUN_MTU;
     use std::sync::Arc;
@@ -284,7 +282,7 @@ mod channel {
 
     async fn send_task(tun: Arc<Tun>, send_q_rx: Receiver<BytesMut>) -> Result<()> {
         while let Ok(buf) = send_q_rx.recv().await {
-            let _ = tun.send(&buf[..]).await;
+            let _ = tun.send(&buf[..]).await?;
         }
         Ok(())
     }
