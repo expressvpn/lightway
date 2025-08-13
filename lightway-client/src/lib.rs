@@ -960,12 +960,8 @@ pub async fn client<
             .await?,
         ),
         None => Arc::new(
-            io::inside::Tun::new(
-                &config.tun_config,
-                config.tun_local_ip,
-                config.tun_dns_ip,
-            )
-            .await?,
+            io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
+                .await?,
         ),
     };
 
