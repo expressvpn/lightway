@@ -44,8 +44,8 @@ twelf.workspace = true
 [dev-dependencies]
 more-asserts.workspace = true
 test-case.workspace = true
-tun.workspace = true
 serial_test = "3.2.0"
+tun-rs.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 route_manager = { version = "0.2.6", features = ["async"] }
