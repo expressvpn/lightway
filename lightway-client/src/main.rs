@@ -87,10 +87,10 @@ async fn main() -> Result<()> {
     // TODO: Fix in future PR
     tun_config
         .mtu(1350)
-        .address(config.tun_local_ip)
+        .address(std::net::IpAddr::V4(config.tun_local_ip))
         .destination(config.tun_peer_ip)
         .up();
-
+    println!("tun_config: {:?}", &tun_config);
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
     ctrlc::set_handler(move || {
