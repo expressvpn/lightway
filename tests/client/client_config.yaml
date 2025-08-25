@@ -22,4 +22,4 @@ enable_pmtud: false
 # sndbuf: 1.5 MiB
 # rcvbuf: 1.5 MiB
 route_mode: default
-dns_config_mode: default
+dns_config_mode: noexec
