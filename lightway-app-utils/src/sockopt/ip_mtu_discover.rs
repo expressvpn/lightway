@@ -4,17 +4,11 @@
 //! <https://github.com/rust-lang/socket2/issues/487> we have to reach
 //! for libc and unsafety.
 
+use libc::{IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT};
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 
-/// From `include/uapi/linux/in.h`:
-///
-/// ```ignore
-/// #define IP_PMTUDISC_DONT                0       /* Never send DF frames */
-/// #define IP_PMTUDISC_WANT                1       /* Use per route hints  */
-/// #define IP_PMTUDISC_DO                  2       /* Always DF            */
-/// #define IP_PMTUDISC_PROBE               3       /* Ignore dst pmtu      */
-/// ```
+/// Enum to represent PMTUd values
 #[derive(Copy, Clone)]
 pub enum IpPmtudisc {
     /// Never send DF frames
@@ -30,10 +24,10 @@ pub enum IpPmtudisc {
 impl From<IpPmtudisc> for libc::c_int {
     fn from(value: IpPmtudisc) -> Self {
         match value {
-            IpPmtudisc::Dont => 0,
-            IpPmtudisc::Want => 1,
-            IpPmtudisc::Do => 2,
-            IpPmtudisc::Probe => 3,
+            IpPmtudisc::Dont => IP_PMTUDISC_DONT,
+            IpPmtudisc::Want => IP_PMTUDISC_WANT,
+            IpPmtudisc::Do => IP_PMTUDISC_DO,
+            IpPmtudisc::Probe => IP_PMTUDISC_PROBE,
         }
     }
 }
@@ -43,11 +37,14 @@ impl TryFrom<libc::c_int> for IpPmtudisc {
 
     fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(IpPmtudisc::Dont),
-            1 => Ok(IpPmtudisc::Want),
-            2 => Ok(IpPmtudisc::Do),
-            3 => Ok(IpPmtudisc::Probe),
-            _ => Err(std::io::Error::other("unexpected value for IP_PMTUDISC")),
+            IP_PMTUDISC_DONT => Ok(IpPmtudisc::Dont),
+            IP_PMTUDISC_WANT => Ok(IpPmtudisc::Want),
+            IP_PMTUDISC_DO => Ok(IpPmtudisc::Do),
+            IP_PMTUDISC_PROBE => Ok(IpPmtudisc::Probe),
+            v => Err(std::io::Error::other(format!(
+                "unexpected value for IP_PMTUDISC: {:?}",
+                v
+            ))),
         }
     }
 }
