@@ -2,12 +2,12 @@ use anyhow::Result;
 use bytes::BytesMut;
 use lightway_core::IOCallbackResult;
 
+use std::ops::Deref;
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
-use std::{
-    ops::Deref,
-    os::fd::{AsRawFd, RawFd},
-};
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 
 use tun::{AbstractDevice, AsyncDevice as TokioTun};
 
@@ -83,6 +83,7 @@ impl Tun {
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for Tun {
     fn as_raw_fd(&self) -> RawFd {
         match self {
@@ -97,6 +98,7 @@ impl AsRawFd for Tun {
 pub struct TunDirect {
     tun: TokioTun,
     mtu: u16,
+    #[cfg(unix)]
     fd: RawFd,
 }
 
@@ -104,10 +106,17 @@ impl TunDirect {
     /// Create a new `Tun` struct
     pub fn new(config: &TunConfig) -> Result<Self> {
         let tun = tun::create_as_async(config)?;
+
+        #[cfg(unix)]
         let fd = tun.as_raw_fd();
         let mtu = tun.mtu()?;
 
-        Ok(TunDirect { tun, mtu, fd })
+        Ok(TunDirect {
+            tun,
+            mtu,
+            #[cfg(unix)]
+            fd,
+        })
     }
 
     /// Recv from Tun
@@ -151,6 +160,7 @@ impl TunDirect {
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for TunDirect {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
