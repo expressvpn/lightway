@@ -47,9 +47,12 @@ test-case.workspace = true
 tun.workspace = true
 serial_test = "3.2.0"
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 route_manager = { version = "0.2.6", features = ["async"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9.4"
 system-configuration = "0.6.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation"] }

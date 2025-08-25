@@ -145,9 +145,9 @@ async fn main() -> Result<()> {
         preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
-        #[cfg(any(target_os = "linux", target_os = "macos",))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
         route_mode: config.route_mode,
-        #[cfg(any(target_os = "linux", target_os = "macos",))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
         dns_config_mode: config.dns_config_mode,
         enable_pmtud: config.enable_pmtud,
         pmtud_base_mtu: config.pmtud_base_mtu,

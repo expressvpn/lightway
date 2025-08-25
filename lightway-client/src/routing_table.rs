@@ -5,6 +5,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
 use tracing::warn;
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
+
 // LAN networks for RouteMode::Lan
 const LAN_NETWORKS: [(IpAddr, u8); 5] = [
     (
@@ -156,6 +159,8 @@ impl RoutingTable {
         match error.raw_os_error() {
             #[cfg(any(target_os = "linux", target_os = "macos",))]
             Some(libc::EEXIST) => true,
+            #[cfg(windows)]
+            Some(code) => code == ERROR_OBJECT_ALREADY_EXISTS as i32,
             _ => false,
         }
     }

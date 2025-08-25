@@ -1,10 +1,10 @@
 mod debug;
-#[cfg(any(target_os = "linux", target_os = "macos",))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
-#[cfg(any(target_os = "linux", target_os = "macos",))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
 pub mod routing_table;
 
 use anyhow::{Context, Result, anyhow};
@@ -27,9 +27,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(feature = "debug")]
 use crate::debug::WiresharkKeyLogger;
-#[cfg(any(target_os = "linux", target_os = "macos",))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
-#[cfg(any(target_os = "linux", target_os = "macos",))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
 use crate::routing_table::{RouteMode, RoutingTable};
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
@@ -133,11 +133,11 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     pub rcvbuf: Option<ByteSize>,
 
     /// Route Mode
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub route_mode: RouteMode,
 
     /// DNS configuration mode
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub dns_config_mode: DnsConfigMode,
 
     /// Enable PMTU discovery for Udp connections
@@ -541,14 +541,14 @@ pub struct ClientConnection<T: Send + Sync> {
     network_change_signal: mpsc::Sender<()>,
     encoding_request_signal: mpsc::Sender<bool>,
     server_ip: IpAddr,
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     route_table: Option<RoutingTable>,
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     dns_manager: Option<DnsManager>,
 }
 
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
@@ -574,7 +574,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         Ok(())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub fn set_dns(
         &mut self,
         dns_config_mode: DnsConfigMode,
@@ -619,6 +619,7 @@ pub async fn connect<
             ClientConnectionMode::Datagram(maybe_sock) => {
                 let sock = io::outside::Udp::new(server_config.server, maybe_sock)
                     .await
+                    .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                     .context("Outside IO UDP")?;
 
                 (ConnectionType::Datagram, sock)
@@ -626,6 +627,7 @@ pub async fn connect<
             ClientConnectionMode::Stream(maybe_sock) => {
                 let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
                     .await
+                    .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
             }
@@ -838,9 +840,9 @@ pub async fn connect<
         network_change_signal: network_change_tx,
         encoding_request_signal: encoding_request_tx,
         server_ip: server_config.server.ip(),
-        #[cfg(any(target_os = "linux", target_os = "macos",))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
         route_table: None,
-        #[cfg(any(target_os = "linux", target_os = "macos",))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
         dns_manager: None,
     })
 }
@@ -1050,7 +1052,7 @@ pub async fn client<
 
     connection.set_connection_inside_io();
 
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     connection
         .initialize_routes(
             config.route_mode,
@@ -1059,7 +1061,7 @@ pub async fn client<
         )
         .await?;
 
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip)?;
 
     connection.task.await?

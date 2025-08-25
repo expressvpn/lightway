@@ -38,6 +38,8 @@ pub struct DnsManager {
     dns_manager: super::platform::linux::dns_manager::DnsManager,
     #[cfg(target_os = "macos")]
     dns_manager: super::platform::macos::dns_manager::DnsManager,
+    #[cfg(target_os = "windows")]
+    dns_manager: super::platform::windows::dns_manager::DnsManager,
 }
 
 impl DnsSetup for DnsManager {

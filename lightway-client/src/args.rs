@@ -112,7 +112,7 @@ pub struct Config {
     ///     noexec : Does not setup any routes
     ///     lan    : Sets up default + additional lan routes
     #[clap(long, value_enum, default_value_t)]
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub route_mode: RouteMode,
 
     /// DNS configuration mode
@@ -120,7 +120,7 @@ pub struct Config {
     ///     default: Sets up DNS Configuration based on target platform
     ///     noexec : Skips DNS Configuration setup
     #[clap(long, value_enum, default_value_t)]
-    #[cfg(any(target_os = "linux", target_os = "macos",))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows",))]
     pub dns_config_mode: DnsConfigMode,
 
     /// Log level to use

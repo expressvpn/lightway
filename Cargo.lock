@@ -1300,6 +1300,7 @@ dependencies = [
  "tracing-subscriber",
  "tun",
  "twelf",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
