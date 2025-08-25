@@ -34,7 +34,7 @@ lightway-core = { workspace = true, features = ["postquantum"] }
 metrics.workspace = true
 metrics-util = "0.18.0"
 parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }
-pnet.workspace = true
+pnet_packet.workspace = true
 ppp = "2.2.0"
 pwhash = "1.0.0"
 rand.workspace = true

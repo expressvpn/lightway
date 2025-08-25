@@ -1,4 +1,4 @@
-use pnet::packet::{
+use pnet_packet::{
     MutablePacket, PacketSize,
     ip::IpNextHeaderProtocols,
     ipv4::MutableIpv4Packet,

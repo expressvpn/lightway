@@ -22,7 +22,7 @@ use lightway_core::{
     AuthMethod, BuilderPredicates, ConnectionError, ConnectionResult, IOCallbackResult,
     InsideIpConfig, Secret, ServerContextBuilder, ipv4_update_destination,
 };
-use pnet::packet::ipv4::Ipv4Packet;
+use pnet_packet::ipv4::Ipv4Packet;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -5,7 +5,7 @@ use std::{net::Ipv4Addr, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use pnet::packet::ipv4::Ipv4Packet;
+use pnet_packet::ipv4::Ipv4Packet;
 
 use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
 use lightway_core::{

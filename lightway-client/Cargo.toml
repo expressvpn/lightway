@@ -30,7 +30,7 @@ futures = "0.3.30"
 libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core.workspace = true
-pnet.workspace = true
+pnet_packet.workspace = true
 serde = { workspace = true, features = ["derive"] }
 socket2.workspace = true
 thiserror.workspace = true

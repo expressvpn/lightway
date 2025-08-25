@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_channel::{Receiver, Sender, bounded};
 use bytes::BytesMut;
 use clap::Parser;
-use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet_packet::ipv4::MutableIpv4Packet;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;

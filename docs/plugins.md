@@ -22,7 +22,7 @@ The following is an example plugin to drop packets to and from a particular IP a
 use std::net::Ipv4Addr;
 use bytes::BytesMut;
 use lightway_core::{Plugin, PluginType, PluginFactory, PluginResult, PluginFactoryError};
-use pnet::packet::ipv4::Ipv4Packet;
+use pnet_packet::ipv4::Ipv4Packet;
 
 #[derive(Clone, Debug)]
 struct IpFilter(Ipv4Addr);

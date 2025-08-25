@@ -42,7 +42,7 @@ tracing-subscriber = { workspace = true, features = ["json"] }
 tun.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Networking_WinSock"] } 
+windows-sys = { version = "0.52", features = ["Win32_Networking_WinSock"] }
 
 [[example]]
 name = "udprelay"
@@ -51,5 +51,5 @@ path = "examples/udprelay.rs"
 [dev-dependencies]
 async-trait.workspace = true
 async-channel = { version = "2.1.1" }
-pnet.workspace = true
+pnet_packet.workspace = true
 test-case.workspace = true

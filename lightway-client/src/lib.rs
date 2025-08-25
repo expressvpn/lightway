@@ -40,7 +40,7 @@ pub use lightway_core::{
 #[cfg(feature = "debug")]
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
-use pnet::packet::ipv4::Ipv4Packet;
+use pnet_packet::ipv4::Ipv4Packet;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::{
