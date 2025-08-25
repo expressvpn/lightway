@@ -19,14 +19,14 @@ use std::time::Duration;
 pub(crate) struct Tun(AppUtilsTun);
 
 impl Tun {
-    pub async fn new(tun: &TunConfig) -> Result<Self> {
+    pub async fn new(tun: TunConfig) -> Result<Self> {
         let tun = AppUtilsTun::direct(tun).await?;
         Ok(Tun(tun))
     }
 
     #[cfg(feature = "io-uring")]
     pub async fn new_with_iouring(
-        tun: &TunConfig,
+        tun: TunConfig,
         ring_size: usize,
         sqpoll_idle_time: Duration,
     ) -> Result<Self> {
@@ -75,7 +75,7 @@ impl InsideIOSendCallback<ConnectionState> for Tun {
         self.0.mtu()
     }
 
-    fn if_index(&self) -> std::io::Result<i32> {
+    fn if_index(&self) -> std::io::Result<u32> {
         self.0.if_index()
     }
 }

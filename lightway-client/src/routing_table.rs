@@ -339,7 +339,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use test_case::test_case;
     use tokio;
-    use tun::AbstractDevice;
+    use tun_rs::{AsyncDevice, DeviceBuilder};
 
     const EXTERNAL_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     const TEST_TARGET_IP1: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 1));
@@ -433,21 +433,25 @@ mod tests {
 
     async fn create_test_tun(
         local_ip: IpAddr,
-    ) -> Result<(tun::Device, u32), Box<dyn std::error::Error>> {
-        let mut config = tun::Configuration::default();
-        config
-            .address(local_ip.to_string())
-            .netmask("255.255.255.0")
-            .up();
-
-        let tun_device = tun::create(&config)?;
+    ) -> Result<(AsyncDevice, u32), Box<dyn std::error::Error>> {
+        let tun_device = DeviceBuilder::new()
+            .ipv4(
+                match local_ip {
+                    IpAddr::V4(ipv4) => ipv4,
+                    IpAddr::V6(_) => return Err("IPv6 not supported for test".into()),
+                },
+                24,
+                None,
+            )
+            .enable(true)
+            .build_async()?;
 
         // Add 50ms sleep to allow TUN device to be fully initialized
         // NOTE: This sometimes adds an additional route after the tests have stored the initial route
         //       which may lead to inaccurate tests. 50ms is eternity and enough to stabilise this.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let if_index = tun_device.tun_index().unwrap() as u32;
+        let if_index = tun_device.if_index()?;
 
         Ok((tun_device, if_index))
     }

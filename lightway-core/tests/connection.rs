@@ -71,7 +71,7 @@ impl<T> InsideIOSendCallback<T> for ChannelTun {
         1350
     }
 
-    fn if_index(&self) -> std::io::Result<i32> {
+    fn if_index(&self) -> std::io::Result<u32> {
         Err(std::io::Error::other("Not Implemented"))
     }
 }
