@@ -1228,7 +1228,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.3",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -1487,6 +1487,15 @@ name = "more-asserts"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
+
+[[package]]
+name = "msbuild"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75f10d2a26dd8489c4b0dce152371d6f1aabbc9cf52855089bca00a3ce5fdca3"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "nanorand"
@@ -3235,7 +3244,7 @@ dependencies = [
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#db0d46bc789643131d5259593e09b900820c7067"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=winsup#bc8e46d5c1f0daff77f06fb4eaa1fac89cd78be2"
 dependencies = [
  "bytes",
  "log",
@@ -3246,11 +3255,12 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#db0d46bc789643131d5259593e09b900820c7067"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=winsup#bc8e46d5c1f0daff77f06fb4eaa1fac89cd78be2"
 dependencies = [
  "autotools",
  "bindgen",
  "build-target",
+ "msbuild",
 ]
 
 [[package]]
