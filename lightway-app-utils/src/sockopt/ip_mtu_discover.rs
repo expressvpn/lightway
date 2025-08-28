@@ -4,80 +4,146 @@
 //! <https://github.com/rust-lang/socket2/issues/487> we have to reach
 //! for libc and unsafety.
 
-#[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
-use libc::{IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT};
+use std::mem::MaybeUninit;
 
 #[cfg(unix)]
 use libc::socklen_t;
 
-use std::mem::MaybeUninit;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
 #[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
 
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::{
-    IP_MTU_DISCOVER, IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_NOT_SET, IP_PMTUDISC_PROBE,
-    IPPROTO_IP,
-};
+// All Unix other than apple devices
+#[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
+mod internal {
+    use libc::{IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT};
 
-#[cfg(target_vendor = "apple")]
-const IP_PMTUDISC_DONT: i32 = 0;
-#[cfg(target_vendor = "apple")]
-const IP_PMTUDISC_DO: i32 = 1;
+    /// Enum to represent PMTUd values
+    #[derive(Copy, Clone)]
+    pub enum IpPmtudisc {
+        /// Never send DF frames
+        Dont,
+        /// Use per route hints
+        Want,
+        /// Always DF
+        Do,
+        /// Ignore dst pmtu
+        Probe,
+    }
 
-/// Enum to represent PMTUd values
-#[derive(Copy, Clone)]
-pub enum IpPmtudisc {
-    /// Never send DF frames
-    Dont,
-    /// Use per route hints
-    #[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
-    Want,
-    /// Always DF
-    Do,
-    #[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
-    /// Ignore dst pmtu
-    Probe,
-    /// No explicit setting
-    #[cfg(windows)]
-    NotSet,
-}
+    impl From<IpPmtudisc> for libc::c_int {
+        fn from(value: IpPmtudisc) -> Self {
+            match value {
+                IpPmtudisc::Dont => IP_PMTUDISC_DONT,
+                IpPmtudisc::Want => IP_PMTUDISC_WANT,
+                IpPmtudisc::Do => IP_PMTUDISC_DO,
+                IpPmtudisc::Probe => IP_PMTUDISC_PROBE,
+            }
+        }
+    }
 
-impl From<IpPmtudisc> for libc::c_int {
-    fn from(value: IpPmtudisc) -> Self {
-        match value {
-            IpPmtudisc::Dont => IP_PMTUDISC_DONT,
-            #[cfg(not(target_vendor = "apple"))]
-            IpPmtudisc::Want => IP_PMTUDISC_WANT,
-            IpPmtudisc::Do => IP_PMTUDISC_DO,
-            #[cfg(not(target_vendor = "apple"))]
-            IpPmtudisc::Probe => IP_PMTUDISC_PROBE,
-            #[cfg(windows)]
-            IpPmtudisc::NotSet => IP_PMTUDISC_NOT_SET,
+    impl TryFrom<libc::c_int> for IpPmtudisc {
+        type Error = std::io::Error;
+
+        fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
+            match value {
+                IP_PMTUDISC_DONT => Ok(IpPmtudisc::Dont),
+                IP_PMTUDISC_WANT => Ok(IpPmtudisc::Want),
+                IP_PMTUDISC_DO => Ok(IpPmtudisc::Do),
+                IP_PMTUDISC_PROBE => Ok(IpPmtudisc::Probe),
+                v => Err(std::io::Error::other(format!(
+                    "unexpected value for IP_PMTUDISC: {:?}",
+                    v
+                ))),
+            }
         }
     }
 }
 
-impl TryFrom<libc::c_int> for IpPmtudisc {
-    type Error = std::io::Error;
+#[cfg(windows)]
+mod internal {
+    use windows_sys::Win32::Networking::WinSock::{
+        IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_NOT_SET, IP_PMTUDISC_PROBE,
+    };
+    #[derive(Copy, Clone)]
+    /// Enum to represent PMTUd values
+    pub enum IpPmtudisc {
+        /// Never send DF frames
+        Dont,
+        /// Always DF
+        Do,
+        /// Ignore dst pmtu
+        Probe,
+        /// No explicit setting
+        NotSet,
+    }
 
-    fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
-        match value {
-            IP_PMTUDISC_DONT => Ok(IpPmtudisc::Dont),
-            #[cfg(not(target_vendor = "apple"))]
-            IP_PMTUDISC_WANT => Ok(IpPmtudisc::Want),
-            IP_PMTUDISC_DO => Ok(IpPmtudisc::Do),
-            #[cfg(not(target_vendor = "apple"))]
-            IP_PMTUDISC_PROBE => Ok(IpPmtudisc::Probe),
-            #[cfg(windows)]
-            IP_PMTUDISC_NOT_SET => Ok(IpPmtudisc::NotSet),
-            v => Err(std::io::Error::other(format!(
-                "unexpected value for IP_PMTUDISC: {:?}",
-                v
-            ))),
+    impl From<IpPmtudisc> for libc::c_int {
+        fn from(value: IpPmtudisc) -> Self {
+            match value {
+                IpPmtudisc::Dont => IP_PMTUDISC_DONT,
+                IpPmtudisc::Do => IP_PMTUDISC_DO,
+                IpPmtudisc::Probe => IP_PMTUDISC_PROBE,
+                IpPmtudisc::NotSet => IP_PMTUDISC_NOT_SET,
+            }
+        }
+    }
+
+    impl TryFrom<libc::c_int> for IpPmtudisc {
+        type Error = std::io::Error;
+
+        fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
+            match value {
+                IP_PMTUDISC_DONT => Ok(IpPmtudisc::Dont),
+                IP_PMTUDISC_DO => Ok(IpPmtudisc::Do),
+                IP_PMTUDISC_PROBE => Ok(IpPmtudisc::Probe),
+                IP_PMTUDISC_NOT_SET => Ok(IpPmtudisc::NotSet),
+                v => Err(std::io::Error::other(format!(
+                    "unexpected value for IP_PMTUDISC: {:?}",
+                    v
+                ))),
+            }
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+mod internal {
+    const IP_ALLOW_FRAG: i32 = 0;
+    const IP_DONT_FRAG: i32 = 1;
+
+    /// Enum to represent PMTUd values
+    #[derive(Copy, Clone)]
+    pub enum IpPmtudisc {
+        /// Never send DF frames
+        Dont,
+        /// Ignore dst pmtu
+        Probe,
+    }
+
+    impl From<IpPmtudisc> for libc::c_int {
+        fn from(value: IpPmtudisc) -> Self {
+            match value {
+                IpPmtudisc::Dont => IP_ALLOW_FRAG,
+                IpPmtudisc::Probe => IP_DONT_FRAG,
+            }
+        }
+    }
+
+    impl TryFrom<libc::c_int> for IpPmtudisc {
+        type Error = std::io::Error;
+
+        fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
+            match value {
+                IP_ALLOW_FRAG => Ok(IpPmtudisc::Dont),
+                IP_DONT_FRAG => Ok(IpPmtudisc::Probe),
+                v => Err(std::io::Error::other(format!(
+                    "unexpected value for IP_PMTUDISC: {:?}",
+                    v
+                ))),
+            }
         }
     }
 }
@@ -86,7 +152,7 @@ fn get_level_and_optname() -> (i32, i32) {
     let level: i32;
     let optname: i32;
 
-    #[cfg(all(target_vendor = "apple", target_family = "unix"))]
+    #[cfg(target_vendor = "apple")]
     {
         level = libc::IPPROTO_IP;
         optname = libc::IP_DONTFRAG;
@@ -100,6 +166,7 @@ fn get_level_and_optname() -> (i32, i32) {
 
     #[cfg(windows)]
     {
+        use windows_sys::Win32::Networking::WinSock::{IP_MTU_DISCOVER, IPPROTO_IP};
         level = IPPROTO_IP;
         optname = IP_MTU_DISCOVER;
     }
@@ -136,6 +203,8 @@ impl<T: AsRawFd> AsGenericHandle for T {
         self.as_raw_fd()
     }
 }
+
+pub use internal::*;
 
 /// Generic handle to use in sockopt
 pub trait AsGenericHandle {
