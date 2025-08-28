@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-build, nix-clippy]
+    needs: [earthly, e2e, coverage, nix-build, nix-clippy, windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -186,7 +186,7 @@ jobs:
 
       - name: Run cargo tests with kyber_only feature
         run: nix develop --command cargo test --features kyber_only
-      
+
       - name: Run privileged tests (macOS only)
         if: matrix.os == 'macos-latest'
         run: sudo nix develop --command cargo test test_privileged -- --ignored
@@ -213,3 +213,45 @@ jobs:
 
       - name: Run clippy
         run: nix develop --command cargo make clippy
+
+  windows-build:
+    name: Windows Build
+    runs-on: windows-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: >-
+          cargo clippy --package lightway-client --target ${{ matrix.target }} -- -D warnings
+
+      - name: Build lightway client
+        run: >-
+          cargo build --release --bin lightway-client --target ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }} -p lightway-client
