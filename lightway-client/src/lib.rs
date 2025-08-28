@@ -29,6 +29,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::debug::WiresharkKeyLogger;
 #[cfg(any(target_os = "linux", target_os = "macos",))]
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
+use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(any(target_os = "linux", target_os = "macos",))]
 use crate::routing_table::{RouteMode, RoutingTable};
 #[cfg(feature = "debug")]
@@ -43,6 +44,7 @@ pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet::packet::ipv4::Ipv4Packet;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
+use std::time::Instant;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
@@ -54,7 +56,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_stream::{StreamExt, StreamMap};
-use tracing::info;
+use tracing::{debug, info};
 
 /// Connection type
 /// Applications can also attach socket for library to use directly,
@@ -365,11 +367,21 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn inside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     inside_io: Arc<dyn io::inside::InsideIORecv<ExtAppState>>,
     tun_dns_ip: Ipv4Addr,
+    keepalive: Keepalive,
+    keepalive_config: KeepaliveConfig,
 ) -> Result<()> {
+    let tracer_trigger_timeout = if keepalive_config.continuous {
+        // Continuous keepalive is already doing the same thing
+        Duration::ZERO
+    } else {
+        DEFAULT_TRACER_TRIGGER_TIMEOUT
+    };
     loop {
         let mut buf = match inside_io.recv_buf().await {
             IOCallbackResult::Ok(buf) => buf,
@@ -380,38 +392,60 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
-        let mut conn = conn.lock().unwrap();
+        let duration_since_last_outside_data = {
+            let mut conn = conn.lock().unwrap();
 
-        // Update source IP address to server assigned IP address
-        let ip_config = conn.app_state().ip_config;
-        if let Some(ip_config) = &ip_config {
-            ipv4_update_source(buf.as_mut(), ip_config.client_ip);
+            // Update source IP address to server assigned IP address
+            let ip_config = conn.app_state().ip_config;
+            if let Some(ip_config) = &ip_config {
+                ipv4_update_source(buf.as_mut(), ip_config.client_ip);
 
-            // Update TUN device DNS IP address to server provided DNS address
-            let packet = Ipv4Packet::new(buf.as_ref());
-            if let Some(packet) = packet
-                && packet.get_destination() == tun_dns_ip
-            {
-                ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
-            };
-        }
+                // Update TUN device DNS IP address to server provided DNS address
+                let packet = Ipv4Packet::new(buf.as_ref());
+                if let Some(packet) = packet
+                    && packet.get_destination() == tun_dns_ip
+                {
+                    ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
+                };
+            }
 
-        match conn.inside_data_received(&mut buf) {
-            Ok(()) => {}
-            Err(ConnectionError::PluginDropWithReply(reply)) => {
-                // Send the reply packet to inside path
-                let _ = inside_io.try_send(reply, ip_config);
+            match conn.inside_data_received(&mut buf) {
+                Ok(()) => {
+                    let now = Instant::now();
+                    now.duration_since(conn.activity().last_outside_data_received)
+                }
+                Err(ConnectionError::PluginDropWithReply(reply)) => {
+                    // Send the reply packet to inside path
+                    let _ = inside_io.try_send(reply, ip_config);
+                    return Ok(());
+                }
+                Err(ConnectionError::InvalidState) => {
+                    // Ignore the packet till the connection is online
+                    return Ok(());
+                }
+                Err(ConnectionError::InvalidInsidePacket(_)) => {
+                    // Ignore invalid inside packet
+                    return Ok(());
+                }
+                Err(err) => {
+                    // Fatal error
+                    return Err(err.into());
+                }
             }
-            Err(ConnectionError::InvalidState) => {
-                // Ignore the packet till the connection is online
-            }
-            Err(ConnectionError::InvalidInsidePacket(_)) => {
-                // Ignore invalid inside packet
-            }
-            Err(err) => {
-                // Fatal error
-                return Err(err.into());
-            }
+        };
+
+        if !tracer_trigger_timeout.is_zero()
+            && duration_since_last_outside_data > tracer_trigger_timeout
+        {
+            debug!(
+                duration = format!(
+                    "{}.{}s",
+                    duration_since_last_outside_data.as_secs(),
+                    duration_since_last_outside_data.subsec_millis()
+                ),
+                "sending keepalive due to delta exceeded trigger timeout"
+            );
+            keepalive.network_changed().await;
         }
     }
 }
@@ -714,14 +748,13 @@ pub async fn connect<
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
-    let (keepalive, keepalive_task) = Keepalive::new(
-        keepalive::Config {
-            interval: config.keepalive_interval,
-            timeout: config.keepalive_timeout,
-            continuous: config.continuous_keepalive,
-        },
-        Arc::downgrade(&conn),
-    );
+    let keepalive_config = keepalive::Config {
+        interval: config.keepalive_interval,
+        timeout: config.keepalive_timeout,
+        continuous: config.continuous_keepalive,
+    };
+    let (keepalive, keepalive_task) =
+        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
 
     let (connected_tx, connected_rx) = oneshot::channel();
     let (disconnected_tx, disconnected_rx) = oneshot::channel();
@@ -759,6 +792,8 @@ pub async fn connect<
         conn.clone(),
         inside_io.clone(),
         config.tun_dns_ip,
+        keepalive.clone(),
+        keepalive_config,
     ));
 
     let (network_change_tx, network_change_rx) = tokio::sync::mpsc::channel(1);
