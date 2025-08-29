@@ -31,6 +31,7 @@ pub trait SleepManager: Send {
     fn continuous(&self) -> bool;
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub interval: Duration,
     pub timeout: Duration,
