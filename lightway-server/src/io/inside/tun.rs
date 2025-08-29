@@ -75,7 +75,7 @@ impl InsideIOSendCallback<ConnectionState> for Tun {
         self.0.mtu()
     }
 
-    fn if_index(&self) -> std::io::Result<i32> {
+    fn if_index(&self) -> std::io::Result<u32> {
         self.0.if_index()
     }
 }

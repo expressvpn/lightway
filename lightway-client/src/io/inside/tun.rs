@@ -39,7 +39,7 @@ impl Tun {
         Ok(Tun { tun, ip, dns_ip })
     }
 
-    pub fn if_index(&self) -> std::io::Result<i32> {
+    pub fn if_index(&self) -> std::io::Result<u32> {
         self.tun.if_index()
     }
 }
@@ -103,7 +103,7 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
         self.tun.mtu()
     }
 
-    fn if_index(&self) -> std::io::Result<i32> {
+    fn if_index(&self) -> std::io::Result<u32> {
         self.if_index()
     }
 }

@@ -1,23 +1,165 @@
 use anyhow::Result;
 use bytes::BytesMut;
+use educe::Educe;
 use lightway_core::IOCallbackResult;
 
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
 use std::{
-    ops::Deref,
-    os::fd::{AsRawFd, RawFd},
+    mem::ManuallyDrop,
+    net::{IpAddr, Ipv4Addr},
+    os::fd::{AsRawFd, IntoRawFd, RawFd},
 };
 
-use tun::{AbstractDevice, AsyncDevice as TokioTun};
-
-pub use tun::Configuration as TunConfig;
-
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::os::fd::FromRawFd;
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
+use tun_rs::AsyncDevice;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use tun_rs::DeviceBuilder;
 
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
+
+/// Configuration options for creating a interface
+///
+/// This struct provides a builder-like interface for configuring TUN interfaces
+/// with various network settings including address assignment, routing, and MTU.
+#[derive(Clone, Debug, Educe)]
+#[educe(Default)]
+pub struct TunConfig {
+    /// Optional name for the TUN interface (e.g., "utun3" on macOS)
+    pub tun_name: Option<String>,
+    /// IP address to assign to the TUN interface (IPv4 or IPv6)
+    pub address: Option<IpAddr>,
+    /// Destination/gateway address for the TUN interface
+    pub destination: Option<Ipv4Addr>,
+    /// Network mask for the assigned address (defaults to host route if not specified)
+    pub prefix: Option<u8>,
+    /// Maximum transmission unit size in bytes
+    pub mtu: Option<u16>,
+    /// Whether the interface should be brought up after creation
+    pub enabled: bool,
+    /// File Descriptor of the Tunnel
+    pub fd: Option<RawFd>,
+    /// Whether to close the file descriptor when the TUN device is dropped
+    #[educe(Default = true)]
+    pub close_fd_on_drop: bool,
+}
+
+impl TunConfig {
+    /// Set the tun name.
+    /// # Note:
+    /// On macOS, the tun name must be the form `utunx` where `x` is a number, such as `utun3`
+    pub fn tun_name<T: Into<String>>(&mut self, tun_name: T) -> &mut Self {
+        self.tun_name = Some(tun_name.into());
+        self
+    }
+
+    /// Set the gateway address.
+    pub fn address(&mut self, value: IpAddr) -> &mut Self {
+        self.address = Some(value);
+        self
+    }
+
+    /// Set the destination address.
+    pub fn destination(&mut self, value: Ipv4Addr) -> &mut Self {
+        self.destination = Some(value);
+        self
+    }
+
+    /// Set the netmask for address
+    pub fn prefix(&mut self, prefix: u8) -> &mut Self {
+        self.prefix = Some(prefix);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(&mut self, value: u16) -> &mut Self {
+        self.mtu = Some(value);
+        self
+    }
+
+    /// Set the interface to be enabled once created.
+    pub fn up(&mut self) -> &mut Self {
+        self.enabled = true;
+        self
+    }
+    /// Set the file descriptor
+    pub fn raw_fd(&mut self, fd: RawFd) -> &mut Self {
+        self.fd = Some(fd);
+        self
+    }
+    /// Set whether to close the received raw file descriptor on drop or not.
+    /// The default behaviour is to close the received or tun generated file descriptor.
+    /// Note: If this is set to true, it is up to the caller to ensure the
+    /// file descriptor (obtainable via [`AsRawFd::as_raw_fd`]) is properly closed.
+    pub fn close_fd_on_drop(&mut self, value: bool) -> &mut Self {
+        self.close_fd_on_drop = value;
+        self
+    }
+
+    /// Creates an async device based on TunConfig
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
+        let mut builder = DeviceBuilder::new();
+        if let Some(name) = self.tun_name.as_ref() {
+            builder = builder.name(name);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.associate_route(false);
+        }
+        let device = builder.build_async()?;
+
+        if let Some(mtu) = self.mtu {
+            device.set_mtu(mtu)?;
+        }
+
+        device.enabled(self.enabled)?;
+
+        if let Some(address) = self.address {
+            match address {
+                IpAddr::V4(ipv4_addr) => {
+                    let netmask = self
+                        .prefix
+                        .map(|x| x.min(Ipv4Addr::BITS as u8))
+                        .unwrap_or(Ipv4Addr::BITS as u8);
+                    device.set_network_address(ipv4_addr, netmask, self.destination)?;
+                }
+                IpAddr::V6(ipv6_addr) => {
+                    use std::net::Ipv6Addr;
+
+                    let netmask = self
+                        .prefix
+                        .map(|x| x.min(Ipv6Addr::BITS as u8))
+                        .unwrap_or(Ipv6Addr::BITS as u8);
+                    device.add_address_v6(ipv6_addr, netmask)?;
+                }
+            }
+        }
+        Ok(device)
+    }
+    /// Creates an async device based on TunConfig
+    #[allow(unsafe_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
+        let device = match self.fd {
+            Some(fd) => {
+                // SAFETY: The caller must ensure `fd` is a valid TUN device file descriptor
+                // and transfer exclusive ownership to this function. The AsyncDevice will
+                // properly close the fd when dropped.
+                unsafe { tun_rs::AsyncDevice::from_raw_fd(fd) }
+            }
+            None => {
+                return Err(std::io::Error::other("Unable to create device without fd"));
+            }
+        };
+
+        Ok(device)
+    }
+}
 
 /// Tun enum interface to read/write packets
 pub enum Tun {
@@ -74,7 +216,7 @@ impl Tun {
     }
 
     /// Interface index of 'Tun' interface
-    pub fn if_index(&self) -> std::io::Result<i32> {
+    pub fn if_index(&self) -> std::io::Result<u32> {
         match self {
             Tun::Direct(t) => t.if_index(),
             #[cfg(feature = "io-uring")]
@@ -95,19 +237,29 @@ impl AsRawFd for Tun {
 
 /// Tun struct
 pub struct TunDirect {
-    tun: TokioTun,
+    tun: ManuallyDrop<AsyncDevice>,
     mtu: u16,
     fd: RawFd,
+    close_fd_on_drop: bool,
 }
 
 impl TunDirect {
     /// Create a new `Tun` struct
     pub fn new(config: &TunConfig) -> Result<Self> {
-        let tun = tun::create_as_async(config)?;
-        let fd = tun.as_raw_fd();
-        let mtu = tun.mtu()?;
+        let tun_device = config.create_as_async()?;
+        let fd = tun_device.as_raw_fd();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mtu = tun_device.mtu()?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let mtu = 1350;
+        let tun = ManuallyDrop::new(tun_device);
 
-        Ok(TunDirect { tun, mtu, fd })
+        Ok(TunDirect {
+            tun,
+            mtu,
+            fd,
+            close_fd_on_drop: config.close_fd_on_drop,
+        })
     }
 
     /// Recv from Tun
@@ -130,8 +282,7 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        let try_send_res = self.tun.deref().send(&buf[..]);
-        match try_send_res {
+        match self.tun.try_send(&buf[..]) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
@@ -146,14 +297,45 @@ impl TunDirect {
     }
 
     /// Interface index of Tun
-    pub fn if_index(&self) -> std::io::Result<i32> {
-        Ok(self.tun.tun_index()?)
+    pub fn if_index(&self) -> std::io::Result<u32> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return self.tun.if_index();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
 }
 
 impl AsRawFd for TunDirect {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
+    }
+}
+
+impl IntoRawFd for TunDirect {
+    fn into_raw_fd(mut self) -> RawFd {
+        // Alters state to prevent drop from closing fd
+        self.close_fd_on_drop = false;
+        self.fd
+    }
+}
+
+impl Drop for TunDirect {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        if self.close_fd_on_drop {
+            // Manually drop the AsyncDevice (closes the fd)
+            // SAFETY: This is the final drop of TunDirect, so we have exclusive access to self.tun.
+            // ManuallyDrop::drop is safe here because we never access self.tun again after this call.
+            unsafe {
+                ManuallyDrop::drop(&mut self.tun);
+            }
+        } else {
+            // Take ownership and call into_raw_fd (prevents fd closure)
+            // SAFETY: This is the final drop of TunDirect, so we have exclusive access to self.tun.
+            // ManuallyDrop::take is safe here because we immediately consume the value and never access self.tun again.
+            let tun = unsafe { ManuallyDrop::take(&mut self.tun) };
+            let _ = tun.into_raw_fd();
+        }
     }
 }
 
@@ -198,7 +380,7 @@ impl TunIoUring {
     }
 
     /// Interface index of tun
-    pub fn if_index(&self) -> std::io::Result<i32> {
+    pub fn if_index(&self) -> std::io::Result<u32> {
         self.tun_io_uring.owned_fd().if_index()
     }
 }
