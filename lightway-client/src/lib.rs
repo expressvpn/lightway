@@ -859,6 +859,8 @@ pub async fn connect<
 
         if result.is_ok() {
             let _ = disconnected_rx.await;
+        } else {
+            tracing::warn!("Connection task ended:\n{:?}", result);
         }
 
         outside_io_loop.abort();

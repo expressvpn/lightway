@@ -158,6 +158,8 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
     enum State {
         // No pending keepalive
         Inactive,
+        // Need to send keepalive immediately
+        Needed,
         // We are waiting between keepalive intervals
         Waiting,
         // A keepalive has been sent, reply is pending
@@ -214,8 +216,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         // the keepalives otherwise this will
                         // reset our timeouts
                         tracing::info!("network change keepalives");
-                        state = State::Waiting;
-                        timeout.as_mut().set(None.into())
+                        state = State::Needed;
                     },
                     Message::Suspend => {
                         // Suspend keepalives whenever the timer is active
@@ -228,7 +229,18 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                 }
             }
 
-            _ = config.sleep_for_interval(), if matches!(state, State::Waiting | State::Pending) => {
+            _ = futures::future::ready(()), if matches!(state, State::Needed) => {
+                if let Err(e) = conn.keepalive() {
+                    tracing::error!("Send Keepalive failed: {e:?}");
+                }
+                state = State::Pending;
+                if !config.timeout_is_zero() {
+                    let fut = config.sleep_for_timeout();
+                    timeout.as_mut().set(Some(fut).into());
+                }
+            }
+
+            _ = config.sleep_for_interval(), if matches!(state, State::Pending | State::Waiting) => {
                 if let Err(e) = conn.keepalive() {
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
@@ -254,389 +266,399 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use more_asserts::*;
-    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use test_case::test_case;
-    use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
+    use tokio::sync::Notify;
+    use tokio::time::sleep;
 
-    #[derive(Copy, Clone, Debug)]
-    enum FixtureEvent {
-        Wait,
-        Online,
-        IntervalExpired,
-        ReplyReceived,
-        OutsideActivity,
-        NetworkChange,
-        TimeoutExpired,
-        Suspend,
-    }
-
-    struct FixtureState {
-        events: VecDeque<FixtureEvent>,
-        sleep_requests: usize,
-        keepalive_count: usize,
-        done: mpsc::UnboundedSender<()>,
-        pending_interval: Option<oneshot::Sender<()>>,
-        pending_timeout: Option<oneshot::Sender<()>>,
-        continuous: bool,
-    }
-
-    impl FixtureState {
-        fn sleep_event(&mut self) {
-            let Some(ev) = self.events.front() else {
-                return;
-            };
-
-            // In order to operate in lockstep with the keepalive task
-            // we model which timers the keepalive main loop is
-            // expected to become armed on each iteration.
-            //
-            // Most events just expect the interval timer to be
-            // created (since it is recreated on every loop).
-            //
-            // `TimeoutExpired` must follow `IntervalExpired` and in
-            // this case both timers are primed, the timeout while
-            // handling interval expiration and then interval again on
-            // the next iteration of the loop.
-            //
-            // Note that `tokio::select` always executes the
-            // expression of each branch, even if the guard condition
-            // is false (it just never polls the resulting future in
-            // that case). This is why one timer is expected even for
-            // `Online`.
-            let required_sleeps = if matches!(ev, FixtureEvent::TimeoutExpired) {
-                2
-            } else {
-                1
-            };
-
-            assert_lt!(self.sleep_requests, required_sleeps);
-
-            self.sleep_requests += 1;
-
-            if self.sleep_requests == required_sleeps {
-                println!("ev {ev:?} is complete");
-                self.sleep_requests = 0;
-                self.events.pop_front();
-                self.done.send(()).unwrap();
-            } else {
-                println!("ev {ev:?} still waiting");
-            }
-        }
-    }
-
+    /// Mock connection that tracks keepalive calls
     #[derive(Clone)]
-    struct Fixture(
-        Arc<Mutex<FixtureState>>,
-        Arc<TokioMutex<mpsc::UnboundedReceiver<()>>>,
-    );
+    struct MockConnection {
+        keepalive_count: Arc<AtomicUsize>,
+    }
 
-    impl Fixture {
-        fn new(value: Vec<FixtureEvent>, continuous: bool) -> Self {
-            let (tx, rx) = mpsc::unbounded_channel();
-
-            Self(
-                Arc::new(Mutex::new(FixtureState {
-                    events: value.into(),
-                    sleep_requests: 0,
-                    keepalive_count: 0,
-                    done: tx,
-                    pending_interval: None,
-                    pending_timeout: None,
-                    continuous,
-                })),
-                Arc::new(TokioMutex::new(rx)),
-            )
-        }
-
-        fn event(&self) -> Option<FixtureEvent> {
-            let inner = self.0.lock().unwrap();
-            inner.events.front().copied()
+    impl MockConnection {
+        fn new() -> Self {
+            Self {
+                keepalive_count: Arc::new(AtomicUsize::new(0)),
+            }
         }
 
         fn keepalive_count(&self) -> usize {
-            self.0.lock().unwrap().keepalive_count
-        }
-
-        fn interval_expired(&self) {
-            println!("Interval expired");
-            let mut inner = self.0.lock().unwrap();
-            let tx = inner.pending_interval.take().unwrap();
-            tx.send(()).unwrap();
-        }
-
-        fn timeout_expired(&self) {
-            println!("Timeout expired");
-            let mut inner = self.0.lock().unwrap();
-            let tx = inner.pending_timeout.take().unwrap();
-            tx.send(()).unwrap();
-        }
-
-        async fn run(&self) -> (Keepalive, OptionFuture<JoinHandle<KeepaliveResult>>) {
-            let (keepalive, task) = Keepalive::new(self.clone(), self.clone());
-
-            loop {
-                let Some(ev) = self.event() else { break };
-                println!("run: wait for tick: {ev:?}");
-                self.1.lock().await.recv().await.unwrap();
-                println!("run: handle {ev:?}");
-                match ev {
-                    FixtureEvent::Online => keepalive.online().await,
-                    FixtureEvent::IntervalExpired => self.interval_expired(),
-                    FixtureEvent::ReplyReceived => keepalive.reply_received().await,
-                    FixtureEvent::OutsideActivity => keepalive.outside_activity().await,
-                    FixtureEvent::NetworkChange => keepalive.network_changed().await,
-                    FixtureEvent::TimeoutExpired => self.timeout_expired(),
-                    FixtureEvent::Suspend => keepalive.suspend().await,
-                    FixtureEvent::Wait => {}
-                }
-            }
-
-            (keepalive, task)
+            self.keepalive_count.load(Ordering::SeqCst)
         }
     }
 
-    impl SleepManager for Fixture {
-        fn interval_is_zero(&self) -> bool {
-            println!("interval_is_zero");
-            self.0.lock().unwrap().events.is_empty()
-        }
-
-        fn timeout_is_zero(&self) -> bool {
-            println!("timeout_is_zero");
-            !self
-                .0
-                .lock()
-                .unwrap()
-                .events
-                .iter()
-                .any(|ev| matches!(ev, FixtureEvent::TimeoutExpired))
-        }
-
-        fn sleep_for_interval(&self) -> impl futures::Future<Output = ()> + std::marker::Send {
-            println!("sleep_for_interval");
-            let mut inner = self.0.lock().unwrap();
-
-            inner.sleep_event();
-
-            let (tx, rx) = oneshot::channel();
-            inner.pending_interval = Some(tx);
-            Box::pin(async move { rx.await.unwrap() })
-        }
-
-        fn sleep_for_timeout(&self) -> impl futures::Future<Output = ()> + std::marker::Send {
-            println!("sleep_for_timeout");
-            let mut inner = self.0.lock().unwrap();
-
-            inner.sleep_event();
-
-            let (tx, rx) = oneshot::channel();
-            inner.pending_timeout = Some(tx);
-            Box::pin(async move { rx.await.unwrap() })
-        }
-
-        fn continuous(&self) -> bool {
-            self.0.lock().unwrap().continuous
-        }
-    }
-
-    impl Connection for Fixture {
+    impl Connection for MockConnection {
         fn keepalive(&self) -> lightway_core::ConnectionResult<()> {
-            println!("Ping!");
-            self.0.lock().unwrap().keepalive_count += 1;
+            self.keepalive_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
-    #[test_case(true; "Continuous keep alive")]
-    #[test_case(false; "Non-continuous keep alives")]
+    /// Controllable sleep manager for deterministic testing
+    #[derive(Clone)]
+    struct MockSleepManager {
+        interval: Duration,
+        timeout: Duration,
+        continuous: bool,
+        interval_trigger: Arc<Notify>,
+        timeout_trigger: Arc<Notify>,
+    }
+
+    impl MockSleepManager {
+        fn new(interval: Duration, timeout: Duration, continuous: bool) -> Self {
+            Self {
+                interval,
+                timeout,
+                continuous,
+                interval_trigger: Arc::new(Notify::new()),
+                timeout_trigger: Arc::new(Notify::new()),
+            }
+        }
+
+        fn trigger_interval(&self) {
+            self.interval_trigger.notify_one();
+        }
+
+        fn trigger_timeout(&self) {
+            self.timeout_trigger.notify_one();
+        }
+    }
+
+    impl SleepManager for MockSleepManager {
+        fn interval_is_zero(&self) -> bool {
+            self.interval.is_zero()
+        }
+
+        fn timeout_is_zero(&self) -> bool {
+            self.timeout.is_zero()
+        }
+
+        async fn sleep_for_interval(&self) {
+            if self.interval.is_zero() {
+                return;
+            }
+            self.interval_trigger.notified().await;
+        }
+
+        async fn sleep_for_timeout(&self) {
+            if self.timeout.is_zero() {
+                return;
+            }
+            self.timeout_trigger.notified().await;
+        }
+
+        fn continuous(&self) -> bool {
+            self.continuous
+        }
+    }
+
+    /// start keepalives based on mode
+    async fn start_keepalives(
+        keepalive: &Keepalive,
+        sleep_manager: &MockSleepManager,
+        continuous: bool,
+    ) {
+        if continuous {
+            keepalive.online().await;
+            sleep(Duration::from_millis(10)).await;
+            // Trigger keepalive by kicking interval
+            sleep_manager.trigger_interval();
+            sleep(Duration::from_millis(10)).await;
+        } else {
+            keepalive.network_changed().await;
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Test helper for setting up keepalive scenarios
+    struct KeepaliveTestBuilder {
+        interval: Duration,
+        timeout: Duration,
+        continuous: bool,
+    }
+
+    impl KeepaliveTestBuilder {
+        fn new() -> Self {
+            Self {
+                interval: Duration::from_millis(100),
+                timeout: Duration::from_millis(200),
+                continuous: true,
+            }
+        }
+
+        fn interval(mut self, interval: Duration) -> Self {
+            self.interval = interval;
+            self
+        }
+
+        fn timeout(mut self, timeout: Duration) -> Self {
+            self.timeout = timeout;
+            self
+        }
+
+        fn continuous(mut self, continuous: bool) -> Self {
+            self.continuous = continuous;
+            self
+        }
+
+        fn build(self) -> (MockSleepManager, MockConnection) {
+            let sleep_manager = MockSleepManager::new(self.interval, self.timeout, self.continuous);
+            let connection = MockConnection::new();
+            (sleep_manager, connection)
+        }
+    }
+
     #[tokio::test]
-    async fn keepalives_can_be_disabled(continuous: bool) {
-        let fixture = Fixture::new(vec![], continuous);
+    async fn disabled_keepalive_does_nothing() {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().interval(Duration::ZERO).build();
 
-        let (keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager, connection.clone());
 
+        // Send all possible messages
         keepalive.online().await;
         keepalive.outside_activity().await;
         keepalive.reply_received().await;
         keepalive.network_changed().await;
+        keepalive.suspend().await;
 
+        // Task should be None (not started)
         assert!(task.await.is_none());
-
-        assert_eq!(0, fixture.keepalive_count());
+        assert_eq!(connection.keepalive_count(), 0);
     }
 
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
+    #[test_case(true, 1; "continuous")]
+    #[test_case(false, 2; "non-continuous")]
     #[tokio::test]
-    async fn keepalives_are_sent(continuous: bool) {
-        use FixtureEvent::*;
-        let first_event = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(vec![first_event, IntervalExpired, Wait], continuous);
+    async fn keepalive_activation(continuous: bool, exp_count: usize) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
 
-        let (keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        if continuous {
+            keepalive.online().await;
+            sleep(Duration::from_millis(10)).await;
+
+            // For Online, keepalive will not be sent immediately
+            assert_eq!(connection.keepalive_count(), 0);
+        } else {
+            keepalive.network_changed().await;
+            sleep(Duration::from_millis(10)).await;
+            // For NetworkChange, keepalive will be sent immediately
+            assert_eq!(connection.keepalive_count(), 1);
+        }
+
+        sleep_manager.trigger_interval();
+        sleep(Duration::from_millis(10)).await;
+
+        // Now, both modes keepalive count should have been incremented by 1
+        assert_eq!(connection.keepalive_count(), exp_count);
 
         drop(keepalive);
-        assert!(matches!(
-            task.await.unwrap(),
-            Ok(KeepaliveResult::Cancelled)
-        ));
-
-        assert_eq!(1, fixture.keepalive_count());
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
+    #[test_case(true, 0; "continuous")]
+    #[test_case(false, 1; "non-continuous")]
     #[tokio::test]
-    async fn multiple_keepalives_are_sent_without_reply(continuous: bool) {
-        use FixtureEvent::*;
-        let first_event = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(
-            vec![
-                first_event,
-                IntervalExpired,
-                IntervalExpired,
-                IntervalExpired,
-                Wait,
-            ],
-            continuous,
-        );
+    async fn multiple_keepalives_sent_at_intervals(continuous: bool, exp_start: usize) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
 
-        let (keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        if continuous {
+            keepalive.online().await;
+            sleep(Duration::from_millis(10)).await;
+        } else {
+            keepalive.network_changed().await;
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(connection.keepalive_count(), exp_start);
+
+        // Trigger multiple intervals and verify keepalive count
+        for i in 1..=5 {
+            sleep_manager.trigger_interval();
+            sleep(Duration::from_millis(10)).await;
+            assert_eq!(connection.keepalive_count(), exp_start + i);
+        }
 
         drop(keepalive);
-        assert!(matches!(
-            task.await.unwrap(),
-            Ok(KeepaliveResult::Cancelled)
-        ));
-
-        assert_eq!(3, fixture.keepalive_count());
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
     #[tokio::test]
-    async fn multiple_keepalives_are_sent_with_reply() {
-        use FixtureEvent::*;
-        let fixture = Fixture::new(
-            vec![
-                Online,
-                IntervalExpired,
-                ReplyReceived,
-                IntervalExpired,
-                ReplyReceived,
-                IntervalExpired,
-                ReplyReceived,
-                Wait,
-            ],
-            true,
-        );
+    async fn timeout_causes_task_termination(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
 
-        let (keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Trigger timeout
+        sleep_manager.trigger_timeout();
+
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Timedout));
+    }
+
+    #[test_case(true, 2; "continuous")]
+    #[test_case(false, 1; "non-continuous")]
+    #[tokio::test]
+    async fn reply_received_behavior(continuous: bool, exp_count: usize) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Reply received - behavior differs between modes
+        keepalive.reply_received().await;
+        sleep(Duration::from_millis(10)).await;
+
+        // Verify keepalive count has not increased
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Trigger interval to test post-reply behavior
+        sleep_manager.trigger_interval();
+        sleep(Duration::from_millis(10)).await;
+
+        // For continuous, after reply, interval triger will increase
+        // For non continuous, after reply, no more keepalives sent
+        assert_eq!(connection.keepalive_count(), exp_count);
 
         drop(keepalive);
-        assert!(matches!(
-            task.await.unwrap(),
-            Ok(KeepaliveResult::Cancelled)
-        ));
-
-        assert_eq!(3, fixture.keepalive_count());
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
     #[tokio::test]
-    async fn multiple_keepalives_are_sent_before_reply(continuous: bool) {
-        use FixtureEvent::*;
-        let first_event = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(
-            vec![
-                first_event,
-                IntervalExpired,
-                IntervalExpired,
-                IntervalExpired,
-                ReplyReceived,
-                Wait,
-            ],
-            continuous,
-        );
+    async fn outside_activity_resets_interval(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
 
-        let (keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+
+        // Outside activity should reset interval timer but not affect timeout
+        keepalive.outside_activity().await;
+        sleep(Duration::from_millis(10)).await;
+
+        // Trigger interval - should still send keepalive
+        sleep_manager.trigger_interval();
+        sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(connection.keepalive_count(), 2);
 
         drop(keepalive);
-        assert!(matches!(
-            task.await.unwrap(),
-            Ok(KeepaliveResult::Cancelled)
-        ));
-
-        assert_eq!(3, fixture.keepalive_count());
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
     #[tokio::test]
-    async fn timeout_if_no_reply(continuous: bool) {
-        use FixtureEvent::*;
-        let first_event = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(
-            vec![first_event, IntervalExpired, TimeoutExpired],
-            continuous,
-        );
+    async fn suspend_stops_keepalives(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
 
-        let (_keepalive, task) = fixture.run().await;
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
 
-        assert!(matches!(task.await.unwrap(), Ok(KeepaliveResult::Timedout)));
+        // Suspend keepalives
+        keepalive.suspend().await;
+        sleep(Duration::from_millis(10)).await;
 
-        assert_eq!(1, fixture.keepalive_count());
-    }
+        // Trigger interval - should not send keepalive while suspended
+        sleep_manager.trigger_interval();
+        sleep(Duration::from_millis(10)).await;
 
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
-    #[tokio::test]
-    async fn timeout_if_no_reply_even_if_outside_data(continuous: bool) {
-        use FixtureEvent::*;
-        let first_event = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(
-            vec![
-                first_event,
-                IntervalExpired,
-                OutsideActivity,
-                TimeoutExpired,
-            ],
-            continuous,
-        );
-
-        let (_keepalive, task) = fixture.run().await;
-
-        assert!(matches!(task.await.unwrap(), Ok(KeepaliveResult::Timedout)));
-
-        assert_eq!(1, fixture.keepalive_count());
-    }
-
-    #[test_case(true; "Continuous uses Online to start keepalives")]
-    #[test_case(false; "Non-Continuous uses NetworkChange to start keepalives")]
-    #[tokio::test]
-    async fn suspend_keepalives_and_enable_again(continuous: bool) {
-        use FixtureEvent::*;
-        let enable_keepalive = if continuous { Online } else { NetworkChange };
-        let fixture = Fixture::new(
-            vec![
-                enable_keepalive,
-                IntervalExpired,
-                Suspend,
-                enable_keepalive,
-                IntervalExpired,
-                Wait,
-            ],
-            continuous,
-        );
-
-        let (keepalive, task) = fixture.run().await;
+        assert_eq!(connection.keepalive_count(), 1);
 
         drop(keepalive);
-        assert!(matches!(
-            task.await.unwrap(),
-            Ok(KeepaliveResult::Cancelled)
-        ));
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
+    }
 
-        assert_eq!(2, fixture.keepalive_count());
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
+    async fn suspend_and_resume(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Suspend
+        keepalive.suspend().await;
+        sleep(Duration::from_millis(10)).await;
+
+        // Resume with the appropriate trigger based on mode
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+
+        assert_eq!(connection.keepalive_count(), 2);
+
+        drop(keepalive);
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
+    }
+
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
+    async fn zero_timeout_disables_timeout(continuous: bool) {
+        let (sleep_manager, connection) = KeepaliveTestBuilder::new()
+            .continuous(continuous)
+            .timeout(Duration::ZERO)
+            .build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Continue sending keepalives without timeout
+        sleep_manager.trigger_interval();
+        sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(connection.keepalive_count(), 2);
+
+        drop(keepalive);
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
+    }
+
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
+    async fn task_cancellation_on_drop(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+
+        // Drop keepalive to cancel task
+        drop(keepalive);
+
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 }

@@ -245,6 +245,7 @@ impl ConnectionError {
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::PeerClosed)) => true,
+                    WolfSSL(wolfssl::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
 
                     WireError(wire::FromWireError::UnknownFrameType) => false,
                     WireError(_) => true,
