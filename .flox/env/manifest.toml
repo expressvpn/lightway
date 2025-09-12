@@ -1,0 +1,72 @@
+# Flox manifest for Lightway VPN
+version = 1
+
+[options]
+# Support both macOS (for development) and Linux (for deployment/testing)
+systems = ["aarch64-darwin", "x86_64-darwin", "x86_64-linux", "aarch64-linux"]
+
+[install]
+# Core Rust toolchain (rustup includes cargo, clippy, rustfmt, rust-analyzer)
+rustup.pkg-path = "rustup"
+gcc.pkg-path = "gcc"
+pkg-config.pkg-path = "pkg-config"
+
+# Autotools for building dependencies
+autoconf.pkg-path = "autoconf"
+automake.pkg-path = "automake"
+libtool.pkg-path = "libtool"
+
+# Core dependencies
+git.pkg-path = "git"
+cmake.pkg-path = "cmake"
+gnumake.pkg-path = "gnumake"
+libiconv.pkg-path = "libiconv"  # Added for macOS linking
+
+# Network testing tools
+tcpdump.pkg-path = "tcpdump"
+netcat.pkg-path = "netcat"
+curl.pkg-path = "curl"
+bind.pkg-path = "bind"  # for dig/nslookup
+
+# Development tools
+gdb.pkg-path = "gdb"
+
+# Python for scripts
+python3.pkg-path = "python3"
+
+# Container tools for cross-platform testing
+docker.pkg-path = "docker"
+docker-compose.pkg-path = "docker-compose"
+
+[vars]
+RUST_BACKTRACE = "1"
+LW_DANGEROUSLY_DISABLE_PERMISSIONS_CHECKS = "1"
+CARGO_HOME = "$HOME/.cargo"
+RUSTUP_HOME = "$HOME/.rustup"
+
+[hook]
+on-activate = """
+echo "🚀 Lightway Development Environment Activated"
+echo ""
+echo "Platform: $(uname -s) $(uname -m)"
+echo ""
+echo "Quick commands:"
+echo "  cargo build           - Build all components"
+echo "  cargo test            - Run unit tests"
+echo "  cargo clippy          - Run linter"
+echo "  cargo fmt             - Format code"
+echo ""
+# Check if rustup is properly configured
+if command -v rustup &> /dev/null; then
+    echo "Rust toolchain: $(rustup show active-toolchain 2>/dev/null || echo 'Not installed - run: rustup install stable')"
+else
+    echo "Setting up rustup..."
+    rustup-init -y --no-modify-path --default-toolchain stable
+fi
+
+# Set up library paths for macOS
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    export LIBRARY_PATH="$LIBRARY_PATH:$(brew --prefix)/lib"
+    export CPATH="$CPATH:$(brew --prefix)/include"
+fi
+"""
