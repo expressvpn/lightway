@@ -572,7 +572,7 @@ pub struct ClientConnection<T: Send + Sync> {
     network_change_signal: mpsc::Sender<()>,
     encoding_request_signal: mpsc::Sender<bool>,
     #[cfg(desktop)]
-    route_manager: Option<JoinHandle<()>>,
+    route_manager: Option<RouteManager>,
     #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
@@ -596,10 +596,11 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             tun_peer_ip,
             tun_dns_ip
         );
-        let route_manager =
+        let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        route_manager.start().await?;
 
-        self.route_manager = route_manager.start().await?;
+        self.route_manager = Some(route_manager);
         Ok(())
     }
 
@@ -1085,7 +1086,14 @@ pub async fn client<
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
 
-    connection.task.await?
+    let result = connection.task.await?;
+
+    #[cfg(desktop)]
+    if let Some(mut route_manager) = connection.route_manager {
+        let _ = route_manager.stop().await;
+    }
+
+    result
 }
 
 #[cfg(test)]

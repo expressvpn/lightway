@@ -86,6 +86,11 @@ pub enum RoutingTableError {
 }
 
 pub struct RouteManager {
+    inner: Option<RouteManagerInner>,
+    task: Option<JoinHandle<()>>,
+}
+
+struct RouteManagerInner {
     routing_mode: RouteMode,
     route_manager: SyncRouteManager,
     route_manager_async: AsyncRouteManager,
@@ -101,6 +106,45 @@ pub struct RouteManager {
 
 impl RouteManager {
     pub fn new(
+        routing_mode: RouteMode,
+        server_ip: IpAddr,
+        tun_index: u32,
+        tun_peer_ip: IpAddr,
+        tun_dns_ip: IpAddr,
+    ) -> Result<Self, RoutingTableError> {
+        let inner = Some(RouteManagerInner::new(
+            routing_mode,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+        )?);
+        Ok(Self { inner, task: None })
+    }
+
+    pub async fn start(&mut self) -> Result<(), RoutingTableError> {
+        let Some(inner) = self.inner.take() else {
+            return Err(RoutingTableError::InsufficientPermissions);
+        };
+
+        self.task = inner.start().await?;
+        Ok(())
+    }
+
+    pub async fn stop(&mut self) -> Result<(), RoutingTableError> {
+        if let Some(task) = self.task.take() {
+            task.abort();
+
+            // Wait till the task finishes to clear routes
+            let _ = task.await;
+        }
+
+        Ok(())
+    }
+}
+
+impl RouteManagerInner {
+    fn new(
         routing_mode: RouteMode,
         server_ip: IpAddr,
         tun_index: u32,
@@ -295,7 +339,7 @@ impl RouteManager {
 
     /// Install routes required to use tunnel and start monitoring route changes
     /// to update the routes if needed (mostly during connection floating)
-    pub async fn start(mut self) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
+    async fn start(mut self) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
         if self.routing_mode == RouteMode::NoExec {
             return Ok(None);
         }
@@ -407,7 +451,7 @@ impl RouteManager {
     }
 }
 
-impl Drop for RouteManager {
+impl Drop for RouteManagerInner {
     fn drop(&mut self) {
         self.cleanup_sync();
     }
@@ -433,7 +477,7 @@ mod tests {
 
     /// Helper to create test routes with gateway lookup
     fn create_test_routes_with_gateway(
-        route_manager: &mut RouteManager,
+        route_manager: &mut RouteManagerInner,
     ) -> (Route, Route, Route, IpAddr) {
         let default_route = route_manager.find_route(&EXTERNAL_IP).unwrap();
         let gateway_ip = default_route.gateway().unwrap();
@@ -453,11 +497,11 @@ mod tests {
             && route1.if_index() == route2.if_index()
     }
 
-    /// Creates a test setup with RouteRestorer, TUN device, and RouteManager
+    /// Creates a test setup with RouteRestorer, TUN device, and RouteManagerInner
     /// Returns tuple where RouteRestorer is dropped last for proper cleanup
     async fn create_test_setup(
         route_mode: RouteMode,
-    ) -> Result<(RouteRestorer, AsyncDevice, RouteManager), Box<dyn std::error::Error>> {
+    ) -> Result<(RouteRestorer, AsyncDevice, RouteManagerInner), Box<dyn std::error::Error>> {
         // Capture initial state FIRST
         let restorer = RouteRestorer::new();
 
@@ -481,11 +525,11 @@ mod tests {
 
         let tun_index = tun_device.if_index()?;
 
-        // Then create RouteManager
+        // Create RouteManagerInner directly for testing
         let route_manager =
-            RouteManager::new(route_mode, EXTERNAL_IP, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
+            RouteManagerInner::new(route_mode, EXTERNAL_IP, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
 
-        // Return tuple - RouteManager will be dropped first, then TUN device, RouteRestorer last
+        // Return tuple - RouteManagerInner will be dropped first, then TUN device, RouteRestorer last
         Ok((restorer, tun_device, route_manager))
     }
 
