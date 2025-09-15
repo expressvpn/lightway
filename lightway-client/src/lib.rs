@@ -572,7 +572,7 @@ pub struct ClientConnection<T: Send + Sync> {
     network_change_signal: mpsc::Sender<()>,
     encoding_request_signal: mpsc::Sender<bool>,
     #[cfg(desktop)]
-    route_manager: Option<RouteManager>,
+    route_manager: Option<JoinHandle<()>>,
     #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
@@ -585,27 +585,21 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
     ) -> Result<()> {
+        let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
 
-        let mut route_manager = RouteManager::new(route_mode)?;
         tracing::trace!(
-            "Initializing route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
+            "Starting route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
             route_mode,
-            &self.outside_io.peer_addr().ip(),
+            server_ip,
             tun_index,
-            &tun_peer_ip,
-            &tun_dns_ip
+            tun_peer_ip,
+            tun_dns_ip
         );
-        route_manager
-            .initialize(
-                &self.outside_io.peer_addr().ip(),
-                tun_index,
-                &tun_peer_ip,
-                &tun_dns_ip,
-            )
-            .await?;
+        let route_manager =
+            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
 
-        self.route_manager = Some(route_manager);
+        self.route_manager = route_manager.start().await?;
         Ok(())
     }
 
