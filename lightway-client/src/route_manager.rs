@@ -71,6 +71,8 @@ pub enum RoutingTableError {
     AddRouteError(std::io::Error),
     #[error("Default interface not found: {0}")]
     DefaultInterfaceNotFound(std::io::Error),
+    #[error("Default route not found")]
+    DefaultRouteNotFound,
     #[error("Interface index not found")]
     InterfaceIndexNotFound,
     #[error("Interface gateway not found")]
@@ -168,6 +170,51 @@ impl RouteManagerInner {
             server_route: None,
             monitor_task: None,
         })
+    }
+
+    /// Identifies 0.0.0.0 route with least metric if applicable
+    /// Or the first found 0.0.0.0 route.
+    /// (Route metrics is applicable only in windows and linux Os)
+    fn find_best_default_route(&mut self, server_ip: &IpAddr) -> Result<Route, RoutingTableError> {
+        let routes = self
+            .route_manager
+            .list()
+            .map_err(RoutingTableError::DefaultInterfaceNotFound)?;
+
+        let mut best_route: Option<Route> = None;
+
+        for route in routes {
+            // Skip IPv6 routes if we're looking for IPv4, and vice versa
+            if server_ip.is_ipv4() != route.destination().is_ipv4() {
+                continue;
+            }
+
+            // Not a default route, skip
+            if route.prefix() != 0 {
+                continue;
+            }
+
+            // For windows, linux, use metric to choose best deafult route
+            #[cfg(any(linux, windows))]
+            {
+                let route_metric = route.metric().unwrap_or(u32::MAX - 1);
+                let best_route_metric = best_route
+                    .as_ref()
+                    .and_then(|a| a.metric())
+                    .unwrap_or(u32::MAX);
+                if route_metric < best_route_metric {
+                    best_route = Some(route);
+                }
+            }
+            // For other platforms, choose the first route available
+            #[cfg(not(any(linux, windows)))]
+            {
+                best_route = Some(route);
+                break;
+            }
+        }
+
+        best_route.ok_or(RoutingTableError::DefaultRouteNotFound)
     }
 
     /// Identifies route used to reach a particular ip
@@ -408,7 +455,7 @@ impl RouteManagerInner {
     async fn check_and_update_server_route(&mut self) -> Result<(), RoutingTableError> {
         // Find the current default route to the server
         let server_ip = self.server_ip;
-        let current_route = self.find_route(&server_ip)?;
+        let current_route = self.find_best_default_route(&server_ip)?;
         let current_gateway = current_route.gateway();
         let current_if_index = current_route.if_index();
 
