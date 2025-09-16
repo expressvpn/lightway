@@ -172,6 +172,22 @@ impl RouteManagerInner {
         })
     }
 
+    fn get_route_metric(route: &Route) -> u32 {
+        let route_metric = route.metric().unwrap_or(0);
+
+        // On Windows, get interface metric and add it to route metric
+        #[cfg(windows)]
+        let route_metric = {
+            let interface_metric = if let Some(if_index) = route.if_index() {
+                utils::get_interface_metric(if_index).unwrap_or(u32::MAX)
+            } else {
+                u32::MAX
+            };
+            route_metric.saturating_add(interface_metric)
+        };
+        route_metric
+    }
+
     /// Identifies 0.0.0.0 route with least metric if applicable
     /// Or the first found 0.0.0.0 route.
     /// (Route metrics is applicable only in windows and linux Os)
@@ -196,17 +212,41 @@ impl RouteManagerInner {
                 continue;
             }
 
-            // For windows, linux, use metric to choose best deafult route
+            tracing::trace!(
+                "Checking route: dest={}, prefix={}, gateway={:?}, if_index={:?}, metric={:?}",
+                route.destination(),
+                route.prefix(),
+                route.gateway(),
+                route.if_index(),
+                Self::get_route_metric(&route),
+            );
+
+            // For windows, linux, use metric to choose best default route
             #[cfg(any(linux, windows))]
             {
-                let route_metric = route.metric().unwrap_or(u32::MAX - 1);
-                let best_route_metric = best_route
+                let route_metric = Self::get_route_metric(&route);
+                let best_metric = best_route
                     .as_ref()
-                    .and_then(|a| a.metric())
+                    .map(Self::get_route_metric)
                     .unwrap_or(u32::MAX);
-                if route_metric < best_route_metric {
-                    best_route = Some(route);
-                }
+
+                match route_metric.cmp(&best_metric) {
+                    std::cmp::Ordering::Less => {
+                        tracing::trace!("New best route found with better route metric");
+                        best_route = Some(route);
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if let Some(server_route) = self.server_route.as_ref()
+                            && *server_route == route
+                        {
+                            tracing::trace!("Same route metric, but choosing previous best route");
+                            best_route = Some(route);
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
+                        tracing::trace!("Route route metric is not better than current best");
+                    }
+                };
             }
             // For other platforms, choose the first route available
             #[cfg(not(any(linux, windows)))]
