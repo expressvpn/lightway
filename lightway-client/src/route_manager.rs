@@ -176,6 +176,8 @@ impl RouteManagerInner {
     /// Or the first found 0.0.0.0 route.
     /// (Route metrics is applicable only in windows and linux Os)
     fn find_best_default_route(&mut self, server_ip: &IpAddr) -> Result<Route, RoutingTableError> {
+        tracing::trace!("Finding best default route for server IP: {}", server_ip);
+
         let routes = self
             .route_manager
             .list()
@@ -209,8 +211,18 @@ impl RouteManagerInner {
             // For other platforms, choose the first route available
             #[cfg(not(any(linux, windows)))]
             {
+                tracing::trace!("Using first available default route");
                 best_route = Some(route);
                 break;
+            }
+        }
+
+        match &best_route {
+            Some(route) => {
+                tracing::trace!("Best {} selected", route);
+            }
+            None => {
+                tracing::trace!("No suitable route found");
             }
         }
 
@@ -245,7 +257,10 @@ impl RouteManagerInner {
     /// Adds Route
     async fn add_route(&mut self, route: &Route) -> Result<(), RoutingTableError> {
         match self.route_manager_async.add(route).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                tracing::info!("Added {route}");
+                Ok(())
+            }
             Err(e) => {
                 if self.is_route_exists_error(&e) {
                     // Ignore error if route already exists and
