@@ -805,4 +805,109 @@ mod tests {
         let found_route2 = route_manager.find_route(&ROUTE_TEST_IP2).unwrap();
         assert_eq!(found_route2.gateway(), route2.gateway());
     }
+
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::NoExec)]
+    #[tokio::test]
+    async fn test_route_manager_start_stop(route_mode: RouteMode) {
+        let mut route_manager =
+            RouteManager::new(route_mode, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+
+        // Test that we can start the route manager
+        let start_result = route_manager.start().await;
+        if route_mode == RouteMode::NoExec {
+            // NoExec mode should succeed but not actually do anything
+            assert!(start_result.is_ok());
+        } else {
+            // Other modes may require privileges, so we just check it doesn't panic
+            let _ = start_result;
+        }
+
+        // Test that we can stop the route manager
+        let stop_result = route_manager.stop().await;
+        assert!(stop_result.is_ok());
+
+        // Test that stopping again is safe
+        let stop_again_result = route_manager.stop().await;
+        assert!(stop_again_result.is_ok());
+    }
+
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[tokio::test]
+    async fn test_route_manager_inner_structure(route_mode: RouteMode) {
+        // Test that RouteManagerInner can be created directly
+        let inner_result =
+            RouteManagerInner::new(route_mode, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP);
+        assert!(inner_result.is_ok());
+
+        let inner = inner_result.unwrap();
+        assert_eq!(inner.routing_mode, route_mode);
+        assert_eq!(inner.server_ip, EXTERNAL_IP);
+        assert_eq!(inner.tun_index, 0);
+        assert_eq!(inner.tun_peer_ip, TUN_PEER_IP);
+        assert_eq!(inner.tun_dns_ip, TUN_DNS_IP);
+        assert_eq!(inner.vpn_routes.len(), 0);
+        assert_eq!(inner.lan_routes.len(), 0);
+        assert!(inner.server_route.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_route_manager_double_start_error() {
+        let mut route_manager =
+            RouteManager::new(RouteMode::NoExec, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+
+        // First start should succeed
+        assert!(route_manager.start().await.is_ok());
+
+        // Second start should fail since inner is already taken
+        let second_start_result = route_manager.start().await;
+        assert!(second_start_result.is_err());
+        assert!(matches!(
+            second_start_result.unwrap_err(),
+            RoutingTableError::InsufficientPermissions
+        ));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(route_manager)]
+    #[ignore = "Requires network privileges and may affect system routing"]
+    async fn test_privileged_route_monitoring_server_route_update() {
+        let (_restorer, _tun_device, mut inner) =
+            create_test_setup(RouteMode::Default).await.unwrap();
+
+        // Install initial routes
+        inner.install_routes().await.unwrap();
+
+        // Verify server route was created
+        assert!(inner.server_route.is_some());
+        let initial_server_route = inner.server_route.as_ref().unwrap().clone();
+
+        // Test check_and_update_server_route when no change is needed
+        let result = inner.check_and_update_server_route().await;
+        assert!(result.is_ok());
+
+        // Server route should remain unchanged
+        assert!(inner.server_route.is_some());
+        let unchanged_route = inner.server_route.as_ref().unwrap();
+        assert_eq!(
+            initial_server_route.destination(),
+            unchanged_route.destination()
+        );
+        assert_eq!(initial_server_route.prefix(), unchanged_route.prefix());
+    }
+
+    #[tokio::test]
+    async fn test_route_manager_start_with_noexec_mode() {
+        // Don't create TUN device for NoExec mode, just test RouteManagerInner directly
+        let inner =
+            RouteManagerInner::new(RouteMode::NoExec, EXTERNAL_IP, 1, TUN_PEER_IP, TUN_DNS_IP)
+                .unwrap();
+
+        // NoExec mode should return None (no monitoring task)
+        let monitor_task = inner.start().await;
+        assert!(monitor_task.is_ok());
+        assert!(monitor_task.unwrap().is_none());
+    }
 }
