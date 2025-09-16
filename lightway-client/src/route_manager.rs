@@ -487,6 +487,8 @@ impl RouteManagerInner {
                 if let Some(gateway) = current_gateway {
                     new_server_route = new_server_route.with_gateway(gateway);
                 }
+                #[cfg(windows)]
+                let new_server_route = new_server_route.with_metric(0);
 
                 self.add_route_server(new_server_route).await?;
 
