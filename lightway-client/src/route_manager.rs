@@ -11,6 +11,11 @@ use tracing::warn;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
 
+#[cfg(windows)]
+use crate::platform::windows::addr_monitor::AsyncAddrListener;
+#[cfg(windows)]
+use crate::platform::windows::utils;
+
 // LAN networks for RouteMode::Lan
 const LAN_NETWORKS: [(IpAddr, u8); 5] = [
     (
@@ -459,7 +464,7 @@ impl RouteManagerInner {
         // Spawn async task to monitor route changes using AsyncRouteListener
         let monitor_task = tokio::spawn(async move {
             // Create AsyncRouteListener
-            let mut listener = match AsyncRouteListener::new() {
+            let mut route_listener = match AsyncRouteListener::new() {
                 Ok(listener) => listener,
                 Err(e) => {
                     tracing::error!("Failed to create AsyncRouteListener: {}", e);
@@ -467,38 +472,76 @@ impl RouteManagerInner {
                 }
             };
 
-            tracing::info!("Started route monitoring...");
-            // Listen for route changes in a loop
+            // On Windows, also create address change listener as a fallback
+            // since Windows doesn't always publish route changes on network down
+            #[cfg(windows)]
+            let mut addr_listener = match AsyncAddrListener::new() {
+                Ok(listener) => {
+                    tracing::info!("Started address change monitoring (Windows)...");
+                    Some(listener)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create AsyncAddrListener: {}", e);
+                    None
+                }
+            };
+
+            #[cfg(not(windows))]
+            let (_sender, addr_listener) = tokio::sync::mpsc::unbounded_channel::<()>();
+            #[cfg(not(windows))]
+            let mut addr_listener = Some(addr_listener);
+
+            tracing::info!("Started monitoring route/intf...");
+            // Listen for changes in a loop
             loop {
-                match listener.listen().await {
-                    Ok(route_change) => {
-                        tracing::debug!("Route change detected: {:?}", route_change);
-                        match route_change {
-                            route_manager::RouteChange::Add(route)
-                            | route_manager::RouteChange::Delete(route)
-                            | route_manager::RouteChange::Change(route) => {
-                                // skip Ipv6 route updates
-                                if route.destination().is_ipv6() {
-                                    continue;
-                                };
-                                // Update only the /32 prefix route i.e default route
-                                if route.prefix() as u32 != Ipv4Addr::BITS {
-                                    continue;
-                                }
-                                if route.gateway().is_none_or(|a| a.is_unspecified()) {
-                                    continue;
-                                }
-                                if let Err(e) = self.check_and_update_server_route().await {
-                                    tracing::warn!("Updating server route failed: {:?}", e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error listening for route changes: {}", e);
-                        // Continue monitoring even on errors
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    }
+                tokio::select! {
+                   // Handle route changes
+                   route_result = route_listener.listen() => {
+                       match route_result {
+                           Ok(route_change) => {
+                               tracing::debug!("Route change detected: {:?}", route_change);
+                               match route_change {
+                                   route_manager::RouteChange::Add(route)
+                                   | route_manager::RouteChange::Delete(route)
+                                   | route_manager::RouteChange::Change(route) => {
+                                       // skip Ipv6 route updates
+                                       if route.destination().is_ipv6() {
+                                           continue;
+                                       };
+                                       // Update only the /0 prefix route i.e default route
+                                       if route.prefix() != 0 {
+                                           continue;
+                                       }
+                                       if route.gateway().is_none_or(|a| a.is_unspecified()) {
+                                           continue;
+                                       }
+                                       if let Err(e) = self.check_and_update_server_route().await {
+                                           tracing::warn!("Updating server route failed: {:?}", e);
+                                       }
+                                   }
+                               }
+                           }
+                       Err(e) => {
+                           tracing::error!("Error listening for route changes: {}", e);
+                           // Continue monitoring even on errors
+                           tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                       }
+                   }}
+
+                   // On address/intf changes, check and update server route
+                   // This helps catch network transitions that don't trigger route changes
+                   _ = async {
+                       if let Some(listener) = &mut addr_listener {
+                           listener.next().await
+                       } else {
+                           std::future::pending().await
+                       }
+                   } => {
+                       tracing::debug!("Address change detected");
+                       if let Err(e) = self.check_and_update_server_route().await {
+                           tracing::warn!("Updating server route after address change failed: {:?}", e);
+                       }
+                   }
                 }
             }
         });
