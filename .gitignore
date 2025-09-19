@@ -1,3 +1,4 @@
 /.cargo/config.toml
 /target/
 result
+artifacts/
