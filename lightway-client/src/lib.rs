@@ -585,25 +585,20 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
     ) -> Result<()> {
+        let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
 
-        let mut route_manager = RouteManager::new(route_mode)?;
         tracing::trace!(
-            "Initializing route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
+            "Starting route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
             route_mode,
-            &self.outside_io.peer_addr().ip(),
+            server_ip,
             tun_index,
-            &tun_peer_ip,
-            &tun_dns_ip
+            tun_peer_ip,
+            tun_dns_ip
         );
-        route_manager
-            .initialize(
-                &self.outside_io.peer_addr().ip(),
-                tun_index,
-                &tun_peer_ip,
-                &tun_dns_ip,
-            )
-            .await?;
+        let mut route_manager =
+            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        route_manager.start().await?;
 
         self.route_manager = Some(route_manager);
         Ok(())
@@ -1091,7 +1086,14 @@ pub async fn client<
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
 
-    connection.task.await?
+    let result = connection.task.await?;
+
+    #[cfg(desktop)]
+    if let Some(mut route_manager) = connection.route_manager {
+        let _ = route_manager.stop().await;
+    }
+
+    result
 }
 
 #[cfg(test)]
