@@ -56,7 +56,7 @@ pub struct DnsManager {
     #[cfg(macos)]
     dns_manager: super::platform::macos::dns_manager::DnsManager,
     #[cfg(windows)]
-    dns_manager: super::platform::windows::dns_manager::DnsManager,
+    pub dns_manager: super::platform::windows::dns_manager::DnsManager,
 }
 
 impl DnsSetup for DnsManager {

@@ -611,9 +611,9 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_dns_ip: IpAddr,
     ) -> Result<(), DnsManagerError> {
         if dns_config_mode == DnsConfigMode::Default {
-            let mut dns_manager = DnsManager::default();
-            dns_manager.set_dns(tun_dns_ip)?;
-            self.dns_manager = Some(dns_manager);
+            if let Some(dns_manager) = &mut self.dns_manager {
+                dns_manager.set_dns(tun_dns_ip)?;
+            }
         }
         Ok(())
     }
@@ -864,6 +864,14 @@ pub async fn connect<
         result
     });
 
+    #[cfg(windows)]
+    let dns_manager = DnsManager {
+        dns_manager: platform::windows::dns_manager::DnsManager::new(tun),
+    };
+
+    #[cfg(all(desktp, not(windows)))]
+    let dns_manager = DnsManager::default();
+
     Ok(ClientConnection {
         task,
         conn,
@@ -876,7 +884,7 @@ pub async fn connect<
         #[cfg(desktop)]
         route_manager: None,
         #[cfg(desktop)]
-        dns_manager: None,
+        dns_manager: Some(DnsManager::default()),
     })
 }
 

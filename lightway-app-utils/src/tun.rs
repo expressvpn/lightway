@@ -267,6 +267,26 @@ impl Tun {
             Tun::IoUring(t) => t.if_index(),
         }
     }
+
+    /// Set the DNS servers for the tunnel interface
+    #[cfg(windows)]
+    pub fn set_dns_servers(&self, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+        if let Tun::Direct(t) = self {
+            t.set_dns_servers(dns_servers)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Clear the DNS servers for the tunnel interface
+    #[cfg(windows)]
+    pub fn clear_dns_servers(&self) -> std::io::Result<()> {
+        if let Tun::Direct(t) = self {
+            t.clear_dns_servers()
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -347,6 +367,18 @@ impl TunDirect {
     /// MTU of Tun
     pub fn mtu(&self) -> usize {
         self.mtu as usize
+    }
+
+    /// Set the DNS servers for the tunnel interface
+    #[cfg(windows)]
+    pub fn set_dns_servers(&self, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Clear the DNS servers for the tunnel interface
+    #[cfg(windows)]
+    pub fn clear_dns_servers(&self) -> std::io::Result<()> {
+        Ok(())
     }
 
     /// Interface index of Tun

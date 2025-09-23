@@ -13,7 +13,10 @@ use lightway_core::{
     ipv4_update_destination, ipv4_update_source,
 };
 
-use crate::{ConnectionState, io::inside::InsideIORecv};
+use crate::{
+    ConnectionState,
+    io::inside::{InsideIO, InsideIORecv},
+};
 
 pub struct Tun {
     tun: AppUtilsTun,
@@ -105,5 +108,16 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
 
     fn if_index(&self) -> std::io::Result<u32> {
         self.if_index()
+    }
+}
+
+impl<ExtAppState: Send + Sync> InsideIO<ConnectionState<ExtAppState>> for Tun {
+    #[cfg(windows)]
+    fn set_dns_servers(&self, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+        Ok(())
+    }
+    #[cfg(windows)]
+    fn clear_dns_servers(&self) -> std::io::Result<()> {
+        Ok(())
     }
 }

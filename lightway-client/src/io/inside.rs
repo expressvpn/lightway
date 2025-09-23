@@ -33,6 +33,14 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
 pub trait InsideIO<ExtAppState: Send + Sync = ()>:
     InsideIORecv<ExtAppState> + InsideIOSendCallback<ConnectionState<ExtAppState>>
 {
+    #[cfg(windows)]
+    fn set_dns_servers(&self, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+        Ok(())
+    }
+    #[cfg(windows)]
+    fn clear_dns_servers(&self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Default blanket implementation for InsideIO
