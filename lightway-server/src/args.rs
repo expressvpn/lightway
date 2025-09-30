@@ -8,6 +8,7 @@ use clap::Parser;
 use ipnet::Ipv4Net;
 use twelf::config;
 
+use crate::network_setup::NetworkSetupMode;
 use lightway_app_utils::args::{ConnectionType, Duration, IpMap, LogFormat, LogLevel};
 
 #[config]
@@ -55,15 +56,15 @@ pub struct Config {
     #[clap(long)]
     pub tun_ip: Option<Ipv4Addr>,
 
-    /// Server IP to send in network_config message
+    /// Server IP to send in network setup message
     #[clap(long, default_value = "10.125.0.6")]
     pub lightway_server_ip: Ipv4Addr,
 
-    /// Client IP to send in network_config message
+    /// Client IP to send in network setup message
     #[clap(long, default_value = "10.125.0.5")]
     pub lightway_client_ip: Ipv4Addr,
 
-    /// DNS IP to send in network_config message
+    /// DNS IP to send in network setup message
     #[clap(long, default_value = "10.125.0.1")]
     pub lightway_dns_ip: Ipv4Addr,
 
@@ -110,6 +111,10 @@ pub struct Config {
     /// Set UDP buffer size. Default value is 15 MiB.
     #[clap(long, default_value_t = ByteSize::mib(15))]
     pub udp_buffer_size: ByteSize,
+
+    /// Network setup mode: 'default' (basic rules), 'strict' (+ anti-spoofing, rate limiting, DROP rules), 'paranoid' (+ fragment/state validation, IPv6 warning), 'no-exec' (disabled)
+    #[clap(long, value_enum, default_value_t = NetworkSetupMode::Default)]
+    pub network_setup: NetworkSetupMode,
 
     /// Enable WolfSSL debug logging
     #[cfg(feature = "debug")]

@@ -3,6 +3,7 @@ mod connection_manager;
 mod io;
 mod ip_manager;
 pub mod metrics;
+pub mod network_setup;
 mod statistics;
 
 use bytesize::ByteSize;
@@ -39,7 +40,7 @@ use tracing::{info, warn};
 pub use crate::connection::ConnectionState;
 pub use crate::io::inside::{InsideIO, InsideIORecv};
 
-use crate::ip_manager::IpManager;
+use crate::{ip_manager::IpManager, network_setup::{NetworkSetup, NetworkSetupMode}};
 
 use connection_manager::ConnectionManager;
 use io::outside::Server;
@@ -156,17 +157,17 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// exclusively for that particular incoming IP.
     pub ip_map: HashMap<IpAddr, Ipv4Net>,
 
-    /// Server IP to send in network_config message
+    /// Server IP to send in network setup message
     pub lightway_server_ip: Ipv4Addr,
 
-    /// Client IP to send in network_config message
+    /// Client IP to send in network setup message
     pub lightway_client_ip: Ipv4Addr,
 
-    /// DNS IP to send in network_config message
+    /// DNS IP to send in network setup message
     pub lightway_dns_ip: Ipv4Addr,
 
     /// Boolean flag to select actual client ip assigned or above static ip
-    /// in network_config message
+    /// in network setup message
     pub use_dynamic_client_ip: bool,
 
     /// Enable Post Quantum Crypto
@@ -208,6 +209,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// UDP Buffer size for the server
     pub udp_buffer_size: ByteSize,
 
+    /// Whether to enable network setup
+    pub network_setup: NetworkSetupMode,
+
     /// Disable IP pool randomization
     /// Should be used for debugging only
     #[cfg(feature = "debug")]
@@ -247,6 +251,17 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     if let Some(tun_ip) = config.tun_ip {
         info!("Server started with inside ip: {}", tun_ip);
     }
+
+    let mut network_setup = NetworkSetup::new(
+        config.network_setup,
+        config.ip_pool,
+        config
+            .tun_config
+            .tun_name
+            .clone()
+            .ok_or_else(|| anyhow!("Tun device name is required for network setup"))?,
+    )
+    .map_err(|e| anyhow!("Failed to initialize network setup: {}", e))?;
 
     let inside_ip_config = InsideIpConfig {
         client_ip: config.lightway_client_ip,
@@ -369,6 +384,8 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             }
         }
     });
+
+    network_setup.start().await.context("Network setup")?;
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);

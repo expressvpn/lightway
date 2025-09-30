@@ -154,7 +154,13 @@ async fn main() -> Result<()> {
     if let Some(tun_name) = config.tun_name {
         tun_config.tun_name(tun_name);
     }
-    tun_config.up();
+    tun_config
+        .mtu(1350)
+        .address(config.lightway_server_ip.into())
+        .prefix(16)
+        .destination(config.lightway_client_ip)
+        .up();
+
     let mode = match config.mode {
         lightway_app_utils::args::ConnectionType::Udp => ServerConnectionMode::Datagram(None),
         lightway_app_utils::args::ConnectionType::Tcp => ServerConnectionMode::Stream(None),
@@ -188,6 +194,7 @@ async fn main() -> Result<()> {
         bind_address: config.bind_address,
         proxy_protocol: config.proxy_protocol,
         udp_buffer_size: config.udp_buffer_size,
+        network_setup: config.network_setup,
         #[cfg(feature = "debug")]
         randomize_ippool: config.randomize_ippool,
     };

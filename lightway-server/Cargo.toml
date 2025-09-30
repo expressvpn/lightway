@@ -26,7 +26,9 @@ clap.workspace = true
 ctrlc.workspace = true
 delegate.workspace = true
 educe.workspace = true
+if-addrs = "0.13.3"
 ipnet.workspace = true
+iptables = "0.6.0"
 jsonwebtoken = "9.3.0"
 libc.workspace = true
 lightway-app-utils.workspace = true
@@ -38,6 +40,7 @@ pnet_packet.workspace = true
 ppp = "2.2.0"
 pwhash = "1.0.0"
 rand.workspace = true
+route_manager = { version = "0.2.6", features = ["async"] }
 serde.workspace = true
 serde_json = "1.0.128"
 socket2.workspace = true
