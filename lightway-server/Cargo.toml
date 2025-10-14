@@ -27,7 +27,7 @@ ctrlc.workspace = true
 delegate.workspace = true
 educe.workspace = true
 ipnet.workspace = true
-jsonwebtoken = "9.3.0"
+jsonwebtoken = { version = "10.0.0", features = ["rust_crypto"] }
 libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core = { workspace = true, features = ["postquantum"] }
