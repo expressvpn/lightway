@@ -65,7 +65,7 @@
                   with pkgs.stdenv.hostPlatform;
                   lib.optionalString (isAarch && isLinux) "-march=${gcc.arch}+crypto";
                 cargoLock.outputHashes = {
-                  "wolfssl-3.0.0" = "sha256-D1yDcaCq1g8br/LVNjwmkZGoWdQTFBREmT87YwLw2F8=";
+                  "wolfssl-3.0.0" = "sha256-rJgfruxKvV+KPKcb8J7F+47jv72wnpd+JNNTErf2mSk=";
                 };
               };
 
