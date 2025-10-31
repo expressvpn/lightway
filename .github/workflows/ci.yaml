@@ -231,11 +231,16 @@ jobs:
         target: [x86_64-pc-windows-msvc]
     steps:
       - uses: actions/checkout@v4
-
+      - name: Get Rust version
+        id: rust-version
+        shell: bash
+        run: |
+          RUST_VERSION=$(grep "FROM rust" Earthfile | awk -F'[:\\-]' '{print $2}')
+          echo "version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust-version.outputs.version }}
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
