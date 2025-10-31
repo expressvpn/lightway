@@ -2,18 +2,13 @@ use crate::ConnectionType;
 
 /// Cipher suite to use for Lightway connection
 /// Client can choose one based on hardware support
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub enum Cipher {
     /// AES256 cipher (default)
+    #[default]
     Aes256,
     /// Chacha20 cipher
     Chacha20,
-}
-
-impl Default for Cipher {
-    fn default() -> Self {
-        Self::Aes256
-    }
 }
 
 impl Cipher {
