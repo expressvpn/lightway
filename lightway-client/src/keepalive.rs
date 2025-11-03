@@ -236,6 +236,8 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                             tracing::info!("sending keepalives because of {:?}", msg);
                             state = State::Needed;
                         }
+                        // Reset failure counter on new interface
+                        failed_keepalives = 0;
                     },
                     Message::TracerDeltaExceeded => {
                         // Do not trigger keepalive if it is suspended or waiting for reply
@@ -556,6 +558,43 @@ mod tests {
 
         let result = task.await.unwrap().unwrap();
         assert!(matches!(result, KeepaliveResult::Timedout));
+    }
+
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
+    async fn network_change_resets_failed_keepalive(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // Trigger timeouts up to the failure threshold
+        // Trigger FAILED_KEEPALIVE_THRESHOLD - 1 timeouts to cause immediate resends
+        for _ in 0..(FAILED_KEEPALIVE_THRESHOLD - 1) {
+            sleep_manager.trigger_timeout();
+            // give the task a moment to process and resend
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        // At this point, we should have sent FAILED_KEEPALIVE_THRESHOLD total keepalives
+        assert_eq!(connection.keepalive_count(), FAILED_KEEPALIVE_THRESHOLD);
+
+        // Network change here should reset failed keepalive counter
+        keepalive.network_changed().await;
+        sleep(Duration::from_millis(10)).await;
+
+        // New timeout and it should just send a new keepalive since the counter got reset
+        sleep_manager.trigger_timeout();
+        sleep(Duration::from_millis(10)).await;
+        assert_eq!(connection.keepalive_count(), FAILED_KEEPALIVE_THRESHOLD + 1);
+
+        drop(keepalive);
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
     #[test_case(true, 2; "continuous")]
