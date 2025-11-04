@@ -222,13 +222,19 @@ jobs:
 
   windows-build:
     name: Windows Build
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     env:
       FORCE_COLOR: 1
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-msvc]
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
       - name: Get Rust version
@@ -264,5 +270,5 @@ jobs:
         run: >-
           cargo build --release --bin lightway-client --target ${{ matrix.target }}
 
-      - name: Run tests
+      - name: Run tests (${{ matrix.arch }})
         run: cargo test --target ${{ matrix.target }} -p lightway-client
