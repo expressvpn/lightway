@@ -3466,7 +3466,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#4577922d79a2cc8fe37a9a759ca7354aecd0994a"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=thomasyau%2Fcovpn-30-bump-wolfssl-to-582#7eac309157ffaade59f4746aec59eb6aca08ed50"
 dependencies = [
  "bytes",
  "log",
@@ -3477,7 +3477,7 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#4577922d79a2cc8fe37a9a759ca7354aecd0994a"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=thomasyau%2Fcovpn-30-bump-wolfssl-to-582#7eac309157ffaade59f4746aec59eb6aca08ed50"
 dependencies = [
  "autotools",
  "bindgen",
