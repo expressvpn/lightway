@@ -180,6 +180,7 @@ async fn handle_stale(conn: Weak<Connection>) {
     if let Some(conn) = conn.upgrade()
         && !matches!(conn.state(), State::Online)
     {
+        tracing::info!(session = ?conn.session_id(), "Closing stale connection");
         metrics::connection_stale_closed();
         let _ = conn.disconnect();
     };
