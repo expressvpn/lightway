@@ -19,7 +19,6 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-average = "0.16.0"
 bytes.workspace = true
 bytesize.workspace = true
 clap.workspace = true
@@ -54,3 +53,4 @@ twelf.workspace = true
 [dev-dependencies]
 more-asserts.workspace = true
 test-case.workspace = true
+average = "0.16.0"
