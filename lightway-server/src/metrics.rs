@@ -95,6 +95,8 @@ static METRIC_SESSIONS_STANDBY_15M: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("sessions_standby_15m"));
 static METRIC_SESSIONS_STANDBY_60M: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("sessions_standby_60m"));
+static METRIC_SESSIONS_ENCODING_ENABLED: LazyLock<Gauge> =
+    LazyLock::new(|| gauge!("sessions_encoding_enabled"));
 
 static METRIC_ASSIGNED_INTERNAL_IPS: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("assigned_internal_ips"));
@@ -359,6 +361,16 @@ pub(crate) fn sessions_statistics(
     METRIC_SESSIONS_STANDBY_5M.set(standby.five_minutes as f64);
     METRIC_SESSIONS_STANDBY_15M.set(standby.fifteen_minutes as f64);
     METRIC_SESSIONS_STANDBY_60M.set(standby.sixty_minutes as f64);
+}
+
+/// Connection's [`lightway_app_utils::PacketCodec`] enabled
+pub(crate) fn connection_encoding_enabled() {
+    METRIC_SESSIONS_ENCODING_ENABLED.increment(1.0);
+}
+
+/// Connection's [`lightway_app_utils::PacketCodec`] disabled
+pub(crate) fn connection_encoding_disabled() {
+    METRIC_SESSIONS_ENCODING_ENABLED.decrement(1.0);
 }
 
 /// Number of IP addresses in use

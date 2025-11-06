@@ -71,6 +71,7 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | sessions_pending_id_rotations | server | Gauge | The number of connections for which a session ID rotation is in progress |
 | sessions_active_5m<br>sessions_active_15m<br>sessions_active_60m | server | Gauge | The number of connections which were “active” in most recent N minutes.<br>An “active” connection is one where traffic has been seen from the client to the Internet |
 | sessions_standby_5m<br>sessions_standby_15m<br>sessions_standby_60m | server | Gauge | The number of connections which were “on standby” in most recent N minutes.<br>An “on standby” connection is one where traffic has been seen from the Internet to the client |
+| sessions_encoding_enabled | server | Gauge | The number of connections which currently have encoding enabled |
 | assigned_internal_ips | server | Gauge | The current number of IPs which are allocated to connections |
 
 

@@ -147,6 +147,15 @@ fn handle_tls_keys_update_complete() {
 }
 
 #[instrument(level = "trace", skip_all)]
+fn handle_encoding_state_changed(enabled: bool) {
+    if enabled {
+        metrics::connection_encoding_enabled();
+    } else {
+        metrics::connection_encoding_disabled();
+    }
+}
+
+#[instrument(level = "trace", skip_all)]
 async fn handle_events(mut stream: EventStream, conn: Weak<Connection>) {
     while let Some(event) = stream.next().await {
         match event {
@@ -160,7 +169,7 @@ async fn handle_events(mut stream: EventStream, conn: Weak<Connection>) {
             Event::FirstPacketReceived => {
                 unreachable!("client only event received");
             }
-            Event::EncodingStateChanged { .. } => {}
+            Event::EncodingStateChanged { enabled } => handle_encoding_state_changed(enabled),
         }
     }
 }
