@@ -138,7 +138,10 @@ impl OutsideIOSendCallback for Udp {
                 // to clear up send buffer.
                 IOCallbackResult::Ok(buf.len())
             }
-            Err(err) => IOCallbackResult::Err(err),
+            Err(err) => {
+                tracing::warn!("Outside IO Send failed: {err:?}");
+                IOCallbackResult::Err(err)
+            }
         }
     }
 
