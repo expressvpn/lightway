@@ -141,6 +141,7 @@ impl Connection {
         }
 
         if fatal {
+            tracing::info!(session = ?self.session_id(), "Outside IO error, disconnecting");
             let _ = self.disconnect();
             std::ops::ControlFlow::Break(())
         } else {
