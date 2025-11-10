@@ -365,8 +365,6 @@ mod tests {
 
     #[test]
     fn test_shuffle() {
-        use average::Mean;
-
         let mut pool = get_ip_pool();
         pool.shuffle_ips();
 
@@ -383,15 +381,19 @@ mod tests {
         // chances of this coming out as less than 512 in practice are
         // miniscule.
         let mut previous = pool.allocate_ip().unwrap().to_bits();
-        let m: Mean = std::iter::from_fn(|| {
+        let (count, total_differences) = std::iter::from_fn(|| {
             let ip = pool.allocate_ip()?.to_bits();
 
             let delta = ip.abs_diff(previous);
             previous = ip;
             Some(delta as f64)
         })
-        .collect();
-        assert_gt!(m.mean(), 512.0);
+        .fold((0, 0.0f64), |(mut count, mut total_differences), v| {
+            count += 1;
+            total_differences += v;
+            (count, total_differences)
+        });
+        assert_gt!(total_differences / count as f64, 512.0);
     }
 }
 

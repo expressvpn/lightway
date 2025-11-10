@@ -166,17 +166,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "average"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75aacce61912644dbb732271789748142bc4bf7ce6382d67bb26850516b7a391"
-dependencies = [
- "easy-cast",
- "float-ord",
- "num-traits",
-]
-
-[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
