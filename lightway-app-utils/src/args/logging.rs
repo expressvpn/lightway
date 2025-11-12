@@ -1,6 +1,10 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{filter::LevelFilter, fmt::SubscriberBuilder};
+use tracing_subscriber::{
+    EnvFilter,
+    filter::LevelFilter,
+    fmt::{SubscriberBuilder, format},
+};
 
 #[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -20,6 +24,24 @@ pub enum LogFormat {
 impl LogFormat {
     /// Finalise a [`SubscriberBuilder`] according to the `LogFormat`
     pub fn init(self, builder: SubscriberBuilder) {
+        match self {
+            LogFormat::Full => builder.init(),
+            LogFormat::Compact => builder.compact().init(),
+            LogFormat::Pretty => builder.pretty().init(),
+            LogFormat::Json => builder.json().init(),
+        }
+    }
+
+    /// Finalise a [`SubscriberBuilder`] with [`EnvFilter`] according to the `LogFormat`
+    pub fn init_with_env_filter(
+        self,
+        builder: SubscriberBuilder<
+            format::DefaultFields,
+            format::Format,
+            EnvFilter,
+            fn() -> std::io::Stdout,
+        >,
+    ) {
         match self {
             LogFormat::Full => builder.init(),
             LogFormat::Compact => builder.compact().init(),

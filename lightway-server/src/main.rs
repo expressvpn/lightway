@@ -107,9 +107,19 @@ async fn main() -> Result<()> {
         set_logging_callback(Some(wolfssl_tracing_callback));
     }
 
-    let fmt = tracing_subscriber::fmt().with_max_level(config.log_level);
+    let filter = tracing_subscriber::EnvFilter::builder()
+        // https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.Builder.html#method.with_regex
+        // recommends to disable REGEX when using envfilter from untrusted sources
+        .with_regex(false)
+        .from_env()
+        .unwrap_or_else(|_| {
+            // If RUST_LOG is not set, use config.log_level as default
+            let level: tracing::level_filters::LevelFilter = config.log_level.into();
+            tracing_subscriber::EnvFilter::new(level.to_string())
+        });
+    let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
-    config.log_format.init(fmt);
+    config.log_format.init_with_env_filter(fmt);
 
     tokio::spawn(metrics_debug());
 
