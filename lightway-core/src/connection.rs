@@ -267,6 +267,7 @@ impl ConnectionError {
                     WireError(wire::FromWireError::UnknownFrameType) => false,
                     WireError(wire::FromWireError::InsufficientData) => false,
                     WireError(wire::FromWireError::InvalidExpressData) => false,
+                    WireError(wire::FromWireError::ReplayedExpressData) => false,
                     WireError(_) => true,
 
                     InvalidState => false, // Can be due to out of order or repeated messages

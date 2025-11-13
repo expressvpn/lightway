@@ -108,6 +108,9 @@ pub enum FromWireError {
     /// Invalid express data
     #[error("Invalid express data")]
     InvalidExpressData,
+    /// Replayed express data (duplicate wire counter)
+    #[error("Replayed express data packet")]
+    ReplayedExpressData,
 }
 
 /// The result of an attempted wire decode.

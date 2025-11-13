@@ -98,6 +98,73 @@ pub enum ExpresslaneError {
 
 type ExpresslaneResult<T> = Result<T, ExpresslaneError>;
 
+/// Sliding window for replay protection
+///
+/// Tracks received packet counters to detect and prevent replay attacks
+/// while handling out-of-order packet delivery typical in UDP.
+#[derive(Debug, Clone, Default)]
+struct ReplayWindow {
+    /// Highest wire counter seen so far
+    max_counter: u64,
+    /// Bitmap tracking received packets within the window
+    /// Bit N represents counter (max_counter - N)
+    bitmap: u64,
+}
+
+impl ReplayWindow {
+    /// Window size in packets (must be <= 64 for bitmap)
+    const WINDOW_SIZE: u64 = 64;
+
+    /// Check if a wire counter should be accepted and update window state
+    ///
+    /// Returns true if the packet is valid and should be processed.
+    /// Returns false if it's a replay or too old.
+    fn check_and_update(&mut self, wire_counter: u64) -> bool {
+        // First packet ever received
+        if self.max_counter == 0 && self.bitmap == 0 {
+            self.max_counter = wire_counter;
+            self.bitmap = 1; // Mark bit 0 as received
+            return true;
+        }
+
+        // Packet is newer than current max - advance window
+        if wire_counter > self.max_counter {
+            let diff = wire_counter - self.max_counter;
+
+            if diff < Self::WINDOW_SIZE {
+                // Shift bitmap left by diff positions
+                self.bitmap <<= diff;
+            } else {
+                // Packet is way ahead, reset the window
+                self.bitmap = 0;
+            }
+
+            // Mark current position as received
+            self.bitmap |= 1;
+            self.max_counter = wire_counter;
+            return true;
+        }
+
+        // Packet is within current window
+        if wire_counter > self.max_counter.saturating_sub(Self::WINDOW_SIZE) {
+            let bit_position = self.max_counter - wire_counter;
+            let bit_mask = 1u64 << bit_position;
+
+            // Check if we've already seen this counter
+            if (self.bitmap & bit_mask) != 0 {
+                return false; // Replay detected
+            }
+
+            // Mark as received
+            self.bitmap |= bit_mask;
+            return true;
+        }
+
+        // Packet is too old (outside window)
+        false
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ExpresslaneData {
     pub(crate) version: ExpresslaneVersion,
@@ -106,8 +173,10 @@ pub(crate) struct ExpresslaneData {
     pub(crate) config_counter: u64,
     /// Number of retransmissions done with the latest pending encoding request packet
     pub(crate) retransmit_count: u8,
-    // Counter which is used in Expresslane wire packets
+    // Counter which is used in Expresslane wire packets (for sending)
     wire_counter: u64,
+    // Replay protection window for received packets
+    replay_window: ReplayWindow,
     // current key
     current_self: Option<ExpresslaneDataCipher>,
     current_peer: Option<ExpresslaneDataCipher>,
@@ -198,6 +267,12 @@ impl ExpresslaneData {
         };
 
         let wire_counter = buf.get_u64();
+
+        // Check for replay attacks using sliding window
+        if !self.replay_window.check_and_update(wire_counter) {
+            return Err(FromWireError::ReplayedExpressData);
+        }
+
         let mut auth_vec: [u8; 16] = [0; 16];
         auth_vec[..8].copy_from_slice(&session_id.0[..]);
         auth_vec[8..].copy_from_slice(&wire_counter.to_be_bytes()[..]);
@@ -506,5 +581,200 @@ mod tests {
             buf3[0], buf3[1], buf3[2], buf3[3], buf3[4], buf3[5], buf3[6], buf3[7],
         ]);
         assert_eq!(wire_counter3, 1);
+    }
+
+    #[test]
+    fn replay_window_accepts_first_packet() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        assert_eq!(window.max_counter, 100);
+    }
+
+    #[test]
+    fn replay_window_detects_exact_replay() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        // Replaying the same counter should be rejected
+        assert!(!window.check_and_update(100));
+    }
+
+    #[test]
+    fn replay_window_accepts_newer_packets() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        assert!(window.check_and_update(101));
+        assert!(window.check_and_update(102));
+        assert_eq!(window.max_counter, 102);
+    }
+
+    #[test]
+    fn replay_window_accepts_out_of_order_within_window() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        assert!(window.check_and_update(105));
+        assert!(window.check_and_update(103)); // Out of order, but within window
+        assert!(window.check_and_update(102)); // Out of order, but within window
+        assert_eq!(window.max_counter, 105);
+    }
+
+    #[test]
+    fn replay_window_rejects_replayed_out_of_order_packet() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        assert!(window.check_and_update(105));
+        assert!(window.check_and_update(103));
+        // Replaying 103 should be rejected
+        assert!(!window.check_and_update(103));
+    }
+
+    #[test]
+    fn replay_window_rejects_too_old_packets() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        assert!(window.check_and_update(200)); // Advance window by 100
+        // Packet 100 is now outside the window (200 - 64 = 136)
+        assert!(!window.check_and_update(100));
+        assert!(!window.check_and_update(135));
+        // But packets within window should work
+        assert!(window.check_and_update(137));
+    }
+
+    #[test]
+    fn replay_window_handles_large_jumps() {
+        let mut window = ReplayWindow::default();
+        assert!(window.check_and_update(100));
+        // Jump way ahead (> window size)
+        assert!(window.check_and_update(200));
+        assert_eq!(window.max_counter, 200);
+        // Old packets should be rejected
+        assert!(!window.check_and_update(100));
+    }
+
+    #[test]
+    fn replay_window_full_scenario() {
+        let mut window = ReplayWindow::default();
+
+        // Receive packets 1-10 in order
+        for i in 1..=10 {
+            assert!(window.check_and_update(i), "Failed to accept packet {}", i);
+        }
+
+        // Receive some out-of-order packets
+        assert!(window.check_and_update(15));
+        assert!(window.check_and_update(13));
+        assert!(window.check_and_update(11));
+        assert!(window.check_and_update(12));
+        assert!(window.check_and_update(14));
+
+        // Try to replay some packets
+        assert!(!window.check_and_update(10));
+        assert!(!window.check_and_update(13));
+        assert!(!window.check_and_update(15));
+
+        // Continue with new packets
+        assert!(window.check_and_update(16));
+        assert!(window.check_and_update(17));
+    }
+
+    #[test]
+    fn replay_protection_end_to_end() {
+        let mut sender = ExpresslaneData::default();
+        let mut receiver = ExpresslaneData::default();
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8; 8]);
+        let plain_text = b"Hello, ExpressLane!";
+        let iv = [
+            9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8,
+        ];
+
+        // Send and receive packet 1
+        let mut buf1 = BytesMut::new();
+        sender.append_to_wire(&mut buf1, session_id, plain_text, iv);
+        let buf1_clone = buf1.clone();
+
+        let mut borrowed_buf1 = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf1);
+        let decrypted1 = receiver
+            .try_from_wire(&mut borrowed_buf1, session_id)
+            .unwrap();
+        assert_eq!(decrypted1.as_ref(), plain_text);
+
+        // Try to replay packet 1 - should be rejected
+        let mut buf1_replay = buf1_clone.clone();
+        let mut borrowed_buf_replay =
+            crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf1_replay);
+        let result = receiver.try_from_wire(&mut borrowed_buf_replay, session_id);
+        assert!(matches!(
+            result.err().unwrap(),
+            FromWireError::ReplayedExpressData
+        ));
+
+        // Send and receive packet 2
+        let mut buf2 = BytesMut::new();
+        sender.append_to_wire(&mut buf2, session_id, plain_text, iv);
+        let mut borrowed_buf2 = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf2);
+        let decrypted2 = receiver
+            .try_from_wire(&mut borrowed_buf2, session_id)
+            .unwrap();
+        assert_eq!(decrypted2.as_ref(), plain_text);
+
+        // Try to replay packet 1 again - should still be rejected
+        let mut buf1_replay2 = buf1_clone.clone();
+        let mut borrowed_buf_replay2 =
+            crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf1_replay2);
+        let result2 = receiver.try_from_wire(&mut borrowed_buf_replay2, session_id);
+        assert!(matches!(
+            result2.err().unwrap(),
+            FromWireError::ReplayedExpressData
+        ));
+    }
+
+    #[test]
+    fn replay_protection_out_of_order_packets() {
+        let mut sender = ExpresslaneData::default();
+        let mut receiver = ExpresslaneData::default();
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8; 8]);
+        let plain_text = b"Test data";
+        let iv = [0u8; 12];
+
+        // Generate 5 packets
+        let mut packets = Vec::new();
+        for _ in 0..5 {
+            let mut buf = BytesMut::new();
+            sender.append_to_wire(&mut buf, session_id, plain_text, iv);
+            packets.push(buf);
+        }
+
+        // Receive packets out of order: 1, 3, 5, 2, 4
+        let order = [0, 2, 4, 1, 3];
+        for &idx in &order {
+            let mut buf = packets[idx].clone();
+            let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+            let result = receiver.try_from_wire(&mut borrowed_buf, session_id);
+            assert!(
+                result.is_ok(),
+                "Failed to receive packet {} in out-of-order delivery",
+                idx + 1
+            );
+        }
+
+        // Try to replay packet 3 - should be rejected
+        let mut buf = packets[2].clone();
+        let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let result = receiver.try_from_wire(&mut borrowed_buf, session_id);
+        assert!(matches!(
+            result.err().unwrap(),
+            FromWireError::ReplayedExpressData
+        ));
     }
 }
