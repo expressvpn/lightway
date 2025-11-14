@@ -1729,6 +1729,14 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
+    /// Get the current encoding state from the encoder
+    pub fn is_encoding_enabled(&self) -> bool {
+        self.inside_pkt_encoder
+            .as_ref()
+            .map(|encoder| encoder.get_encoding_state())
+            .unwrap_or(false)
+    }
+
     /// Create and send an encoding request to the server. (Client only)
     pub fn set_encoding(&mut self, enable: bool) -> ConnectionResult<()> {
         if self.inside_pkt_encoder.is_none() {

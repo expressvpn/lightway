@@ -207,6 +207,10 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         trace!("Dropping Connection!");
+        let conn = self.lw_conn.lock().unwrap();
+        if conn.is_encoding_enabled() {
+            metrics::connection_encoding_disabled();
+        }
         metrics::connection_closed();
     }
 }
