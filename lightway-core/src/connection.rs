@@ -1353,7 +1353,11 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn handle_pong(&mut self, pong: wire::Pong) -> ConnectionResult<()> {
-        info!(id = pong.id, "Received pong");
+        if !matches!(self.state, State::Online) {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        debug!(id = pong.id, "Received pong");
         if pong.id == 0 {
             self.event(Event::KeepaliveReply);
         }
