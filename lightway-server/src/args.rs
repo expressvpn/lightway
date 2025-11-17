@@ -111,6 +111,14 @@ pub struct Config {
     #[clap(long, default_value_t = ByteSize::mib(15))]
     pub udp_buffer_size: ByteSize,
 
+    /// Enable UDP Generic Segmentation Offload (GSO) for improved throughput (Linux only)
+    #[clap(long, default_value_t = false)]
+    pub enable_udp_gso: bool,
+
+    /// Maximum queue size for UDP GSO packet batching. Only used when enable_udp_gso is true.
+    #[clap(long, default_value_t = 64)]
+    pub udp_gso_queue_limit: usize,
+
     /// Enable WolfSSL debug logging
     #[cfg(feature = "debug")]
     #[clap(long)]

@@ -49,6 +49,8 @@ impl<const N: usize> Buffer<N> {
 
 pub enum Message<'a> {
     IpPktinfo(&'a libc::in_pktinfo),
+    #[cfg(target_os = "linux")]
+    UdpSegment(&'a u16),
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
 }
 
@@ -86,18 +88,28 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
             self.cursor = unsafe { libc::CMSG_NXTHDR(&self.msghdr, self.cursor) };
 
             #[cfg(target_vendor = "apple")]
-            let (cmsg_level, cmsg_type) = (libc::IPPROTO_IP, libc::IP_PKTINFO);
+            let (pktinfo_level, pktinfo_type) = (libc::IPPROTO_IP, libc::IP_PKTINFO);
             #[cfg(not(target_vendor = "apple"))]
-            let (cmsg_level, cmsg_type) = (libc::SOL_IP, libc::IP_PKTINFO);
+            let (pktinfo_level, pktinfo_type) = (libc::SOL_IP, libc::IP_PKTINFO);
 
-            if item.cmsg_level == cmsg_level && item.cmsg_type == cmsg_type {
+            if item.cmsg_level == pktinfo_level && item.cmsg_type == pktinfo_type {
                 // SAFETY: `item` is a valid `cmsghdr` from a
                 // prior call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
                 let data = unsafe { libc::CMSG_DATA(item) as *const libc::in_pktinfo };
                 // SAFETY: we constructed `data` above
                 let pi = unsafe { &*data };
                 Some(Message::IpPktinfo(pi))
-            } else {
+            }
+            #[cfg(target_os = "linux")]
+            else if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_SEGMENT {
+                // SAFETY: `item` is a valid `cmsghdr` from a
+                // prior call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
+                let data = unsafe { libc::CMSG_DATA(item) as *const u16 };
+                // SAFETY: we constructed `data` above
+                let segment_size = unsafe { &*data };
+                Some(Message::UdpSegment(segment_size))
+            }
+            else {
                 Some(Message::Unknown(item))
             }
         }

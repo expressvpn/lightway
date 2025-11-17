@@ -1,8 +1,12 @@
 mod cmsg;
 
 use std::{
+    collections::VecDeque,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 use anyhow::Result;
@@ -41,6 +45,47 @@ impl std::fmt::Display for BindMode {
             }
             BindMode::SpecificAddress { local_addr } => local_addr.fmt(f),
         }
+    }
+}
+
+/// GSO (Generic Segmentation Offload) send state for a connection
+#[cfg(target_os = "linux")]
+struct GsoSendState {
+    /// Packets waiting to be sent
+    queue: Mutex<VecDeque<BytesMut>>,
+    /// Whether a send operation is currently in progress
+    send_in_progress: AtomicBool,
+    /// Maximum queue size
+    queue_limit: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl GsoSendState {
+    fn new(queue_limit: usize) -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::with_capacity(queue_limit)),
+            send_in_progress: AtomicBool::new(false),
+            queue_limit,
+        }
+    }
+
+    fn queue_packet(&self, buf: &[u8]) -> Result<(), ()> {
+        let mut queue = self.queue.lock().unwrap();
+        if queue.len() >= self.queue_limit {
+            // Queue full, drop packet
+            return Err(());
+        }
+        queue.push_back(BytesMut::from(buf));
+        Ok(())
+    }
+
+    fn drain_queue(&self) -> Vec<BytesMut> {
+        let mut queue = self.queue.lock().unwrap();
+        queue.drain(..).collect()
+    }
+
+    fn queue_len(&self) -> usize {
+        self.queue.lock().unwrap().len()
     }
 }
 
@@ -89,10 +134,18 @@ struct UdpSocket {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: RwLock<(SocketAddr, SockAddr)>,
     reply_pktinfo: Option<libc::in_pktinfo>,
+    #[cfg(target_os = "linux")]
+    gso_state: Option<Arc<GsoSendState>>,
 }
 
 impl OutsideIOSendCallback for UdpSocket {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+        #[cfg(target_os = "linux")]
+        if let Some(gso_state) = &self.gso_state {
+            return self.send_with_gso(buf, gso_state);
+        }
+
+        // Non-GSO path (Linux without GSO enabled, or non-Linux)
         let peer_addr = self.peer_addr.read().unwrap();
         send_to_socket(&self.sock, buf, &peer_addr.1, self.reply_pktinfo)
     }
@@ -109,10 +162,157 @@ impl OutsideIOSendCallback for UdpSocket {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl UdpSocket {
+    fn send_with_gso(&self, buf: &[u8], gso_state: &GsoSendState) -> IOCallbackResult<usize> {
+        // Check if a send is currently in progress
+        if gso_state
+            .send_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            // Send in progress, queue the packet
+            if gso_state.queue_packet(buf).is_err() {
+                // Queue full, drop packet
+                warn!("GSO queue full, dropping packet");
+                // Return Ok to avoid connection errors, packet is just dropped
+                return IOCallbackResult::Ok(buf.len());
+            }
+            return IOCallbackResult::Ok(buf.len());
+        }
+
+        // No send in progress, check if there are queued packets
+        let queue_len = gso_state.queue_len();
+        if queue_len == 0 {
+            // No queued packets, send immediately as single packet
+            let peer_addr = self.peer_addr.read().unwrap();
+            let result = send_to_socket(&self.sock, buf, &peer_addr.1, self.reply_pktinfo);
+            gso_state.send_in_progress.store(false, Ordering::Release);
+            result
+        } else {
+            // Queue this packet too, then send batch
+            let _ = gso_state.queue_packet(buf);
+            let packets = gso_state.drain_queue();
+            let peer_addr = self.peer_addr.read().unwrap();
+            let result =
+                self.send_gso_batch(&self.sock, &packets, &peer_addr.1, self.reply_pktinfo);
+            gso_state.send_in_progress.store(false, Ordering::Release);
+            result
+        }
+    }
+
+    fn send_gso_batch(
+        &self,
+        sock: &Arc<tokio::net::UdpSocket>,
+        packets: &[BytesMut],
+        peer_addr: &SockAddr,
+        pktinfo: Option<libc::in_pktinfo>,
+    ) -> IOCallbackResult<usize> {
+        if packets.is_empty() {
+            return IOCallbackResult::Ok(0);
+        }
+
+        if packets.len() == 1 {
+            // Only one packet, send without GSO
+            return send_to_socket(sock, &packets[0], peer_addr, pktinfo);
+        }
+
+        // Group packets by size - only batch same-sized packets
+        let mut size_groups: std::collections::HashMap<usize, Vec<&BytesMut>> =
+            std::collections::HashMap::new();
+        for pkt in packets {
+            size_groups.entry(pkt.len()).or_default().push(pkt);
+        }
+
+        let mut total_sent = 0;
+
+        // Send each size group separately
+        for (size, group) in size_groups {
+            if group.len() == 1 {
+                // Single packet of this size, send without GSO
+                match send_to_socket(sock, group[0], peer_addr, pktinfo) {
+                    IOCallbackResult::Ok(n) => total_sent += n,
+                    IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+                    IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+                }
+            } else {
+                // Multiple packets of same size, send with GSO
+                match self.send_gso_group(sock, &group, size, peer_addr, pktinfo) {
+                    IOCallbackResult::Ok(n) => total_sent += n,
+                    IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+                    IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+                }
+            }
+        }
+
+        IOCallbackResult::Ok(total_sent)
+    }
+
+    fn send_gso_group(
+        &self,
+        sock: &Arc<tokio::net::UdpSocket>,
+        packets: &[&BytesMut],
+        segment_size: usize,
+        peer_addr: &SockAddr,
+        pktinfo: Option<libc::in_pktinfo>,
+    ) -> IOCallbackResult<usize> {
+        // Concatenate all packets into a single buffer
+        let total_len: usize = packets.iter().map(|p| p.len()).sum();
+        let mut combined = BytesMut::with_capacity(total_len);
+        for pkt in packets {
+            combined.extend_from_slice(pkt);
+        }
+
+        let res = sock.try_io(Interest::WRITABLE, || {
+            let sock = SockRef::from(sock.as_ref());
+            let bufs = [std::io::IoSlice::new(&combined)];
+
+            let msghdr = MsgHdr::new().with_addr(peer_addr).with_buffers(&bufs);
+
+            // Calculate control message size: IP_PKTINFO + UDP_SEGMENT
+            const PKTINFO_SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
+            const SEGMENT_SIZE: usize = cmsg::Message::space::<u16>();
+            const CMSG_SIZE: usize = PKTINFO_SIZE + SEGMENT_SIZE;
+            let mut cmsg = cmsg::BufferMut::<CMSG_SIZE>::zeroed();
+            let mut builder = cmsg.builder();
+
+            // Add IP_PKTINFO if needed
+            if let Some(pktinfo) = pktinfo {
+                #[cfg(target_vendor = "apple")]
+                let (cmsg_level, cmsg_type) = (libc::IPPROTO_IP, libc::IP_PKTINFO);
+                #[cfg(not(target_vendor = "apple"))]
+                let (cmsg_level, cmsg_type) = (libc::SOL_IP, libc::IP_PKTINFO);
+
+                builder.fill_next(cmsg_level, cmsg_type, pktinfo)?;
+            }
+
+            // Add UDP_SEGMENT
+            let segment_size_u16 = segment_size as u16;
+            builder.fill_next(libc::SOL_UDP, libc::UDP_SEGMENT, segment_size_u16)?;
+
+            let msghdr = msghdr.with_control(cmsg.as_ref());
+
+            sock.sendmsg(&msghdr, 0)
+        });
+
+        match res {
+            Ok(nr) => IOCallbackResult::Ok(nr),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+}
+
 pub(crate) struct UdpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
+    #[cfg(target_os = "linux")]
+    gso_enabled: bool,
+    #[cfg(target_os = "linux")]
+    gso_queue_limit: usize,
 }
 
 impl UdpServer {
@@ -121,6 +321,8 @@ impl UdpServer {
         bind_address: SocketAddr,
         udp_buffer_size: ByteSize,
         sock: Option<tokio::net::UdpSocket>,
+        #[cfg(target_os = "linux")] gso_enabled: bool,
+        #[cfg(target_os = "linux")] gso_queue_limit: usize,
     ) -> Result<UdpServer> {
         let sock = match sock {
             Some(s) => s,
@@ -155,6 +357,10 @@ impl UdpServer {
             conn_manager,
             sock,
             bind_mode,
+            #[cfg(target_os = "linux")]
+            gso_enabled,
+            #[cfg(target_os = "linux")]
+            gso_queue_limit,
         })
     }
 
@@ -197,10 +403,19 @@ impl UdpServer {
                     hdr.session,
                     local_addr,
                     || {
+                        #[cfg(target_os = "linux")]
+                        let gso_state = if self.gso_enabled {
+                            Some(Arc::new(GsoSendState::new(self.gso_queue_limit)))
+                        } else {
+                            None
+                        };
+
                         Arc::new(UdpSocket {
                             sock: self.sock.clone(),
                             peer_addr: RwLock::new((peer_addr, peer_addr.into())),
                             reply_pktinfo,
+                            #[cfg(target_os = "linux")]
+                            gso_state,
                         })
                     },
                 );

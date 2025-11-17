@@ -325,6 +325,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 config.bind_address,
                 config.udp_buffer_size,
                 may_be_sock,
+                #[cfg(target_os = "linux")]
+                config.enable_udp_gso,
+                #[cfg(target_os = "linux")]
+                config.udp_gso_queue_limit,
             )
             .await?,
         ),
