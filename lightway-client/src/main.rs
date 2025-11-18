@@ -7,7 +7,9 @@ use lightway_core::{Event, EventCallback};
 use twelf::Layer;
 
 use lightway_app_utils::{
-    TunConfig, Validate, args::ConnectionType, validate_configuration_file_path,
+    TunConfig, Validate,
+    args::{ConnectionType, LogFormat},
+    validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
 mod args;
@@ -76,9 +78,19 @@ async fn main() -> Result<()> {
         Layer::Clap(matches),
     ])?;
 
-    tracing_subscriber::fmt()
-        .with_max_level(config.log_level)
-        .init();
+    let filter = tracing_subscriber::EnvFilter::builder()
+        // https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.Builder.html#method.with_regex
+        // recommends to disable REGEX when using envfilter from untrusted sources
+        .with_regex(false)
+        .from_env()
+        .unwrap_or_else(|_| {
+            // If RUST_LOG is not set, use config.log_level as default
+            let level: tracing::level_filters::LevelFilter = config.log_level.into();
+            tracing_subscriber::EnvFilter::new(level.to_string())
+        });
+    let fmt = tracing_subscriber::fmt().with_env_filter(filter);
+
+    LogFormat::Full.init_with_env_filter(fmt);
 
     let auth = config.take_auth()?;
 
