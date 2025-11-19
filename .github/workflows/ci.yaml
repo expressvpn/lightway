@@ -52,7 +52,50 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4
       - name: Run +${{ matrix.target }} on Earthly
-        run: earthly --ci ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
+        run: earthly --ci --output ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
+
+      - name: Upload lightway-client artifact (x86_64)
+        if: matrix.target == 'build'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-x86_64-unknown-linux-gnu
+          path: target/release/lightway-client
+
+      - name: Upload lightway-server artifact (x86_64)
+        if: matrix.target == 'build'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-server-x86_64-unknown-linux-gnu
+          path: target/release/lightway-server
+
+      - name: Upload lightway-client artifact (arm64)
+        if: matrix.target == 'build-cross-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (arm64)
+        if: matrix.target == 'build-cross-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-server-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/lightway-server
+
+      - name: Upload lightway-client artifact (riscv64)
+        if: matrix.target == 'build-cross-riscv64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-riscv64gc-unknown-linux-gnu
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (riscv64)
+        if: matrix.target == 'build-cross-riscv64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-server-riscv64gc-unknown-linux-gnu
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
+
   e2e:
     runs-on: ubuntu-latest
     env:
@@ -173,7 +216,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -191,17 +240,33 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: sudo nix develop --command cargo test test_privileged -- --ignored
 
-      - name: Build lightway client
-        run: nix build .#lightway-client
-
-      - name: Build lightway server
-        run: nix build .#lightway-server
+      - run: mkdir -p build/
 
       - name: Build lightway client on MSRV version
         run: nix build .#lightway-client-msrv
 
       - name: Build lightway server on MSRV version
         run: nix build .#lightway-server-msrv
+
+      - name: Build lightway client
+        run: nix build .#lightway-client
+
+      - name: Build lightway server
+        run: nix build .#lightway-server
+
+      - name: Upload lightway-client artifact
+        if: matrix.os == 'macos-latest' || matrix.os == 'macos-15-intel'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-${{ matrix.target }}
+          path: result/bin/lightway-client
+
+      - name: Upload lightway-server artifact
+        if: matrix.os == 'macos-latest' || matrix.os == 'macos-15-intel'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-server-${{ matrix.target }}
+          path: result/bin/lightway-server
 
   nix-clippy:
     name: Nix Clippy (${{ matrix.os }})
@@ -272,3 +337,9 @@ jobs:
 
       - name: Run tests (${{ matrix.arch }})
         run: cargo test --target ${{ matrix.target }} -p lightway-client
+
+      - name: Upload lightway-client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/lightway-client.exe
