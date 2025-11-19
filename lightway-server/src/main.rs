@@ -51,24 +51,25 @@ async fn metrics_debug() {
                 metrics_util::debugging::DebugValue::Gauge(value) => {
                     trace!("metric: {} {labels:?} = Guage({value:?})", name.as_str())
                 }
-                metrics_util::debugging::DebugValue::Histogram(values) => {
-                    // TODO: https://docs.rs/average/latest/average/macro.concatenate.html for min/max and avg?
-
-                    use average::{Estimate, Max, Mean, Min, concatenate};
-
-                    concatenate!(Stats, [Min, min], [Mean, mean], [Max, max]);
-                    let len = values.len();
-                    let s: Stats = values.into_iter().map(|f| f.into_inner()).collect();
-
+                metrics_util::debugging::DebugValue::Histogram(values) if !values.is_empty() => {
+                    let (sum, maximum, minimum) = values.iter().fold(
+                        (0.0f64, f64::NEG_INFINITY, f64::INFINITY),
+                        |(mut sum, maximum, minimum), v| {
+                            let v = v.into_inner();
+                            sum += v;
+                            (sum, maximum.max(v), minimum.min(v))
+                        },
+                    );
                     trace!(
                         "metric: {} {labels:?} = Histogram({} samples min/avg/max {:.2}/{:.2}/{:.2})",
                         name.as_str(),
-                        len,
-                        s.min(),
-                        s.mean(),
-                        s.max(),
+                        values.len(),
+                        minimum,
+                        sum / values.len() as f64,
+                        maximum,
                     )
                 }
+                _ => (),
             };
         }
     }
