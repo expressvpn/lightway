@@ -38,7 +38,7 @@ tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
-tracing-subscriber = { workspace = true}
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twelf.workspace = true
 
 [dev-dependencies]

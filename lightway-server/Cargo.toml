@@ -48,7 +48,7 @@ tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-log = "0.2.0"
-tracing-subscriber = { workspace = true, features = ["json"] }
+tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
 twelf.workspace = true
 
 [dev-dependencies]
