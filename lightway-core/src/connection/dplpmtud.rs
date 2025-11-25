@@ -455,7 +455,7 @@ impl<AppState> Dplpmtud<AppState> {
     /// Called in response to receipt of a [`wire::Pong`] frame
     pub(crate) fn pong_received(&mut self, pong: &wire::Pong, state: &mut AppState) -> Action {
         // We never use id == 0, those are regular keepalive pings
-        if pong.id == 0 {
+        if pong.id == wire::Ping::KEEPALIVE_ID {
             return Action::None;
         }
 

@@ -1051,12 +1051,10 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         };
 
-        let id = 0;
-
-        debug!(session = ?self.session_id, id, "Sending ping");
+        debug!(session = ?self.session_id, "Sending ping");
 
         let ping = wire::Ping {
-            id,
+            id: wire::Ping::KEEPALIVE_ID,
             payload: Default::default(),
         };
 
@@ -1451,7 +1449,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         debug!(id = pong.id, "Received pong");
-        if pong.id == 0 {
+        if pong.id == wire::Ping::KEEPALIVE_ID {
             self.event(Event::KeepaliveReply);
         }
         if let Some(ref mut pmtud) = self.pmtud {

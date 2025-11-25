@@ -6,6 +6,11 @@ use super::{FromWireError, FromWireResult};
 
 /// A ping request to the other side.
 ///
+/// Currently this message type is used by keepalive and plpmtud modules.
+/// Field `id` in the packet header differentiates between this two types
+/// id =0 For keepalive messages
+/// id != 0 for PLPMTUD messages
+///
 /// Wire Format (variable length):
 ///
 /// ```text
@@ -28,6 +33,9 @@ pub(crate) struct Ping {
 impl Ping {
     /// Wire overhead in bytes, does not include the payload itself.
     pub(crate) const WIRE_OVERHEAD: usize = 4;
+
+    /// Identifier used in keepalive messages
+    pub const KEEPALIVE_ID: u16 = 0;
 
     pub(crate) fn try_from_wire(buf: &mut BorrowedBytesMut) -> FromWireResult<Self> {
         if buf.len() < Self::WIRE_OVERHEAD {
