@@ -6,7 +6,7 @@ mod fragment_map;
 mod io_adapter;
 mod key_update;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
 use rand::Rng;
 use std::borrow::Cow;
@@ -1051,11 +1051,14 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         };
 
-        debug!(session = ?self.session_id, "Sending ping");
+        // Calculate expresslane health deltas if expresslane is ready
+        let payload = self.encode_expresslane_metrics_payload();
+
+        debug!(session = ?self.session_id, payload_len = payload.len(), "Sending ping");
 
         let ping = wire::Ping {
             id: wire::Ping::KEEPALIVE_ID,
-            payload: Default::default(),
+            payload,
         };
 
         let msg = wire::Frame::Ping(ping);
@@ -1434,12 +1437,19 @@ impl<AppState: Send> Connection<AppState> {
             "Received ping"
         );
 
-        let pong = wire::Pong {
-            id: ping.id,
-            payload: Default::default(),
+        // Calculate expresslane health deltas for keepalive pongs if expresslane is ready
+        let payload = if ping.id == wire::Ping::KEEPALIVE_ID {
+            self.encode_expresslane_metrics_payload()
+        } else {
+            Default::default()
         };
 
-        debug!(session = ?self.session_id(), id = pong.id, "Sending pong");
+        debug!(session = ?self.session_id(), id = ping.id, payload_len = payload.len(), "Sending pong");
+
+        let pong = wire::Pong {
+            id: ping.id,
+            payload,
+        };
 
         let msg = wire::Frame::Pong(pong);
 
@@ -1534,6 +1544,34 @@ impl<AppState: Send> Connection<AppState> {
 
     fn expresslane_ready(&self) -> bool {
         self.expresslane_supported() && self.expresslane.is_ready()
+    }
+
+    /// Encode expresslane metrics as a binary payload.
+    ///
+    /// Calculates the delta of packets sent and received since the last snapshot,
+    /// updates the snapshots, and encodes the deltas as a 16-byte binary payload.
+    ///
+    /// Returns an empty payload if expresslane is not ready.
+    fn encode_expresslane_metrics_payload(&mut self) -> Bytes {
+        if !self.expresslane_ready() {
+            return Default::default();
+        }
+
+        let current_sent = self.expresslane.packets_sent();
+        let current_recv = self.expresslane.packets_received();
+
+        let sent_delta = current_sent - self.expresslane.last_snapshot_sent;
+        let recv_delta = current_recv - self.expresslane.last_snapshot_recv;
+
+        // Update snapshots for next exchange
+        self.expresslane.last_snapshot_sent = current_sent;
+        self.expresslane.last_snapshot_recv = current_recv;
+
+        // Encode deltas as binary: [sent_delta: u64][recv_delta: u64]
+        let mut buf = bytes::BytesMut::with_capacity(16);
+        buf.put_u64(sent_delta);
+        buf.put_u64(recv_delta);
+        buf.freeze()
     }
 
     fn handle_expresslane_config(
