@@ -95,7 +95,7 @@ function tunnel_configure() {
   set +x
   sleep 2
   pgrep -fla lightway-server || exit 0
-  echo "Assigning IP address after 5 seconds"
+  echo "Assigning IP address after 2 seconds"
   ip link set dev "${tun_intf}" up
   ip addr replace "${tun_ip}" dev "${tun_intf}"
   ip route replace "${tun_ip_subnet}" dev "${tun_intf}"
