@@ -1419,7 +1419,10 @@ impl<AppState: Send> Connection<AppState> {
             "Received ping"
         );
 
-        let pong = wire::Pong { id: ping.id };
+        let pong = wire::Pong {
+            id: ping.id,
+            payload: Default::default(),
+        };
 
         debug!(session = ?self.session_id(), id = pong.id, "Sending pong");
 
