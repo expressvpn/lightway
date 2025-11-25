@@ -6,7 +6,7 @@ mod fragment_map;
 mod io_adapter;
 mod key_update;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
 use rand::Rng;
 use std::borrow::Cow;
@@ -216,6 +216,10 @@ pub enum ConnectionError {
     #[error("Expresslane version mismatch")]
     ExpresslaneVersionMismatch,
 
+    /// Expresslane is degraded and disabled
+    #[error("Expresslane is degraded")]
+    ExpreslaneDegraded,
+
     /// Expresslane error occurred
     #[error("Expresslane Error: {0}")]
     ExpresslaneError(#[from] ExpresslaneError),
@@ -280,6 +284,7 @@ impl ConnectionError {
                     PacketError(_) => false,
                     DataFragmentError(_) => false,
                     ExpresslaneVersionMismatch => false,
+                    ExpreslaneDegraded => false,
                     ExpresslaneError(_) => false,
                     WolfSSL(_) => false,
                 }
@@ -337,6 +342,7 @@ pub type ConnectionResult<T> = Result<T, ConnectionError>;
 
 enum ExpresslaneState {
     Disabled,
+    Degraded,
     Active,
 }
 
@@ -1461,13 +1467,77 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
-        debug!(id = pong.id, "Received pong");
+        debug!(
+            id = pong.id,
+            payload_len = pong.payload.len(),
+            "Received pong"
+        );
+
         if pong.id == wire::Ping::KEEPALIVE_ID {
             self.event(Event::KeepaliveReply);
+            self.check_expresslane_health(&pong.payload)?;
         }
+
         if let Some(ref mut pmtud) = self.pmtud {
             let action = pmtud.pong_received(&pong, &mut self.app_state);
             self.handle_pmtud_action(action)?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if packet drops exceed threshold
+    /// Returns true if drops detected (sent >= min packets and loss ratio > threshold)
+    fn has_packet_drops(sent: u64, received: u64) -> bool {
+        const MIN_PACKETS_FOR_LOSS_CHECK: u64 = 10;
+        const PACKET_LOSS_RATIO_THRESHOLD: f64 = 0.50; // 50%
+
+        if sent < MIN_PACKETS_FOR_LOSS_CHECK {
+            return false;
+        }
+
+        let packet_loss = sent.saturating_sub(received);
+        let loss_ratio = packet_loss as f64 / sent as f64;
+        loss_ratio > PACKET_LOSS_RATIO_THRESHOLD
+    }
+
+    /// Check expresslane health from keepalive pong payload
+    ///  and disable if packet drops detected
+    fn check_expresslane_health(&mut self, mut payload: &[u8]) -> ConnectionResult<()> {
+        if payload.len() != 16 || !self.expresslane_ready() {
+            return Ok(());
+        }
+
+        let peer_sent_delta = payload.get_u64();
+        let peer_recv_delta = payload.get_u64();
+
+        // Calculate my deltas
+        let current_sent = self.expresslane.packets_sent();
+        let current_recv = self.expresslane.packets_received();
+        let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
+        let my_recv_delta = current_recv - self.expresslane.last_snapshot_recv;
+
+        // Update snapshots
+        self.expresslane.last_snapshot_sent = current_sent;
+        self.expresslane.last_snapshot_recv = current_recv;
+
+        trace!(
+            peer_sent_delta,
+            my_recv_delta, my_sent_delta, peer_recv_delta, "Packet stats",
+        );
+
+        // Inbound packet drops
+        if Self::has_packet_drops(peer_sent_delta, my_recv_delta) {
+            warn!("Expresslane degraded (INBOUND): Falling back to DTLS");
+            self.disable_expresslane();
+            return Ok(());
+        }
+
+        // Outbound packet drops
+        if Self::has_packet_drops(my_sent_delta, peer_recv_delta) {
+            warn!("Expresslane degraded (OUTBOUND): Falling back to DTLS");
+            self.disable_expresslane();
+            return Ok(());
         }
 
         Ok(())
@@ -1548,8 +1618,11 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Encode expresslane metrics as a binary payload.
     ///
-    /// Calculates the delta of packets sent and received since the last snapshot,
-    /// updates the snapshots, and encodes the deltas as a 16-byte binary payload.
+    /// Calculates the delta of packets sent and received since the last snapshot
+    /// and encodes the deltas as a 16-byte binary payload.
+    ///
+    /// Note: Snapshots are NOT updated here. They are updated in check_expresslane_health()
+    /// after receiving the pong and comparing metrics.
     ///
     /// Returns an empty payload if expresslane is not ready.
     fn encode_expresslane_metrics_payload(&mut self) -> Bytes {
@@ -1562,10 +1635,6 @@ impl<AppState: Send> Connection<AppState> {
 
         let sent_delta = current_sent - self.expresslane.last_snapshot_sent;
         let recv_delta = current_recv - self.expresslane.last_snapshot_recv;
-
-        // Update snapshots for next exchange
-        self.expresslane.last_snapshot_sent = current_sent;
-        self.expresslane.last_snapshot_recv = current_recv;
 
         // Encode deltas as binary: [sent_delta: u64][recv_delta: u64]
         let mut buf = bytes::BytesMut::with_capacity(16);
@@ -1597,6 +1666,14 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
+        // Dont allow to update the expresslane status, if expresslane is degraded
+        // This also bypasses sending ACK, since peer should not enable
+        // expresslane
+        if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
+            debug!("Ignoring expresslane config from peer (expresslane degraded)");
+            return Ok(());
+        }
+
         self.expresslane.enabled = config.enabled;
         if self.expresslane.enabled {
             info!("Enabling expresslane for peer");
@@ -1618,6 +1695,11 @@ impl<AppState: Send> Connection<AppState> {
         if !self.expresslane_supported() {
             return Ok(());
         }
+        // Don't allow key rotation if expresslane is degraded
+        if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
+            return Err(ConnectionError::ExpreslaneDegraded);
+        }
+
         let key: ExpresslaneKey = self.rng.lock().unwrap().random();
         // Do not update current encrpytion key. Just update self key and
         // share it with peer. Only after peer acknowledged, update it in
@@ -1645,6 +1727,35 @@ impl<AppState: Send> Connection<AppState> {
             TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
         );
         Ok(())
+    }
+
+    /// Disable expresslane locally and notify peer to also disable
+    fn disable_expresslane(&mut self) {
+        self.expresslane.enabled = false;
+        self.expresslane_state = ExpresslaneState::Degraded;
+
+        let key = ExpresslaneKey::INVALID;
+        let _ = self.expresslane.update_next_self_key(key);
+
+        self.expresslane.config_counter += 1;
+        let config = wire::ExpresslaneConfig {
+            enabled: false,
+            key,
+            version: ExpresslaneVersion::Version1,
+            ack: false,
+            counter: self.expresslane.config_counter,
+        };
+
+        let msg = wire::Frame::ExpresslaneConfig(config);
+        let _ = self.send_frame_or_drop(msg);
+
+        // Callback to schedule re-transmission if required
+        // reuses same retry logic as key rotation
+        (self.schedule_tick_cb)(
+            self.expresslane.retransmit_wait_time(),
+            &mut self.app_state,
+            TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
+        );
     }
 
     fn publish_expresslane_key(&self) {

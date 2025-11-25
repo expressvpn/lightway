@@ -51,6 +51,10 @@ use super::{FromWireError, FromWireResult, SessionId, expresslane_config::Expres
 #[derive(PartialEq, Debug, Clone, Copy, Default)]
 pub struct ExpresslaneKey(pub [u8; EXPRESSLANE_KEY_SIZE]);
 
+impl ExpresslaneKey {
+    pub const INVALID: Self = ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]);
+}
+
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
 
 impl rand::distr::Distribution<ExpresslaneKey> for rand::distr::StandardUniform {
