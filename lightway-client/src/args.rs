@@ -89,12 +89,16 @@ pub struct Config {
     pub enable_pqc: bool,
 
     /// Interval between keepalives
-    #[clap(long, default_value = "0s")]
-    pub keepalive_interval: Duration,
+    #[clap(long, default_value = "10s")]
+    pub keepalive_interval: NonZeroDuration,
 
     /// Keepalive timeout
-    #[clap(long, default_value = "0s")]
-    pub keepalive_timeout: Duration,
+    #[clap(long, default_value = "60s")]
+    pub keepalive_timeout: NonZeroDuration,
+
+    /// Enable continuous Keepalive
+    #[clap(long, default_value_t = true)]
+    pub keepalive_continuous: bool,
 
     /// Time it takes to trigger a tracer packet
     /// when we haven't received an outside packet
