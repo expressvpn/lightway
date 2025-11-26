@@ -3,7 +3,7 @@ use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use clap::Parser;
-use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel};
+use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use serde::Serialize;
 use std::{net::Ipv4Addr, path::PathBuf};
@@ -99,7 +99,7 @@ pub struct Config {
     /// Time it takes to trigger a tracer packet
     /// when we haven't received an outside packet
     #[clap(long, default_value = "10s")]
-    pub tracer_packet_timeout: Duration,
+    pub tracer_packet_timeout: NonZeroDuration,
 
     /// How long to wait before selecting the best connection. If the preferred
     /// connection connects before the timeout, it will be used immediately.
