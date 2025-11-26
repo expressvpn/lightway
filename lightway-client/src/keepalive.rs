@@ -27,8 +27,6 @@ impl<T: Send + Sync> Connection for Weak<Mutex<lightway_core::Connection<Connect
 }
 
 pub trait SleepManager: Send {
-    fn interval_is_zero(&self) -> bool;
-    fn timeout_is_zero(&self) -> bool;
     fn sleep_for_interval(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn sleep_for_timeout(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn continuous(&self) -> bool;
@@ -43,14 +41,6 @@ pub struct Config {
 }
 
 impl SleepManager for Config {
-    fn interval_is_zero(&self) -> bool {
-        self.interval.is_zero()
-    }
-
-    fn timeout_is_zero(&self) -> bool {
-        self.timeout.is_zero()
-    }
-
     async fn sleep_for_interval(&self) {
         tokio::time::sleep(self.interval).await
     }
@@ -92,16 +82,6 @@ impl Keepalive {
         conn: CONNECTION,
     ) -> (Self, OptionFuture<JoinHandle<KeepaliveResult>>) {
         let cancel = CancellationToken::new();
-
-        if config.interval_is_zero() {
-            return (
-                Self {
-                    tx: None,
-                    _cancellation: Arc::new(cancel.drop_guard()),
-                },
-                None.into(),
-            );
-        }
 
         let (tx, rx) = mpsc::channel(1024);
         let task = tokio::spawn(keepalive(config, conn, rx, cancel.clone()));
@@ -263,26 +243,23 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
                 state = State::Pending;
-                if !config.timeout_is_zero() {
-                    let fut = config.sleep_for_timeout();
-                    timeout.as_mut().set(Some(fut).into());
-                }
+                let fut = config.sleep_for_timeout();
+                timeout.as_mut().set(Some(fut).into());
             }
 
             _ = config.sleep_for_interval(), if matches!(state, State::Pending | State::Waiting) => {
                 if let Err(e) = conn.keepalive() {
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
-                if matches!(state, State::Waiting) && !config.timeout_is_zero() {
+                if matches!(state, State::Waiting) {
                     state = State::Pending;
                     let fut = config.sleep_for_timeout();
                     timeout.as_mut().set(Some(fut).into());
                 }
             }
 
-            // Note that `timeout` is `Some` only when state ==
-            // `State::Pending` and `config.timeout` is non-zero and
-            // evaluates to `None` otherwise.
+            // Note that `timeout` is `Some` only when state == `State::Pending`
+            // Evaluates to `None` otherwise.
             Some(_) = timeout.as_mut() => {
                 // Keepalive timed out: increment failure counter
                 failed_keepalives = failed_keepalives.saturating_add(1);
@@ -365,14 +342,6 @@ mod tests {
     }
 
     impl SleepManager for MockSleepManager {
-        fn interval_is_zero(&self) -> bool {
-            self.interval.is_zero()
-        }
-
-        fn timeout_is_zero(&self) -> bool {
-            self.timeout.is_zero()
-        }
-
         async fn sleep_for_interval(&self) {
             if self.interval.is_zero() {
                 return;
