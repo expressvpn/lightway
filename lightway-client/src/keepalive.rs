@@ -173,13 +173,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         // this branch of the select we have achieved
                         // the aim of not sending keepalives if there
                         // is active traffic.
-                        //
-                        // On the other hand the timeout timer is not
-                        // restarted, if a ping has been sent then a
-                        // pong is required even in the presence of
-                        // other outside traffic. This helps to catch
-                        // connectivity issues even if traffic is
-                        // flowing only in one direction.
+                        timeout.as_mut().set(None.into());
                         continue
                     },
                     Message::ReplyReceived => {
