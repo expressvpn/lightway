@@ -68,7 +68,7 @@ pub enum KeepaliveResult {
 
 #[derive(Clone)]
 pub struct Keepalive {
-    tx: Option<mpsc::Sender<Message>>,
+    tx: mpsc::Sender<Message>,
     _cancellation: Arc<DropGuard>,
 }
 
@@ -85,7 +85,7 @@ impl Keepalive {
         let cancel = Arc::new(cancel.drop_guard());
         (
             Self {
-                tx: Some(tx),
+                tx,
                 _cancellation: cancel,
             },
             Some(task).into(),
@@ -94,48 +94,36 @@ impl Keepalive {
 
     /// Signal that the connection is now online
     pub async fn online(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Online).await;
-        }
+        let _ = self.tx.send(Message::Online).await;
     }
 
     /// Signal that outside activity was observed
     pub async fn outside_activity(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Message::OutsideActivity);
-        }
+        let _ = self.tx.try_send(Message::OutsideActivity);
     }
 
     /// Signal that a pong was received
     pub async fn reply_received(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::ReplyReceived).await;
-        }
+        let _ = self.tx.send(Message::ReplyReceived).await;
     }
 
     /// Signal that the network has changed.
     /// In the case we are offline, this will start the keepalives immediately
     /// Otherwise this will reset our timeouts
     pub async fn network_changed(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::NetworkChange).await;
-        }
+        let _ = self.tx.send(Message::NetworkChange).await;
     }
 
     /// Signal that we haven't heard from server in a while
     /// This will trigger a keepalive immediately if keepalive is not suspended.
     pub async fn tracer_delta_exceeded(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::TracerDeltaExceeded).await;
-        }
+        let _ = self.tx.send(Message::TracerDeltaExceeded).await;
     }
 
     /// Signal to suspend keepalives.
     /// Suspends the sleep interval timer if it's active.
     pub async fn suspend(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Suspend).await;
-        }
+        let _ = self.tx.send(Message::Suspend).await;
     }
 }
 
