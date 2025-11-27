@@ -169,6 +169,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// in network_config message
     pub use_dynamic_client_ip: bool,
 
+    /// Enable Expresslane for Udp connections
+    pub enable_expresslane: bool,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -310,6 +313,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         connection_ticker_cb,
     )?
     .with_key_update_interval(config.key_update_interval)
+    .when(config.enable_expresslane, |b| b.with_expresslane())
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)

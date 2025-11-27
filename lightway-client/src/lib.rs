@@ -145,6 +145,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub dns_config_mode: DnsConfigMode,
 
+    /// Enable Expresslane for Udp connections
+    pub enable_expresslane: bool,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -730,6 +733,7 @@ pub async fn connect<
     .with_cipher(server_config.cipher.into())?
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)
+    .when(config.enable_expresslane, |b| b.with_expresslane())
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),

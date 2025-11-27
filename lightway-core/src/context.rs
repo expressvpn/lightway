@@ -119,6 +119,7 @@ pub struct ClientContext<AppState> {
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
     pub(crate) rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
+    pub(crate) expresslane: bool,
     pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
@@ -143,6 +144,7 @@ pub struct ClientContextBuilder<AppState> {
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
+    expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType>,
 }
 
@@ -172,6 +174,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
+            expresslane: false,
             expresslane_cb: None,
         })
     }
@@ -203,6 +206,14 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
+    /// Enable expresslane data path
+    pub fn with_expresslane(self) -> Self {
+        Self {
+            expresslane: true,
+            ..self
+        }
+    }
+
     /// Sets callback for expresslane key update
     pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
         Self {
@@ -223,6 +234,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             rng: Arc::new(Mutex::new(rand::rngs::StdRng::from_os_rng())),
+            expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
         }
     }
@@ -270,6 +282,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
+    pub(crate) expresslane: bool,
     pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
@@ -325,6 +338,7 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
+    expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType>,
 }
 
@@ -388,6 +402,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
+            expresslane: false,
             expresslane_cb: None,
         })
     }
@@ -442,6 +457,14 @@ impl<AppState> ServerContextBuilder<AppState> {
         }
     }
 
+    /// Enable expresslane data path
+    pub fn with_expresslane(self) -> Self {
+        Self {
+            expresslane: true,
+            ..self
+        }
+    }
+
     /// Sets callback for expresslane key update
     pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
         Self {
@@ -478,6 +501,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             outside_plugins_instance,
+            expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
         })
     }

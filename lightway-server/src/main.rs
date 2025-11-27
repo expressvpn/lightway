@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
         lightway_client_ip: config.lightway_client_ip,
         lightway_dns_ip: config.lightway_dns_ip,
         use_dynamic_client_ip: false,
+        enable_expresslane: config.enable_expresslane,
         enable_pqc: config.enable_pqc,
         #[cfg(feature = "io-uring")]
         enable_tun_iouring: config.enable_tun_iouring,

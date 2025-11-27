@@ -134,6 +134,10 @@ pub struct Config {
     #[clap(long, value_enum, default_value_t = LogLevel::Info)]
     pub log_level: LogLevel,
 
+    /// Enable Expresslane for [`ConnectionType::Udp`] connections
+    #[clap(long, default_value_t)]
+    pub enable_expresslane: bool,
+
     /// Enable PMTU discovery for [`ConnectionType::Udp`] connections
     #[clap(long)]
     pub enable_pmtud: bool,
