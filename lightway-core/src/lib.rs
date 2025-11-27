@@ -32,12 +32,12 @@ pub use cipher::Cipher;
 pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
     ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg,
-    ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer,
+    ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer, expresslane_cb::*,
 };
 pub use context::{
-    ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleCodecTickCb,
-    ScheduleTickCb, ServerAuth, ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext,
-    ServerContextBuilder,
+    ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleTickCb, ServerAuth,
+    ServerAuthArg, ServerAuthHandle, ServerAuthResult, ServerContext, ServerContextBuilder,
+    TickType,
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
 pub use features::LightwayFeature;

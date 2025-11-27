@@ -218,6 +218,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitfield-struct"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de05f8756f1c68937349406d4632ae96ae35901019b5e59c508d9c38c64715fb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.110",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1402,6 +1413,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitfield-struct",
  "bytes",
  "delegate",
  "itertools 0.14.0",

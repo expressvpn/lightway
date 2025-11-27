@@ -1,6 +1,6 @@
 //! Handle `lightway_core::ScheduleTickCb` callbacks using Tokio.
 
-use lightway_core::{Connection, ConnectionError, ConnectionResult};
+use lightway_core::{Connection, ConnectionError, ConnectionResult, TickType};
 use std::{
     sync::{Mutex, Weak},
     time::Duration,
@@ -18,20 +18,20 @@ pub trait ConnectionTickerState {
 }
 
 /// Callback for use with
-/// [`lightway_core::ClientContextBuilder::with_schedule_tick_cb`] and
-/// [`lightway_core::ServerContextBuilder::with_schedule_tick_cb`].
+/// [`lightway_core::Connection::schedule_tick_cb`] and
 pub fn connection_ticker_cb<AppState: ConnectionTickerState>(
     d: std::time::Duration,
     state: &mut AppState,
+    tick_type: TickType,
 ) {
-    state.connection_ticker().schedule(d);
+    state.connection_ticker().schedule(d, tick_type);
 }
 
 /// Embed this into a [`Connection`]'s `AppState` and call
 /// [`ConnectionTicker::schedule`] from your
 /// `lightway_core::ScheduleTickCb` implementation. `tick_channel_cb`
 /// is a helper callback.
-pub struct ConnectionTicker(mpsc::UnboundedSender<()>);
+pub struct ConnectionTicker(mpsc::UnboundedSender<TickType>);
 
 impl ConnectionTicker {
     /// Create a new [`ConnectionTicker`]. Once the connection is built
@@ -44,11 +44,11 @@ impl ConnectionTicker {
     }
 
     /// Schedule a tick.
-    pub fn schedule(&self, d: Duration) {
+    pub fn schedule(&self, d: Duration, t: TickType) {
         let sender = self.0.clone();
         tokio::spawn(async move {
             tokio::time::sleep(d).await;
-            if let Err(e) = sender.send(()) {
+            if let Err(e) = sender.send(t) {
                 warn!("Ticker send error: {:?}", e);
             }
         });
@@ -66,17 +66,17 @@ impl ConnectionTickerState for ConnectionTicker {
 /// `tick`.
 pub trait Tickable: Send + Sync {
     /// Kick this tickable.
-    fn tick(&self) -> ConnectionResult<()>;
+    fn tick(&self, t: TickType) -> ConnectionResult<()>;
 }
 
 impl<AppState: Send> Tickable for Mutex<Connection<AppState>> {
-    fn tick(&self) -> ConnectionResult<()> {
-        self.lock().unwrap().tick()
+    fn tick(&self, t: TickType) -> ConnectionResult<()> {
+        self.lock().unwrap().tick(t)
     }
 }
 
 /// Task which receives tick requests from channel and calls tick.
-pub struct ConnectionTickerTask(mpsc::UnboundedReceiver<()>);
+pub struct ConnectionTickerTask(mpsc::UnboundedReceiver<TickType>);
 
 impl ConnectionTickerTask {
     /// Spawn the handler task
@@ -93,13 +93,13 @@ impl ConnectionTickerTask {
         join_set.spawn(Self::task(weak, self.0))
     }
 
-    async fn task<T: Tickable + 'static>(weak: Weak<T>, mut recv: UnboundedReceiver<()>) {
-        while let Some(()) = recv.recv().await {
+    async fn task<T: Tickable + 'static>(weak: Weak<T>, mut recv: UnboundedReceiver<TickType>) {
+        while let Some(tick_type) = recv.recv().await {
             let Some(tickable) = weak.upgrade() else {
                 break;
             };
 
-            if let Err(e) = tickable.tick() {
+            if let Err(e) = tickable.tick(tick_type) {
                 match e {
                     ConnectionError::TimedOut => {
                         warn!("DTLS connection timed out");
@@ -129,7 +129,7 @@ mod tests {
         struct Dummy(Mutex<Option<oneshot::Sender<()>>>);
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 self.0.lock().unwrap().take().unwrap().send(()).unwrap();
                 Ok(())
             }
@@ -139,7 +139,7 @@ mod tests {
 
         ticker_task.spawn(Arc::downgrade(&conn));
 
-        ticker.schedule(Duration::ZERO);
+        ticker.schedule(Duration::ZERO, TickType::ConnectionTick);
 
         rx.await.unwrap(); // Should get the tick
     }
@@ -153,7 +153,7 @@ mod tests {
         struct Dummy;
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -176,7 +176,7 @@ mod tests {
         struct Dummy;
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -187,7 +187,7 @@ mod tests {
 
         drop(conn);
 
-        ticker.schedule(Duration::ZERO);
+        ticker.schedule(Duration::ZERO, TickType::ConnectionTick);
 
         task.await.unwrap(); // Task should exit cleanly
     }
@@ -205,7 +205,7 @@ mod tests {
         struct Dummy(Mutex<Option<oneshot::Sender<()>>>);
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 self.0.lock().unwrap().take().unwrap().send(()).unwrap();
                 Ok(())
             }
@@ -216,7 +216,7 @@ mod tests {
 
         ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
 
-        ticker.schedule(Duration::ZERO);
+        ticker.schedule(Duration::ZERO, TickType::ConnectionTick);
 
         rx.await.unwrap(); // Should get the tick
     }
@@ -230,7 +230,7 @@ mod tests {
         struct Dummy;
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -254,7 +254,7 @@ mod tests {
         struct Dummy;
 
         impl Tickable for Dummy {
-            fn tick(&self) -> ConnectionResult<()> {
+            fn tick(&self, _t: TickType) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -266,7 +266,7 @@ mod tests {
 
         drop(conn);
 
-        ticker.schedule(Duration::ZERO);
+        ticker.schedule(Duration::ZERO, TickType::ConnectionTick);
 
         // Task should exit cleanly
         while (join_set.join_next().await).is_some() {}

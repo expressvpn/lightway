@@ -16,6 +16,7 @@
 * [Logging and Metrics](./logs_and_metrics.md)
 * [Supported TLS/DTLS versions](./tls_versions.md)
 * [Inside Packet Codec](./inside_packet_codec.md)
+* [Expresslane](./expresslane.md)
 * [FAQ](./faq.md)
 
 # Miscellaneous

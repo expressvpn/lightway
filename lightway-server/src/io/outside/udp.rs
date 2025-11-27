@@ -253,6 +253,7 @@ impl UdpServer {
             version: Version::MINIMUM,
             aggressive_mode: false,
             session: SessionId::REJECTED,
+            expresslane_data: false,
         };
 
         let mut buf = BytesMut::with_capacity(Header::WIRE_SIZE);

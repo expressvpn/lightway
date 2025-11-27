@@ -1,6 +1,7 @@
 mod builders;
 pub(crate) mod dplpmtud;
 mod event;
+pub(crate) mod expresslane_cb;
 mod fragment_map;
 mod io_adapter;
 mod key_update;
@@ -20,12 +21,12 @@ use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
 use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
+use crate::context::ExpresslaneTickData;
 use crate::{
     ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
     TCP_HEADER_SIZE, Version,
-    context::{
-        ScheduleCodecTickCb, ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult,
-    },
+    borrowed_bytesmut::BorrowedBytesMut,
+    context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
     metrics,
     packet_codec::{CodecStatus, PacketDecoderType, PacketEncoderType},
@@ -33,12 +34,17 @@ use crate::{
     utils::tcp_clamp_mss,
     wire::{self, AuthMethod},
 };
-use crate::{LightwayFeature, OutsideIOSendCallbackArg, dtls_required_outside_mtu, max_dtls_mtu};
+use crate::{
+    ExpresslaneCbData, ExpresslaneCbType, Header, LightwayFeature, OutsideIOSendCallbackArg,
+    TickType, dtls_required_outside_mtu, max_dtls_mtu,
+};
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
-use crate::wire::AuthSuccessWithConfigV4;
+use crate::wire::{
+    AuthSuccessWithConfigV4, ExpresslaneData, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion,
+};
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
@@ -67,6 +73,9 @@ pub(crate) use io_adapter::{SendBuffer as IOAdapterSendBuffer, WolfSSLIOAdapter}
 const WOLF_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 
 const WOLF_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
+
+/// Maximum number of retransmissions attempts for lightway frames
+const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 
 /// Maximum number of retransmissions attempts for each encoding request packet.
 const ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
@@ -203,6 +212,14 @@ pub enum ConnectionError {
     #[error("WolfSSL Error: {0}")]
     WolfSSL(#[from] wolfssl::Error),
 
+    /// Expresslane version mismatch
+    #[error("Expresslane version mismatch")]
+    ExpresslaneVersionMismatch,
+
+    /// Expresslane error occurred
+    #[error("Expresslane Error: {0}")]
+    ExpresslaneError(#[from] ExpresslaneError),
+
     /// Packet Codec does not exist
     #[error("Packet Codec Does Not Exist")]
     PacketCodecDoesNotExist,
@@ -248,6 +265,9 @@ impl ConnectionError {
                     WolfSSL(wolfssl::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
 
                     WireError(wire::FromWireError::UnknownFrameType) => false,
+                    WireError(wire::FromWireError::InsufficientData) => false,
+                    WireError(wire::FromWireError::InvalidExpressData) => false,
+                    WireError(wire::FromWireError::ReplayedExpressData) => false,
                     WireError(_) => true,
 
                     InvalidState => false, // Can be due to out of order or repeated messages
@@ -259,6 +279,8 @@ impl ConnectionError {
                     PluginError(_) => false,
                     PacketError(_) => false,
                     DataFragmentError(_) => false,
+                    ExpresslaneVersionMismatch => false,
+                    ExpresslaneError(_) => false,
                     WolfSSL(_) => false,
                 }
             }
@@ -286,8 +308,6 @@ enum ConnectionMode<AppState> {
         auth_method: AuthMethod,
         /// Callback to notify about inside ip config
         ip_config_cb: ClientIpConfigArg<AppState>,
-        /// Application provided callback to schedule an encoding request retransmission tick
-        schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
     },
     Server {
         /// Authentication oracle.
@@ -296,7 +316,6 @@ enum ConnectionMode<AppState> {
         auth_handle: Option<Box<dyn ServerAuthHandle + Sync + Send>>,
         ip_pool: ServerIpPoolArg<AppState>,
         key_update: key_update::State,
-        rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
         /// `Some(_)` iff a session ID rotation is in progress.
         pending_session_id: Option<SessionId>,
     },
@@ -345,6 +364,9 @@ pub struct Connection<AppState: Send = ()> {
     /// Client vs Server state.
     mode: ConnectionMode<AppState>,
 
+    /// Random number generator
+    rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
+
     /// The MTU for the outside path
     outside_mtu: usize,
 
@@ -360,7 +382,7 @@ pub struct Connection<AppState: Send = ()> {
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
 
     /// Application provided callback to schedule a tick
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
 
     /// Application provided callback to notify events
     event_cb: Option<EventCallbackArg>,
@@ -412,6 +434,12 @@ pub struct Connection<AppState: Send = ()> {
 
     // States for encoding request
     encoding_request_states: EncodingRequestStates,
+
+    // Expresslane engine
+    expresslane: ExpresslaneData,
+
+    // Express data config update callback
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 /// Information about the new session being established with a new
@@ -423,9 +451,10 @@ struct NewConnectionArgs<AppState> {
     session: wolfssl::Session<WolfSSLIOAdapter>,
     session_id: SessionId,
     mode: ConnectionMode<AppState>,
+    rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
     outside_mtu: usize,
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     event_cb: Option<EventCallbackArg>,
     inside_plugins: PluginList,
     outside_plugins: Arc<PluginList>,
@@ -433,6 +462,7 @@ struct NewConnectionArgs<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     pmtud_base_mtu: Option<u16>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -452,6 +482,7 @@ impl<AppState: Send> Connection<AppState> {
             session: args.session,
             session_id: args.session_id,
             mode: args.mode,
+            rng: args.rng,
             outside_mtu: args.outside_mtu,
             receive_buf: BytesMut::new(),
             inside_io: args.inside_io,
@@ -486,6 +517,8 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder,
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
+            expresslane: ExpresslaneData::default(),
+            expresslane_cb: args.expresslane_cb,
         };
 
         // This will very likely fail since negotiation always needs
@@ -553,6 +586,11 @@ impl<AppState: Send> Connection<AppState> {
         if matches!(new_state, State::Online) {
             debug!(curve = ?self.current_curve(), cipher = ?self.current_cipher(), "ONLINE");
             self.session.io_cb_mut().aggressive_send = false;
+
+            // Set initial expresslane keys
+            self.rotate_expresslane_key()?;
+
+            // Start PMTU discovery
             if let Some(ref mut pmtud) = self.pmtud {
                 let action = pmtud.online(&mut self.app_state);
                 self.handle_pmtud_action(action)?;
@@ -680,11 +718,13 @@ impl<AppState: Send> Connection<AppState> {
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
             trace!("Scheduling tick for {:?}", interval);
-            if let Some(schedule_tick_cb) = self.schedule_tick_cb {
-                schedule_tick_cb(interval, &mut self.app_state);
+            (self.schedule_tick_cb)(
+                interval,
+                &mut self.app_state,
+                crate::TickType::ConnectionTick,
+            );
 
-                self.is_tick_timer_running = true;
-            }
+            self.is_tick_timer_running = true;
         }
     }
 
@@ -698,12 +738,6 @@ impl<AppState: Send> Connection<AppState> {
     /// D/TLS implements exponential back off, the amount of waiting time
     /// can change after every read.
     ///
-    /// Applications may prefer to use
-    /// [`crate::context::ClientContextBuilder::with_schedule_tick_cb`]
-    /// or
-    /// [`crate::context::ServerContextBuilder::with_schedule_tick_cb`]
-    /// to get a callback when a tick is required.
-    ///
     /// If in use this should be called after every read cycle and, if
     /// `Some(_)`, [`Connection::tick`] should be called that amount
     /// of time later.
@@ -713,7 +747,17 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Inject a tick to the connection. See
     /// [`Connection::tick_interval`] for usage.
-    pub fn tick(&mut self) -> ConnectionResult<()> {
+    pub fn tick(&mut self, tick_type: TickType) -> ConnectionResult<()> {
+        match tick_type {
+            TickType::ConnectionTick => self.connection_tick(),
+            TickType::PktCodecTick(request_id) => self.codec_tick(request_id),
+            TickType::ExpresslaneKeyShareTick(config) => self.expresslane_key_share_tick(config),
+        }
+    }
+
+    /// Inject a tick to the connection. See
+    /// [`Connection::tick_interval`] for usage.
+    pub fn connection_tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
         trace!(session_id = ?self.session_id, "Processing connection tick");
 
@@ -794,7 +838,7 @@ impl<AppState: Send> Connection<AppState> {
 
         let pkt = pkt.apply_ingress_chain(&self.outside_plugins)?;
 
-        let session_id = match pkt.header() {
+        let hdr = match pkt.header() {
             Some(hdr) => {
                 if matches!(self.mode, ConnectionMode::Server { .. }) {
                     if hdr.version != self.tunnel_protocol_version {
@@ -808,7 +852,7 @@ impl<AppState: Send> Connection<AppState> {
                         return Err(ConnectionError::RejectedSessionID);
                     }
                 }
-                Some(hdr.session)
+                Some(*hdr)
             }
             None => None,
         };
@@ -817,10 +861,10 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::RejectedSessionID);
         };
 
-        let result = self.process_new_outside_data(payload);
+        let result = self.process_new_outside_data(payload, hdr);
         match result {
             // We only look into the session id after we verify the connection is valid
-            Ok(frames_read) if frames_read > 0 => self.update_session_id(session_id),
+            Ok(frames_read) if frames_read > 0 => self.update_session_id(hdr.map(|h| h.session)),
             _ => {}
         }
         result
@@ -926,6 +970,10 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidInsidePacket(
                 InvalidPacketError::InvalidPacketSize,
             ));
+        }
+
+        if self.expresslane_ready() {
+            return self.send_expresslane_data(data, is_encoded);
         }
 
         let inside_pkt = wire::Data {
@@ -1085,11 +1133,10 @@ impl<AppState: Send> Connection<AppState> {
                 ..
             } => Ok(pending_session_id),
             Server {
-                ref mut rng,
                 ref mut pending_session_id,
                 ..
             } => {
-                let new_session_id = rng.lock().unwrap().random();
+                let new_session_id = self.rng.lock().unwrap().random();
 
                 self.session.io_cb_mut().set_session_id(new_session_id);
 
@@ -1226,11 +1273,40 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    fn process_new_outside_data(&mut self, buf: &BytesMut) -> ConnectionResult<usize> {
+    fn process_new_outside_data(
+        &mut self,
+        buf: &mut BytesMut,
+        hdr: Option<Header>,
+    ) -> ConnectionResult<usize> {
+        self.activity.last_outside_data_received = Instant::now();
+
+        if let Some(hdr) = hdr
+            && hdr.expresslane_data
+        {
+            let Some(inside_io) = &self.inside_io else {
+                return Err(ConnectionError::InvalidInsideIo);
+            };
+
+            let data = self
+                .expresslane
+                .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
+            let frame_read_count = match inside_io.send(data, &mut self.app_state) {
+                IOCallbackResult::Ok(_nr) => 1,
+                IOCallbackResult::Err(err) => {
+                    metrics::inside_io_send_failed(err);
+                    0
+                }
+                IOCallbackResult::WouldBlock => {
+                    metrics::inside_io_send_failed(std::io::Error::other("Would block"));
+                    0
+                }
+            };
+            return Ok(frame_read_count);
+        }
+
         let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
         outside_received_pending.extend_from_slice(&buf[..]);
 
-        self.activity.last_outside_data_received = Instant::now();
         let frame_read_count_result = match self.state {
             State::Connecting => match self.session.try_negotiate()? {
                 wolfssl::Poll::PendingWrite => {
@@ -1317,6 +1393,7 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::ServerConfig(_) => warn!("Ignoring ServerConfig"),
                 wire::Frame::EncodingRequest(er) => self.process_encoding_request_pkt(er)?,
                 wire::Frame::EncodingResponse(er) => self.process_encoding_response_pkt(er)?,
+                wire::Frame::ExpresslaneConfig(config) => self.handle_expresslane_config(config)?,
             };
         }
 
@@ -1375,6 +1452,178 @@ impl<AppState: Send> Connection<AppState> {
 
         let _ = self.send_frame_or_drop(msg);
         let _ = self.disconnect();
+    }
+
+    /// Attempts to retransmit the currently pending expresslane config packet
+    fn expresslane_key_share_tick(
+        &mut self,
+        last_config: ExpresslaneTickData,
+    ) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        if !self.expresslane_supported() {
+            return Err(ConnectionError::InvalidConnectionType);
+        }
+        let last_config = last_config.0;
+
+        // Ignore retransmit calls for the stale (previous) requests.
+        if last_config.counter != self.expresslane.config_counter {
+            debug!(
+                "Expresslane config stale retransmit {}",
+                last_config.counter
+            );
+            return Ok(());
+        }
+
+        // If self key is equal to last retransmit key, it means peer has
+        // already acknowledged. We can ignore the tick
+        if last_config.key == self.expresslane.self_key() {
+            debug!("Expresslane config {} ack successful", last_config.counter);
+            return Ok(());
+        }
+
+        if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
+            warn!("Expresslane config transmit timed out, disabling expresslane");
+            self.expresslane.enabled = false;
+            return Ok(());
+        }
+
+        self.expresslane.retransmit_count += 1;
+        debug!(
+            "Expresslane config retransmitting {} ({} time)",
+            last_config.counter, self.expresslane.retransmit_count
+        );
+
+        // Callback to schedule another re-transmission
+        (self.schedule_tick_cb)(
+            self.expresslane.retransmit_wait_time(),
+            &mut self.app_state,
+            TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(last_config)),
+        );
+
+        let msg = wire::Frame::ExpresslaneConfig(last_config);
+        self.send_frame_or_drop(msg)
+    }
+
+    fn expresslane_supported(&self) -> bool {
+        self.connection_type.is_datagram()
+            && self
+                .tunnel_protocol_version
+                .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
+            && self.inside_pkt_encoder.is_none()
+    }
+
+    fn expresslane_ready(&self) -> bool {
+        self.expresslane_supported() && self.expresslane.is_ready()
+    }
+
+    fn handle_expresslane_config(
+        &mut self,
+        config: wire::ExpresslaneConfig,
+    ) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            return Err(ConnectionError::InvalidState);
+        }
+        if config.version != self.expresslane.version {
+            return Err(ConnectionError::ExpresslaneVersionMismatch);
+        }
+
+        // Handle acknowledgement from peer
+        if config.ack {
+            if config.counter == self.expresslane.config_counter {
+                // Peer acknowledged, can update local key now
+                self.expresslane.update_self_key();
+                self.publish_expresslane_key();
+
+                self.expresslane.retransmit_count = 0;
+            }
+            return Ok(());
+        }
+
+        self.expresslane.enabled = config.enabled;
+        if self.expresslane.enabled {
+            info!("Enabling expresslane for peer");
+            self.expresslane.update_peer_key(config.key)?;
+            self.publish_expresslane_key();
+        }
+
+        // Send acknowledgement
+        let mut config = config;
+        config.ack = true;
+        let msg = wire::Frame::ExpresslaneConfig(config);
+        let _ = self.send_frame_or_drop(msg);
+
+        Ok(())
+    }
+
+    /// Rotate expresslane key
+    pub fn rotate_expresslane_key(&mut self) -> ConnectionResult<()> {
+        if !self.expresslane_supported() {
+            return Ok(());
+        }
+        let key: ExpresslaneKey = self.rng.lock().unwrap().random();
+        // Do not update current encrpytion key. Just update self key and
+        // share it with peer. Only after peer acknowledged, update it in
+        // [`self::handle_expresslane_config`]
+        //
+        // If updating key failed, send disabled to peer
+        let enabled = self.expresslane.update_next_self_key(key).is_ok();
+
+        self.expresslane.config_counter += 1;
+        let config = wire::ExpresslaneConfig {
+            enabled,
+            key,
+            version: ExpresslaneVersion::Version1,
+            ack: false,
+            counter: self.expresslane.config_counter,
+        };
+
+        let msg = wire::Frame::ExpresslaneConfig(config);
+        let _ = self.send_frame_or_drop(msg);
+
+        // Callback to schedule re-transmission if required
+        (self.schedule_tick_cb)(
+            self.expresslane.retransmit_wait_time(),
+            &mut self.app_state,
+            TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
+        );
+        Ok(())
+    }
+
+    fn publish_expresslane_key(&self) {
+        if let Some(xp_config_cb) = &self.expresslane_cb {
+            let self_key = self.expresslane.self_key();
+            let peer_key = self.expresslane.peer_key();
+
+            let data = ExpresslaneCbData { self_key, peer_key };
+            xp_config_cb.update(self.session_id, data);
+        }
+    }
+
+    fn send_expresslane_data(
+        &mut self,
+        data: &mut BytesMut,
+        _is_encoded: bool,
+    ) -> ConnectionResult<()> {
+        // Generate random IV
+        let iv: [u8; 12] = self.rng.lock().unwrap().random();
+
+        let mut buf = BytesMut::new();
+        // In case of server, pending sesssion id will be used immediately in the Lightway Header
+        // So use it if there is one.
+        // In case of client there will be no pending_session_id, so it is fine
+        let session_id = self.pending_session_id().unwrap_or(self.session_id);
+        self.expresslane
+            .append_to_wire(&mut buf, session_id, data.as_ref(), iv);
+        self.activity.last_data_traffic_from_peer = Instant::now();
+
+        match self.session.io_cb().udp_send(buf.as_ref(), true) {
+            IOCallbackResult::Ok(_) => ConnectionResult::Ok(()),
+            IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
+            IOCallbackResult::Err(_e) => ConnectionResult::Err(ConnectionError::AccessDenied),
+        }
     }
 
     fn handle_auth_request(&mut self, auth_request: wire::AuthRequest) -> ConnectionResult<()> {
@@ -1713,27 +1962,6 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    fn get_codec_tick_cb(&self) -> ConnectionResult<ScheduleCodecTickCb<AppState>> {
-        match self.mode {
-            ConnectionMode::Server { .. } => {
-                error!("Attempting to send an EncodingRequest as a server");
-                Err(ConnectionError::InvalidMode)
-            }
-            ConnectionMode::Client {
-                schedule_codec_tick_cb,
-                ..
-            } => match schedule_codec_tick_cb {
-                Some(cb) => Ok(cb),
-                None => {
-                    error!(
-                        "Failed to retransmit as schedule encoding request retransmit cb is not set."
-                    );
-                    Err(ConnectionError::EncodingReqRetransmitCbDoesNotExist)
-                }
-            },
-        }
-    }
-
     /// Get the current encoding state from the encoder
     pub fn is_encoding_enabled(&self) -> bool {
         self.inside_pkt_encoder
@@ -1757,8 +1985,6 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidConnectionType);
         }
 
-        let schedule_codec_tick_cb = self.get_codec_tick_cb()?;
-
         self.encoding_request_states.id_counter =
             self.encoding_request_states.id_counter.wrapping_add(1);
         let encoding_request = wire::EncodingRequest {
@@ -1772,10 +1998,10 @@ impl<AppState: Send> Connection<AppState> {
         let msg = wire::Frame::EncodingRequest(encoding_request);
 
         // Callback to schedule a re-transmission
-        schedule_codec_tick_cb(
+        (self.schedule_tick_cb)(
             self.encoding_request_states.retransmit_wait_time(),
-            self.encoding_request_states.id_counter,
             &mut self.app_state,
+            TickType::PktCodecTick(self.encoding_request_states.id_counter),
         );
 
         debug!(
@@ -1805,8 +2031,6 @@ impl<AppState: Send> Connection<AppState> {
             error!("Attempting to send an EncodingRequest as a server");
             return Err(ConnectionError::InvalidMode);
         }
-
-        let schedule_codec_tick_cb = self.get_codec_tick_cb()?;
 
         let pending_request_pkt = match &self.encoding_request_states.pending_request_pkt {
             Some(pkt) => pkt,
@@ -1848,10 +2072,10 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         // Callback to schedule another re-transmission
-        schedule_codec_tick_cb(
+        (self.schedule_tick_cb)(
             self.encoding_request_states.retransmit_wait_time(),
-            self.encoding_request_states.id_counter,
             &mut self.app_state,
+            TickType::PktCodecTick(self.encoding_request_states.id_counter),
         );
 
         let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());

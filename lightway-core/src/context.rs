@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::{
-    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError,
+    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError, ExpresslaneCbType,
     InsideIOSendCallbackArg, OutsideIOSendCallbackArg, OutsidePacket, PluginResult,
     RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg, Version,
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
-    wire,
+    wire::{self, ExpresslaneConfig},
 };
 pub use server_auth::{ServerAuth, ServerAuthArg, ServerAuthHandle, ServerAuthResult};
 
@@ -83,6 +83,20 @@ mod test_connection_type {
     }
 }
 
+/// Struct to control [`ExpresslaneConfig`] visibility
+/// Without this, [`ExpresslaneConfig`] has to be made pub
+pub struct ExpresslaneTickData(pub(crate) ExpresslaneConfig);
+
+/// Tick type
+pub enum TickType {
+    /// Ticks for connection management
+    ConnectionTick,
+    /// Ticks for inside packet codec
+    PktCodecTick(u64),
+    /// Ticks for Expresslane key sharing
+    ExpresslaneKeyShareTick(ExpresslaneTickData),
+}
+
 /// Type of the application provided method to schedule a call to
 /// [`crate::Connection::tick`] after an interval. When this method is
 /// called by lightway the application should arrange to call
@@ -92,32 +106,20 @@ mod test_connection_type {
 /// Take care if calling [`crate::Connection`] methods from within the
 /// callback to avoid deadlock with any application lock you have
 /// wrapped the connection in.
-pub type ScheduleTickCb<AppState> = fn(d: std::time::Duration, state: &mut AppState);
+pub type ScheduleTickCb<AppState> =
+    fn(d: std::time::Duration, state: &mut AppState, tick_type: TickType);
 
-/// Type of the application provided method to schedule a call to
-/// [`crate::Connection::codec_tick`] after
-/// an interval.
-/// When this method is called by lightway the application should
-/// arrange to call
-/// [`crate::Connection::codec_tick`] after
-/// `wait_time` has elapsed. There is no requirement to cancel any
-/// other pending callback.
-///
-/// Take care if calling [`crate::Connection`] methods from within the
-/// callback to avoid deadlock with any application lock you have
-/// wrapped the connection in.
-pub type ScheduleCodecTickCb<AppState> =
-    fn(d: std::time::Duration, request_id: u64, state: &mut AppState);
 /// The core Lightway Client-side context.
 pub struct ClientContext<AppState> {
     pub(crate) wolfssl: wolfssl::Context,
     pub(crate) connection_type: ConnectionType,
     pub(crate) inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    pub(crate) schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
     pub(crate) ip_config: ClientIpConfigArg<AppState>,
     pub(crate) inside_plugins: Arc<PluginFactoryList>,
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
-    pub(crate) schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
+    pub(crate) rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -137,11 +139,11 @@ pub struct ClientContextBuilder<AppState> {
     wolfssl: wolfssl::ContextBuilder,
     connection_type: ConnectionType,
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     ip_config: ClientIpConfigArg<AppState>,
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
-    schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -151,6 +153,7 @@ impl<AppState> ClientContextBuilder<AppState> {
         root_ca: RootCertificate,
         inside_io: Option<InsideIOSendCallbackArg<AppState>>,
         ip_config: ClientIpConfigArg<AppState>,
+        schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => wolfssl::Method::TlsClientV1_3,
@@ -165,21 +168,12 @@ impl<AppState> ClientContextBuilder<AppState> {
             wolfssl,
             connection_type,
             inside_io,
-            schedule_tick_cb: None,
+            schedule_tick_cb,
             ip_config,
             inside_plugins: Arc::new(PluginFactoryList::default()),
             outside_plugins: Arc::new(PluginFactoryList::default()),
-            schedule_codec_tick_cb: None,
+            expresslane_cb: None,
         })
-    }
-
-    /// Sets the function that will be called when Lightway needs to
-    /// schedule a callback. See [`ScheduleTickCb`].
-    pub fn with_schedule_tick_cb(self, schedule_tick_cb: ScheduleTickCb<AppState>) -> Self {
-        Self {
-            schedule_tick_cb: Some(schedule_tick_cb),
-            ..self
-        }
     }
 
     /// Sets the inside plugins list which should be used for Lightway connection.
@@ -209,14 +203,10 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { wolfssl, ..self })
     }
 
-    /// Sets the schedule inside packet codec's encoding request retransmit tick callback
-    /// See [`ScheduleCodecTickCb`]
-    pub fn with_schedule_codec_tick_cb(
-        self,
-        schedule_codec_tick_cb: Option<ScheduleCodecTickCb<AppState>>,
-    ) -> Self {
+    /// Sets callback for expresslane key update
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
         Self {
-            schedule_codec_tick_cb,
+            expresslane_cb: Some(cb),
             ..self
         }
     }
@@ -232,7 +222,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
-            schedule_codec_tick_cb: self.schedule_codec_tick_cb,
+            rng: Arc::new(Mutex::new(rand::rngs::StdRng::from_os_rng())),
+            expresslane_cb: self.expresslane_cb,
         }
     }
 }
@@ -269,7 +260,7 @@ pub enum ContextError {
 pub struct ServerContext<AppState = ()> {
     pub(crate) wolfssl: wolfssl::Context,
     pub(crate) connection_type: ConnectionType,
-    pub(crate) schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
     pub(crate) inside_io: InsideIOSendCallbackArg<AppState>,
     pub(crate) auth: ServerAuthArg<AppState>,
     pub(crate) ip_pool: ServerIpPoolArg<AppState>,
@@ -279,6 +270,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) inside_plugins: PluginFactoryList,
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -325,7 +317,7 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
 pub struct ServerContextBuilder<AppState> {
     wolfssl: wolfssl::ContextBuilder,
     connection_type: ConnectionType,
-    schedule_tick_cb: Option<ScheduleTickCb<AppState>>,
+    schedule_tick_cb: ScheduleTickCb<AppState>,
     inside_io: InsideIOSendCallbackArg<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
@@ -333,6 +325,7 @@ pub struct ServerContextBuilder<AppState> {
     key_update_interval: std::time::Duration,
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
+    expresslane_cb: Option<ExpresslaneCbType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -363,6 +356,7 @@ impl<AppState> ServerContextBuilder<AppState> {
         auth: ServerAuthArg<AppState>,
         ip_pool: ServerIpPoolArg<AppState>,
         inside_io: InsideIOSendCallbackArg<AppState>,
+        schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => wolfssl::Method::TlsServerV1_3,
@@ -389,21 +383,13 @@ impl<AppState> ServerContextBuilder<AppState> {
             auth,
             ip_pool,
             inside_io,
-            schedule_tick_cb: None,
+            schedule_tick_cb,
             supported_protocol_versions: VersionRangeInclusive::all(),
             key_update_interval: std::time::Duration::ZERO,
             inside_plugins: PluginFactoryList::default(),
             outside_plugins: PluginFactoryList::default(),
+            expresslane_cb: None,
         })
-    }
-
-    /// Sets the function that will be called when Lightway needs to
-    /// schedule a callback. See [`ScheduleTickCb`].
-    pub fn with_schedule_tick_cb(self, schedule_tick_cb: ScheduleTickCb<AppState>) -> Self {
-        Self {
-            schedule_tick_cb: Some(schedule_tick_cb),
-            ..self
-        }
     }
 
     /// Sets the inside plugins list which should be used for Lightway connection.
@@ -456,6 +442,14 @@ impl<AppState> ServerContextBuilder<AppState> {
         }
     }
 
+    /// Sets callback for expresslane key update
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+        Self {
+            expresslane_cb: Some(cb),
+            ..self
+        }
+    }
+
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
@@ -484,6 +478,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
             outside_plugins_instance,
+            expresslane_cb: self.expresslane_cb,
         })
     }
 }

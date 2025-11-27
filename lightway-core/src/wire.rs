@@ -52,6 +52,8 @@ mod data;
 mod data_frag;
 mod encoding_request;
 mod encoding_response;
+mod expresslane_config;
+mod expresslane_data;
 mod ping;
 mod pong;
 mod server_config;
@@ -65,6 +67,8 @@ pub(crate) use data::Data;
 pub(crate) use data_frag::DataFrag;
 pub(crate) use encoding_request::EncodingRequest;
 pub(crate) use encoding_response::EncodingResponse;
+pub(crate) use expresslane_config::{ExpresslaneConfig, ExpresslaneVersion};
+pub(crate) use expresslane_data::{ExpresslaneData, ExpresslaneError, ExpresslaneKey};
 pub(crate) use ping::Ping;
 pub(crate) use pong::Pong;
 pub(crate) use server_config::ServerConfig;
@@ -98,6 +102,15 @@ pub enum FromWireError {
     /// The toggle option is not a boolean
     #[error("Invalid toggle option: is not a boolean")]
     InvalidBool,
+    /// Invalid express data path
+    #[error("Invalid express data path")]
+    InvalidExpressDataPath,
+    /// Invalid express data
+    #[error("Invalid express data")]
+    InvalidExpressData,
+    /// Replayed express data (duplicate wire counter)
+    #[error("Replayed express data packet")]
+    ReplayedExpressData,
 }
 
 /// The result of an attempted wire decode.
@@ -169,7 +182,7 @@ impl std::fmt::Debug for SessionId {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |   ASCII 'H'   |   ASCII 'e'   | major_version | minor_version |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |   aggressive  |                   RESERVED                    |
+/// |   aggressive  | express data  |          RESERVED             |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                            Session                            |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -182,6 +195,8 @@ pub struct Header {
     pub version: crate::Version,
     /// Request aggressive mode
     pub aggressive_mode: bool,
+    /// Expresslane data
+    pub expresslane_data: bool,
     /// Session identifier (opaque cookie)
     pub session: SessionId,
 }
@@ -207,7 +222,8 @@ impl Header {
         let minor_version = buf.get_u8();
 
         let aggressive_mode = buf.get_u8() != 0;
-        buf.advance(3); // RESERVED
+        let expresslane_data = buf.get_u8() != 0;
+        buf.advance(2); // RESERVED
 
         let mut session = SessionId::EMPTY;
         buf.copy_to_slice(session.as_mut_slice());
@@ -219,6 +235,7 @@ impl Header {
         Ok(Header {
             version,
             aggressive_mode,
+            expresslane_data,
             session,
         })
     }
@@ -233,7 +250,8 @@ impl Header {
         buf.put_u8(self.version.minor());
 
         buf.put_u8(self.aggressive_mode as u8);
-        buf.put_bytes(0, 3); // RESERVED
+        buf.put_u8(self.expresslane_data as u8);
+        buf.put_bytes(0, 2); // RESERVED
 
         buf.put(self.session.as_slice());
 
@@ -280,6 +298,8 @@ pub(crate) enum FrameKind {
     EncodingRequest = 18,
     /// Encoding Response
     EncodingResponse = 19,
+    /// Express Data
+    ExpresslaneConfig = 20,
 }
 
 /// Encapsulates a single frame.
@@ -323,6 +343,8 @@ pub(crate) enum Frame<'data> {
     EncodingRequest(encoding_request::EncodingRequest),
     /// Encoding Response
     EncodingResponse(encoding_response::EncodingResponse),
+    /// Expresslane config
+    ExpresslaneConfig(expresslane_config::ExpresslaneConfig),
 }
 
 impl Frame<'_> {
@@ -342,6 +364,7 @@ impl Frame<'_> {
             Self::EncodedDataFrag(_) => FrameKind::EncodedDataFrag,
             Self::EncodingRequest(_) => FrameKind::EncodingRequest,
             Self::EncodingResponse(_) => FrameKind::EncodingResponse,
+            Self::ExpresslaneConfig(_) => FrameKind::ExpresslaneConfig,
         }
     }
 
@@ -379,6 +402,9 @@ impl Frame<'_> {
             FrameKind::EncodingResponse => {
                 Self::EncodingResponse(EncodingResponse::try_from_wire(&mut buf)?)
             }
+            FrameKind::ExpresslaneConfig => {
+                Self::ExpresslaneConfig(ExpresslaneConfig::try_from_wire(&mut buf)?)
+            }
         };
 
         buf.commit(); // We've successfully parsed a frame, move the
@@ -407,6 +433,7 @@ impl Frame<'_> {
             Self::EncodedDataFrag(df) => df.append_to_wire(buf),
             Self::EncodingRequest(er) => er.append_to_wire(buf),
             Self::EncodingResponse(er) => er.append_to_wire(buf),
+            Self::ExpresslaneConfig(conf) => conf.append_to_wire(buf),
         }
     }
 }
@@ -461,6 +488,7 @@ mod test_header {
             Header {
                 version: crate::Version::try_new(1, 2).unwrap(),
                 aggressive_mode: true,
+                expresslane_data: false,
                 session: SessionId([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]),
             },
         );
@@ -496,6 +524,7 @@ mod test_header {
         let h = Header {
             version: crate::Version::try_new(1, 2).unwrap(),
             aggressive_mode: true,
+            expresslane_data: false,
             session: SessionId([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]),
         };
 
@@ -553,13 +582,14 @@ mod test_frame_kind {
     #[test_case(17 => FrameKind::EncodedDataFrag)]
     #[test_case(18 => FrameKind::EncodingRequest)]
     #[test_case(19 => FrameKind::EncodingResponse)]
+    #[test_case(20 => FrameKind::ExpresslaneConfig)]
     fn try_from_primitive(b: u8) -> FrameKind {
         FrameKind::try_from(b).unwrap()
     }
 
     #[test]
     fn try_from_primitive_out_of_range() {
-        for b in 20..=255 {
+        for b in 21..=255 {
             assert!(FrameKind::try_from(b).is_err())
         }
     }

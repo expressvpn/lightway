@@ -2,7 +2,6 @@
 #![warn(missing_docs)]
 
 pub mod args;
-pub mod codec_ticker;
 pub mod sockopt;
 
 #[cfg(feature = "tokio")]
@@ -15,8 +14,6 @@ mod event_stream;
 mod iouring;
 mod tun;
 
-#[cfg(feature = "tokio")]
-pub use codec_ticker::{CodecTicker, CodecTickerState, CodecTickerTask, codec_ticker_cb};
 #[cfg(feature = "tokio")]
 pub use connection_ticker::{
     ConnectionTicker, ConnectionTickerState, ConnectionTickerTask, Tickable, connection_ticker_cb,

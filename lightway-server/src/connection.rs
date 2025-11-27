@@ -14,7 +14,7 @@ use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCal
 use lightway_core::{
     ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType,
     OutsideIOSendCallbackArg, OutsidePacket, PacketDecoderType, PacketEncoderType, ProtocolVersion,
-    ServerContext, SessionId, State, Version,
+    ServerContext, SessionId, State, TickType, Version,
 };
 
 pub struct ConnectionState {
@@ -43,8 +43,8 @@ pub(crate) struct Connection {
 }
 
 impl Tickable for Connection {
-    fn tick(&self) -> ConnectionResult<()> {
-        Connection::tick(self)
+    fn tick(&self, t: TickType) -> ConnectionResult<()> {
+        Connection::tick(self, t)
     }
 }
 
@@ -108,8 +108,9 @@ impl Connection {
             pub fn current_curve(&self) -> Option<String>;
             pub fn state(&self) -> State;
             pub fn activity(&self) -> ConnectionActivity;
-            pub fn tick(&self) -> ConnectionResult<()>;
+            pub fn tick(&self, t: TickType) -> ConnectionResult<()>;
             pub fn authentication_expired(&self) -> ConnectionResult<bool>;
+            pub fn rotate_expresslane_key(&self) -> ConnectionResult<()>;
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
             pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
