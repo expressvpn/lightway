@@ -200,11 +200,9 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                     }
                     Message::Suspend => {
                         // Suspend keepalives whenever the timer is active
-                        if !matches!(state, State::Suspended) {
-                            tracing::info!("suspending keepalives");
-                            state = State::Suspended;
-                            timeout.as_mut().set(None.into())
-                        }
+                        tracing::info!("suspending keepalives");
+                        state = State::Suspended;
+                        timeout.as_mut().set(None.into())
                     },
                 }
             }
@@ -224,8 +222,8 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                 if let Err(e) = conn.keepalive() {
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
-                if matches!(state, State::Waiting) {
-                    state = State::Pending;
+                state = State::Pending;
+                if timeout.is_terminated() {
                     let fut = config.sleep_for_timeout().fuse();
                     timeout.as_mut().set(Some(fut).into());
                 }
