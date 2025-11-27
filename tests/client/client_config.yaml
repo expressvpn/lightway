@@ -18,6 +18,7 @@ enable_tun_iouring: false
 iouring_entry_count: 1024
 keepalive_interval: 0s
 keepalive_timeout: 0s
+enable_expresslane: false
 enable_pmtud: false
 # sndbuf: 1.5 MiB
 # rcvbuf: 1.5 MiB

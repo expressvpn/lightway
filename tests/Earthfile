@@ -96,6 +96,15 @@ run-udp-pmtud-test:
 run-udp-iouring-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
 
+# run-udp-expresslane-test runs e2e test using UDP with expresslane enabled
+run-udp-expresslane-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane"
+
+# run-udp-expresslane-compat-test runs e2e test using UDP with expresslane enabled in either peer
+run-udp-expresslane-compat-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-expresslane"
+
 # run-tcp-iouring-test runs e2e test using TCP and default cipher with io-uring enabled
 run-tcp-iouring-test:
     DO +TEST --MODE=tcp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
@@ -149,6 +158,8 @@ run-all-tests:
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
+    BUILD +run-udp-expresslane-test
+    BUILD +run-udp-expresslane-compat-test
     BUILD +run-tcp-iouring-test
     BUILD +run-udp-keepalive-test
     BUILD +run-tcp-keepalive-test
