@@ -1,5 +1,11 @@
 # Lightway Protocol Documentation
 
+## Getting Started
+
+* [Quick Start Guide](./quick_start_guide.md) - Quick setup using nightly builds
+
+## Protocol Documentation
+
 * [Design Overview](./design_overview.md)
 * [Parallel Connect](./parallel_connect.md)
 * [IP translation](./ip_translation.md)

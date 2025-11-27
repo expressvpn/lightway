@@ -2,6 +2,10 @@
 
 Lightway is a modern VPN protocol in Rust, to deliver a VPN experience that’s faster, more secure, and more reliable.
 
+## Quick Start
+
+Want to try Lightway VPN quickly? Download pre-built binaries from our [nightly releases](https://github.com/expressvpn/lightway/releases/tag/lightway-nightly) and follow the [Quick Start Guide](docs/quick_start_guide.md) for step-by-step setup instructions.
+
 ## Structure
 
 This repository contains multiple crates as follows:
