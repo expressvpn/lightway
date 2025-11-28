@@ -348,7 +348,7 @@ jobs:
     name: Nightly Release
     runs-on: ubuntu-latest
     needs: [ci]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref_name == 'main'
     concurrency:
       group: nightly-release
       cancel-in-progress: true
