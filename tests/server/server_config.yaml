@@ -18,6 +18,7 @@ lightway_dns_ip: 169.254.10.5
 log_format: full
 log_level: info
 enable_pqc: false
+enable_expresslane: false
 enable_tun_iouring: false
 # iouring_sqpoll_idle_time: 100ms
 iouring_entry_count: 1024

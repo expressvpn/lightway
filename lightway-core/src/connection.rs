@@ -335,6 +335,11 @@ pub struct ConnectionActivity {
 /// The result of an operation on a [`Connection`].
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
 
+enum ExpresslaneState {
+    Disabled,
+    Active,
+}
+
 /// A lightway connection
 pub struct Connection<AppState: Send = ()> {
     /// Type of connection
@@ -435,6 +440,9 @@ pub struct Connection<AppState: Send = ()> {
     // States for encoding request
     encoding_request_states: EncodingRequestStates,
 
+    // Expresslane State
+    expresslane_state: ExpresslaneState,
+
     // Expresslane engine
     expresslane: ExpresslaneData,
 
@@ -462,6 +470,7 @@ struct NewConnectionArgs<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     pmtud_base_mtu: Option<u16>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
+    expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType>,
 }
 
@@ -473,6 +482,11 @@ impl<AppState: Send> Connection<AppState> {
         let (inside_pkt_encoder, inside_pkt_decoder) = match args.inside_pkt_codec {
             Some(e) => (Some(e.0), Some(e.1)),
             None => (None, None),
+        };
+        let expresslane_state = if args.expresslane {
+            ExpresslaneState::Active
+        } else {
+            ExpresslaneState::Disabled
         };
         let mut conn = Connection {
             connection_type: args.connection_type,
@@ -517,6 +531,7 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder,
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
+            expresslane_state,
             expresslane: ExpresslaneData::default(),
             expresslane_cb: args.expresslane_cb,
         };
@@ -1513,6 +1528,7 @@ impl<AppState: Send> Connection<AppState> {
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && self.inside_pkt_encoder.is_none()
+            && matches!(self.expresslane_state, ExpresslaneState::Active)
     }
 
     fn expresslane_ready(&self) -> bool {

@@ -166,6 +166,7 @@ async fn main() -> Result<()> {
         tun_dns_ip: config.tun_dns_ip,
         #[cfg(feature = "postquantum")]
         enable_pqc: config.enable_pqc,
+        enable_expresslane: config.enable_expresslane,
         keepalive_interval: config.keepalive_interval.into(),
         keepalive_timeout: config.keepalive_timeout.into(),
         tracer_packet_timeout: config.tracer_packet_timeout.into(),

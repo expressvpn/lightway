@@ -256,6 +256,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             pmtud_timer: self.pmtud_timer,
             pmtud_base_mtu: self.pmtud_base_mtu,
             inside_pkt_codec: self.inside_pkt_codec,
+            expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
         })?)
     }
@@ -392,6 +393,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             pmtud_timer: None,
             pmtud_base_mtu: None,
             inside_pkt_codec: self.inside_pkt_codec,
+            expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
         })?)
     }

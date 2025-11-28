@@ -67,6 +67,10 @@ pub struct Config {
     #[clap(long, default_value = "10.125.0.1")]
     pub lightway_dns_ip: Ipv4Addr,
 
+    /// Enable Expresslane for [`ConnectionType::Udp`] connections
+    #[clap(long, default_value_t)]
+    pub enable_expresslane: bool,
+
     /// Enable Post Quantum Crypto
     #[clap(long, default_value_t)]
     pub enable_pqc: bool,
