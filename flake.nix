@@ -80,8 +80,9 @@
             };
           clientFeatures = [ ] ++ lib.optional pkgs.stdenv.isLinux [ "io-uring" ];
           serverFeatures = [ ] ++ lib.optional pkgs.stdenv.isLinux [ "io-uring" ];
+          serverStartScript = pkgs.writeShellScriptBin "server_start" (builtins.readFile ./samples/server_start.sh);
         in
-        {
+        rec {
           _module.args.pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
@@ -98,6 +99,23 @@
           devShells.stable = mkDevShell pkgs.rust-bin.stable.latest.default;
           devShells.nightly = mkDevShell pkgs.rust-bin.nightly.latest.default;
           devShells.msrv = mkDevShell pkgs.rust-bin.stable.${msrv}.default;
+          devShells.quick-start = pkgs.mkShell {
+            shellHook = ''
+              export RUST_SRC_PATH=${pkgs.rustPlatform.rustLibSrc}
+            '';
+            buildInputs = runtimeDeps;
+            nativeBuildInputs = buildDeps ++ devDeps ++ (with pkgs; [ 
+              apacheHttpd
+              iproute2
+              iptables
+              jq
+              openssl
+              yq
+            ]) ++ [
+              packages.lightway-server
+              serverStartScript 
+            ];
+          };
 
           formatter = pkgs.nixfmt-rfc-style;
         };
