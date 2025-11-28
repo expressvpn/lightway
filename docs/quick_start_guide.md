@@ -12,15 +12,18 @@ This guide will help you quickly set up a Lightway VPN server and client using t
 
 ### Server Requirements
 
-- Linux system (x86_64, arm64, or riscv64)
-- Root or sudo access
-- The following packages:
-  - `jq`, `yq` (for parsing server and client config.yaml files)
-  - `apache2-utils` (htpasswd for user authentication)
-  - `iproute2`
-  - `iptables`
-
-Install dependencies on Debian/Ubuntu:
+- Nix user
+  - use quick start shell
+  - `nix develop github:expressvpn/lightway#quick-start`
+- None Nix user
+  - Linux system (x86_64, arm64, or riscv64)
+  - Root or sudo access
+  - The following packages:
+    - `jq`, `yq` (for parsing server and client config.yaml files)
+    - `apache2-utils` (htpasswd for user authentication)
+    - `iproute2`
+    - `iptables`
+  - Install dependencies on Debian/Ubuntu:
 ```bash
 sudo apt-get update
 sudo apt-get install jq yq apache2-utils iproutes2 iptables
@@ -45,7 +48,11 @@ chmod +x lightway-server
 ```
 
 ### 2. Download the Setup Script
+- Nix user
+  - The script is also included in the quick-start shell, you do not need to download it.
 
+- None Nix user
+  - Download latest script from repository
 ```bash
 curl -L -o server_start.sh https://raw.githubusercontent.com/expressvpn/lightway/main/samples/server_start.sh
 chmod +x server_start.sh
@@ -104,6 +111,12 @@ Edit the config to update the database (`user_db`) and certificate paths (`serve
 
 Use the provided setup script to start the server:
 
+- Nix user
+```bash
+sudo server_start server_config.yaml
+```
+
+- None Nix user
 ```bash
 sudo ./server_start.sh server_config.yaml
 ```
@@ -151,6 +164,12 @@ Edit the config to update `server`, `ca_cert`, `user`, and `password` fields.
 
 Run the client to establish a VPN connection to the server:
 
+- Nix user
+```bash
+sudo nix run github:expressvpn/lightway#lightway-client -- --config-file client_config.yaml
+```
+
+- None Nix user
 ```bash
 sudo ./lightway-client --config-file client_config.yaml
 ```
