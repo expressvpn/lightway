@@ -8,7 +8,9 @@ use clap::Parser;
 use ipnet::Ipv4Net;
 use twelf::config;
 
-use lightway_app_utils::args::{ConnectionType, Duration, IpMap, LogFormat, LogLevel};
+use lightway_app_utils::args::{
+    ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration,
+};
 
 #[config]
 #[derive(Parser, Debug)]
@@ -101,7 +103,7 @@ pub struct Config {
 
     /// The key update interval for DTLS/TLS 1.3 connections
     #[clap(long, default_value = "15m")]
-    pub key_update_interval: Duration,
+    pub key_update_interval: NonZeroDuration,
 
     /// Address to listen to
     #[clap(long, default_value = "0.0.0.0:27690")]
