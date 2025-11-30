@@ -355,6 +355,8 @@ const SERVER_CURVE_PQC_GROUPS: &[wolfssl::CurveGroup] = &[
     wolfssl::CurveGroup::P521MLKEM1024,
     wolfssl::CurveGroup::P521KyberLevel5,
     #[cfg(not(feature = "kyber_only"))]
+    wolfssl::CurveGroup::X25519MLKEM768,
+    #[cfg(not(feature = "kyber_only"))]
     wolfssl::CurveGroup::P256MLKEM512,
     wolfssl::CurveGroup::P256KyberLevel1,
     wolfssl::CurveGroup::EccSecp256R1,
