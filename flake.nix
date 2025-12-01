@@ -26,106 +26,33 @@
           ...
         }:
         let
-          runtimeDeps = with pkgs; [ ];
-          buildDeps = with pkgs; [
-            autoconf
-            automake
-            libtool
-            rustPlatform.bindgenHook
-          ];
-          # Build dependencies for musl static builds
-          muslBuildDeps = with pkgs.pkgsStatic; [
-            autoconf
-            automake
-            libtool
-          ] ++ (with pkgs; [
-            rustPlatform.bindgenHook
-          ]);
-          devDeps = with pkgs; [
-            cargo-deny
-            cargo-make
-            cargo-nextest
-            cargo-outdated
-            cargo-fuzz
-            rust-analyzer
-          ];
-
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-          cargoMemberToml = package: builtins.fromTOML (builtins.readFile ./${package}/Cargo.toml);
           msrv = cargoToml.workspace.package.rust-version;
 
-          rustPackage =
-            rustVersion: package: features:
-            (pkgs.makeRustPlatform {
-              cargo = pkgs.rust-bin.stable.${rustVersion}.minimal;
-              rustc = pkgs.rust-bin.stable.${rustVersion}.minimal;
-            }).buildRustPackage
-              {
-                inherit ((cargoMemberToml package).package) name version;
-                src = ./.;
-                cargoLock.lockFile = ./Cargo.lock;
-                buildFeatures = features;
-                buildInputs = runtimeDeps;
-                nativeBuildInputs = buildDeps;
-                cargoBuildFlags = "-p ${package}";
-                # Enable ARM crypto extensions, overrides the default stdenv.hostPlatform.gcc.arch.
-                env.NIX_CFLAGS_COMPILE =
-                  with pkgs.stdenv.hostPlatform;
-                  lib.optionalString (isAarch && isLinux) "-march=${gcc.arch}+crypto";
-                cargoLock.outputHashes = {
-                  "wolfssl-3.0.0" = "sha256-kEVY/HLHTGFaIRSdLbVIomewUngUKEc9q11605n3I+Y=";
-                };
-              };
+          # Rust toolchains
+          rustLatest = pkgs.rust-bin.stable.latest;
+          rustMsrv = pkgs.rust-bin.stable.${msrv};
+          rustNightly = pkgs.rust-bin.nightly.latest;
 
-          # Musl static package builder using pkgsCross
-          muslCrossPkgs = pkgs.pkgsCross.musl64;
-          rustMuslPackage =
-            rustVersion: package: features:
-            let
-              rustWithMusl = pkgs.rust-bin.stable.${rustVersion}.minimal.override {
-                targets = [ "x86_64-unknown-linux-musl" ];
-              };
-            in
-            (muslCrossPkgs.makeRustPlatform {
-              cargo = rustWithMusl;
-              rustc = rustWithMusl;
-            }).buildRustPackage
-              {
-                inherit ((cargoMemberToml package).package) name version;
-                src = ./.;
-                cargoLock.lockFile = ./Cargo.lock;
-                buildFeatures = features;
-                buildInputs = runtimeDeps;
-                nativeBuildInputs = with muslCrossPkgs; [
-                  autoconf
-                  automake
-                  libtool
-                ] ++ (with pkgs; [
-                  rustPlatform.bindgenHook
-                ]);
-                cargoBuildFlags = "-p ${package}";
-                # Ensure fully static linking with musl
-                RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=-static";
-                # Enable ARM crypto extensions, overrides the default stdenv.hostPlatform.gcc.arch.
-                env.NIX_CFLAGS_COMPILE =
-                  with muslCrossPkgs.stdenv.hostPlatform;
-                  lib.optionalString (isAarch && isLinux) "-march=${gcc.arch}+crypto";
-                cargoLock.outputHashes = {
-                  "wolfssl-3.0.0" = "sha256-kEVY/HLHTGFaIRSdLbVIomewUngUKEc9q11605n3I+Y=";
-                };
-              };
+          # Rust platforms for different variants
+          rustPlatformLatest = pkgs.makeRustPlatform {
+            cargo = rustLatest.minimal;
+            rustc = rustLatest.minimal;
+          };
+          rustPlatformMsrv = pkgs.makeRustPlatform {
+            cargo = rustMsrv.minimal;
+            rustc = rustMsrv.minimal;
+          };
 
-          mkDevShell =
-            rustc:
-            pkgs.mkShell {
-              shellHook = ''
-                export RUST_SRC_PATH=${pkgs.rustPlatform.rustLibSrc}
-              '';
-              buildInputs = runtimeDeps;
-              nativeBuildInputs = buildDeps ++ devDeps ++ [ rustc ];
-            };
-          clientFeatures = [ ] ++ lib.optional pkgs.stdenv.isLinux [ "io-uring" ];
-          serverFeatures = [ ] ++ lib.optional pkgs.stdenv.isLinux [ "io-uring" ];
+          # Musl cross-compilation setup
+          muslPkgs = pkgs.pkgsCross.musl64;
+          rustLatestMusl = rustLatest.minimal.override {
+            targets = [ "x86_64-unknown-linux-musl" ];
+          };
+          rustPlatformMusl = muslPkgs.makeRustPlatform {
+            cargo = rustLatestMusl;
+            rustc = rustLatestMusl;
+          };
         in
         {
           _module.args.pkgs = import inputs.nixpkgs {
@@ -133,21 +60,58 @@
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
 
-          packages.default = self'.packages.lightway-client;
-          devShells.default = self'.devShells.stable;
+          packages = {
+            default = self'.packages.lightway-client;
 
-          packages.lightway-client = rustPackage "latest" "lightway-client" clientFeatures;
-          packages.lightway-server = rustPackage "latest" "lightway-server" serverFeatures;
-          packages.lightway-client-msrv = rustPackage msrv "lightway-client" clientFeatures;
-          packages.lightway-server-msrv = rustPackage msrv "lightway-server" serverFeatures;
+            # Regular builds with latest rust
+            lightway-client = pkgs.callPackage ./nix {
+              rustPlatform = rustPlatformLatest;
+            };
+            lightway-server = pkgs.callPackage ./nix {
+              package = "lightway-server";
+              rustPlatform = rustPlatformLatest;
+            };
 
-          # Musl static packages
-          packages.lightway-client-musl = rustMuslPackage "latest" "lightway-client" clientFeatures;
-          packages.lightway-server-musl = rustMuslPackage "latest" "lightway-server" serverFeatures;
+            # MSRV builds
+            lightway-client-msrv = pkgs.callPackage ./nix {
+              rustPlatform = rustPlatformMsrv;
+            };
+            lightway-server-msrv = pkgs.callPackage ./nix {
+              package = "lightway-server";
+              rustPlatform = rustPlatformMsrv;
+            };
 
-          devShells.stable = mkDevShell pkgs.rust-bin.stable.latest.default;
-          devShells.nightly = mkDevShell pkgs.rust-bin.nightly.latest.default;
-          devShells.msrv = mkDevShell pkgs.rust-bin.stable.${msrv}.default;
+            # Musl static builds
+            lightway-client-musl = muslPkgs.callPackage ./nix {
+              rustPlatform = rustPlatformMusl;
+              isStatic = true;
+            };
+            lightway-server-musl = muslPkgs.callPackage ./nix {
+              package = "lightway-server";
+              rustPlatform = rustPlatformMusl;
+              isStatic = true;
+            };
+          };
+
+          devShells = {
+            default = self'.devShells.stable;
+
+            stable = pkgs.callPackage ./nix/shell.nix {
+              rustc = rustLatest.default;
+            };
+            nightly = pkgs.callPackage ./nix/shell.nix {
+              rustc = rustNightly.default;
+            };
+            msrv = pkgs.callPackage ./nix/shell.nix {
+              rustc = rustMsrv.default;
+            };
+            musl = muslPkgs.callPackage ./nix/shell.nix {
+              rustc = rustLatestMusl.override {
+                extensions = [ "rust-src" "rust-analyzer" ];
+              };
+              isStatic = true;
+            };
+          };
 
           formatter = pkgs.nixfmt-rfc-style;
         };
