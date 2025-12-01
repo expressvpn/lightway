@@ -44,15 +44,32 @@
             rustc = rustMsrv.minimal;
           };
 
-          # Musl cross-compilation setup
-          muslPkgs = pkgs.pkgsCross.musl64;
+          # Musl static builds (architecture-aware cross-compilation)
+          # Uses pkgsCross to avoid rebuilding entire toolchain
+          # Only supported on Linux systems
+          muslConfig = {
+            "x86_64-linux" = {
+              pkgs = pkgs.pkgsCross.musl64;
+              target = "x86_64-unknown-linux-musl";
+            };
+            "aarch64-linux" = {
+              pkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
+              target = "aarch64-unknown-linux-musl";
+            };
+          }.${system} or null;
+          muslPkgs = if muslConfig != null then muslConfig.pkgs else null;
+          muslTarget = if muslConfig != null then muslConfig.target else null;
           rustLatestMusl = rustLatest.minimal.override {
-            targets = [ "x86_64-unknown-linux-musl" ];
+            targets = lib.optional (muslTarget != null) muslTarget;
           };
-          rustPlatformMusl = muslPkgs.makeRustPlatform {
-            cargo = rustLatestMusl;
-            rustc = rustLatestMusl;
-          };
+          rustPlatformMusl =
+            if muslPkgs != null then
+              muslPkgs.makeRustPlatform {
+                cargo = rustLatestMusl;
+                rustc = rustLatestMusl;
+              }
+            else
+              null;
         in
         {
           _module.args.pkgs = import inputs.nixpkgs {
@@ -60,59 +77,67 @@
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
 
-          packages = {
-            default = self'.packages.lightway-client;
+          packages =
+            {
+              default = self'.packages.lightway-client;
 
-            # Regular builds with latest rust
-            lightway-client = pkgs.callPackage ./nix {
-              rustPlatform = rustPlatformLatest;
-            };
-            lightway-server = pkgs.callPackage ./nix {
-              package = "lightway-server";
-              rustPlatform = rustPlatformLatest;
-            };
-
-            # MSRV builds
-            lightway-client-msrv = pkgs.callPackage ./nix {
-              rustPlatform = rustPlatformMsrv;
-            };
-            lightway-server-msrv = pkgs.callPackage ./nix {
-              package = "lightway-server";
-              rustPlatform = rustPlatformMsrv;
-            };
-
-            # Musl static builds
-            lightway-client-musl = muslPkgs.callPackage ./nix {
-              rustPlatform = rustPlatformMusl;
-              isStatic = true;
-            };
-            lightway-server-musl = muslPkgs.callPackage ./nix {
-              package = "lightway-server";
-              rustPlatform = rustPlatformMusl;
-              isStatic = true;
-            };
-          };
-
-          devShells = {
-            default = self'.devShells.stable;
-
-            stable = pkgs.callPackage ./nix/shell.nix {
-              rustc = rustLatest.default;
-            };
-            nightly = pkgs.callPackage ./nix/shell.nix {
-              rustc = rustNightly.default;
-            };
-            msrv = pkgs.callPackage ./nix/shell.nix {
-              rustc = rustMsrv.default;
-            };
-            musl = muslPkgs.callPackage ./nix/shell.nix {
-              rustc = rustLatestMusl.override {
-                extensions = [ "rust-src" "rust-analyzer" ];
+              # Regular builds with latest rust
+              lightway-client = pkgs.callPackage ./nix {
+                rustPlatform = rustPlatformLatest;
               };
-              isStatic = true;
-              defaultTarget = "x86_64-unknown-linux-musl";
+              lightway-server = pkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformLatest;
+              };
+
+              # MSRV builds
+              lightway-client-msrv = pkgs.callPackage ./nix {
+                rustPlatform = rustPlatformMsrv;
+              };
+              lightway-server-msrv = pkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformMsrv;
+              };
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              # Musl static builds (Linux only)
+              lightway-client-musl = muslPkgs.callPackage ./nix {
+                rustPlatform = rustPlatformMusl;
+                isStatic = true;
+              };
+              lightway-server-musl = muslPkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformMusl;
+                isStatic = true;
+              };
             };
-          };
+
+          devShells =
+            {
+              default = self'.devShells.stable;
+
+              stable = pkgs.callPackage ./nix/shell.nix {
+                rustc = rustLatest.default;
+              };
+              nightly = pkgs.callPackage ./nix/shell.nix {
+                rustc = rustNightly.default;
+              };
+              msrv = pkgs.callPackage ./nix/shell.nix {
+                rustc = rustMsrv.default;
+              };
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              musl = muslPkgs.callPackage ./nix/shell.nix {
+                rustc = rustLatestMusl.override {
+                  extensions = [
+                    "rust-src"
+                    "rust-analyzer"
+                  ];
+                };
+                isStatic = true;
+                defaultTarget = muslTarget;
+              };
+            };
 
           formatter = pkgs.nixfmt-rfc-style;
         };
