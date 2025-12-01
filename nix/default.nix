@@ -5,6 +5,7 @@
   autoconf,
   automake,
   libtool,
+  buildPackages,
   package ? "lightway-client",
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
   isStatic ? false,
@@ -40,12 +41,31 @@ rustPlatform.buildRustPackage {
   buildFeatures = features;
   cargoBuildFlags = "-p ${package}";
 
-  nativeBuildInputs = [
-    autoconf
-    automake
-    libtool
-    rustPlatform.bindgenHook
-  ];
+  nativeBuildInputs =
+    [
+      autoconf
+      automake
+      libtool
+    ]
+    ++ lib.optionals (stdenv.hostPlatform.system == stdenv.buildPlatform.system) [
+      # For native builds, use bindgenHook normally
+      rustPlatform.bindgenHook
+    ];
+
+  # For cross-compilation, manually configure bindgen
+  # Use build platform's libclang but target platform's headers
+  LIBCLANG_PATH = lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system) "${lib.getLib buildPackages.llvmPackages.libclang}/lib";
+
+  BINDGEN_EXTRA_CLANG_ARGS = lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system) (
+    lib.concatStringsSep " " ([
+      "--target=${stdenv.hostPlatform.config}"
+      "-isystem ${lib.getDev stdenv.cc.libc}/include"
+      "-I${buildPackages.llvmPackages.clang}/resource-root/include"
+    ] ++ lib.optionals (stdenv.cc ? nix-support) [
+      "$(< ${stdenv.cc}/nix-support/libc-cflags)"
+      "$(< ${stdenv.cc}/nix-support/cc-cflags)"
+    ])
+  );
 
   # Enable fully static linking for musl builds
   RUSTFLAGS = lib.optionalString isStatic "-C target-feature=+crt-static -C link-arg=-static";
