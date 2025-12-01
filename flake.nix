@@ -70,6 +70,47 @@
               }
             else
               null;
+
+          # Explicit cross-compilation targets (always available on Linux)
+          # x86_64 musl
+          x86_64MuslPkgs = pkgs.pkgsCross.musl64;
+          rustLatestX86_64Musl = rustLatest.minimal.override {
+            targets = [ "x86_64-unknown-linux-musl" ];
+          };
+          rustPlatformX86_64Musl = x86_64MuslPkgs.makeRustPlatform {
+            cargo = rustLatestX86_64Musl;
+            rustc = rustLatestX86_64Musl;
+          };
+
+          # aarch64 musl
+          aarch64MuslPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
+          rustLatestAarch64Musl = rustLatest.minimal.override {
+            targets = [ "aarch64-unknown-linux-musl" ];
+          };
+          rustPlatformAarch64Musl = aarch64MuslPkgs.makeRustPlatform {
+            cargo = rustLatestAarch64Musl;
+            rustc = rustLatestAarch64Musl;
+          };
+
+          # aarch64 glibc
+          aarch64Pkgs = pkgs.pkgsCross.aarch64-multiplatform;
+          rustLatestAarch64 = rustLatest.minimal.override {
+            targets = [ "aarch64-unknown-linux-gnu" ];
+          };
+          rustPlatformAarch64 = aarch64Pkgs.makeRustPlatform {
+            cargo = rustLatestAarch64;
+            rustc = rustLatestAarch64;
+          };
+
+          # x86_64 glibc
+          x86_64Pkgs = pkgs.pkgsCross.gnu64;
+          rustLatestX86_64 = rustLatest.minimal.override {
+            targets = [ "x86_64-unknown-linux-gnu" ];
+          };
+          rustPlatformX86_64 = x86_64Pkgs.makeRustPlatform {
+            cargo = rustLatestX86_64;
+            rustc = rustLatestX86_64;
+          };
         in
         {
           _module.args.pkgs = import inputs.nixpkgs {
@@ -99,8 +140,8 @@
                 rustPlatform = rustPlatformMsrv;
               };
             }
-            // lib.optionalAttrs pkgs.stdenv.isLinux {
-              # Musl static builds (Linux only)
+            // lib.optionalAttrs (muslPkgs != null) {
+              # Musl static builds (native to current architecture, Linux only)
               lightway-client-musl = muslPkgs.callPackage ./nix {
                 rustPlatform = rustPlatformMusl;
                 isStatic = true;
@@ -109,6 +150,48 @@
                 package = "lightway-server";
                 rustPlatform = rustPlatformMusl;
                 isStatic = true;
+              };
+            }
+            // {
+              # Explicit cross-compilation targets (available on all platforms)
+              # x86_64 musl static
+              lightway-client-cross-x86_64-musl = x86_64MuslPkgs.callPackage ./nix {
+                rustPlatform = rustPlatformX86_64Musl;
+                isStatic = true;
+              };
+              lightway-server-cross-x86_64-musl = x86_64MuslPkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformX86_64Musl;
+                isStatic = true;
+              };
+
+              # aarch64 musl static
+              lightway-client-cross-aarch64-musl = aarch64MuslPkgs.callPackage ./nix {
+                rustPlatform = rustPlatformAarch64Musl;
+                isStatic = true;
+              };
+              lightway-server-cross-aarch64-musl = aarch64MuslPkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformAarch64Musl;
+                isStatic = true;
+              };
+
+              # aarch64 glibc dynamic
+              lightway-client-cross-aarch64-gnu = aarch64Pkgs.callPackage ./nix {
+                rustPlatform = rustPlatformAarch64;
+              };
+              lightway-server-cross-aarch64-gnu = aarch64Pkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformAarch64;
+              };
+
+              # x86_64 glibc dynamic
+              lightway-client-cross-x86_64-gnu = x86_64Pkgs.callPackage ./nix {
+                rustPlatform = rustPlatformX86_64;
+              };
+              lightway-server-cross-x86_64-gnu = x86_64Pkgs.callPackage ./nix {
+                package = "lightway-server";
+                rustPlatform = rustPlatformX86_64;
               };
             };
 
@@ -126,7 +209,7 @@
                 rustc = rustMsrv.default;
               };
             }
-            // lib.optionalAttrs pkgs.stdenv.isLinux {
+            // lib.optionalAttrs (muslPkgs != null) {
               musl = muslPkgs.callPackage ./nix/shell.nix {
                 rustc = rustLatestMusl.override {
                   extensions = [
