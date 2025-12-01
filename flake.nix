@@ -110,6 +110,7 @@
                 extensions = [ "rust-src" "rust-analyzer" ];
               };
               isStatic = true;
+              defaultTarget = "x86_64-unknown-linux-musl";
             };
           };
 
