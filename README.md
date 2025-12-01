@@ -200,7 +200,7 @@ By default the client will use the existing MTU on the tunnel device, this can b
 the `--inside-mtu` option but note that this requires additional privileges, specifically the
 `CAP_SYS_ADMIN` capability.
 
-Running the client on linux platforms with `dns_config_mode: default` will require `CAP_DAC_OVERRIDE` 
+Running the client on linux platforms with `dns_config_mode: default` will require `CAP_DAC_OVERRIDE`
 and ` CAP_FOWNER` permissions, to properly modify `resolv.conf`.
 
 > [!CAUTION]
@@ -257,6 +257,76 @@ nix run .#lightway-client -- -c config.yaml
 
 Both Linux and macOS are supported.
 
+### Available Build Targets
+
+The flake provides multiple build variants using a consistent platform-libc naming convention:
+`lightway-{client,server}-{arch}-{os}-{libc}[-variant]`
+
+#### Convenience Aliases (recommended for most users)
+
+```bash
+# Short names that automatically select the right package for your platform
+nix build .#lightway-client        # Native build for current platform
+nix build .#lightway-server        # Native build for current platform
+nix build .#lightway-client-msrv   # MSRV build for current platform
+nix build .#lightway-server-msrv   # MSRV build for current platform
+```
+
+#### Native Linux Builds (x86_64-linux and aarch64-linux)
+
+```bash
+# Dynamic glibc builds (latest Rust)
+nix build .#lightway-client-x86_64-linux-gnu
+nix build .#lightway-server-x86_64-linux-gnu
+nix build .#lightway-client-aarch64-linux-gnu
+nix build .#lightway-server-aarch64-linux-gnu
+
+# MSRV builds
+nix build .#lightway-client-x86_64-linux-gnu-msrv
+nix build .#lightway-server-aarch64-linux-gnu-msrv
+
+# Static musl builds (no external dependencies)
+nix build .#lightway-client-x86_64-linux-musl
+nix build .#lightway-server-x86_64-linux-musl
+nix build .#lightway-client-aarch64-linux-musl
+nix build .#lightway-server-aarch64-linux-musl
+```
+
+#### Native macOS Builds (aarch64-darwin / Apple Silicon)
+
+```bash
+# Native macOS builds (latest Rust)
+nix build .#lightway-client-aarch64-darwin
+nix build .#lightway-server-aarch64-darwin
+
+# MSRV builds
+nix build .#lightway-client-aarch64-darwin-msrv
+nix build .#lightway-server-aarch64-darwin-msrv
+```
+
+#### Cross-Compilation Targets
+
+All platforms can cross-compile to Linux targets. These use Rust target triple naming
+(e.g., `aarch64-unknown-linux-musl`):
+
+```bash
+# From any platform, build x86_64 Linux targets
+nix build .#lightway-client-x86_64-linux-gnu    # dynamic glibc
+nix build .#lightway-client-x86_64-linux-musl   # static musl
+
+# From any platform, build aarch64 Linux targets
+nix build .#lightway-client-aarch64-linux-gnu   # dynamic glibc
+nix build .#lightway-client-aarch64-linux-musl  # static musl
+```
+
+**Use cases for cross-compilation:**
+- CI/CD pipelines building for multiple architectures from a single runner
+- Building ARM binaries on x86_64 hardware (and vice versa)
+- Creating static binaries for containerized deployments on macOS
+- Testing builds for different architectures without native hardware
+
+**Note:** All `-musl` builds produce static-pie linked binaries with no external dependencies
+
 ### Development environment
 
 Set up a local development environment using the Nix flake:
@@ -268,10 +338,23 @@ cargo build --bin lightway-server
 
 This installs all necessary tools required to develop Lightway.
 
-For nightly toolchain support (needed for fuzzing):
+Development shells are available for different use cases:
+
 ```bash
+# Default development shell (stable Rust)
+nix develop
+
+# Nightly Rust toolchain (needed for fuzzing)
 nix develop .#nightly
+
+# MSRV toolchain for compatibility testing
+nix develop .#msrv
+
+# Musl development shell (Linux only, for static builds)
+nix develop .#musl
 ```
+
+The musl development shell automatically configures the build environment for static musl compilation.
 
 ## Contributing
 
