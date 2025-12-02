@@ -68,7 +68,11 @@ rustPlatform.buildRustPackage {
   );
 
   # Enable fully static linking for musl builds
-  RUSTFLAGS = lib.optionalString isStatic "-C target-feature=+crt-static -C link-arg=-static";
+  # For cross-compilation from macOS, disable lld and use gcc directly to avoid platform_version flags
+  RUSTFLAGS =
+    lib.optionalString isStatic "-C target-feature=+crt-static -C link-arg=-static"
+    + lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system && !isStatic)
+      " -C linker=${stdenv.cc.targetPrefix}cc -C link-arg=-fuse-ld=bfd";
 
   # Enable ARM crypto extensions
   env.NIX_CFLAGS_COMPILE =
