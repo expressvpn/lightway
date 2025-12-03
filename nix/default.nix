@@ -9,6 +9,7 @@
   package ? "lightway-client",
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
   isStatic ? false,
+  platformSuffix ? null,
 }:
 
 let
@@ -25,9 +26,17 @@ let
       mainProgram = "lightway-server";
     };
   };
+
+  # Construct package name with optional platform suffix
+  packageName =
+    if platformSuffix != null then
+      "${cargoToml.package.name}-${platformSuffix}"
+    else
+      cargoToml.package.name;
 in
 rustPlatform.buildRustPackage {
-  inherit (cargoToml.package) name version;
+  pname = packageName;
+  inherit (cargoToml.package) version;
 
   src = ../.;
 
