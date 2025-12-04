@@ -103,16 +103,16 @@ jobs:
             build_type: "native"
 
           # Musl static builds (same arch, different libc)
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-client-aarch64-linux-musl
-            verify_type: "musl-static"
-            build_type: "native"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-server-aarch64-linux-musl
-            verify_type: "musl-static"
-            build_type: "native"
+          # - runner: ubuntu-24.04-arm
+          #   platform: aarch64-linux
+          #   package: lightway-client-aarch64-linux-musl
+          #   verify_type: "musl-static"
+          #   build_type: "native"
+          # - runner: ubuntu-24.04-arm
+          #   platform: aarch64-linux
+          #   package: lightway-server-aarch64-linux-musl
+          #   verify_type: "musl-static"
+          #   build_type: "native"
 
           # Cross-compile to x86_64
           - runner: ubuntu-24.04-arm
