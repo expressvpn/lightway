@@ -1,0 +1,323 @@
+name: Nix Build and Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run daily at 18:00 UTC
+    - cron: '0 18 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+jobs:
+  nix-build:
+    name: ${{ matrix.package }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ===================================================================
+          # x86_64 Linux (ubuntu-latest)
+          # ===================================================================
+          # Native builds
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-client-x86_64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-server-x86_64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-client-x86_64-linux-gnu-msrv
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-server-x86_64-linux-gnu-msrv
+            verify_type: "dynamically linked"
+            build_type: "native"
+
+          # Musl static builds (same arch, different libc)
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-client-x86_64-linux-musl
+            verify_type: "static-pie linked"
+            build_type: "native"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-server-x86_64-linux-musl
+            verify_type: "static-pie linked"
+            build_type: "native"
+
+          # Cross-compile to aarch64
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-client-aarch64-linux-musl
+            verify_type: "musl-static"
+            build_type: "cross"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-server-aarch64-linux-musl
+            verify_type: "musl-static"
+            build_type: "cross"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-client-aarch64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "cross"
+          - runner: ubuntu-latest
+            platform: x86_64-linux
+            package: lightway-server-aarch64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "cross"
+
+          # ===================================================================
+          # aarch64 Linux (ubuntu-24.04-arm)
+          # ===================================================================
+          # Native builds
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-client-aarch64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-server-aarch64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-client-aarch64-linux-gnu-msrv
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-server-aarch64-linux-gnu-msrv
+            verify_type: "dynamically linked"
+            build_type: "native"
+
+          # Musl static builds (same arch, different libc)
+          # - runner: ubuntu-24.04-arm
+          #   platform: aarch64-linux
+          #   package: lightway-client-aarch64-linux-musl
+          #   verify_type: "musl-static"
+          #   build_type: "native"
+          # - runner: ubuntu-24.04-arm
+          #   platform: aarch64-linux
+          #   package: lightway-server-aarch64-linux-musl
+          #   verify_type: "musl-static"
+          #   build_type: "native"
+
+          # Cross-compile to x86_64
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-client-x86_64-linux-musl
+            verify_type: "static-pie linked"
+            build_type: "cross"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-server-x86_64-linux-musl
+            verify_type: "static-pie linked"
+            build_type: "cross"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-client-x86_64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "cross"
+          - runner: ubuntu-24.04-arm
+            platform: aarch64-linux
+            package: lightway-server-x86_64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "cross"
+
+          # ===================================================================
+          # macOS (macos-latest - Apple Silicon)
+          # ===================================================================
+          # Native builds
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-aarch64-darwin
+            verify_type: "skip"  # macOS binaries
+            build_type: "native"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-aarch64-darwin
+            verify_type: "skip"
+            build_type: "native"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-aarch64-darwin-msrv
+            verify_type: "skip"
+            build_type: "native"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-aarch64-darwin-msrv
+            verify_type: "skip"
+            build_type: "native"
+
+          # Cross-compile to x86_64 Linux
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-x86_64-linux-musl
+            verify_type: "skip"  # Verified on Linux
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-x86_64-linux-musl
+            verify_type: "skip"
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-x86_64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-x86_64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+
+          # Cross-compile to aarch64 Linux
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-aarch64-linux-musl
+            verify_type: "skip"
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-aarch64-linux-musl
+            verify_type: "skip"
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-client-aarch64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+          - runner: macos-latest
+            platform: aarch64-darwin
+            package: lightway-server-aarch64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: false
+
+      - name: Check Nix flake
+        run: nix flake check
+
+      - name: Build ${{ matrix.package }}
+        run: nix build .#${{ matrix.package }} -o result --print-build-logs
+
+      - name: Verify binary linking type (Linux only)
+        if: matrix.verify_type != 'skip'
+        run: |
+          binary_path=$(find result/bin -type f | head -n 1)
+          echo "Checking binary: $binary_path"
+
+          file_output=$(file "$binary_path")
+          echo "File output: $file_output"
+
+          # For musl-static, verify by checking NEEDED entries (not file output)
+          if [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
+            echo "Verifying musl static binary (checking NEEDED entries)..."
+
+            # Check for NEEDED entries using readelf
+            if readelf -d "$binary_path" 2>&1 | grep -q "(NEEDED)"; then
+              echo "✗ Binary has NEEDED entries (not truly static):"
+              readelf -d "$binary_path" | grep "(NEEDED)"
+              exit 1
+            fi
+
+            echo "✓ Binary is truly static (no NEEDED entries)"
+            echo "Note: aarch64 may show 'dynamically linked' in file output (cosmetic only)"
+
+          # For other types, check file output
+          elif echo "$file_output" | grep -q "${{ matrix.verify_type }}"; then
+            echo "✓ Binary is correctly ${{ matrix.verify_type }}"
+          else
+            echo "✗ Expected '${{ matrix.verify_type }}' but got:"
+            echo "$file_output"
+            exit 1
+          fi
+
+          # Additional verification for static builds
+          if [[ "${{ matrix.verify_type }}" == "static-pie linked" ]] || [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
+            echo "Verifying no dynamic dependencies..."
+            if ldd "$binary_path" 2>&1 | grep -v "not a dynamic executable" | grep -v "statically linked" | grep -v "linux-vdso"; then
+              if ldd "$binary_path" 2>&1 | grep "=>"; then
+                echo "✗ Static binary has unexpected dynamic dependencies:"
+                ldd "$binary_path"
+                exit 1
+              fi
+            fi
+            echo "✓ No unexpected dynamic dependencies found"
+          fi
+
+      - name: Show binary info
+        run: |
+          binary_path=$(find result/bin -type f | head -n 1)
+          echo "=== Binary Information ==="
+          ls -lh "$binary_path"
+          file "$binary_path"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            echo ""
+            echo "=== Dynamic Dependencies ==="
+            ldd "$binary_path" 2>&1 || true
+            echo ""
+            echo "=== ELF Header ==="
+            readelf -h "$binary_path" || true
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.package }}-${{ matrix.build_type }}-${{ matrix.platform }}
+          path: result/bin/*
+          if-no-files-found: error
+
+  verify-builds:
+    name: Verify All Builds
+    runs-on: ubuntu-latest
+    needs: nix-build
+    if: always()  # Run even if some builds failed
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Display build summary
+        run: |
+          echo "=== Build Summary ==="
+          echo ""
+          echo "Total artifacts:"
+          ls -1 artifacts/ | wc -l
+          echo ""
+          echo "=== All Built Packages ==="
+          ls -1 artifacts/ | sort
+          echo ""
+          echo "=== Binary Details ==="
+          find artifacts -type f | while read -r f; do
+            if file "$f" | grep -q "ELF"; then
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "Package: $(basename $(dirname $f))"
+              echo "Binary: $(basename $f)"
+              file "$f" | sed 's/^/  /'
+            fi
+          done
+          echo ""
+          echo "✅ All builds completed successfully!"

@@ -2,20 +2,18 @@
 name = "lightway-core-fuzz"
 version = "0.0.0"
 publish = false
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+edition = "2024"
+authors = ["lightway-developers@expressvpn.com"]
+license = "AGPL-3.0-only"
 
 [package.metadata]
 cargo-fuzz = true
 
-[dependencies]
-libfuzzer-sys = "0.4"
-bytes = { workspace = true }
+[workspace]
 
-[dependencies.lightway-core]
-workspace = true
-features = ["fuzzing_api"]
+[dependencies]
+bytes = "1.5.0"
+lightway-core = { path = "..", features = ["fuzzing_api"] }
 
 [[bin]]
 name = "fuzz_parse_header"
@@ -28,3 +26,6 @@ name = "fuzz_parse_frame"
 path = "fuzz_targets/fuzz_parse_frame.rs"
 test = false
 doc = false
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+libfuzzer-sys = "0.4"

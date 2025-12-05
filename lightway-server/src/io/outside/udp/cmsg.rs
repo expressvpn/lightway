@@ -4,7 +4,10 @@
 #[cfg(target_vendor = "apple")]
 pub(crate) type LibcControlLen = libc::socklen_t;
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(not(target_vendor = "apple"), target_env = "musl"))]
+pub(crate) type LibcControlLen = libc::socklen_t;
+
+#[cfg(all(not(target_vendor = "apple"), not(target_env = "musl")))]
 pub(crate) type LibcControlLen = libc::size_t;
 
 pub(crate) struct Buffer<const N: usize>([std::mem::MaybeUninit<u8>; N]);
@@ -26,15 +29,16 @@ impl<const N: usize> Buffer<N> {
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.
-        let msghdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: std::ptr::null_mut(),
-            msg_iovlen: 0,
-            msg_control: self.0.as_ptr() as *mut _,
-            msg_controllen: control_len,
-            msg_flags: 0,
-        };
+        // SAFETY: We're initializing an msghdr struct with zeroed memory, which is safe
+        // as all fields will be explicitly set below before use
+        let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        msghdr.msg_name = std::ptr::null_mut();
+        msghdr.msg_namelen = 0;
+        msghdr.msg_iov = std::ptr::null_mut();
+        msghdr.msg_iovlen = 0;
+        msghdr.msg_control = self.0.as_ptr() as *mut _;
+        msghdr.msg_controllen = control_len;
+        msghdr.msg_flags = 0;
         // SAFETY: We constructed a sufficiently valid `msghdr` above.
         // `msg_control[..msg_controllen]` are valid initialized bytes
         // per the safety requirements for calling this method.
@@ -127,15 +131,16 @@ impl<const N: usize> BufferMut<N> {
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.
-        let msghdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: std::ptr::null_mut(),
-            msg_iovlen: 0,
-            msg_control: self.0.as_mut_ptr() as *mut _,
-            msg_controllen: self.0.len() as LibcControlLen,
-            msg_flags: 0,
-        };
+        // SAFETY: We're initializing an msghdr struct with zeroed memory, which is safe
+        // as all fields will be explicitly set below before use
+        let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        msghdr.msg_name = std::ptr::null_mut();
+        msghdr.msg_namelen = 0;
+        msghdr.msg_iov = std::ptr::null_mut();
+        msghdr.msg_iovlen = 0;
+        msghdr.msg_control = self.0.as_mut_ptr() as *mut _;
+        msghdr.msg_controllen = self.0.len() as LibcControlLen;
+        msghdr.msg_flags = 0;
         // SAFETY: We constructed a sufficiently valid `msghdr` above.
         // `msg_control[..msg_controllen]` are valid initialized bytes
         // per the safety requirements for calling this method.
@@ -205,12 +210,16 @@ impl<const N: usize> BufferBuilder<'_, N> {
         // - For subsequent iterations `CMSG_NXTHDR` takes alignment
         //   into consideration and returns a pointer correctly aligned
         //   for a `cmsghdr`.
+        // SAFETY: We're initializing a cmsghdr struct with zeroed memory, which is safe
+        // as all fields will be explicitly set below before use
+        let mut cmsghdr: libc::cmsghdr = unsafe { std::mem::zeroed() };
+        cmsghdr.cmsg_len = cmsg_len;
+        cmsghdr.cmsg_level = cmsg_level;
+        cmsghdr.cmsg_type = cmsg_type;
+        // SAFETY: self.cmsghdr is a valid pointer from CMSG_FIRSTHDR/CMSG_NXTHDR
+        // (verified non-null above), and is correctly aligned for cmsghdr (see comments above)
         unsafe {
-            self.cmsghdr.write(libc::cmsghdr {
-                cmsg_len,
-                cmsg_level,
-                cmsg_type,
-            });
+            self.cmsghdr.write(cmsghdr);
         }
 
         // SAFETY: `self.cmsghdr` is a valid `cmsghdr` from a prior
