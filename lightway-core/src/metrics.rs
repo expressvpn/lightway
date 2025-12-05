@@ -1,7 +1,7 @@
 use metrics::{Counter, counter};
 use std::sync::LazyLock;
-use tracing::debug;
-use wolfssl::ProtocolVersion;
+use tracing::{debug, warn};
+use wolfssl::{Aes256GcmError, ProtocolVersion};
 
 static METRIC_CONNECTION_ALLOC_FRAG_MAP: LazyLock<Counter> =
     LazyLock::new(|| counter!("conn_alloc_frag_map"));
@@ -20,6 +20,13 @@ static METRIC_RECEIVED_RECONDING_RES_AS_SERVER: LazyLock<Counter> =
     LazyLock::new(|| counter!("received_encoding_res_as_server"));
 
 static TLS_PROTOCOL_VERSION_LABEL: &str = "tls_protocol_version";
+
+static METRIC_EXPRESSLANE_ENCRYPT_NO_KEY: LazyLock<Counter> =
+    LazyLock::new(|| counter!("expresslane_encrypt_no_key"));
+static METRIC_EXPRESSLANE_DECRYPT_NO_KEY: LazyLock<Counter> =
+    LazyLock::new(|| counter!("expresslane_decrypt_no_key"));
+static METRIC_EXPRESSLANE_DECRYPT_FAILED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("expresslane_decrypt_failed"));
 
 /// [`crate::Connection`] has allocated its [`crate::Connection::fragment_map`]
 pub(crate) fn connection_alloc_frag_map() {
@@ -62,4 +69,25 @@ pub(crate) fn received_encoding_req_with_tcp() {
 /// Server received an encoding response
 pub(crate) fn received_encoding_res_as_server() {
     METRIC_RECEIVED_RECONDING_RES_AS_SERVER.increment(1);
+}
+
+/// Server try to send an expresslane packet, but no valid expresslane key
+/// to encrypt
+pub(crate) fn expresslane_encrypt_no_key() {
+    warn!("No valid expresslane key to encrypt");
+    METRIC_EXPRESSLANE_ENCRYPT_NO_KEY.increment(1);
+}
+
+/// Server received an expresslane packet, but no valid expresslane key
+/// to decrypt
+pub(crate) fn expresslane_decrypt_no_key() {
+    warn!("No valid expresslane key to decrypt");
+    METRIC_EXPRESSLANE_DECRYPT_NO_KEY.increment(1);
+}
+
+/// Server received an expresslane packet, but cannot be decrpyted by
+/// current/prev key
+pub(crate) fn expresslane_decrypt_failed(err: &Aes256GcmError) {
+    warn!("Prev key failed: {err:?}");
+    METRIC_EXPRESSLANE_DECRYPT_FAILED.increment(1);
 }

@@ -35,6 +35,9 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | received_encoding_req_non_online | core | Counter | Server received an encoding request when the Connection state is not Online |
 | received_encoding_req_with_tcp | core | Counter | Server received an encoding request when the Connection type is TCP |
 | received_encoding_res_as_server | core | Counter | Server received an encoding response |
+| expresslane_encrypt_no_key | core | Counter | Server tried to send an expresslane packet, but no valid expresslane key to encrypt |
+| expresslane_decrypt_no_key | core | Counter | Server received an expresslane packet, but no valid expresslane key to decrypt |
+| expresslane_decrypt_failed | core | Counter | Server received an expresslane packet, but it cannot be decrypted by current/prev key |
 | conn_created | server | Counter | The number of new connections created |
 | conn_link_up | server | Counter | Counts connection which have reached the “link up” state (~(D)TLS connection established) |
 | conn_online | server | Counter | Counts connection which have reached the “online” state after successful authentication |

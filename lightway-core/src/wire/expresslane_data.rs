@@ -1,9 +1,11 @@
 use std::{fmt::Debug, time::Duration};
 
 use crate::borrowed_bytesmut::BorrowedBytesMut;
+use crate::metrics;
 use bytes::{Buf, BufMut, BytesMut};
 use more_asserts::*;
 use rand::Rng;
+use tracing::debug;
 
 use super::{FromWireError, FromWireResult, SessionId, expresslane_config::ExpresslaneVersion};
 
@@ -226,13 +228,13 @@ impl ExpresslaneData {
             .map_err(|_| ExpresslaneError::SetKeyFailed)?;
 
         self.next_self = Some(ExpresslaneDataCipher { key, cipher });
-        tracing::debug!("Updating expresslane next self keys: {:?}", self);
+        debug!("Updating expresslane next self keys: {:?}", self);
         Ok(())
     }
 
     pub(crate) fn update_self_key(&mut self) {
         self.current_self = self.next_self.take();
-        tracing::debug!("Updating expresslane self keys: {:?}", self);
+        debug!("Updating expresslane self keys: {:?}", self);
     }
 
     pub(crate) fn update_peer_key(&mut self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
@@ -245,7 +247,7 @@ impl ExpresslaneData {
         let current = Some(ExpresslaneDataCipher { key, cipher });
         self.prev_peer = std::mem::replace(&mut self.current_peer, current);
 
-        tracing::debug!("Updating expresslane peer keys: {:?}", self);
+        debug!("Updating expresslane peer keys: {:?}", self);
         Ok(())
     }
 
@@ -291,7 +293,7 @@ impl ExpresslaneData {
         let data = buf.commit_and_split_to(data_len);
 
         let Some(current) = &mut self.current_peer else {
-            tracing::error!("No key present packet");
+            metrics::expresslane_decrypt_no_key();
             return Err(FromWireError::InvalidExpressData);
         };
 
@@ -306,7 +308,7 @@ impl ExpresslaneData {
                 if let Some(prev) = &mut self.prev_peer {
                     prev.cipher
                         .decrypt(iv, data.as_ref(), &auth_vec[..], &auth_tag)
-                        .inspect_err(|e| tracing::error!("Prev key failed: {e:?}"))
+                        .inspect_err(metrics::expresslane_decrypt_failed)
                         .map_err(|_| e)?
                 } else {
                     return Err(e);
@@ -328,7 +330,7 @@ impl ExpresslaneData {
         buf.reserve(Self::WIRE_OVERHEAD + plain_text.len());
 
         let Some(current) = &mut self.current_self else {
-            tracing::error!("Skipping data packet");
+            metrics::expresslane_encrypt_no_key();
             return;
         };
 
