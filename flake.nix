@@ -32,6 +32,8 @@
             automake
             libtool
             rustPlatform.bindgenHook
+          ] ++ lib.optionals pkgs.stdenv.isDarwin [
+            xcodes
           ];
           devDeps = with pkgs; [
             cargo-deny
@@ -74,6 +76,9 @@
             pkgs.mkShell {
               shellHook = ''
                 export RUST_SRC_PATH=${pkgs.rustPlatform.rustLibSrc}
+                ${lib.optionalString pkgs.stdenv.isDarwin ''
+                  xcodes select 26.0.1
+                ''}
               '';
               buildInputs = runtimeDeps;
               nativeBuildInputs = buildDeps ++ devDeps ++ [ rustc ];
