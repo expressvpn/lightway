@@ -38,7 +38,7 @@ check_dependencies() {
         exit 1
     fi
 
-    if [[ ! -f "./lightway-server" ]]; then
+    if [[ ! -f "./lightway-server" ]] && [[ ! -x "$(command -v lightway-server)" ]]; then
         echo "Error: lightway-server binary not found in current directory" >&2
         exit 1
     fi
@@ -117,5 +117,5 @@ iptables -P OUTPUT ACCEPT
 iptables -P FORWARD ACCEPT
 iptables -t nat -A POSTROUTING -s "${tun_ip_subnet}" -o "${wandev}" -j SNAT --to "${basenet}"
 
-./lightway-server -c "${VPN_SERVER_CONFIG}" "${EXTRA_ARGS[@]}"
-
+./lightway-server -c "${VPN_SERVER_CONFIG}" "${EXTRA_ARGS[@]}" ||
+    lightway-server -c "${VPN_SERVER_CONFIG}" "${EXTRA_ARGS[@]}"
