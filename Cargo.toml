@@ -2,10 +2,13 @@
 
 members = [
     "lightway-core",
-    "lightway-core/fuzz",
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",
+]
+
+exclude = [
+    "lightway-core/fuzz",
 ]
 
 resolver = "3"
