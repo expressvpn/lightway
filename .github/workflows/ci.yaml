@@ -237,9 +237,11 @@ jobs:
       - run: mkdir -p build/
 
       - name: Build lightway client on MSRV version
+        if: matrix.os == 'ubuntu-latest'
         run: nix build .#lightway-client-msrv
 
       - name: Build lightway server on MSRV version
+        if: matrix.os == 'ubuntu-latest'
         run: nix build .#lightway-server-msrv
 
       - name: Build lightway client
