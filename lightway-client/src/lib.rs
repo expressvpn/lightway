@@ -762,7 +762,9 @@ pub async fn connect<
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
-    tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    if connection_type.is_datagram() {
+        tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    }
     let keepalive_config = keepalive::Config {
         interval: config.keepalive_interval,
         timeout: config.keepalive_timeout,

@@ -275,7 +275,9 @@ fn new_connection(
 
     tokio::spawn(handle_events(event_stream, Arc::downgrade(&conn)));
     tokio::spawn(handle_stale(Arc::downgrade(&conn)));
-    tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    if conn.connection_type().is_datagram() {
+        tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    }
 
     if let Some((encoded_pkt_receiver, decoded_pkt_receiver)) = pkt_receivers {
         tokio::spawn(handle_encoded_pkt_send(
