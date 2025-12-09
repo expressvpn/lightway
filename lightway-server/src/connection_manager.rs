@@ -192,9 +192,10 @@ async fn expresslane_key_rotation(conn: Weak<Connection>) {
 
     loop {
         tokio::time::sleep(EXPRESSLANE_REFRESH_KEYS).await;
-        if let Some(conn) = conn.upgrade()
-            && matches!(conn.state(), State::Online)
-        {
+        let Some(conn) = conn.upgrade() else {
+            break;
+        };
+        if matches!(conn.state(), State::Online) {
             let _ = conn.rotate_expresslane_key();
         };
     }
