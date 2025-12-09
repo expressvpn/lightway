@@ -640,12 +640,14 @@ async fn expresslane_key_rotation<T: Send + Sync>(
     const EXPRESSLANE_REFRESH_KEYS: Duration = Duration::from_secs(60 * 15);
     loop {
         tokio::time::sleep(EXPRESSLANE_REFRESH_KEYS).await;
-        if let Some(conn) = conn.upgrade() {
-            let mut conn = conn.lock().unwrap();
-            if matches!(conn.state(), State::Online) {
-                let _ = conn.rotate_expresslane_key();
-            }
+        let Some(conn) = conn.upgrade() else {
+            break;
         };
+
+        let mut conn = conn.lock().unwrap();
+        if matches!(conn.state(), State::Online) {
+            let _ = conn.rotate_expresslane_key();
+        }
     }
 }
 
@@ -760,7 +762,9 @@ pub async fn connect<
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
-    tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    if connection_type.is_datagram() {
+        tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    }
     let keepalive_config = keepalive::Config {
         interval: config.keepalive_interval,
         timeout: config.keepalive_timeout,

@@ -192,9 +192,10 @@ async fn expresslane_key_rotation(conn: Weak<Connection>) {
 
     loop {
         tokio::time::sleep(EXPRESSLANE_REFRESH_KEYS).await;
-        if let Some(conn) = conn.upgrade()
-            && matches!(conn.state(), State::Online)
-        {
+        let Some(conn) = conn.upgrade() else {
+            break;
+        };
+        if matches!(conn.state(), State::Online) {
             let _ = conn.rotate_expresslane_key();
         };
     }
@@ -274,7 +275,9 @@ fn new_connection(
 
     tokio::spawn(handle_events(event_stream, Arc::downgrade(&conn)));
     tokio::spawn(handle_stale(Arc::downgrade(&conn)));
-    tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    if conn.connection_type().is_datagram() {
+        tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
+    }
 
     if let Some((encoded_pkt_receiver, decoded_pkt_receiver)) = pkt_receivers {
         tokio::spawn(handle_encoded_pkt_send(
