@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-build, nix-clippy, windows-build]
+    needs: [earthly, e2e, coverage, nix-build, nix-tests, windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -225,27 +225,23 @@ jobs:
             os: macos-15-intel
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: nix flake check
-
-      - name: Run cargo tests
-        run: nix develop --command cargo test
-
-      - name: Run cargo tests with kyber_only feature
-        run: nix develop --command cargo test --features kyber_only
-
-      - name: Run privileged tests (macOS only)
-        if: matrix.os == 'macos-latest'
-        run: sudo nix develop --command cargo test test_privileged -- --ignored
+          use-flakehub: false
 
       - run: mkdir -p build/
 
       - name: Build lightway client on MSRV version
+        if: matrix.os == 'ubuntu-latest'
         run: nix build .#lightway-client-msrv
 
       - name: Build lightway server on MSRV version
+        if: matrix.os == 'ubuntu-latest'
         run: nix build .#lightway-server-msrv
 
       - name: Build lightway client
@@ -268,22 +264,38 @@ jobs:
           name: lightway-server-${{ matrix.target }}
           path: result-server/bin/lightway-server
 
-  nix-clippy:
-    name: Nix Clippy (${{ matrix.os }})
+  nix-tests:
+    name: Nix tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          use-flakehub: false
+
       - run: nix flake check
 
       - name: Run clippy
         run: nix develop --command cargo make clippy
+
+      - name: Run cargo tests
+        run: nix develop --command cargo test
+
+      - name: Run cargo tests with kyber_only feature
+        run: nix develop --command cargo test --features kyber_only
+
+      - name: Run privileged tests (macOS only)
+        if: matrix.os == 'macos-latest'
+        run: sudo nix develop --command cargo test test_privileged -- --ignored
 
   windows-build:
     name: Windows Build
