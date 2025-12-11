@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{trace, warn};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
@@ -387,6 +387,7 @@ impl RouteManagerInner {
                 route, e
             );
         }
+        trace!("Inner route manager cleaned up");
     }
 
     async fn install_routes(&mut self) -> Result<(), RoutingTableError> {
