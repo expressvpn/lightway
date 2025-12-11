@@ -190,6 +190,12 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                             tracing::info!("sending keepalives because of {:?}", msg);
                             state = State::Needed;
                         }
+                        // Reset timeout to make sure we start again
+                        // When there is a network interruption, mobile clients may send
+                        // suspend to avoid keepalive dropping the connection.
+                        // Once the connection comes back up, it sends NetworkChange to
+                        // trigger connection floating incase needed.
+                        timeout.as_mut().set(None.into())
                     },
                     Message::TracerDeltaExceeded => {
                         // Do not trigger keepalive if it is suspended or waiting for reply
