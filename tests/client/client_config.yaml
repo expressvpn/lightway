@@ -16,8 +16,9 @@ enable_pqc: false
 enable_tun_iouring: false
 # iouring_sqpoll_idle_time: 100ms
 iouring_entry_count: 1024
-keepalive_interval: 0s
-keepalive_timeout: 0s
+keepalive_interval: 10s
+keepalive_timeout: 30s
+keepalive_continuous: true
 enable_expresslane: false
 enable_pmtud: false
 # sndbuf: 1.5 MiB

@@ -1,5 +1,5 @@
 //! Keepalive processing
-use futures::future::OptionFuture;
+use futures::{FutureExt, future::FusedFuture, future::OptionFuture};
 use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -8,9 +8,6 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::ConnectionState;
-
-// Number of consecutive keepalive timeouts before disconnecting.
-const FAILED_KEEPALIVE_THRESHOLD: usize = 3;
 
 pub trait Connection: Send {
     fn keepalive(&self) -> lightway_core::ConnectionResult<()>;
@@ -27,8 +24,6 @@ impl<T: Send + Sync> Connection for Weak<Mutex<lightway_core::Connection<Connect
 }
 
 pub trait SleepManager: Send {
-    fn interval_is_zero(&self) -> bool;
-    fn timeout_is_zero(&self) -> bool;
     fn sleep_for_interval(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn sleep_for_timeout(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn continuous(&self) -> bool;
@@ -43,14 +38,6 @@ pub struct Config {
 }
 
 impl SleepManager for Config {
-    fn interval_is_zero(&self) -> bool {
-        self.interval.is_zero()
-    }
-
-    fn timeout_is_zero(&self) -> bool {
-        self.timeout.is_zero()
-    }
-
     async fn sleep_for_interval(&self) {
         tokio::time::sleep(self.interval).await
     }
@@ -81,7 +68,7 @@ pub enum KeepaliveResult {
 
 #[derive(Clone)]
 pub struct Keepalive {
-    tx: Option<mpsc::Sender<Message>>,
+    tx: mpsc::Sender<Message>,
     _cancellation: Arc<DropGuard>,
 }
 
@@ -93,22 +80,12 @@ impl Keepalive {
     ) -> (Self, OptionFuture<JoinHandle<KeepaliveResult>>) {
         let cancel = CancellationToken::new();
 
-        if config.interval_is_zero() {
-            return (
-                Self {
-                    tx: None,
-                    _cancellation: Arc::new(cancel.drop_guard()),
-                },
-                None.into(),
-            );
-        }
-
         let (tx, rx) = mpsc::channel(1024);
         let task = tokio::spawn(keepalive(config, conn, rx, cancel.clone()));
         let cancel = Arc::new(cancel.drop_guard());
         (
             Self {
-                tx: Some(tx),
+                tx,
                 _cancellation: cancel,
             },
             Some(task).into(),
@@ -117,48 +94,36 @@ impl Keepalive {
 
     /// Signal that the connection is now online
     pub async fn online(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Online).await;
-        }
+        let _ = self.tx.send(Message::Online).await;
     }
 
     /// Signal that outside activity was observed
     pub async fn outside_activity(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Message::OutsideActivity);
-        }
+        let _ = self.tx.try_send(Message::OutsideActivity);
     }
 
     /// Signal that a pong was received
     pub async fn reply_received(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::ReplyReceived).await;
-        }
+        let _ = self.tx.send(Message::ReplyReceived).await;
     }
 
     /// Signal that the network has changed.
     /// In the case we are offline, this will start the keepalives immediately
     /// Otherwise this will reset our timeouts
     pub async fn network_changed(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::NetworkChange).await;
-        }
+        let _ = self.tx.send(Message::NetworkChange).await;
     }
 
     /// Signal that we haven't heard from server in a while
     /// This will trigger a keepalive immediately if keepalive is not suspended.
     pub async fn tracer_delta_exceeded(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::TracerDeltaExceeded).await;
-        }
+        let _ = self.tx.send(Message::TracerDeltaExceeded).await;
     }
 
     /// Signal to suspend keepalives.
     /// Suspends the sleep interval timer if it's active.
     pub async fn suspend(&self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Suspend).await;
-        }
+        let _ = self.tx.send(Message::Suspend).await;
     }
 }
 
@@ -188,9 +153,6 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
     let timeout: OptionFuture<_> = None.into();
     tokio::pin!(timeout);
 
-    // Number of consecutive keepalive timeouts observed
-    let mut failed_keepalives: usize = 0;
-
     loop {
         tokio::select! {
             _ = token.cancelled() => {
@@ -211,13 +173,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         // this branch of the select we have achieved
                         // the aim of not sending keepalives if there
                         // is active traffic.
-                        //
-                        // On the other hand the timeout timer is not
-                        // restarted, if a ping has been sent then a
-                        // pong is required even in the presence of
-                        // other outside traffic. This helps to catch
-                        // connectivity issues even if traffic is
-                        // flowing only in one direction.
+                        timeout.as_mut().set(None.into());
                         continue
                     },
                     Message::ReplyReceived => {
@@ -227,8 +183,6 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                             tracing::info!("reply received turning off network change keepalives");
                             State::Inactive
                         };
-                        // Reset failure counter on successful reply
-                        failed_keepalives = 0;
                         timeout.as_mut().set(None.into())
                     },
                     Message::NetworkChange => {
@@ -236,8 +190,12 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                             tracing::info!("sending keepalives because of {:?}", msg);
                             state = State::Needed;
                         }
-                        // Reset failure counter on new interface
-                        failed_keepalives = 0;
+                        // Reset timeout to make sure we start again
+                        // When there is a network interruption, mobile clients may send
+                        // suspend to avoid keepalive dropping the connection.
+                        // Once the connection comes back up, it sends NetworkChange to
+                        // trigger connection floating incase needed.
+                        timeout.as_mut().set(None.into())
                     },
                     Message::TracerDeltaExceeded => {
                         // Do not trigger keepalive if it is suspended or waiting for reply
@@ -248,12 +206,9 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                     }
                     Message::Suspend => {
                         // Suspend keepalives whenever the timer is active
-                        if !matches!(state, State::Suspended) {
-                            tracing::info!("suspending keepalives");
-                            state = State::Suspended;
-                            failed_keepalives = 0;
-                            timeout.as_mut().set(None.into())
-                        }
+                        tracing::info!("suspending keepalives");
+                        state = State::Suspended;
+                        timeout.as_mut().set(None.into())
                     },
                 }
             }
@@ -263,8 +218,8 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
                 state = State::Pending;
-                if !config.timeout_is_zero() {
-                    let fut = config.sleep_for_timeout();
+                if timeout.is_terminated() {
+                    let fut = config.sleep_for_timeout().fuse();
                     timeout.as_mut().set(Some(fut).into());
                 }
             }
@@ -273,29 +228,19 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                 if let Err(e) = conn.keepalive() {
                     tracing::error!("Send Keepalive failed: {e:?}");
                 }
-                if matches!(state, State::Waiting) && !config.timeout_is_zero() {
-                    state = State::Pending;
-                    let fut = config.sleep_for_timeout();
+                state = State::Pending;
+                if timeout.is_terminated() {
+                    let fut = config.sleep_for_timeout().fuse();
                     timeout.as_mut().set(Some(fut).into());
                 }
             }
 
-            // Note that `timeout` is `Some` only when state ==
-            // `State::Pending` and `config.timeout` is non-zero and
-            // evaluates to `None` otherwise.
+            // Note that `timeout` is `Some` only when state == `State::Pending`
+            // Evaluates to `None` otherwise.
             Some(_) = timeout.as_mut() => {
-                // Keepalive timed out: increment failure counter
-                failed_keepalives = failed_keepalives.saturating_add(1);
-                tracing::info!("keepalive timed out (consecutive timeouts = {failed_keepalives})");
-
-                if failed_keepalives >= FAILED_KEEPALIVE_THRESHOLD {
-                    tracing::info!("keepalive failure threshold exceeded; disconnecting");
-                    return KeepaliveResult::Timedout;
-                }
-
-                // Immediately attempt another keepalive
-                state = State::Needed;
-                timeout.as_mut().set(None.into());
+                tracing::warn!("keepalive timed out");
+                // Return will exit the client
+                return KeepaliveResult::Timedout;
             }
         }
     }
@@ -365,14 +310,6 @@ mod tests {
     }
 
     impl SleepManager for MockSleepManager {
-        fn interval_is_zero(&self) -> bool {
-            self.interval.is_zero()
-        }
-
-        fn timeout_is_zero(&self) -> bool {
-            self.timeout.is_zero()
-        }
-
         async fn sleep_for_interval(&self) {
             if self.interval.is_zero() {
                 return;
@@ -426,16 +363,6 @@ mod tests {
             }
         }
 
-        fn interval(mut self, interval: Duration) -> Self {
-            self.interval = interval;
-            self
-        }
-
-        fn timeout(mut self, timeout: Duration) -> Self {
-            self.timeout = timeout;
-            self
-        }
-
         fn continuous(mut self, continuous: bool) -> Self {
             self.continuous = continuous;
             self
@@ -446,25 +373,6 @@ mod tests {
             let connection = MockConnection::new();
             (sleep_manager, connection)
         }
-    }
-
-    #[tokio::test]
-    async fn disabled_keepalive_does_nothing() {
-        let (sleep_manager, connection) =
-            KeepaliveTestBuilder::new().interval(Duration::ZERO).build();
-
-        let (keepalive, task) = Keepalive::new(sleep_manager, connection.clone());
-
-        // Send all possible messages
-        keepalive.online().await;
-        keepalive.outside_activity().await;
-        keepalive.reply_received().await;
-        keepalive.network_changed().await;
-        keepalive.suspend().await;
-
-        // Task should be None (not started)
-        assert!(task.await.is_none());
-        assert_eq!(connection.keepalive_count(), 0);
     }
 
     #[test_case(true, 1; "continuous")]
@@ -542,59 +450,10 @@ mod tests {
         start_keepalives(&keepalive, &sleep_manager, continuous).await;
         assert_eq!(connection.keepalive_count(), 1);
 
-        // Trigger timeouts up to the failure threshold
-        // Trigger FAILED_KEEPALIVE_THRESHOLD - 1 timeouts to cause immediate resends
-        for _ in 0..(FAILED_KEEPALIVE_THRESHOLD - 1) {
-            sleep_manager.trigger_timeout();
-            // give the task a moment to process and resend
-            sleep(Duration::from_millis(10)).await;
-        }
-
-        // At this point, we should have sent FAILED_KEEPALIVE_THRESHOLD total keepalives
-        assert_eq!(connection.keepalive_count(), FAILED_KEEPALIVE_THRESHOLD);
-
-        // Final timeout should exceed the threshold and terminate the task
         sleep_manager.trigger_timeout();
 
         let result = task.await.unwrap().unwrap();
         assert!(matches!(result, KeepaliveResult::Timedout));
-    }
-
-    #[test_case(true; "continuous")]
-    #[test_case(false; "non-continuous")]
-    #[tokio::test]
-    async fn network_change_resets_failed_keepalive(continuous: bool) {
-        let (sleep_manager, connection) =
-            KeepaliveTestBuilder::new().continuous(continuous).build();
-
-        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
-
-        start_keepalives(&keepalive, &sleep_manager, continuous).await;
-        assert_eq!(connection.keepalive_count(), 1);
-
-        // Trigger timeouts up to the failure threshold
-        // Trigger FAILED_KEEPALIVE_THRESHOLD - 1 timeouts to cause immediate resends
-        for _ in 0..(FAILED_KEEPALIVE_THRESHOLD - 1) {
-            sleep_manager.trigger_timeout();
-            // give the task a moment to process and resend
-            sleep(Duration::from_millis(10)).await;
-        }
-
-        // At this point, we should have sent FAILED_KEEPALIVE_THRESHOLD total keepalives
-        assert_eq!(connection.keepalive_count(), FAILED_KEEPALIVE_THRESHOLD);
-
-        // Network change here should reset failed keepalive counter
-        keepalive.network_changed().await;
-        sleep(Duration::from_millis(10)).await;
-
-        // New timeout and it should just send a new keepalive since the counter got reset
-        sleep_manager.trigger_timeout();
-        sleep(Duration::from_millis(10)).await;
-        assert_eq!(connection.keepalive_count(), FAILED_KEEPALIVE_THRESHOLD + 1);
-
-        drop(keepalive);
-        let result = task.await.unwrap().unwrap();
-        assert!(matches!(result, KeepaliveResult::Cancelled));
     }
 
     #[test_case(true, 2; "continuous")]
@@ -723,31 +582,6 @@ mod tests {
 
         // Resume with the appropriate trigger based on mode
         start_keepalives(&keepalive, &sleep_manager, continuous).await;
-
-        assert_eq!(connection.keepalive_count(), 2);
-
-        drop(keepalive);
-        let result = task.await.unwrap().unwrap();
-        assert!(matches!(result, KeepaliveResult::Cancelled));
-    }
-
-    #[test_case(true; "continuous")]
-    #[test_case(false; "non-continuous")]
-    #[tokio::test]
-    async fn zero_timeout_disables_timeout(continuous: bool) {
-        let (sleep_manager, connection) = KeepaliveTestBuilder::new()
-            .continuous(continuous)
-            .timeout(Duration::ZERO)
-            .build();
-
-        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
-
-        start_keepalives(&keepalive, &sleep_manager, continuous).await;
-        assert_eq!(connection.keepalive_count(), 1);
-
-        // Continue sending keepalives without timeout
-        sleep_manager.trigger_interval();
-        sleep(Duration::from_millis(10)).await;
 
         assert_eq!(connection.keepalive_count(), 2);
 
