@@ -604,7 +604,7 @@ mod test_frame {
 
     #[test_case(Frame::NoOp => FrameKind::NoOp)]
     #[test_case(Frame::Ping(Ping{ id: 0, payload: Default::default() }) => FrameKind::Ping)]
-    #[test_case(Frame::Pong(Pong{ id: 0 }) => FrameKind::Pong)]
+    #[test_case(Frame::Pong(Pong{ id: 0, payload: Default::default() }) => FrameKind::Pong)]
     #[test_case(Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::UserPass{ user: Default::default(), password: Default::default() }}) => FrameKind::AuthRequest)]
     #[test_case(Frame::Data(Data{ data: Cow::Owned(BytesMut::new()) }) => FrameKind::Data)]
     #[test_case(Frame::AuthSuccessWithConfigV4(AuthSuccessWithConfigV4{ local_ip: Default::default(), peer_ip: Default::default(), dns_ip: Default::default(), mtu: Default::default(), session: SessionId::EMPTY }) => FrameKind::AuthSuccessWithConfigV4)]
@@ -620,7 +620,7 @@ mod test_frame {
 
     #[test_case(Frame::NoOp => vec![0x01]; "noop")]
     #[test_case(Frame::Ping(Ping{ id: 0xf00b, payload: Default::default()}) => vec![0x2, 0xf0, 0x0b, 0x00, 0x00]; "ping")]
-    #[test_case(Frame::Pong(Pong{ id: 0xabcd }) => vec![0x3, 0xab, 0xcd, 0x00, 0x00]; "pong")]
+    #[test_case(Frame::Pong(Pong{ id: 0xabcd, payload: Default::default() }) => vec![0x3, 0xab, 0xcd, 0x00, 0x00]; "pong")]
     #[test_case(Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::UserPass{ user: "me".to_string(), password: "secret".to_string() }}) => b"\x04\x01\x02\x06me\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00secret\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(); "auth request userpass")]
     #[test_case(Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::Token{ token: "token".to_string() }}) => b"\x04\x02\x00\x05token".to_vec(); "auth request token")]
     #[test_case(Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::CustomCallback{ data: Bytes::from_static(&[1, 2, 3, 4]) }}) => vec![0x4, 23, 0x00, 0x04, 1, 2, 3, 4]; "auth request custom callback")]
@@ -640,7 +640,7 @@ mod test_frame {
 
     #[test_case(&[0x01] => Frame::NoOp; "noop")]
     #[test_case(&[0x2, 0xf0, 0x0b, 0x00, 0x00] => Frame::Ping(Ping{ id: 0xf00b, payload: Default::default() }); "ping")]
-    #[test_case(&[0x3, 0xab, 0xcd, 0x00, 0x00] => Frame::Pong(Pong{ id: 0xabcd }); "pong")]
+    #[test_case(&[0x3, 0xab, 0xcd, 0x00, 0x00] => Frame::Pong(Pong{ id: 0xabcd, payload: Default::default() }); "pong")]
     #[test_case(b"\x04\x01\x02\x06me\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00secret\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" => Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::UserPass{ user: "me".to_string(), password: "secret".to_string() }}); "auth request user pass")]
     #[test_case(b"\x04\x02\x00\x05token" => Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::Token{ token: "token".to_string() }}); "auth request token")]
     #[test_case(&[0x4, 23, 0x00, 0x04, 1, 2, 3, 4] => Frame::AuthRequest(AuthRequest{ auth_method: auth_request::AuthMethod::CustomCallback{ data: Bytes::from_static(&[1, 2, 3, 4]) }}); "auth request custom callback")]

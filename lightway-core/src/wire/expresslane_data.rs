@@ -51,6 +51,10 @@ use super::{FromWireError, FromWireResult, SessionId, expresslane_config::Expres
 #[derive(PartialEq, Debug, Clone, Copy, Default)]
 pub struct ExpresslaneKey(pub [u8; EXPRESSLANE_KEY_SIZE]);
 
+impl ExpresslaneKey {
+    pub const INVALID: Self = ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]);
+}
+
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
 
 impl rand::distr::Distribution<ExpresslaneKey> for rand::distr::StandardUniform {
@@ -111,6 +115,8 @@ struct ReplayWindow {
     /// Bitmap tracking received packets within the window
     /// Bit N represents counter (max_counter - N)
     bitmap: u64,
+    /// Total number of packets successfully received
+    packets_received: u64,
 }
 
 impl ReplayWindow {
@@ -126,6 +132,7 @@ impl ReplayWindow {
         if self.max_counter == 0 && self.bitmap == 0 {
             self.max_counter = wire_counter;
             self.bitmap = 1; // Mark bit 0 as received
+            self.packets_received += 1;
             return true;
         }
 
@@ -144,6 +151,7 @@ impl ReplayWindow {
             // Mark current position as received
             self.bitmap |= 1;
             self.max_counter = wire_counter;
+            self.packets_received += 1;
             return true;
         }
 
@@ -159,6 +167,7 @@ impl ReplayWindow {
 
             // Mark as received
             self.bitmap |= bit_mask;
+            self.packets_received += 1;
             return true;
         }
 
@@ -185,6 +194,11 @@ pub(crate) struct ExpresslaneData {
     // prev key
     next_self: Option<ExpresslaneDataCipher>,
     prev_peer: Option<ExpresslaneDataCipher>,
+    // Snapshot tracking for expresslane health monitoring
+    /// Packets sent at the time of last keepalive exchange
+    pub(crate) last_snapshot_sent: u64,
+    /// Packets received at the time of last keepalive exchange
+    pub(crate) last_snapshot_recv: u64,
 }
 
 impl Debug for ExpresslaneData {
@@ -218,6 +232,16 @@ impl ExpresslaneData {
             .as_ref()
             .map(|a| a.key)
             .unwrap_or_default()
+    }
+
+    /// Get the total number of packets sent via expresslane
+    pub(crate) fn packets_sent(&self) -> u64 {
+        self.wire_counter
+    }
+
+    /// Get the total number of packets received via expresslane
+    pub(crate) fn packets_received(&self) -> u64 {
+        self.replay_window.packets_received
     }
 
     pub(crate) fn update_next_self_key(&mut self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
@@ -590,6 +614,7 @@ mod tests {
         let mut window = ReplayWindow::default();
         assert!(window.check_and_update(100));
         assert_eq!(window.max_counter, 100);
+        assert_eq!(window.packets_received, 1);
     }
 
     #[test]
@@ -598,6 +623,7 @@ mod tests {
         assert!(window.check_and_update(100));
         // Replaying the same counter should be rejected
         assert!(!window.check_and_update(100));
+        assert_eq!(window.packets_received, 1);
     }
 
     #[test]
@@ -607,6 +633,7 @@ mod tests {
         assert!(window.check_and_update(101));
         assert!(window.check_and_update(102));
         assert_eq!(window.max_counter, 102);
+        assert_eq!(window.packets_received, 3);
     }
 
     #[test]
@@ -617,6 +644,7 @@ mod tests {
         assert!(window.check_and_update(103)); // Out of order, but within window
         assert!(window.check_and_update(102)); // Out of order, but within window
         assert_eq!(window.max_counter, 105);
+        assert_eq!(window.packets_received, 4);
     }
 
     #[test]
@@ -627,6 +655,7 @@ mod tests {
         assert!(window.check_and_update(103));
         // Replaying 103 should be rejected
         assert!(!window.check_and_update(103));
+        assert_eq!(window.packets_received, 3);
     }
 
     #[test]
@@ -639,6 +668,7 @@ mod tests {
         assert!(!window.check_and_update(135));
         // But packets within window should work
         assert!(window.check_and_update(137));
+        assert_eq!(window.packets_received, 3);
     }
 
     #[test]
@@ -650,6 +680,7 @@ mod tests {
         assert_eq!(window.max_counter, 200);
         // Old packets should be rejected
         assert!(!window.check_and_update(100));
+        assert_eq!(window.packets_received, 2);
     }
 
     #[test]
@@ -676,6 +707,9 @@ mod tests {
         // Continue with new packets
         assert!(window.check_and_update(16));
         assert!(window.check_and_update(17));
+
+        // Verify total packets received: 10 + 5 + 2 = 17
+        assert_eq!(window.packets_received, 17);
     }
 
     #[test]

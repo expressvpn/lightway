@@ -455,7 +455,7 @@ impl<AppState> Dplpmtud<AppState> {
     /// Called in response to receipt of a [`wire::Pong`] frame
     pub(crate) fn pong_received(&mut self, pong: &wire::Pong, state: &mut AppState) -> Action {
         // We never use id == 0, those are regular keepalive pings
-        if pong.id == 0 {
+        if pong.id == wire::Ping::KEEPALIVE_ID {
             return Action::None;
         }
 
@@ -630,6 +630,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -689,6 +690,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: completed_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -706,6 +708,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -828,6 +831,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -881,6 +885,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: completed_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -897,6 +902,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -923,7 +929,13 @@ mod tests {
         // online, 1st base probe sent and succeeds
         pmtud.online(&mut ());
         let id = pmtud.pending_probe.as_ref().unwrap().id;
-        let action = pmtud.pong_received(&wire::Pong { id: id.as_u16() }, &mut ());
+        let action = pmtud.pong_received(
+            &wire::Pong {
+                id: id.as_u16(),
+                payload: Default::default(),
+            },
+            &mut (),
+        );
 
         assert!(matches!(pmtud.state, State::Searching));
         (action, pmtud)
@@ -979,6 +991,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1041,6 +1054,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: completed_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1058,6 +1072,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: expected_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1101,6 +1116,7 @@ mod tests {
                 pmtud.pong_received(
                     &wire::Pong {
                         id: pending.id.as_u16(),
+                        payload: Default::default(),
                     },
                     &mut (),
                 )
@@ -1143,6 +1159,7 @@ mod tests {
         pmtud.pong_received(
             &wire::Pong {
                 id: pending.id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1190,6 +1207,7 @@ mod tests {
         let mut action = pmtud.pong_received(
             &wire::Pong {
                 id: pending.id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1211,6 +1229,7 @@ mod tests {
                 pmtud.pong_received(
                     &wire::Pong {
                         id: pending.id.as_u16(),
+                        payload: Default::default(),
                     },
                     &mut (),
                 )
@@ -1262,6 +1281,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: first_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1274,6 +1294,7 @@ mod tests {
         let action = pmtud.pong_received(
             &wire::Pong {
                 id: second_id.as_u16(),
+                payload: Default::default(),
             },
             &mut (),
         );
@@ -1397,6 +1418,7 @@ mod tests {
             pmtud.pong_received(
                 &wire::Pong {
                     id: pending.id.as_u16(),
+                    payload: Default::default(),
                 },
                 &mut (),
             );

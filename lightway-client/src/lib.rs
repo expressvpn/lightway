@@ -396,6 +396,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             .tracer_trigger_timeout
             .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
     };
+    let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
     loop {
         let mut buf = match inside_io.recv_buf().await {
             IOCallbackResult::Ok(buf) => buf,
@@ -406,7 +407,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
-        let duration_since_last_outside_data = {
+        let last_outside_data_received = {
             let mut conn = conn.lock().unwrap();
 
             // Update source IP address to server assigned IP address
@@ -424,10 +425,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
 
             match conn.inside_data_received(&mut buf) {
-                Ok(()) => {
-                    let now = Instant::now();
-                    now.duration_since(conn.activity().last_outside_data_received)
-                }
+                Ok(()) => conn.activity().last_outside_data_received,
                 Err(ConnectionError::PluginDropWithReply(reply)) => {
                     // Send the reply packet to inside path
                     let _ = inside_io.try_send(reply, ip_config);
@@ -448,10 +446,17 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
+        let now = Instant::now();
+        let duration_since_last_outside_data = now.duration_since(last_outside_data_received);
+
         if !tracer_trigger_timeout.is_zero()
             && duration_since_last_outside_data > tracer_trigger_timeout
+            && tracer_timeout_last_outside_data_rcvd.is_none_or(|x| x != last_outside_data_received)
         {
-            keepalive.tracer_delta_exceeded().await;
+            {
+                tracer_timeout_last_outside_data_rcvd = Some(last_outside_data_received);
+                keepalive.tracer_delta_exceeded().await;
+            }
         }
     }
 }

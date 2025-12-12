@@ -228,7 +228,7 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
         connection_ticker_cb,
     )
     .unwrap()
-    .with_minimum_protocol_version(Version::MAXIMUM)
+    .with_minimum_protocol_version(Version::MINIMUM)
     .unwrap()
     .with_maximum_protocol_version(Version::MAXIMUM)
     .unwrap()
@@ -237,9 +237,14 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
     .unwrap();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
+    // Use Version(1, 2) to match default client version (when expresslane is not enabled)
+    // This mirrors the real server which reads version from client packet header
     let conn = Arc::new(Mutex::new(
         server_ctx
-            .start_accept(Version::MAXIMUM, sock.clone().into_io_send_callback())
+            .start_accept(
+                Version::try_new(1, 2).unwrap(),
+                sock.clone().into_io_send_callback(),
+            )
             .unwrap()
             .with_inside_pkt_codec(packet_codec)
             .accept(ticker)
