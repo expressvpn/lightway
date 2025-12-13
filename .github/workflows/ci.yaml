@@ -211,7 +211,7 @@ jobs:
         run: exit 1
 
   nix-build:
-    name: Nix Build (${{ matrix.os }})
+    name: Nix Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -219,10 +219,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            package_client: lightway-client
+            package_server: lightway-server
+            build_msrv: true
           - target: aarch64-apple-darwin
             os: macos-latest
+            package_client: lightway-client
+            package_server: lightway-server
+            build_msrv: false
+          # Cross-compile x86_64 Darwin from Apple Silicon (much faster than Intel Mac)
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
+            package_client: lightway-client-x86_64-darwin
+            package_server: lightway-server-x86_64-darwin
+            build_msrv: false
     steps:
       - uses: actions/checkout@v4
 
@@ -237,28 +247,28 @@ jobs:
       - run: mkdir -p build/
 
       - name: Build lightway client on MSRV version
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.build_msrv
         run: nix build .#lightway-client-msrv
 
       - name: Build lightway server on MSRV version
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.build_msrv
         run: nix build .#lightway-server-msrv
 
       - name: Build lightway client
-        run: nix build .#lightway-client -o result-client
+        run: nix build .#${{ matrix.package_client }} -o result-client
 
       - name: Build lightway server
-        run: nix build .#lightway-server -o result-server
+        run: nix build .#${{ matrix.package_server }} -o result-server
 
       - name: Upload lightway-client artifact
-        if: matrix.os == 'macos-latest' || matrix.os == 'macos-15-intel'
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
         uses: actions/upload-artifact@v4
         with:
           name: lightway-client-${{ matrix.target }}
           path: result-client/bin/lightway-client
 
       - name: Upload lightway-server artifact
-        if: matrix.os == 'macos-latest' || matrix.os == 'macos-15-intel'
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
         uses: actions/upload-artifact@v4
         with:
           name: lightway-server-${{ matrix.target }}
@@ -270,7 +280,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, macos-15-intel]
+        os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
