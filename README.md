@@ -306,6 +306,8 @@ nix build .#lightway-server-aarch64-darwin-msrv
 
 #### Cross-Compilation Targets
 
+##### Linux Cross-Compilation
+
 All platforms can cross-compile to Linux targets. These use Rust target triple naming
 (e.g., `aarch64-unknown-linux-musl`):
 
@@ -317,6 +319,16 @@ nix build .#lightway-client-x86_64-linux-musl   # static musl
 # From any platform, build aarch64 Linux targets
 nix build .#lightway-client-aarch64-linux-gnu   # dynamic glibc
 nix build .#lightway-client-aarch64-linux-musl  # static musl
+```
+
+##### Darwin Cross-Compilation (aarch64-darwin only)
+
+Apple Silicon Macs can cross-compile to Intel Mac (x86_64-darwin):
+
+```bash
+# From Apple Silicon, build Intel Mac binaries
+nix build .#lightway-client-x86_64-darwin
+nix build .#lightway-server-x86_64-darwin
 ```
 
 **Use cases for cross-compilation:**

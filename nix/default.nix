@@ -91,12 +91,16 @@ rustPlatform.buildRustPackage {
   # aarch64 musl always produces PIE binaries with PT_INTERP section
   #
   # Note 2:
-  # For cross-compilation from macOS, disable lld and use gcc directly to
-  # avoid platform_version flags
+  # For cross-compilation from macOS to Linux, disable lld and use gcc/bfd directly
+  # to avoid platform_version flags. For Darwin-to-Darwin cross, just set the linker.
   RUSTFLAGS =
     lib.optionalString isStatic "-C target-feature=+crt-static -C link-arg=-static"
-    + lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system && !isStatic)
-      " -C linker=${stdenv.cc.targetPrefix}cc -C link-arg=-fuse-ld=bfd";
+    + lib.optionalString (
+      stdenv.hostPlatform.system != stdenv.buildPlatform.system && !isStatic && stdenv.hostPlatform.isLinux
+    ) " -C linker=${stdenv.cc.targetPrefix}cc -C link-arg=-fuse-ld=bfd"
+    + lib.optionalString (
+      stdenv.hostPlatform.system != stdenv.buildPlatform.system && !isStatic && stdenv.hostPlatform.isDarwin
+    ) " -C linker=${stdenv.cc.targetPrefix}cc";
 
   # Enable ARM crypto extensions
   env.NIX_CFLAGS_COMPILE =
