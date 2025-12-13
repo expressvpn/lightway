@@ -297,9 +297,6 @@ jobs:
       - name: Run clippy
         run: nix develop --command cargo make clippy
 
-      - name: Run cargo tests
-        run: nix develop --command cargo test
-
       - name: Run cargo tests with kyber_only feature
         run: nix develop --command cargo test --features kyber_only
 
