@@ -6,7 +6,7 @@ ARG --global debian = bookworm
 IMPORT github.com/earthly/lib/rust:a49d2a0f4028cd15666d19904f8fc5fbd0b9ba87 AS lib-rust
 
 install-build-dependencies:
-    FROM rust:1.91.1-$debian
+    FROM rust:1.92.0-$debian
     WORKDIR /lightway
     RUN dpkg --add-architecture arm64
     RUN apt-get update -qq
