@@ -3,7 +3,7 @@ use route_manager::{
     AsyncRouteListener, AsyncRouteManager, Route, RouteManager as SyncRouteManager,
 };
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::{trace, warn};
@@ -91,6 +91,24 @@ pub enum RoutingTableError {
     RoutingManagerError(std::io::Error),
     #[error("Server route already exists, try modifying it instead")]
     ServerRouteAlreadyExists,
+}
+
+/// Returns the host prefix length for an IP address
+/// (32 bits for IPv4, 128 bits for IPv6)
+fn host_prefix_len(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(_) => Ipv4Addr::BITS as u8,
+        IpAddr::V6(_) => Ipv6Addr::BITS as u8,
+    }
+}
+
+/// Checks if two IP addresses are from the same address family
+/// (both IPv4 or both IPv6)
+fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
+    matches!(
+        (ip1, ip2),
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+    )
 }
 
 pub struct RouteManager {
@@ -281,11 +299,10 @@ impl RouteManagerInner {
 
     /// Identifies route used to reach a particular ip
     fn find_route(&mut self, server_ip: &IpAddr) -> Result<Route, RoutingTableError> {
-        Ok(self
-            .route_manager
+        self.route_manager
             .find_route(server_ip)
             .map_err(RoutingTableError::DefaultInterfaceNotFound)?
-            .unwrap())
+            .ok_or(RoutingTableError::DefaultRouteNotFound)
     }
 
     /// Identifies default interface by finding the route to be used to access server_ip
@@ -403,7 +420,8 @@ impl RouteManagerInner {
 
         // Create server route with optional gateway - handles both direct routes (containers)
         // and routed networks (host systems with gateways)
-        let server_route = Route::new(server_ip, 32).with_if_index(default_interface_index);
+        let prefix = host_prefix_len(&server_ip);
+        let server_route = Route::new(server_ip, prefix).with_if_index(default_interface_index);
         let server_route = match default_interface_gateway {
             Some(gateway) => server_route.with_gateway(gateway),
             None => server_route,
@@ -418,7 +436,10 @@ impl RouteManagerInner {
             for (network, prefix) in LAN_NETWORKS {
                 let mut lan_route =
                     Route::new(network, prefix).with_if_index(default_interface_index);
-                if let Some(gw) = default_interface_gateway {
+                // Only use gateway if it matches the route's address family
+                if let Some(gw) = default_interface_gateway
+                    && same_ip_family(&network, &gw)
+                {
                     lan_route = lan_route.with_gateway(gw);
                 }
                 #[cfg(windows)]
@@ -440,7 +461,7 @@ impl RouteManagerInner {
         }
 
         // Add DNS route separately since it's not a constant
-        let dns_route = Route::new(self.tun_dns_ip, 32)
+        let dns_route = Route::new(self.tun_dns_ip, host_prefix_len(&self.tun_dns_ip))
             .with_gateway(self.tun_peer_ip)
             .with_if_index(self.tun_index);
         #[cfg(windows)]
@@ -503,10 +524,13 @@ impl RouteManagerInner {
                                    route_manager::RouteChange::Add(route)
                                    | route_manager::RouteChange::Delete(route)
                                    | route_manager::RouteChange::Change(route) => {
-                                       // skip Ipv6 route updates
-                                       if route.destination().is_ipv6() {
+                                       // Only process route updates that match server IP family
+                                       // If server is IPv4, only monitor IPv4 routes; if IPv6, only IPv6
+                                       if !same_ip_family(&self.server_ip, &route.destination()) {
+                                           // Different IP families - skip
                                            continue;
-                                       };
+                                       }
+
                                        // Update only the /0 prefix route i.e default route
                                        if route.prefix() != 0 {
                                            continue;
@@ -577,7 +601,8 @@ impl RouteManagerInner {
                 }
 
                 // Add new route with current gateway and interface
-                let mut new_server_route = Route::new(self.server_ip, 32);
+                let prefix = host_prefix_len(&self.server_ip);
+                let mut new_server_route = Route::new(self.server_ip, prefix);
                 if let Some(if_index) = current_if_index {
                     new_server_route = new_server_route.with_if_index(if_index);
                 }
@@ -606,15 +631,18 @@ impl Drop for RouteManagerInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use test_case::test_case;
     use tokio;
     use tun_rs::{AsyncDevice, DeviceBuilder};
 
-    const EXTERNAL_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    const EXTERNAL_IP_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    const EXTERNAL_IP_V6: IpAddr =
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888));
     const TEST_TARGET_IP1: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 1));
     const TEST_TARGET_IP2: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 2));
     const TEST_TARGET_IP3: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 3));
+
     const TUN_LOCAL_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 1));
     const TUN_PEER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 49, 0, 2));
     const TUN_DNS_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4));
@@ -625,12 +653,15 @@ mod tests {
     fn create_test_routes_with_gateway(
         route_manager: &mut RouteManagerInner,
     ) -> (Route, Route, Route, IpAddr) {
-        let default_route = route_manager.find_route(&EXTERNAL_IP).unwrap();
+        let default_route = route_manager.find_route(&EXTERNAL_IP_V4).unwrap();
         let gateway_ip = default_route.gateway().unwrap();
 
-        let route1 = Route::new(TEST_TARGET_IP1, 32).with_gateway(gateway_ip);
-        let route2 = Route::new(TEST_TARGET_IP2, 32).with_gateway(gateway_ip);
-        let route3 = Route::new(TEST_TARGET_IP3, 32).with_gateway(gateway_ip);
+        let route1 =
+            Route::new(TEST_TARGET_IP1, host_prefix_len(&TEST_TARGET_IP1)).with_gateway(gateway_ip);
+        let route2 =
+            Route::new(TEST_TARGET_IP2, host_prefix_len(&TEST_TARGET_IP2)).with_gateway(gateway_ip);
+        let route3 =
+            Route::new(TEST_TARGET_IP3, host_prefix_len(&TEST_TARGET_IP3)).with_gateway(gateway_ip);
 
         (route1, route2, route3, gateway_ip)
     }
@@ -647,11 +678,12 @@ mod tests {
     /// Returns tuple where RouteRestorer is dropped last for proper cleanup
     async fn create_test_setup(
         route_mode: RouteMode,
+        server_ip: IpAddr,
     ) -> Result<(RouteRestorer, AsyncDevice, RouteManagerInner), Box<dyn std::error::Error>> {
         // Capture initial state FIRST
         let restorer = RouteRestorer::new();
 
-        // Create TUN device
+        // Create TUN device (tunnel remains IPv4)
         let tun_device = DeviceBuilder::new()
             .ipv4(
                 match TUN_LOCAL_IP {
@@ -671,9 +703,51 @@ mod tests {
 
         let tun_index = tun_device.if_index()?;
 
+        // For IPv6 server testing, ensure a usable mock default IPv6 route exists
+        // This allows find_route to work even if the system doesn't have IPv6 configured
+        if server_ip.is_ipv6() {
+            let mut route_manager = SyncRouteManager::new()?;
+            let routes = route_manager.list()?;
+
+            // Check if any IPv6 default route exists with a non-link-local gateway
+            // Link-local gateways (fe80::/10) can't route global IPv6 traffic
+            let has_usable_ipv6_default = routes
+                .iter()
+                .filter(|r| r.destination().is_ipv6() && r.prefix() == 0)
+                .any(|r| {
+                    matches!(r.gateway(), Some(IpAddr::V6(gw))
+                        // Check if gateway is NOT link-local (fe80::/10)
+                        // Link-local addresses have first 10 bits as 1111111010
+                        if (gw.segments()[0] & 0xffc0) != 0xfe80)
+                });
+
+            if !has_usable_ipv6_default {
+                // Find loopback interface index
+                // Loopback is typically index 1 on most systems, but we'll search for it
+                let loopback_index = route_manager
+                    .list()?
+                    .iter()
+                    .find(|r| {
+                        // Look for loopback by finding route to ::1
+                        r.destination() == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                    })
+                    .and_then(|r| r.if_index())
+                    .unwrap_or(1); // Default to 1 if not found (standard loopback index)
+
+                // Add a mock IPv6 default route via loopback interface
+                // Use ::1 (IPv6 loopback) as the gateway
+                // This will be cleaned up by RouteRestorer
+                let mock_ipv6_default = Route::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+                    .with_if_index(loopback_index)
+                    .with_gateway(IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+                let _ = route_manager.add(&mock_ipv6_default);
+            }
+        }
+
         // Create RouteManagerInner directly for testing
         let route_manager =
-            RouteManagerInner::new(route_mode, EXTERNAL_IP, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
+            RouteManagerInner::new(route_mode, server_ip, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
 
         // Return tuple - RouteManagerInner will be dropped first, then TUN device, RouteRestorer last
         Ok((restorer, tun_device, route_manager))
@@ -737,7 +811,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_privileged_new_route_manager(route_mode: RouteMode) {
-        let (_restorer, _tun_device, route_manager) = create_test_setup(route_mode).await.unwrap();
+        let (_restorer, _tun_device, route_manager) =
+            create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
         assert_eq!(route_manager.routing_mode, route_mode);
         assert_eq!(route_manager.vpn_routes.len(), 0);
         assert_eq!(route_manager.lan_routes.len(), 0);
@@ -752,7 +827,7 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_privileged_cleanup_sync(route_mode: RouteMode) {
         let (_restorer, _tun_device, mut route_manager) =
-            create_test_setup(route_mode).await.unwrap();
+            create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
 
         // Get initial route count from the system
         let initial_count = route_manager.route_manager.list().unwrap().len();
@@ -800,7 +875,9 @@ mod tests {
     #[ignore = "May affect system routing"]
     async fn test_privileged_is_route_exists_error_real() {
         let (_restorer, _tun_device, mut route_manager) =
-            create_test_setup(RouteMode::Default).await.unwrap();
+            create_test_setup(RouteMode::Default, EXTERNAL_IP_V4)
+                .await
+                .unwrap();
 
         // Create test routes using shared fixtures
         let (route, _, _, _) = create_test_routes_with_gateway(&mut route_manager);
@@ -826,7 +903,9 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_privileged_add_single_route(add_method: RouteAddMethod) {
         let (_restorer, _tun_device, mut route_manager) =
-            create_test_setup(RouteMode::Default).await.unwrap();
+            create_test_setup(RouteMode::Default, EXTERNAL_IP_V4)
+                .await
+                .unwrap();
 
         // Create test route using shared fixtures
         let (route1, _route2, _route3, _gateway_ip) =
@@ -859,7 +938,7 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_privileged_initialize_route_manager(route_mode: RouteMode) {
         let (_restorer, _tun_device, mut route_manager) =
-            create_test_setup(route_mode).await.unwrap();
+            create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
 
         // Get tun_index from the route_manager (it's already set during creation)
         let tun_index = route_manager.tun_index;
@@ -874,7 +953,7 @@ mod tests {
         if [RouteMode::Default, RouteMode::Lan].contains(&route_mode) {
             let server_route_found = routes_after_init
                 .iter()
-                .any(|r| r.destination() == EXTERNAL_IP && r.prefix() == 32);
+                .any(|r| r.destination() == EXTERNAL_IP_V4 && r.prefix() == Ipv4Addr::BITS as u8);
             assert!(server_route_found);
 
             for (network, prefix) in TUNNEL_ROUTES {
@@ -890,7 +969,7 @@ mod tests {
 
             let dns_route_in_system = routes_after_init.iter().any(|r| {
                 r.destination() == TUN_DNS_IP
-                    && r.prefix() == 32
+                    && r.prefix() == Ipv4Addr::BITS as u8
                     && r.gateway() == Some(TUN_PEER_IP)
                     && r.if_index() == Some(tun_index)
             });
@@ -900,7 +979,7 @@ mod tests {
         // Verify LAN routes are present in system
         if route_mode == RouteMode::Lan {
             let (default_index, default_gateway) = route_manager
-                .find_default_interface_index_and_gateway(&EXTERNAL_IP)
+                .find_default_interface_index_and_gateway(&EXTERNAL_IP_V4)
                 .unwrap();
 
             for (network, prefix) in LAN_NETWORKS {
@@ -922,7 +1001,7 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_privileged_find_server_route(route_mode: RouteMode) {
         let (_restorer, _tun_device, mut route_manager) =
-            create_test_setup(route_mode).await.unwrap();
+            create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
 
         // Get tun_index from the route_manager (it's already set during creation)
         let tun_index = route_manager.tun_index;
@@ -960,7 +1039,7 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_route_manager_start_stop(route_mode: RouteMode) {
         let mut route_manager =
-            RouteManager::new(route_mode, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+            RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
 
         // Test that we can start the route manager
         let start_result = route_manager.start().await;
@@ -987,12 +1066,12 @@ mod tests {
     async fn test_route_manager_inner_structure(route_mode: RouteMode) {
         // Test that RouteManagerInner can be created directly
         let inner_result =
-            RouteManagerInner::new(route_mode, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP);
+            RouteManagerInner::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP);
         assert!(inner_result.is_ok());
 
         let inner = inner_result.unwrap();
         assert_eq!(inner.routing_mode, route_mode);
-        assert_eq!(inner.server_ip, EXTERNAL_IP);
+        assert_eq!(inner.server_ip, EXTERNAL_IP_V4);
         assert_eq!(inner.tun_index, 0);
         assert_eq!(inner.tun_peer_ip, TUN_PEER_IP);
         assert_eq!(inner.tun_dns_ip, TUN_DNS_IP);
@@ -1003,8 +1082,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_route_manager_double_start_error() {
-        let mut route_manager =
-            RouteManager::new(RouteMode::NoExec, EXTERNAL_IP, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+        let mut route_manager = RouteManager::new(
+            RouteMode::NoExec,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        )
+        .unwrap();
 
         // First start should succeed
         assert!(route_manager.start().await.is_ok());
@@ -1023,7 +1108,9 @@ mod tests {
     #[ignore = "Requires network privileges and may affect system routing"]
     async fn test_privileged_route_monitoring_server_route_update() {
         let (_restorer, _tun_device, mut inner) =
-            create_test_setup(RouteMode::Default).await.unwrap();
+            create_test_setup(RouteMode::Default, EXTERNAL_IP_V4)
+                .await
+                .unwrap();
 
         // Install initial routes
         inner.install_routes().await.unwrap();
@@ -1049,13 +1136,128 @@ mod tests {
     #[tokio::test]
     async fn test_route_manager_start_with_noexec_mode() {
         // Don't create TUN device for NoExec mode, just test RouteManagerInner directly
-        let inner =
-            RouteManagerInner::new(RouteMode::NoExec, EXTERNAL_IP, 1, TUN_PEER_IP, TUN_DNS_IP)
-                .unwrap();
+        let inner = RouteManagerInner::new(
+            RouteMode::NoExec,
+            EXTERNAL_IP_V4,
+            1,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        )
+        .unwrap();
 
         // NoExec mode should return None (no monitoring task)
         let monitor_task = inner.start().await;
         assert!(monitor_task.is_ok());
         assert!(monitor_task.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_server_route_manager_creation() {
+        // Test that RouteManagerInner can be created with IPv6 server
+        let inner = RouteManagerInner::new(
+            RouteMode::Default,
+            EXTERNAL_IP_V6,
+            1,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        );
+        assert!(inner.is_ok());
+
+        let inner = inner.unwrap();
+        assert_eq!(inner.server_ip, EXTERNAL_IP_V6);
+        assert!(inner.server_ip.is_ipv6());
+    }
+
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::NoExec)]
+    #[tokio::test]
+    #[serial_test::serial(route_manager)]
+    #[ignore = "Requires IPv6 routing support in test environment"]
+    async fn test_privileged_ipv6_server_initialize_route_manager(route_mode: RouteMode) {
+        let (_restorer, _tun_device, mut route_manager) =
+            create_test_setup(route_mode, EXTERNAL_IP_V6).await.unwrap();
+
+        // Get tun_index from the route_manager (it's already set during creation)
+        let tun_index = route_manager.tun_index;
+
+        // Test install routes using IPv6 server
+        route_manager.install_routes().await.unwrap();
+
+        // Get system routes after initialization
+        let routes_after_init = route_manager.route_manager.list().unwrap();
+
+        // Verify routes are present in system
+        if [RouteMode::Default, RouteMode::Lan].contains(&route_mode) {
+            // Server route should use /128 prefix for IPv6
+            let server_route_found = routes_after_init
+                .iter()
+                .any(|r| r.destination() == EXTERNAL_IP_V6 && r.prefix() == Ipv6Addr::BITS as u8);
+            assert!(
+                server_route_found,
+                "IPv6 server route with /128 prefix not found"
+            );
+
+            // Tunnel routes remain IPv4
+            for (network, prefix) in TUNNEL_ROUTES {
+                let route_in_system = routes_after_init.iter().any(|r| {
+                    r.destination() == network
+                        && r.prefix() == prefix
+                        && r.gateway() == Some(TUN_PEER_IP)
+                        && r.if_index() == Some(tun_index)
+                });
+                assert!(
+                    route_in_system,
+                    "IPv4 tunnel route not found for {:?}",
+                    network
+                );
+            }
+
+            // DNS route remains IPv4
+            let dns_route_in_system = routes_after_init.iter().any(|r| {
+                r.destination() == TUN_DNS_IP
+                    && r.prefix() == Ipv4Addr::BITS as u8
+                    && r.gateway() == Some(TUN_PEER_IP)
+                    && r.if_index() == Some(tun_index)
+            });
+            assert!(dns_route_in_system, "IPv4 DNS route not found");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(route_manager)]
+    #[ignore = "Requires IPv6 routing support in test environment"]
+    async fn test_privileged_ipv6_server_route_update() {
+        let (_restorer, _tun_device, mut inner) =
+            create_test_setup(RouteMode::Default, EXTERNAL_IP_V6)
+                .await
+                .unwrap();
+
+        // Install initial routes
+        inner.install_routes().await.unwrap();
+
+        // Verify server route was created with /128 prefix
+        assert!(inner.server_route.is_some());
+        let initial_server_route = inner.server_route.as_ref().unwrap().clone();
+        assert_eq!(initial_server_route.destination(), EXTERNAL_IP_V6);
+        assert_eq!(initial_server_route.prefix(), Ipv6Addr::BITS as u8);
+
+        // Test check_and_update_server_route when no change is needed
+        let result = inner.check_and_update_server_route().await;
+        assert!(result.is_ok());
+
+        // Server route should remain unchanged
+        assert!(inner.server_route.is_some());
+        let unchanged_route = inner.server_route.as_ref().unwrap();
+        assert_eq!(
+            initial_server_route.destination(),
+            unchanged_route.destination()
+        );
+        assert_eq!(initial_server_route.prefix(), unchanged_route.prefix());
+        assert_eq!(
+            unchanged_route.prefix(),
+            Ipv6Addr::BITS as u8,
+            "IPv6 route should maintain /128 prefix"
+        );
     }
 }
