@@ -127,24 +127,46 @@
         installPhase = "echo 'Coverage reports generated in $out'";
       };
 
+      # Build Miri sysroot separately using fixed-output derivation
+      # This follows the standard Nix pattern for dependencies requiring network access
+      # See: https://github.com/oxalica/rust-overlay/issues/100
+      miriSysroot = pkgs.stdenv.mkDerivation {
+        name = "miri-sysroot";
+
+        nativeBuildInputs = [ rustNightlyWithMiri ];
+
+        # Dummy source - we only need cargo/miri commands
+        unpackPhase = "true";
+
+        # Fixed-output derivation - allowed network access with known output hash
+        outputHashMode = "recursive";
+        outputHashAlgo = "sha256";
+        # Use lib.fakeHash initially, then update with actual hash from build error
+        outputHash = lib.fakeHash;
+
+        buildPhase = ''
+          export CARGO_HOME=$TMPDIR/.cargo
+          export MIRI_SYSROOT=$out
+          mkdir -p $CARGO_HOME $out
+
+          # Build Miri sysroot (downloads stdlib dependencies from crates.io)
+          cargo miri setup
+        '';
+
+        installPhase = ''
+          echo "Miri sysroot built at $out"
+        '';
+      };
+
       # Test-miri - runs tests under Miri for unsafe code validation
       test-miri = mkNightlyCheck "lightway-test-miri" {
         nativeBuildInputs = wolfsslBuildInputs;
 
-        # Set environment variables
+        # Use pre-built Miri sysroot from FOD
         MIRIFLAGS = "-Zmiri-permissive-provenance";
-        CARGO_HOME = "$TMPDIR/.cargo";
-        MIRI_SYSROOT = "$TMPDIR/.miri-sysroot";
+        MIRI_SYSROOT = "${miriSysroot}";
 
         buildPhase = ''
-          # Set up writable directories for Miri
-          export CARGO_HOME=$TMPDIR/.cargo
-          export MIRI_SYSROOT=$TMPDIR/.miri-sysroot
-          mkdir -p $CARGO_HOME $MIRI_SYSROOT
-
-          # Build Miri sysroot
-          cargo miri setup
-
           # Test unsafe code in lightway-app-utils
           cargo miri test -p lightway-app-utils -- iouring sockopt
 
