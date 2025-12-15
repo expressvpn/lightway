@@ -130,8 +130,21 @@
       # Test-miri - runs tests under Miri for unsafe code validation
       test-miri = mkNightlyCheck "lightway-test-miri" {
         nativeBuildInputs = wolfsslBuildInputs;
+
+        # Set environment variables
         MIRIFLAGS = "-Zmiri-permissive-provenance";
+        CARGO_HOME = "$TMPDIR/.cargo";
+        MIRI_SYSROOT = "$TMPDIR/.miri-sysroot";
+
         buildPhase = ''
+          # Set up writable directories for Miri
+          export CARGO_HOME=$TMPDIR/.cargo
+          export MIRI_SYSROOT=$TMPDIR/.miri-sysroot
+          mkdir -p $CARGO_HOME $MIRI_SYSROOT
+
+          # Build Miri sysroot
+          cargo miri setup
+
           # Test unsafe code in lightway-app-utils
           cargo miri test -p lightway-app-utils -- iouring sockopt
 
