@@ -5,6 +5,7 @@
       lib,
       pkgs,
       rustLatest,
+      rustNightly,
       ...
     }:
     let
@@ -40,10 +41,34 @@
         rustc = rustWithClippy;
       };
 
+      # Nightly Rust with miri for unsafe code testing
+      rustNightlyWithMiri = rustNightly.default.override {
+        extensions = [ "miri" "rust-src" ];
+      };
+
+      rustPlatformNightly = pkgs.makeRustPlatform {
+        cargo = rustNightlyWithMiri;
+        rustc = rustNightlyWithMiri;
+      };
+
       # Helper to create check derivations with common defaults
       mkCheck =
         pname: attrs:
         rustPlatform.buildRustPackage ({
+          inherit
+            pname
+            version
+            src
+            cargoLock
+            ;
+          installPhase = "touch $out";
+          doCheck = false;
+        } // attrs);
+
+      # Helper for nightly checks
+      mkNightlyCheck =
+        pname: attrs:
+        rustPlatformNightly.buildRustPackage ({
           inherit
             pname
             version
@@ -101,10 +126,29 @@
         '';
         installPhase = "echo 'Coverage reports generated in $out'";
       };
+
+      # Test-miri - runs tests under Miri for unsafe code validation
+      test-miri = mkNightlyCheck "lightway-test-miri" {
+        nativeBuildInputs = wolfsslBuildInputs;
+        MIRIFLAGS = "-Zmiri-permissive-provenance";
+        buildPhase = ''
+          # Test unsafe code in lightway-app-utils
+          cargo miri test -p lightway-app-utils -- iouring sockopt
+
+          # Test unsafe code in lightway-server
+          cargo miri test -p lightway-server -- io::outside::udp
+        '';
+      };
     in
     {
       checks = {
-        inherit fmt lint check-dependencies coverage;
+        inherit
+          fmt
+          lint
+          check-dependencies
+          coverage
+          test-miri
+          ;
       };
     };
 }
