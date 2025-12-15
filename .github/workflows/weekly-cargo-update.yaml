@@ -66,10 +66,10 @@ jobs:
       with:
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Update wolfssl hash in flake.nix
+    - name: Update wolfssl hash in flake
       if: steps.update.outputs.wolfssl_updated == 'true'
       run: |
-        echo "wolfssl was updated, updating flake.nix hash..."
+        echo "wolfssl was updated, updating flake hash..."
 
         # Try to build and capture the expected hash from the error message
         set +e
@@ -81,8 +81,8 @@ jobs:
 
         if [ -n "$expected_hash" ]; then
           # Update with the correct hash
-          sed -i 's|"wolfssl-3.0.0" = "sha256-[^"]*"|"wolfssl-3.0.0" = "sha256-'$expected_hash'"|' flake.nix
-          echo "Updated wolfssl hash in flake.nix to: sha256-$expected_hash"
+          sed -i 's|"wolfssl-3.0.0" = "sha256-[^"]*"|"wolfssl-3.0.0" = "sha256-'$expected_hash'"|' nix/default.nix
+          echo "Updated wolfssl hash in flake to: sha256-$expected_hash"
         else
           echo "Warning: Could not determine correct wolfssl hash from nix build output"
           echo "Nix output: $nix_output"
