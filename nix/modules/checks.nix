@@ -8,8 +8,23 @@
       ...
     }:
     let
-      # Source directory for all checks
+      # Common configuration
       src = ../..;
+      version = "0.1.0";
+
+      cargoLock = {
+        lockFile = ../../Cargo.lock;
+        outputHashes = {
+          "wolfssl-3.0.0" = "sha256-CNGs4M6kyzH9YtEkVWPMAjkxAVyT9plIo1fX3AWOiTw=";
+        };
+      };
+
+      # Build tools needed for wolfssl dependency
+      wolfsslBuildInputs = [
+        pkgs.autoconf
+        pkgs.automake
+        pkgs.libtool
+      ];
 
       # Rust toolchains
       rustFmt = rustLatest.default.override {
@@ -20,11 +35,24 @@
         extensions = [ "clippy" ];
       };
 
-      # Rust platform with clippy for lint check
       rustPlatform = pkgs.makeRustPlatform {
         cargo = rustWithClippy;
         rustc = rustWithClippy;
       };
+
+      # Helper to create check derivations with common defaults
+      mkCheck =
+        pname: attrs:
+        rustPlatform.buildRustPackage ({
+          inherit
+            pname
+            version
+            src
+            cargoLock
+            ;
+          installPhase = "touch $out";
+          doCheck = false;
+        } // attrs);
 
       # Format check - verifies Rust code formatting (doesn't need dependencies)
       fmt = pkgs.runCommand "lightway-fmt-check"
@@ -42,104 +70,36 @@
         '';
 
       # Lint check - runs clippy, cargo doc, and shellcheck
-      lint = rustPlatform.buildRustPackage {
-        pname = "lightway-lint-check";
-        version = "0.1.0";
-        inherit src;
-
-        cargoLock = {
-          lockFile = ../../Cargo.lock;
-          outputHashes = {
-            "wolfssl-3.0.0" = "sha256-CNGs4M6kyzH9YtEkVWPMAjkxAVyT9plIo1fX3AWOiTw=";
-          };
-        };
-
-        # Build tools needed for wolfssl dependency
-        nativeBuildInputs = [
-          pkgs.autoconf
-          pkgs.automake
-          pkgs.libtool
-          pkgs.shellcheck
-        ];
-
+      lint = mkCheck "lightway-lint-check" {
+        nativeBuildInputs = wolfsslBuildInputs ++ [ pkgs.shellcheck ];
         RUSTDOCFLAGS = "-D warnings";
-
-        # Run checks instead of building
         buildPhase = ''
           cargo clippy -p lightway-client --no-default-features --all-targets -- -D warnings
           cargo doc --document-private-items
           find tests -name "*.sh" -print0 | xargs -r0 shellcheck
         '';
-
-        # No artifacts to install
-        installPhase = "touch $out";
-
-        doCheck = false;
       };
 
-      # Check dependencies - runs cargo deny to check for security issues and license compliance
-      check-dependencies = rustPlatform.buildRustPackage {
-        pname = "lightway-check-dependencies";
-        version = "0.1.0";
-        inherit src;
-
-        cargoLock = {
-          lockFile = ../../Cargo.lock;
-          outputHashes = {
-            "wolfssl-3.0.0" = "sha256-CNGs4M6kyzH9YtEkVWPMAjkxAVyT9plIo1fX3AWOiTw=";
-          };
-        };
-
+      # Check dependencies - runs cargo deny
+      check-dependencies = mkCheck "lightway-check-dependencies" {
         nativeBuildInputs = [ pkgs.cargo-deny ];
-
-        # Run cargo deny checks
         buildPhase = ''
           cargo deny --all-features check --deny warnings bans license sources
         '';
-
-        # No artifacts to install
-        installPhase = "touch $out";
-
-        doCheck = false;
       };
 
       # Coverage - generates code coverage reports
-      # Note: Skips privileged tests since they can't run in Nix sandbox
-      coverage = rustPlatform.buildRustPackage {
-        pname = "lightway-coverage";
-        version = "0.1.0";
-        inherit src;
-
-        cargoLock = {
-          lockFile = ../../Cargo.lock;
-          outputHashes = {
-            "wolfssl-3.0.0" = "sha256-CNGs4M6kyzH9YtEkVWPMAjkxAVyT9plIo1fX3AWOiTw=";
-          };
-        };
-
-        nativeBuildInputs = [
-          pkgs.autoconf
-          pkgs.automake
-          pkgs.libtool
-          pkgs.cargo-llvm-cov
-        ];
-
-        # Run tests with coverage and generate reports
+      # Note: cargo-llvm-cov is marked broken on Darwin, works on Linux
+      coverage = mkCheck "lightway-coverage" {
+        nativeBuildInputs = wolfsslBuildInputs ++ [ pkgs.cargo-llvm-cov ];
         buildPhase = ''
-          # Run tests with coverage collection (skip privileged tests)
           cargo llvm-cov test --no-report
-
-          # Generate coverage reports
           mkdir -p $out
           cargo llvm-cov report --summary-only --output-path $out/summary.txt
           cargo llvm-cov report --json --output-path $out/coverage.json
           cargo llvm-cov report --html --output-dir $out/html
         '';
-
-        # Coverage reports are in $out
         installPhase = "echo 'Coverage reports generated in $out'";
-
-        doCheck = false;
       };
     in
     {
