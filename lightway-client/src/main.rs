@@ -78,16 +78,14 @@ async fn main() -> Result<()> {
         Layer::Clap(matches),
     ])?;
 
+    let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(level.into())
         // https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.Builder.html#method.with_regex
         // recommends to disable REGEX when using envfilter from untrusted sources
         .with_regex(false)
-        .from_env()
-        .unwrap_or_else(|_| {
-            // If RUST_LOG is not set, use config.log_level as default
-            let level: tracing::level_filters::LevelFilter = config.log_level.into();
-            tracing_subscriber::EnvFilter::new(level.to_string())
-        });
+        .with_env_var("LW_CLIENT_RUST_LOG")
+        .from_env_lossy();
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     LogFormat::Full.init_with_env_filter(fmt);
