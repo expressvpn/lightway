@@ -23,43 +23,61 @@
 
       # Cross-compilation target configurations
       # Includes both true cross-compilation and musl static builds
-      allTargets = {
-        x86_64-linux-gnu = {
-          pkgsCross = pkgs.pkgsCross.gnu64;
-          rustTarget = "x86_64-unknown-linux-gnu";
-          isStatic = false;
-          arch = "x86_64";
-          libc = "gnu";
+      allTargets =
+        {
+          x86_64-linux-gnu = {
+            pkgsCross = pkgs.pkgsCross.gnu64;
+            rustTarget = "x86_64-unknown-linux-gnu";
+            isStatic = false;
+            arch = "x86_64";
+            libc = "gnu";
+            os = "linux";
+          };
+          x86_64-linux-musl = {
+            pkgsCross = pkgs.pkgsCross.musl64;
+            rustTarget = "x86_64-unknown-linux-musl";
+            isStatic = true;
+            arch = "x86_64";
+            libc = "musl";
+            os = "linux";
+          };
+          aarch64-linux-musl = {
+            pkgsCross = pkgs.pkgsCross.aarch64-multiplatform-musl;
+            rustTarget = "aarch64-unknown-linux-musl";
+            isStatic = true;
+            arch = "aarch64";
+            libc = "musl";
+            os = "linux";
+          };
+          aarch64-linux-gnu = {
+            pkgsCross = pkgs.pkgsCross.aarch64-multiplatform;
+            rustTarget = "aarch64-unknown-linux-gnu";
+            isStatic = false;
+            arch = "aarch64";
+            libc = "gnu";
+            os = "linux";
+          };
+        }
+        // lib.optionalAttrs (system == "aarch64-darwin") {
+          # Cross-compile from Apple Silicon to Intel Mac
+          x86_64-darwin = {
+            pkgsCross = pkgs.pkgsCross.x86_64-darwin;
+            rustTarget = "x86_64-apple-darwin";
+            isStatic = false;
+            arch = "x86_64";
+            libc = "darwin";
+            os = "darwin";
+          };
         };
-        x86_64-linux-musl = {
-          pkgsCross = pkgs.pkgsCross.musl64;
-          rustTarget = "x86_64-unknown-linux-musl";
-          isStatic = true;
-          arch = "x86_64";
-          libc = "musl";
-        };
-        aarch64-linux-musl = {
-          pkgsCross = pkgs.pkgsCross.aarch64-multiplatform-musl;
-          rustTarget = "aarch64-unknown-linux-musl";
-          isStatic = true;
-          arch = "aarch64";
-          libc = "musl";
-        };
-        aarch64-linux-gnu = {
-          pkgsCross = pkgs.pkgsCross.aarch64-multiplatform;
-          rustTarget = "aarch64-unknown-linux-gnu";
-          isStatic = false;
-          arch = "aarch64";
-          libc = "gnu";
-        };
-      };
 
       # Filter out gnu targets for native architecture (already built in native.nix)
       # Keep all musl targets (including native arch) since they're static builds
-      # On Darwin, include all targets as everything is cross-compilation
+      # On Darwin, include all targets:
+      #   - All Linux targets (true cross-compilation)
+      #   - x86_64-darwin when on aarch64-darwin (Darwin-to-Darwin cross)
       crossTargets = lib.filterAttrs (
         name: config:
-        nativeArch == null # Darwin: include everything
+        nativeArch == null # Darwin: include everything (Linux + Darwin cross-targets)
         || config.libc == "musl" # Linux: include all musl
         || config.arch != nativeArch # Linux: include cross-arch gnu
       ) allTargets;

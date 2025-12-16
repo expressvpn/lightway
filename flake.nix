@@ -22,6 +22,7 @@
         ./nix/modules/native.nix
         ./nix/modules/cross.nix
         ./nix/modules/devshells.nix
+        ./nix/modules/checks.nix
       ];
 
       perSystem =

@@ -76,27 +76,34 @@ rustPlatform.buildRustPackage {
     ])
   );
 
-  # Enable fully static linking for musl builds
+  # RUSTFLAGS configuration for different build scenarios:
   #
-  # Note 1:
-  # Use -static for maximum compatibility across architectures
+  # 1. Static builds (musl):
+  #    - Use -static for maximum compatibility across architectures
+  #    - Note: On aarch64 musl, `file` command reports "dynamically linked" but
+  #      the binary is truly static (cosmetic issue only)
+  #    - Alternatives like -static-pie, --no-dynamic-linker cause SIGSEGV crashes on aarch64
+  #    - Also tried to also disable PIE to make it statically linked without PIE,
+  #      but it didn't work. aarch64 musl always produces PIE binaries with PT_INTERP section
   #
-  # In aarch64 musl, With `-static`, the final binary  reports as dynamically
-  # linked using file command. But it looks like cosmetic issue - binary is truly static
+  # 2. Cross-compilation (all platforms):
+  #    - Explicitly set linker to avoid host platform linker leaking into target
   #
-  # OTOH, Both -static-pie and --no-dynamic-linker causes binaries which are reported
-  # as statically linked. But SIGSEGV crashes on aarch64
+  # 3. Cross-compilation to Linux:
+  #    - Additionally force bfd linker to avoid macOS-specific platform_version
+  #      flags when cross-compiling from Darwin to Linux
+  #    - Darwin uses lld by default which can inject incompatible flags
   #
-  # Tried to also disable PIE to make it statically linked without PIE, but it didn't work.
-  # aarch64 musl always produces PIE binaries with PT_INTERP section
-  #
-  # Note 2:
-  # For cross-compilation from macOS, disable lld and use gcc directly to
-  # avoid platform_version flags
+  # 4. Cross-compilation to Darwin:
+  #    - Only set linker
   RUSTFLAGS =
     lib.optionalString isStatic "-C target-feature=+crt-static -C link-arg=-static"
-    + lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system && !isStatic)
-      " -C linker=${stdenv.cc.targetPrefix}cc -C link-arg=-fuse-ld=bfd";
+    + lib.optionalString (
+      !isStatic && stdenv.hostPlatform.system != stdenv.buildPlatform.system
+    ) " -C linker=${stdenv.cc.targetPrefix}cc"
+    + lib.optionalString (
+      !isStatic && stdenv.hostPlatform.system != stdenv.buildPlatform.system && stdenv.hostPlatform.isLinux
+    ) " -C link-arg=-fuse-ld=bfd";
 
   # Enable ARM crypto extensions
   env.NIX_CFLAGS_COMPILE =
