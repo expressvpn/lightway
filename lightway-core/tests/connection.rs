@@ -273,12 +273,8 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
 
                 conn.inside_data_received(&mut reply).expect("Reflect data");
 
-                // https://github.com/wolfSSL/wolfssl/pull/6771 means
-                // this currently returns None.
-                // When this is fixed this will fail, replace `if let` with `unwrap`.
-                if let Some(curve) = conn.current_curve() {
-                    assert_eq!(curve, pqc.expected_curve());
-                }
+                let curve = conn.current_curve().unwrap();
+                assert_eq!(curve, pqc.expected_curve());
             },
 
             // Encoded packet received (inside -> outside)
@@ -627,7 +623,7 @@ impl PQCrypto {
     fn expected_curve(&self) -> &str {
         match self {
             #[cfg(not(feature = "kyber_only"))]
-            PQCrypto::Enabled => "P521_ML_KEM_1024",
+            PQCrypto::Enabled => "SecP521r1MLKEM1024",
             #[cfg(feature = "kyber_only")]
             PQCrypto::Enabled => "P521_KYBER_LEVEL5",
             PQCrypto::Disabled => "SECP256R1",
