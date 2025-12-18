@@ -1,28 +1,19 @@
 use crate::dns_manager::{DnsManagerError, DnsSetup};
-use core_foundation::{
-    array::CFArray,
-    base::{CFGetTypeID, CFTypeRef, TCFType, ToVoid},
-    dictionary::CFDictionary,
-    propertylist::CFPropertyList,
-    string::{CFString, CFStringGetTypeID, CFStringRef},
+use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CFString, CFType};
+use objc2_system_configuration::{
+    SCDynamicStore, kSCDynamicStorePropNetPrimaryService, kSCPropNetDNSSearchDomains,
+    kSCPropNetDNSServerAddresses,
 };
 use std::net::IpAddr;
 use std::process::Command;
-use system_configuration::{
-    dynamic_store::{SCDynamicStore, SCDynamicStoreBuilder},
-    sys::schema_definitions::{
-        kSCDynamicStorePropNetPrimaryService, kSCPropNetDNSSearchDomains,
-        kSCPropNetDNSServerAddresses,
-    },
-};
 
 const DEFAULT_SEARCH_DOMAIN: &str = "expressvpn";
 const DEFAULT_DNS_CONFIG_NAME: &str = "lightway-dns-config";
 const IPV4_STATE_PATH: &str = "State:/Network/Global/IPv4";
 
 pub struct DnsManager {
-    service_id: Option<CFString>,
-    store: SCDynamicStore,
+    service_id: Option<CFRetained<CFString>>,
+    store: CFRetained<SCDynamicStore>,
 }
 
 impl Default for DnsManager {
@@ -32,94 +23,98 @@ impl Default for DnsManager {
 }
 
 impl DnsManager {
+    #[allow(unsafe_code)]
     pub fn new() -> Self {
-        let store = SCDynamicStoreBuilder::new(DEFAULT_DNS_CONFIG_NAME).build();
+        let name = CFString::from_str(DEFAULT_DNS_CONFIG_NAME);
+        // SAFETY: We're passing None for the callback and null_mut for the context,
+        // which is valid when we don't need asynchronous notifications
+        let store = unsafe {
+            SCDynamicStore::new(None, &name, None, std::ptr::null_mut())
+                .expect("Failed to create SCDynamicStore")
+        };
         Self {
             service_id: None,
             store,
         }
     }
+
     /// Get the DNS configuration path for a service ID
-    fn get_primary_service_path(service_id: &CFString) -> String {
-        format!("Setup:/Network/Service/{service_id}/DNS")
+    fn get_primary_service_path(service_id: &CFString) -> CFRetained<CFString> {
+        CFString::from_str(&format!("Setup:/Network/Service/{service_id}/DNS"))
     }
 
-    /// Helper to safely wrap Apple framework constants and add to pairs
-    /// SAFETY: This is safe when key is a valid Apple framework constant
-    /// e.g.
-    ///     - kSCPropNetDNSServerAddresses
-    ///     - kSCPropNetDNSSearchDomains
-    #[allow(unsafe_code)]
-    fn add_config_entry<T: TCFType>(pairs: &mut Vec<(CFString, T)>, key: CFStringRef, value: T) {
-        // SAFETY: Guaranteed valid for Apple framework constants
-        let key = unsafe { CFString::wrap_under_get_rule(key) };
-        pairs.push((key, value));
-    }
     /// Get the primary service ID from the system configuration
     #[allow(unsafe_code)]
-    fn get_primary_service_id(&self) -> Result<CFString, DnsManagerError> {
-        let dictionary = self
-            .store
-            .get(IPV4_STATE_PATH)
-            .and_then(CFPropertyList::downcast_into::<CFDictionary>)
+    fn get_primary_service_id(&self) -> Result<CFRetained<CFString>, DnsManagerError> {
+        let ipv4_path = CFString::from_str(IPV4_STATE_PATH);
+
+        // Get the dictionary from the dynamic store
+        let value = SCDynamicStore::value(Some(&self.store), &ipv4_path)
             .ok_or(DnsManagerError::PrimaryServiceNotFound)?;
 
-        let ptr_to_id_in_dictionary = dictionary
-            .find(
-                // SAFETY: Apple framework constant, guaranteed valid
-                unsafe { kSCDynamicStorePropNetPrimaryService }.to_void(),
-            )
+        // Try to downcast to CFDictionary
+        let dictionary_opaque: &CFDictionary = value
+            .downcast_ref::<CFDictionary>()
             .ok_or(DnsManagerError::PrimaryServiceNotFound)?;
 
-        // SAFETY: ptr_to_id_in_dictionary is a valid CFTypeRef from CFDictionary.find(),
-        // which guarantees the pointer is non-null and points to a valid Core Foundation object
-        let cf_type_id = unsafe { CFGetTypeID(*ptr_to_id_in_dictionary as CFTypeRef) };
-        // SAFETY: CFStringGetTypeID() is a Core Foundation constant getter
-        let string_type_id = unsafe { CFStringGetTypeID() };
-        if cf_type_id != string_type_id {
-            return Err(DnsManagerError::InvalidSystemData);
-        }
-        // SAFETY: We've verified above that ptr_to_id_in_dictionary points to a CFString object.
-        // The cast to CFStringRef is safe because we confirmed the type ID matches CFString.
-        // wrap_under_get_rule is safe because it properly manages the reference count of the CFString.
-        // In addition, Apple documentation states that one should expect a CFString
-        // https://developer.apple.com/documentation/systemconfiguration/kscdynamicstorepropnetprimaryservice-swift.var
-        Ok(unsafe { CFString::wrap_under_get_rule(*ptr_to_id_in_dictionary as CFStringRef) })
+        // SAFETY: We need to cast the dictionary to the proper type. This is safe because we know
+        // the dictionary contains CFString keys and CFType values from the system configuration store.
+        let dictionary: &CFDictionary<CFString, CFType> =
+            unsafe { dictionary_opaque.cast_unchecked() };
+
+        // Get the primary service value using the constant key
+        // SAFETY: Accessing extern static defined by the SystemConfiguration framework
+        let service_value = dictionary
+            .get(unsafe { kSCDynamicStorePropNetPrimaryService })
+            .ok_or(DnsManagerError::PrimaryServiceNotFound)?;
+
+        // Verify it's a CFString by trying to downcast
+        service_value
+            .downcast_ref::<CFString>()
+            .ok_or(DnsManagerError::InvalidSystemData)
+            .map(|s| CFString::from_str(&s.to_string()))
     }
 
     /// Get DNS configuration dictionary for system configuration
     #[allow(unsafe_code)]
     fn get_dns_dictionary(
         &self,
-        addresses: &[CFString],
-        search_domains: &[CFString],
-    ) -> CFDictionary {
-        let mut pairs = Vec::new();
+        addresses: &[CFRetained<CFString>],
+        search_domains: &[CFRetained<CFString>],
+    ) -> CFRetained<CFDictionary<CFString, CFType>> {
+        let mut keys = Vec::new();
+        let mut values: Vec<CFRetained<CFType>> = Vec::new();
 
         // Add DNS server addresses
-        Self::add_config_entry(
-            &mut pairs,
-            // SAFETY: Guaranteed valid for Apple framework constants
-            unsafe { kSCPropNetDNSServerAddresses },
-            CFArray::from_CFTypes(addresses),
-        );
+        // SAFETY: Accessing extern static defined by the SystemConfiguration framework
+        let dns_key_str = unsafe { kSCPropNetDNSServerAddresses.to_string() };
+        keys.push(CFString::from_str(&dns_key_str));
+
+        let address_refs: Vec<&CFString> = addresses.iter().map(|s| &**s).collect();
+        let dns_array = CFArray::from_objects(&address_refs);
+        // Convert CFArray to CFType using AsRef and retain it
+        let cf_type: &CFType = dns_array.as_ref();
+        // SAFETY: Retaining a valid CFType reference for storage in the dictionary
+        values.push(unsafe { CFRetained::retain(cf_type.into()) });
 
         // Add search domains if provided
         if !search_domains.is_empty() {
-            Self::add_config_entry(
-                &mut pairs,
-                // SAFETY: Guaranteed valid for Apple framework constants
-                unsafe { kSCPropNetDNSSearchDomains },
-                CFArray::from_CFTypes(search_domains),
-            );
+            // SAFETY: Accessing extern static defined by the SystemConfiguration framework
+            let search_key_str = unsafe { kSCPropNetDNSSearchDomains.to_string() };
+            keys.push(CFString::from_str(&search_key_str));
+
+            let domain_refs: Vec<&CFString> = search_domains.iter().map(|s| &**s).collect();
+            let search_array = CFArray::from_objects(&domain_refs);
+            // Convert CFArray to CFType using AsRef and retain it
+            let cf_type: &CFType = search_array.as_ref();
+            // SAFETY: Retaining a valid CFType reference for storage in the dictionary
+            values.push(unsafe { CFRetained::retain(cf_type.into()) });
         }
 
-        let dns_config = CFDictionary::from_CFType_pairs(&pairs);
+        let key_refs: Vec<&CFString> = keys.iter().map(|k| &**k).collect();
+        let value_refs: Vec<&CFType> = values.iter().map(|v| &**v).collect();
 
-        // SAFETY: dns_config is a valid CFDictionary created from valid CFString/CFArray pairs above.
-        // as_concrete_TypeRef() returns the valid underlying CFDictionaryRef pointer.
-        // wrap_under_get_rule here bumps the reference count to prevent use-after-free
-        unsafe { CFDictionary::wrap_under_get_rule(dns_config.as_concrete_TypeRef()) }
+        CFDictionary::from_slices(&key_refs, &value_refs)
     }
 
     /// Flush DNS cache based on macOS version
@@ -154,26 +149,34 @@ impl DnsManager {
 }
 
 impl DnsSetup for DnsManager {
+    #[allow(unsafe_code)]
     fn set_dns(&mut self, dns_server: IpAddr) -> Result<(), DnsManagerError> {
         let primary_service_id = self.get_primary_service_id()?;
-
         let primary_service_path = Self::get_primary_service_path(&primary_service_id);
+
+        // Store the service ID for cleanup
         self.service_id = Some(primary_service_id);
 
         // Create DNS configuration dictionary with default search domain
-        let dns_dictionary = self.get_dns_dictionary(
-            &[CFString::new(&dns_server.to_string())],
-            &[CFString::new(DEFAULT_SEARCH_DOMAIN)],
-        );
+        let dns_addresses = vec![CFString::from_str(&dns_server.to_string())];
+        let search_domains = vec![CFString::from_str(DEFAULT_SEARCH_DOMAIN)];
+        let dns_dictionary = self.get_dns_dictionary(&dns_addresses, &search_domains);
 
-        if !self
-            .store
-            .set(primary_service_path.as_str(), dns_dictionary)
-        {
+        // SAFETY: We're setting a valid dictionary to a valid path in the system configuration store
+        let success = unsafe {
+            SCDynamicStore::set_value(
+                Some(&self.store),
+                &primary_service_path,
+                dns_dictionary.as_ref(),
+            )
+        };
+
+        if !success {
             return Err(DnsManagerError::FailedToSetDnsConfig(
                 "Failed to set DNS Dictionary".to_string(),
             ));
         }
+
         self.flush_dns_cache()?;
         Ok(())
     }
@@ -182,7 +185,7 @@ impl DnsSetup for DnsManager {
         if let Some(service_id) = &self.service_id {
             let primary_service_path = Self::get_primary_service_path(service_id);
 
-            if !self.store.remove(primary_service_path.as_str()) {
+            if !SCDynamicStore::remove_value(Some(&self.store), &primary_service_path) {
                 return Err(DnsManagerError::FailedToRemoveDnsConfig);
             }
             self.service_id = None;
