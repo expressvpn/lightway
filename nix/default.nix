@@ -43,7 +43,7 @@ rustPlatform.buildRustPackage {
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = {
-      "wolfssl-3.0.0" = "sha256-CNGs4M6kyzH9YtEkVWPMAjkxAVyT9plIo1fX3AWOiTw=";
+      "wolfssl-3.0.0" = "sha256-Jck6M62eDBevqk2ow2Uzcc0C0JpGzSozOoNXzgnY6Xo=";
     };
   };
 
