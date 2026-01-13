@@ -389,7 +389,7 @@ impl<AppState> ServerContextBuilder<AppState> {
 
         let wolfssl = wolfssl::ContextBuilder::new(protocol)?
             .with_private_key(server_key)?
-            .with_certificate(server_cert)?
+            .with_certificate_chain(server_cert)?
             .with_groups(SERVER_CURVE_BASE_GROUPS)?
             .with_cipher_list(cipher_list)?;
 
