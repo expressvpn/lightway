@@ -2371,7 +2371,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3818,7 +3818,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#73d31444559bdb2283335f1bf96159bfc4260748"
+source = "git+https://github.com/expressvpn/wolfssl-rs#bc5640a308c40df4f7065c2e84ab7d711eaff93f"
 dependencies = [
  "bytes",
  "log",
@@ -3829,7 +3829,7 @@ dependencies = [
 [[package]]
 name = "wolfssl-sys"
 version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#73d31444559bdb2283335f1bf96159bfc4260748"
+source = "git+https://github.com/expressvpn/wolfssl-rs#bc5640a308c40df4f7065c2e84ab7d711eaff93f"
 dependencies = [
  "autotools",
  "bindgen",
