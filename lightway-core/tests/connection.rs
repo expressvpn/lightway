@@ -627,7 +627,7 @@ impl PQCrypto {
     fn expected_curve(&self) -> &str {
         match self {
             #[cfg(not(feature = "kyber_only"))]
-            PQCrypto::Enabled => "P521_ML_KEM_1024",
+            PQCrypto::Enabled => "SecP521r1MLKEM1024",
             #[cfg(feature = "kyber_only")]
             PQCrypto::Enabled => "P521_KYBER_LEVEL5",
             PQCrypto::Disabled => "SECP256R1",
