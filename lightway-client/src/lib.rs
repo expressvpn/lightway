@@ -615,7 +615,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         route_manager.start().await?;
 
         self.route_manager = Some(route_manager);
-        tracing::trace!("Route manager initialized");
+        info!("Routes configured");
         Ok(())
     }
 
