@@ -629,7 +629,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             let mut dns_manager = DnsManager::default();
             dns_manager.set_dns(tun_dns_ip)?;
             self.dns_manager = Some(dns_manager);
-            tracing::trace!(tun_dns_ip = %tun_dns_ip, "Default DNS manager initialized");
+            info!(?dns_config_mode, %tun_dns_ip, "DNS configured");
         }
         Ok(())
     }
