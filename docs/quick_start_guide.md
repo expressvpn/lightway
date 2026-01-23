@@ -23,7 +23,9 @@ This guide will help you quickly set up a Lightway VPN server and client using t
 Install dependencies on Debian/Ubuntu:
 ```bash
 sudo apt-get update
-sudo apt-get install jq yq apache2-utils iproutes2 iptables
+sudo apt-get install jq apache2-utils iproute2 iptables
+sudo wget -O /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+sudo chmod +x /usr/local/bin/yq
 ```
 
 ### Client Requirements
