@@ -10,13 +10,60 @@ use std::ops;
 use tracing::warn;
 
 pub(crate) fn ipv4_is_valid_packet(buf: &[u8]) -> bool {
-    if buf.is_empty() {
+    // Minimum IPv4 header is 20 bytes
+    if buf.len() < 20 {
         return false;
     }
+
     let first_byte = buf[0];
     let ip_version = first_byte >> 4;
 
-    ip_version == 4
+    // Must be IPv4
+    if ip_version != 4 {
+        return false;
+    }
+
+    // Header length is in 4-byte words, must be at least 5 (20 bytes)
+    let header_len = (first_byte & 0x0f) as usize;
+    if header_len < 5 {
+        return false;
+    }
+
+    let header_bytes = header_len * 4;
+
+    // Header length must not exceed total packet length
+    if header_bytes > buf.len() {
+        return false;
+    }
+
+    // Validate total length field is reasonable (handles truncated/corrupted packets)
+    // Allow packets where total_length >= buffer.len() (we might have partial data)
+    let total_length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    // Reject if total_length is impossibly small (< header) or doesn't cover what we have
+    if total_length < header_bytes || total_length < buf.len() {
+        return false;
+    }
+
+    // Check for valid source and destination addresses (non-zero, non-broadcast)
+    // This is a basic check - production systems may want more strict validation
+    let src_ip: [u8; 4] = match buf[12..16].try_into() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    let dst_ip: [u8; 4] = match buf[16..20].try_into() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+
+    // Skip loopback and reserved addresses (127.x.x.x, 0.x.x.x)
+    if src_ip[0] == 127 || src_ip[0] == 0 {
+        return false;
+    }
+    if dst_ip[0] == 127 || dst_ip[0] == 0 {
+        return false;
+    }
+
+    true
 }
 
 // Structure to calculate incremental checksum
@@ -275,12 +322,19 @@ mod tests {
     ];
 
     #[test_case(&[] => false; "empty")]
-    #[test_case(&[0x40] => true; "v4")]
-    #[test_case(&[0x60] => false; "v6")]
+    #[test_case(&[0x40] => false; "too_short_for_ipv4")]
+    #[test_case(&[0x60] => false; "v6_not_supported")]
+    // Valid IPv4 packets
     #[test_case(SOURCE_1_DEST_1 => true; "SOURCE_1_TO_DEST_1")]
     #[test_case(SOURCE_1_DEST_2 => true; "SOURCE_1_TO_DEST_2")]
     #[test_case(SOURCE_2_DEST_1 => true; "SOURCE_2_TO_DEST_1")]
     #[test_case(SOURCE_2_DEST_2 => true; "SOURCE_2_TO_DEST_2")]
+    // Invalid: loopback source
+    #[test_case(&[0x45, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x01, 0x7f, 0x00, 0x00, 0x01, 0x00, 0x00, 0x08, 0xd0, 0x00, 0x00, 0x00, 0x00] => false; "loopback_source")]
+    // Invalid: zero source
+    #[test_case(&[0x45, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x01, 0x00, 0x00, 0x08, 0xd0, 0x00, 0x00, 0x00, 0x00] => false; "zero_source")]
+    // Invalid: header length too small
+    #[test_case(&[0x40, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0x0a, 0x04, 0x14, 0x01, 0x0a, 0x04, 0x14, 0x02, 0x00, 0x00, 0x08, 0xd0] => false; "header_too_small")]
     fn test_ipv4_is_valid_packet(buf: &[u8]) -> bool {
         ipv4_is_valid_packet(buf)
     }
