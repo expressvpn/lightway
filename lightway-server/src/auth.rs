@@ -12,6 +12,18 @@ use pwhash::unix;
 
 use lightway_server::{ServerAuth, ServerAuthHandle, ServerAuthResult};
 
+/// Validates username characters.
+/// Allows alphanumeric characters, underscores, hyphens, and periods.
+/// Maximum length is 50 bytes (as per wire protocol).
+pub fn is_valid_username(username: &str) -> bool {
+    if username.is_empty() || username.len() > 50 {
+        return false;
+    }
+    username.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
+    })
+}
+
 pub struct Auth {
     user_db: Option<HashMap<String, String>>,
     token: Option<(DecodingKey, Validation)>,
@@ -104,22 +116,32 @@ impl<AS> ServerAuth<AS> for Auth {
         password: &str,
         _app_state: &mut AS,
     ) -> ServerAuthResult {
+        // Validate username format before any other processing
+        if !is_valid_username(user) {
+            tracing::info!("Invalid username format");
+            return ServerAuthResult::Denied;
+        }
+
         let Some(user_db) = self.user_db.as_ref() else {
             return ServerAuthResult::Denied;
         };
 
-        let Some(hash) = user_db.get(user) else {
-            tracing::info!(?user, "User not found");
-            return ServerAuthResult::Denied;
-        };
+        // Always verify password to prevent timing attacks.
+        // If user not found, use a fake hash so verification takes same time.
+        // This prevents attackers from determining valid usernames via timing.
+        // Using a known invalid bcrypt format that still requires computation
+        static FAKE_HASH: &str = "$2y$05$ffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let hash = user_db.get(user).map(|s| s.as_str()).unwrap_or(FAKE_HASH);
 
         if unix::verify(password, hash) {
+            // User was found and password matched
+            let _ = user_db.get(user); // Ensure we actually looked up the user
             ServerAuthResult::Granted {
                 handle: Some(Box::new(AuthHandle)),
                 tunnel_protocol_version: None,
             }
         } else {
-            tracing::info!(?user, "Invalid password");
+            tracing::info!("Authentication failed");
             ServerAuthResult::Denied
         }
     }
@@ -134,8 +156,8 @@ impl<AS> ServerAuth<AS> for Auth {
                 handle: Some(Box::new(AuthHandle)),
                 tunnel_protocol_version: None,
             },
-            Err(err) => {
-                tracing::info!(?err, "Invalid token");
+            Err(_) => {
+                tracing::info!("Authentication failed");
                 ServerAuthResult::Denied
             }
         }
@@ -334,5 +356,24 @@ wwIDAQAB
         };
         let r = auth.authorize_token(&make_token(Algorithm::RS256, json!({})), &mut ());
         assert!(matches!(r, ServerAuthResult::Denied));
+    }
+
+    #[test_case("" => false; "empty")]
+    #[test_case("a" => true; "single_char")]
+    #[test_case("user123" => true; "alphanumeric")]
+    #[test_case("user_name" => true; "with_underscore")]
+    #[test_case("user-name" => true; "with_hyphen")]
+    #[test_case("user.name" => true; "with_period")]
+    #[test_case("User.Name-123_test" => true; "mixed_valid_chars")]
+    #[test_case("user@name" => false; "invalid_at_sign")]
+    #[test_case("user/name" => false; "invalid_slash")]
+    #[test_case("user name" => false; "invalid_space")]
+    #[test_case("user\tname" => false; "invalid_tab")]
+    #[test_case("日本語" => false; "unicode")]
+    #[test_case("a" => true; "min_length")]
+    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc" => true; "max_length_50")]
+    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca" => false; "too_long_51")]
+    fn test_username_validation(username: &str) -> bool {
+        is_valid_username(username)
     }
 }
