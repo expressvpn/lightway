@@ -129,13 +129,14 @@ impl<AS> ServerAuth<AS> for Auth {
         // Always verify password to prevent timing attacks.
         // If user not found, use a fake hash so verification takes same time.
         // This prevents attackers from determining valid usernames via timing.
-        // Using a known invalid bcrypt format that still requires computation
-        static FAKE_HASH: &str = "$2y$05$ffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        let hash = user_db.get(user).map(|s| s.as_str()).unwrap_or(FAKE_HASH);
+        // Using a valid bcrypt hash for constant-time verification.
+        static FAKE_HASH: &str = "$2y$05$kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk";
+        let (hash, user_exists) = match user_db.get(user) {
+            Some(h) => (h.as_str(), true),
+            None => (FAKE_HASH, false),
+        };
 
-        if unix::verify(password, hash) {
-            // User was found and password matched
-            let _ = user_db.get(user); // Ensure we actually looked up the user
+        if unix::verify(password, hash) && user_exists {
             ServerAuthResult::Granted {
                 handle: Some(Box::new(AuthHandle)),
                 tunnel_protocol_version: None,
