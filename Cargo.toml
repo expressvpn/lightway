@@ -15,7 +15,7 @@ resolver = "3"
 
 [profile.release]
 lto = true
-debug = 1
+strip = "symbols"
 
 [workspace.package]
 repository = "https://github.com/expressvpn/lightway"
