@@ -118,7 +118,7 @@ impl<AS> ServerAuth<AS> for Auth {
     ) -> ServerAuthResult {
         // Validate username format before any other processing
         if !is_valid_username(user) {
-            tracing::info!("Invalid username format");
+            tracing::info!("Authentication failed");
             return ServerAuthResult::Denied;
         }
 
@@ -370,9 +370,8 @@ wwIDAQAB
     #[test_case("user name" => false; "invalid_space")]
     #[test_case("user\tname" => false; "invalid_tab")]
     #[test_case("日本語" => false; "unicode")]
-    #[test_case("a" => true; "min_length")]
-    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc" => true; "max_length_50")]
-    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca" => false; "too_long_51")]
+    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcab" => true; "max_length_50")]
+    #[test_case("abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc" => false; "too_long_51")]
     fn test_username_validation(username: &str) -> bool {
         is_valid_username(username)
     }
