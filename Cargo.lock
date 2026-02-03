@@ -1022,9 +1022,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fs-mistrust"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9148d54c4a9b8e67264799a1becec9479a00f98d10349865ce3510eccf04a53"
+checksum = "8dbc1c2f0a28563e33be42bebe80d55741c29c8c3d4eaaa9c44bba899f106713"
 dependencies = [
  "derive_builder_fork_arti",
  "libc",
@@ -3831,7 +3831,7 @@ checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 [[package]]
 name = "wolfssl"
 version = "3.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#16780d89cd2ec3c4cfff30aead330c4096bde94b"
+source = "git+https://github.com/expressvpn/wolfssl-rs#fc4ecaa16a43f03022bceb587a5a308a9fc471b6"
 dependencies = [
  "bytes",
  "log",
@@ -3841,8 +3841,8 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "2.0.0"
-source = "git+https://github.com/expressvpn/wolfssl-rs#16780d89cd2ec3c4cfff30aead330c4096bde94b"
+version = "3.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs#fc4ecaa16a43f03022bceb587a5a308a9fc471b6"
 dependencies = [
  "autotools",
  "bindgen",
