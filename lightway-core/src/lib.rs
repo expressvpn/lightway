@@ -58,7 +58,7 @@ pub use utils::{
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
 };
 pub use version::Version;
-pub use wire::{AuthMethod, Header, SessionId};
+pub use wire::{secure_random_session_id, AuthMethod, Header, SessionId};
 
 /// Default MTU size for a packet on the outside path (on the wire)
 pub const MAX_OUTSIDE_MTU: usize = 1500;
