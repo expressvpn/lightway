@@ -5,7 +5,6 @@ use bytesize::ByteSize;
 use clap::Parser;
 use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
-use serde::Serialize;
 use std::{net::Ipv4Addr, path::PathBuf};
 use twelf::config;
 
@@ -195,7 +194,7 @@ impl Config {
 }
 
 #[config]
-#[derive(Parser, Debug, Serialize)]
+#[derive(Parser, Debug)]
 pub struct ConnectionConfig {
     /// Server to connect to in <hostname>:<port> format
     pub server: String,
