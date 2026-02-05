@@ -3,6 +3,8 @@ use base64::{Engine as _, engine::general_purpose};
 use std::fs;
 use std::path::Path;
 #[cfg(windows)]
+use twelf::Layer;
+#[cfg(windows)]
 use windows_dpapi::{Scope, decrypt_data, encrypt_data};
 
 #[cfg(windows)]
@@ -21,11 +23,30 @@ pub fn encrypt_dpapi_config_file(output_path: &Path, content: &str, scope: Scope
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn into_config_layer_from_dpapi(decrypted_content: String) -> Result<Layer> {
+    let value: serde_json::Value = serde_yaml::from_str(&decrypted_content)?;
+    Ok(Layer::CustomFn({
+        let value = value.clone();
+        (move || value.clone()).into()
+    }))
+}
+
 #[cfg(test)]
 #[cfg(windows)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use twelf::config;
+
+    // test config struct
+    #[config]
+    #[derive(Debug, PartialEq)]
+    struct TestConfig {
+        server: String,
+        username: String,
+        password: String,
+    }
 
     fn generate_mock_config() -> String {
         r#"
@@ -85,5 +106,34 @@ mod tests {
             output_path.exists(),
             "Encrypted file does not exist at expected path"
         );
+    }
+
+    #[test]
+    fn test_into_config_layer_from_dpapi_creates_layer() {
+        let config_str = generate_mock_config();
+
+        let result = into_config_layer_from_dpapi(config_str);
+        assert!(result.is_ok(), "Failed to create Layer from config");
+    }
+
+    #[test]
+    fn test_into_config_layer_loads_config_correctly() {
+        let config_str = generate_mock_config();
+
+        let layer = into_config_layer_from_dpapi(config_str).expect("Failed to create Layer");
+
+        let config = TestConfig::with_layers(&[layer]).expect("Failed to load config from Layer");
+
+        assert_eq!(config.server, "vpn.example.com");
+        assert_eq!(config.username, "user1");
+        assert_eq!(config.password, "securepassword");
+    }
+
+    #[test]
+    fn test_into_config_layer_invalid_yaml() {
+        let invalid_yaml = "bad: yaml: {{{".to_string();
+
+        let result = into_config_layer_from_dpapi(invalid_yaml);
+        assert!(result.is_err(), "Should error on invalid YAML");
     }
 }
