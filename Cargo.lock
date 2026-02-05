@@ -4515,6 +4515,7 @@ checksum = "16de46d08a9d3a25e0a65bb70090797b970bd1e95d72872567ba8d02c0b03bdf"
 dependencies = [
  "clap",
  "config-derive",
+ "dyn-clone",
  "envy",
  "log",
  "serde",
