@@ -46,6 +46,7 @@ more-asserts.workspace = true
 test-case.workspace = true
 serial_test = "3.2.0"
 tun-rs.workspace = true
+tempfile = "3.24.0"
 
 [build-dependencies]
 cfg_aliases = "0.2.1"
@@ -58,6 +59,7 @@ objc2-core-foundation = "0.3.1"
 objc2-system-configuration = "0.3.1"
 
 [target.'cfg(windows)'.dependencies]
+windows-dpapi = "0.1.0"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement",
