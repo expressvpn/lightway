@@ -179,6 +179,12 @@ pub struct Config {
     #[cfg(feature = "debug")]
     #[clap(long)]
     pub tls_debug: bool,
+
+    /// Enable DPAPI encryption/decryption for config file
+    /// Only for Windows platform
+    #[cfg(windows)]
+    #[clap(long)]
+    pub enable_dpapi: bool,
 }
 
 impl Config {
