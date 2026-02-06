@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64 = "0.22.1"
 bytes.workspace = true
 bytesize.workspace = true
 clap.workspace = true
@@ -32,7 +33,10 @@ lightway-app-utils.workspace = true
 lightway-core.workspace = true
 pnet_packet.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml = "0.9.34"
 socket2.workspace = true
+tempfile = "3.24.0"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
@@ -40,6 +44,7 @@ tokio-util.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twelf.workspace = true
+windows-dpapi = "0.1.0"
 
 [dev-dependencies]
 more-asserts.workspace = true
