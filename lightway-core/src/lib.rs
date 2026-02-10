@@ -24,14 +24,12 @@ pub use wolfssl::{IOCallbackResult, ProtocolVersion, RootCertificate, Secret};
 // Re-export wolfssl in case applications need it
 pub use wolfssl;
 
-#[cfg(feature = "debug")]
-pub use wolfssl::{Tls13SecretCallbacks, WolfsslLoggingCallback};
 // Reexport our own types
 pub use builder_predicates::BuilderPredicates;
 pub use cipher::Cipher;
 pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
-    ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg,
+    ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg, ExpresslaneState,
     ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer, expresslane_cb::*,
 };
 pub use context::{
@@ -59,6 +57,8 @@ pub use utils::{
 };
 pub use version::Version;
 pub use wire::{AuthMethod, Header, SessionId};
+#[cfg(feature = "debug")]
+pub use wolfssl::{Tls13SecretCallbacks, WolfsslLoggingCallback};
 
 /// Default MTU size for a packet on the outside path (on the wire)
 pub const MAX_OUTSIDE_MTU: usize = 1500;

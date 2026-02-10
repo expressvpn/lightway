@@ -1,3 +1,4 @@
+use crate::connection::ExpresslaneState;
 use crate::{SessionId, State};
 
 /// A lightway event
@@ -38,4 +39,6 @@ pub enum Event {
         /// Whether encoding is now enabled
         enabled: bool,
     },
+    /// Expresslane state changed
+    ExpresslaneStateChanged(ExpresslaneState),
 }

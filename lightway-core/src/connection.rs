@@ -340,9 +340,14 @@ pub struct ConnectionActivity {
 /// The result of an operation on a [`Connection`].
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
 
-enum ExpresslaneState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Current state of Expresslane
+pub enum ExpresslaneState {
+    /// Disabled due to failed config acknowledgement from the peer or Expresslane not enabled at all
     Disabled,
+    /// Detected packet loss is too high, revert back to standard DTLS encryption
     Degraded,
+    /// Expresslane is being used in the current connection
     Active,
 }
 
