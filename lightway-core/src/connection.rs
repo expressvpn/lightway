@@ -339,11 +339,18 @@ pub struct ConnectionActivity {
 
 /// The result of an operation on a [`Connection`].
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
-
-enum ExpresslaneState {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Current state of Expresslane
+pub enum ExpresslaneState {
+    /// Expresslane not enabled in the config
+    #[default]
     Disabled,
-    Degraded,
+    /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
+    Inactive,
+    /// Expresslane enabled and being used in the current connection
     Active,
+    /// Expresslane enabled, but connection is degraded and back to normal D/TLS for data packets
+    Degraded,
 }
 
 /// A lightway connection
