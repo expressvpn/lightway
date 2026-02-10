@@ -454,6 +454,9 @@ pub struct Connection<AppState: Send = ()> {
     // Expresslane State
     expresslane_state: ExpresslaneState,
 
+    /// Last expresslane state emitted to the application
+    expresslane_event_state: ExpresslaneState,
+
     // Expresslane engine
     expresslane: ExpresslaneData,
 
@@ -543,6 +546,7 @@ impl<AppState: Send> Connection<AppState> {
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
             expresslane_state,
+            expresslane_event_state: ExpresslaneState::Disabled,
             expresslane: ExpresslaneData::default(),
             expresslane_cb: args.expresslane_cb,
         };
@@ -1588,6 +1592,7 @@ impl<AppState: Send> Connection<AppState> {
         if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
             warn!("Expresslane config transmit timed out, disabling expresslane");
             self.expresslane.enabled = false;
+            self.update_expresslane_state_event();
             return Ok(());
         }
 
@@ -1619,6 +1624,30 @@ impl<AppState: Send> Connection<AppState> {
 
     fn expresslane_ready(&self) -> bool {
         self.expresslane_supported() && self.expresslane.is_ready()
+    }
+
+    fn expresslane_event_state(&self) -> ExpresslaneState {
+        if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
+            return ExpresslaneState::Degraded;
+        }
+
+        if self.expresslane_ready() {
+            ExpresslaneState::Active
+        } else {
+            ExpresslaneState::Disabled
+        }
+    }
+
+    /// Update the expresslane state event and emit the event if the state has changed (on the client-side)
+    fn update_expresslane_state_event(&mut self) {
+        if !matches!(self.mode, ConnectionMode::Client { .. }) {
+            return;
+        }
+        let new_state = self.expresslane_event_state();
+        if self.expresslane_event_state != new_state {
+            self.expresslane_event_state = new_state;
+            self.event(Event::ExpresslaneStateChanged(new_state));
+        }
     }
 
     /// Encode expresslane metrics as a binary payload.
@@ -1667,6 +1696,8 @@ impl<AppState: Send> Connection<AppState> {
                 self.publish_expresslane_key();
 
                 self.expresslane.retransmit_count = 0;
+                // Self key updated, emit event if it's active
+                self.update_expresslane_state_event();
             }
             return Ok(());
         }
@@ -1685,6 +1716,9 @@ impl<AppState: Send> Connection<AppState> {
             self.expresslane.update_peer_key(config.key)?;
             self.publish_expresslane_key();
         }
+
+        // Update expresslane state as the peer might have disabled expresslane
+        self.update_expresslane_state_event();
 
         // Send acknowledgement
         let mut config = config;
@@ -1738,6 +1772,7 @@ impl<AppState: Send> Connection<AppState> {
     fn disable_expresslane(&mut self) {
         self.expresslane.enabled = false;
         self.expresslane_state = ExpresslaneState::Degraded;
+        self.update_expresslane_state_event();
 
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.update_next_self_key(key);
