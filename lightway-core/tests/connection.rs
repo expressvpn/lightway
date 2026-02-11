@@ -461,6 +461,9 @@ async fn client<S: TestSock>(
                     println!("First packet received");
                     is_first_packet_received = true;
                 }
+                Event::ExpresslaneStateChanged(state) => {
+                    println!("Expresslane state change to {state:?}");
+                }
                 Event::EncodingStateChanged { enabled } => {
                     println!("Encoding state change to {enabled}")
                 }

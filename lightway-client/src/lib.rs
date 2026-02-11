@@ -318,6 +318,9 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
             Event::FirstPacketReceived => {
                 info!("First outside packet received");
             }
+            Event::ExpresslaneStateChanged(state) => {
+                info!(?state, "Expresslane State Change");
+            }
             Event::EncodingStateChanged { enabled } => {
                 info!("Encoding state changed to {enabled}");
             }
