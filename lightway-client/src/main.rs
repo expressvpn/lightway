@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(windows)]
+use clap::ArgMatches;
 use clap::CommandFactory;
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
@@ -60,6 +62,33 @@ async fn make_client_connection_config(
     })
 }
 
+#[cfg(windows)]
+fn load_config_layer(matches: &ArgMatches, config_file: &PathBuf) -> Result<Layer> {
+    use crate::platform::windows::crypto::{
+        decrypt_dpapi_config_file, into_config_layer_from_dpapi,
+    };
+    use windows_dpapi::Scope::User;
+
+    // Fetch whether DPAPI is enabled from CLI args
+    let enable_dpapi = matches
+        .get_one::<bool>("enable_dpapi")
+        .copied()
+        .unwrap_or(false);
+
+    if enable_dpapi {
+        tracing::info!("DPAPI decryption enabled for config file");
+        let decrypted_content = decrypt_dpapi_config_file(config_file, User)
+            .context("Failed to decrypt DPAPI-protected config file")?;
+
+        // Convert decrypted content into config layer
+        return into_config_layer_from_dpapi(decrypted_content)
+            .context("Failed to parse decrypted config content");
+    }
+
+    tracing::debug!("Loading config file directly (no DPAPI)");
+    Ok(Layer::Yaml(config_file.to_owned()))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let matches = Config::command().get_matches();
@@ -72,8 +101,15 @@ async fn main() -> Result<()> {
     validate_configuration_file_path(config_file, Validate::OwnerOnly)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
+    #[cfg(windows)]
+    // Load config layer with DPAPI support
+    let config_layer = load_config_layer(&matches, config_file)?;
+
+    #[cfg(not(windows))]
+    let config_layer = Layer::Yaml(config_file.to_owned());
+
     let mut config = Config::with_layers(&[
-        Layer::Yaml(config_file.to_owned()),
+        config_layer,
         Layer::Env(Some(String::from("LW_CLIENT_"))),
         Layer::Clap(matches),
     ])?;
