@@ -20,6 +20,10 @@ pub(crate) enum FragmentMapResult {
 pub(crate) struct FragmentMap(LruCache<u16, FragmentedPacket>);
 
 impl FragmentMap {
+    /// Default maximum entries for fragment reassembly cache.
+    /// Set to u16::MAX for backwards compatibility, but production deployments
+    /// should consider using a lower value (e.g., 256 or 512) to limit
+    /// potential memory consumption from fragmented packet attacks.
     pub(crate) const DEFAULT_MAX_ENTRIES: NonZeroU16 = NonZeroU16::MAX;
 
     pub(crate) fn new(max_capacity: NonZeroU16) -> Self {
