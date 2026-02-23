@@ -1616,14 +1616,11 @@ impl<AppState: Send> Connection<AppState> {
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && self.inside_pkt_encoder.is_none()
-            && matches!(
-                self.expresslane_state,
-                ExpresslaneState::Inactive | ExpresslaneState::Active
-            )
+            && !matches!(self.expresslane_state, ExpresslaneState::Disabled)
     }
 
     fn expresslane_ready(&self) -> bool {
-        self.expresslane_supported() && self.expresslane.is_ready()
+        self.expresslane_supported() && matches!(self.expresslane_state, ExpresslaneState::Active)
     }
 
     /// Set the expresslane state and emit the event if the state has changed (on the client-side)
@@ -1684,7 +1681,7 @@ impl<AppState: Send> Connection<AppState> {
 
                 self.expresslane.retransmit_count = 0;
                 // Self key updated, check if expresslane is now ready
-                if self.expresslane.is_ready() {
+                if self.expresslane.has_valid_keys() {
                     self.set_expresslane_state(ExpresslaneState::Active);
                 }
             }
@@ -1703,7 +1700,7 @@ impl<AppState: Send> Connection<AppState> {
             info!("Enabling expresslane for peer");
             self.expresslane.update_peer_key(config.key)?;
             self.publish_expresslane_key();
-            if self.expresslane.is_ready() {
+            if self.expresslane.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
             }
         } else {

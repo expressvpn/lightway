@@ -214,7 +214,8 @@ impl ExpresslaneData {
     /// Wire overhead in bytes
     const WIRE_OVERHEAD: usize = 40;
 
-    pub(crate) fn is_ready(&self) -> bool {
+    /// Check whether we have current keys for both the peer and self
+    pub(crate) fn has_valid_keys(&self) -> bool {
         self.current_peer.is_some() && self.current_self.is_some()
     }
 
