@@ -339,11 +339,18 @@ pub struct ConnectionActivity {
 
 /// The result of an operation on a [`Connection`].
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
-
-enum ExpresslaneState {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Current state of Expresslane
+pub enum ExpresslaneState {
+    /// Expresslane not enabled in the config
+    #[default]
     Disabled,
-    Degraded,
+    /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
+    Inactive,
+    /// Expresslane enabled and being used in the current connection
     Active,
+    /// Expresslane enabled, but connection is degraded and back to normal D/TLS for data packets
+    Degraded,
 }
 
 /// A lightway connection
@@ -490,7 +497,7 @@ impl<AppState: Send> Connection<AppState> {
             None => (None, None),
         };
         let expresslane_state = if args.expresslane {
-            ExpresslaneState::Active
+            ExpresslaneState::Inactive
         } else {
             ExpresslaneState::Disabled
         };
@@ -1541,14 +1548,14 @@ impl<AppState: Send> Connection<AppState> {
         // Inbound packet drops
         if Self::has_packet_drops(peer_sent_delta, my_recv_delta) {
             warn!("Expresslane degraded (INBOUND): Falling back to DTLS");
-            self.disable_expresslane();
+            self.set_expresslane_degraded();
             return Ok(());
         }
 
         // Outbound packet drops
         if Self::has_packet_drops(my_sent_delta, peer_recv_delta) {
             warn!("Expresslane degraded (OUTBOUND): Falling back to DTLS");
-            self.disable_expresslane();
+            self.set_expresslane_degraded();
             return Ok(());
         }
 
@@ -1593,8 +1600,8 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
-            warn!("Expresslane config transmit timed out, disabling expresslane");
-            self.expresslane.enabled = false;
+            warn!("Expresslane config transmit timed out, setting expresslane to inactive");
+            self.set_expresslane_state(ExpresslaneState::Inactive);
             return Ok(());
         }
 
@@ -1621,11 +1628,22 @@ impl<AppState: Send> Connection<AppState> {
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && self.inside_pkt_encoder.is_none()
-            && matches!(self.expresslane_state, ExpresslaneState::Active)
+            && !matches!(self.expresslane_state, ExpresslaneState::Disabled)
     }
 
     fn expresslane_ready(&self) -> bool {
-        self.expresslane_supported() && self.expresslane.is_ready()
+        self.expresslane_supported() && matches!(self.expresslane_state, ExpresslaneState::Active)
+    }
+
+    /// Set the expresslane state and emit the event if the state has changed (on the client-side)
+    fn set_expresslane_state(&mut self, new_state: ExpresslaneState) {
+        if self.expresslane_state == new_state {
+            return;
+        }
+        self.expresslane_state = new_state;
+        if matches!(self.mode, ConnectionMode::Client { .. }) {
+            self.event(Event::ExpresslaneStateChanged(new_state));
+        }
     }
 
     /// Encode expresslane metrics as a binary payload.
@@ -1674,6 +1692,10 @@ impl<AppState: Send> Connection<AppState> {
                 self.publish_expresslane_key();
 
                 self.expresslane.retransmit_count = 0;
+                // Self key updated, check if expresslane is now ready
+                if self.expresslane.has_valid_keys() {
+                    self.set_expresslane_state(ExpresslaneState::Active);
+                }
             }
             return Ok(());
         }
@@ -1686,11 +1708,16 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        self.expresslane.enabled = config.enabled;
-        if self.expresslane.enabled {
+        if config.enabled {
             info!("Enabling expresslane for peer");
             self.expresslane.update_peer_key(config.key)?;
             self.publish_expresslane_key();
+            if self.expresslane.has_valid_keys() {
+                self.set_expresslane_state(ExpresslaneState::Active);
+            }
+        } else {
+            debug!("Peer has disabled expresslane, setting state to Inactive");
+            self.set_expresslane_state(ExpresslaneState::Inactive);
         }
 
         // Send acknowledgement
@@ -1741,10 +1768,9 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    /// Disable expresslane locally and notify peer to also disable
-    fn disable_expresslane(&mut self) {
-        self.expresslane.enabled = false;
-        self.expresslane_state = ExpresslaneState::Degraded;
+    /// Mark expresslane as [Degraded](ExpresslaneState::Degraded) and notify the peer to also disable
+    fn set_expresslane_degraded(&mut self) {
+        self.set_expresslane_state(ExpresslaneState::Degraded);
 
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.update_next_self_key(key);

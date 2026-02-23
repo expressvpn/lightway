@@ -199,7 +199,7 @@ impl OutsideIOSendCallback for TestStreamSock {
     }
 }
 
-async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
+async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bool) {
     let server_key = Secret::Asn1Buffer(SERVER_KEY);
     let server_cert = Secret::Asn1Buffer(SERVER_CERT);
     let auth = Arc::new(TestAuth);
@@ -209,7 +209,14 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
     let mut last_inside_rx = std::time::Instant::now();
 
     let packet_codec = TestPacketCodecFactory::default().build();
-    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = {
+    // Expresslane and inside packet codec are mutually exclusive
+    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = if enable_expresslane {
+        (
+            None,
+            packet_codec.encoded_pkt_receiver,
+            packet_codec.decoded_pkt_receiver,
+        )
+    } else {
         (
             Some((packet_codec.encoder, packet_codec.decoder)),
             packet_codec.encoded_pkt_receiver,
@@ -233,18 +240,21 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto) {
     .with_maximum_protocol_version(Version::MAXIMUM)
     .unwrap()
     .when(pqc.enable_server(), |s| s.with_pq_crypto().unwrap())
+    .when(enable_expresslane, |s| s.with_expresslane())
     .build()
     .unwrap();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
     // Use Version(1, 2) to match default client version (when expresslane is not enabled)
     // This mirrors the real server which reads version from client packet header
+    let version = if enable_expresslane {
+        Version::try_new(1, 3).unwrap()
+    } else {
+        Version::try_new(1, 2).unwrap()
+    };
     let conn = Arc::new(Mutex::new(
         server_ctx
-            .start_accept(
-                Version::try_new(1, 2).unwrap(),
-                sock.clone().into_io_send_callback(),
-            )
+            .start_accept(version, sock.clone().into_io_send_callback())
             .unwrap()
             .with_inside_pkt_codec(packet_codec)
             .accept(ticker)
@@ -372,6 +382,9 @@ enum ClientTestState {
     // response to arrive.
     PendingCodecResponse,
 
+    // Waiting for Expresslane to be active
+    PendingActiveExpresslane,
+
     // Lightway has already sent the message packet.
     MessageSent,
 }
@@ -382,6 +395,7 @@ async fn client<S: TestSock>(
     pqc: PQCrypto,
     server_dn: Option<&str>,
     enable_codec: bool,
+    enable_expresslane: bool,
 ) {
     let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -393,7 +407,14 @@ async fn client<S: TestSock>(
 
     let packet_codec = TestPacketCodecFactory::default().build();
     let encoder = packet_codec.encoder.clone();
-    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = {
+    // Expresslane and inside packet codec are mutually exclusive
+    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = if enable_expresslane {
+        (
+            None,
+            packet_codec.encoded_pkt_receiver,
+            packet_codec.decoded_pkt_receiver,
+        )
+    } else {
         (
             Some((packet_codec.encoder, packet_codec.decoder)),
             packet_codec.encoded_pkt_receiver,
@@ -414,6 +435,7 @@ async fn client<S: TestSock>(
     )
     .unwrap()
     .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
+    .when(enable_expresslane, |b| b.with_expresslane())
     .build()
     .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
     .unwrap()
@@ -433,6 +455,10 @@ async fn client<S: TestSock>(
     let event_client = client.clone();
 
     let mut is_first_packet_received = false;
+    let last_expresslane_state: Arc<Mutex<Option<ExpresslaneState>>> = Arc::new(Mutex::new(None));
+    let expresslane_event = last_expresslane_state.clone();
+    let expresslane_notify = Arc::new(tokio::sync::Notify::new());
+    let expresslane_notify_event = expresslane_notify.clone();
     let event_handler_handle = tokio::spawn(async move {
         let client = event_client;
         while let Some(event) = event_stream.next().await {
@@ -461,6 +487,11 @@ async fn client<S: TestSock>(
                     println!("First packet received");
                     is_first_packet_received = true;
                 }
+                Event::ExpresslaneStateChanged(state) => {
+                    println!("Expresslane state change to {state:?}");
+                    expresslane_event.lock().unwrap().replace(state);
+                    expresslane_notify_event.notify_one();
+                }
                 Event::EncodingStateChanged { enabled } => {
                     println!("Encoding state change to {enabled}")
                 }
@@ -474,6 +505,17 @@ async fn client<S: TestSock>(
     let enable_codec = sock.connection_type().is_datagram() && enable_codec;
 
     loop {
+        // This has to look enough like an ipv4 packet to
+        // make it through. In practice for now that means
+        // the version (the first nibble in the packet)
+        // needs to be ok.
+        //
+        // (Note that 'H' is ASCII 0x48 so that happens to
+        // work as the first byte too, but be more
+        // explicit to avoid a confusing surprise for some
+        // future developer).
+        let mut message_packet: BytesMut = BytesMut::from(&b"\x40Hello World!"[..]);
+
         if event_handler_handle.is_finished() {
             // Event handler returning early. Fatal error.
             let result = event_handler_handle.await;
@@ -488,7 +530,7 @@ async fn client<S: TestSock>(
                 assert!(matches!(client.state(), State::Online));
                 assert!(matches!(client_test_state, ClientTestState::MessageSent));
 
-                assert_eq!(&buf[..], b"\x40Hello World!");
+                assert_eq!(&buf[..], message_packet[..].as_ref());
 
                 let curve = client.current_curve().unwrap();
                 assert_eq!(curve, pqc.expected_curve());
@@ -537,17 +579,6 @@ async fn client<S: TestSock>(
                     continue
                 }
 
-                // This has to look enough like an ipv4 packet to
-                // make it through. In practice for now that means
-                // the version (the first nibble in the packet)
-                // needs to be ok.
-                //
-                // (Note that 'H' is ASCII 0x48 so that happens to
-                // work as the first byte too, but be more
-                // explicit to avoid a confusing surprise for some
-                // future developer).
-                let mut message_packet: BytesMut = BytesMut::from(&b"\x40Hello World!"[..]);
-
                 match client_test_state {
                     ClientTestState::Initial => {
                         // Send a ping
@@ -559,7 +590,10 @@ async fn client<S: TestSock>(
                             client.set_encoding(true).expect("client set encoding");
                             eprintln!("Sending encoding request");
                             client_test_state = ClientTestState::PendingCodecResponse;
-                        } else {
+                        } else if enable_expresslane {
+                            client_test_state = ClientTestState::PendingActiveExpresslane;
+                        }
+                        else {
                             // Directly send the message
                             eprintln!("Sending message: {message_packet:?}");
                             client.inside_data_received(&mut message_packet).expect("Send my message");
@@ -577,7 +611,19 @@ async fn client<S: TestSock>(
                         client.inside_data_received(&mut message_packet).expect("Send my message");
                         client_test_state = ClientTestState::MessageSent;
                     }
-                    ClientTestState::MessageSent => {}
+                    ClientTestState::PendingActiveExpresslane | ClientTestState::MessageSent => {},
+                }
+            }
+
+            // A new expresslane state change
+            _ = expresslane_notify.notified(), if matches!(client_test_state, ClientTestState::PendingActiveExpresslane) => {
+                let state = last_expresslane_state.lock().unwrap();
+                if matches!(*state, Some(ExpresslaneState::Active)) {
+                    drop(state);
+                    let mut client = client.lock().unwrap();
+                    eprintln!("Sending message: {message_packet:?}");
+                    client.inside_data_received(&mut message_packet).expect("Send my message");
+                    client_test_state = ClientTestState::MessageSent;
                 }
             }
 
@@ -650,7 +696,7 @@ async fn run_test_tcp<S: TestSock>(
     client_sock: Arc<S>,
 ) {
     // Inside packet codec is only supported by Lightway UDP
-    run_test(cipher, pqc, server_sock, client_sock, false).await;
+    run_test(cipher, pqc, server_sock, client_sock, false, false).await;
 }
 
 async fn run_test<S: TestSock>(
@@ -659,11 +705,19 @@ async fn run_test<S: TestSock>(
     server_sock: Arc<S>,
     client_sock: Arc<S>,
     enable_codec: bool,
+    enable_expresslane: bool,
 ) {
     let test = async move {
         tokio::join!(
-            server(server_sock, pqc),
-            client(client_sock, cipher, pqc, None, enable_codec)
+            server(server_sock, pqc, enable_expresslane),
+            client(
+                client_sock,
+                cipher,
+                pqc,
+                None,
+                enable_codec,
+                enable_expresslane
+            )
         )
     };
 
@@ -672,15 +726,21 @@ async fn run_test<S: TestSock>(
         .expect("Timed out");
 }
 
-#[test_case(None,                   PQCrypto::Enabled,    false; "Default cipher + PQC")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,    false; "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled,    false; "chacha20 +_PQC")]
-#[test_case(None,                   PQCrypto::Disabled,   false; "PQC disabled")]
-#[test_case(None,                   PQCrypto::ServerOnly, false; "PQC server only")]
-#[test_case(None,                   PQCrypto::ClientOnly, false; "PQC client only")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,     true; "Inside packet codec")]
+#[test_case(None,                   PQCrypto::Enabled,    false, false; "Default cipher + PQC")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,    false, false; "aes + PQC")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled,    false, false; "chacha20 +_PQC")]
+#[test_case(None,                   PQCrypto::Disabled,   false, false; "PQC disabled")]
+#[test_case(None,                   PQCrypto::ServerOnly, false, false; "PQC server only")]
+#[test_case(None,                   PQCrypto::ClientOnly, false, false; "PQC client only")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,     true, false; "Inside packet codec")]
+#[test_case(None,                   PQCrypto::Enabled,    false,  true; "Default cipher + PQC + Expresslane")]
 #[tokio::test]
-async fn test_datagram_connection(cipher: Option<Cipher>, pqc: PQCrypto, enable_codec: bool) {
+async fn test_datagram_connection(
+    cipher: Option<Cipher>,
+    pqc: PQCrypto,
+    enable_codec: bool,
+    enable_expresslane: bool,
+) {
     // Communicate over a local datagram socket for simplicity
     let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
     let socket = socket2::SockRef::from(&client_sock);
@@ -691,7 +751,15 @@ async fn test_datagram_connection(cipher: Option<Cipher>, pqc: PQCrypto, enable_
     let server_sock = Arc::new(TestDatagramSock(server_sock));
     let client_sock = Arc::new(TestDatagramSock(client_sock));
 
-    run_test(cipher, pqc, server_sock, client_sock, enable_codec).await;
+    run_test(
+        cipher,
+        pqc,
+        server_sock,
+        client_sock,
+        enable_codec,
+        enable_expresslane,
+    )
+    .await;
 }
 
 #[test_case(None,                   PQCrypto::Enabled;    "Default cipher + PQC")]
@@ -730,8 +798,15 @@ async fn test_server_dn(server_dn: Option<&str>) {
 
     let test = async move {
         tokio::join!(
-            server(server_sock, PQCrypto::Enabled),
-            client(client_sock, None, PQCrypto::Enabled, server_dn, false)
+            server(server_sock, PQCrypto::Enabled, false),
+            client(
+                client_sock,
+                None,
+                PQCrypto::Enabled,
+                server_dn,
+                false,
+                false
+            )
         )
     };
 

@@ -179,7 +179,6 @@ impl ReplayWindow {
 #[derive(Default)]
 pub(crate) struct ExpresslaneData {
     pub(crate) version: ExpresslaneVersion,
-    pub(crate) enabled: bool,
     // Counter value last send in the [`ExpresslaneConfig`] message
     pub(crate) config_counter: u64,
     /// Number of retransmissions done with the latest pending encoding request packet
@@ -204,7 +203,6 @@ pub(crate) struct ExpresslaneData {
 impl Debug for ExpresslaneData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Expresslane")
-            .field("enabled", &self.enabled)
             .field("count", &self.config_counter)
             .field("self", &self.current_self)
             .field("peer", &self.current_peer)
@@ -216,8 +214,9 @@ impl ExpresslaneData {
     /// Wire overhead in bytes
     const WIRE_OVERHEAD: usize = 40;
 
-    pub(crate) fn is_ready(&self) -> bool {
-        self.enabled && self.current_peer.is_some() && self.current_self.is_some()
+    /// Check whether we have current keys for both the peer and self
+    pub(crate) fn has_valid_keys(&self) -> bool {
+        self.current_peer.is_some() && self.current_self.is_some()
     }
 
     pub(crate) fn self_key(&self) -> ExpresslaneKey {
