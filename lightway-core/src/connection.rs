@@ -1536,14 +1536,14 @@ impl<AppState: Send> Connection<AppState> {
         // Inbound packet drops
         if Self::has_packet_drops(peer_sent_delta, my_recv_delta) {
             warn!("Expresslane degraded (INBOUND): Falling back to DTLS");
-            self.disable_expresslane();
+            self.set_expresslane_degraded();
             return Ok(());
         }
 
         // Outbound packet drops
         if Self::has_packet_drops(my_sent_delta, peer_recv_delta) {
             warn!("Expresslane degraded (OUTBOUND): Falling back to DTLS");
-            self.disable_expresslane();
+            self.set_expresslane_degraded();
             return Ok(());
         }
 
@@ -1760,7 +1760,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Mark expresslane as [Degraded](ExpresslaneState::Degraded) and notify the peer to also disable
-    fn disable_expresslane(&mut self) {
+    fn set_expresslane_degraded(&mut self) {
         self.set_expresslane_state(ExpresslaneState::Degraded);
 
         let key = ExpresslaneKey::INVALID;
