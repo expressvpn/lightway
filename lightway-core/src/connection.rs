@@ -1158,7 +1158,8 @@ impl<AppState: Send> Connection<AppState> {
                 ref mut pending_session_id,
                 ..
             } => {
-                let new_session_id = self.rng.lock().unwrap().random();
+                // Use OS RNG directly for cryptographic security
+                let new_session_id = wire::secure_random_session_id();
 
                 self.session.io_cb_mut().set_session_id(new_session_id);
 
