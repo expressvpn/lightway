@@ -1309,9 +1309,21 @@ impl<AppState: Send> Connection<AppState> {
                 return Err(ConnectionError::InvalidInsideIo);
             };
 
-            let data = self
+            let mut data = self
                 .expresslane
                 .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
+
+            match self.inside_plugins.do_egress(&mut data) {
+                PluginResult::Accept => {}
+                PluginResult::Drop => return Ok(0),
+                PluginResult::DropWithReply(b) => {
+                    return Err(ConnectionError::PluginDropWithReply(b));
+                }
+                PluginResult::Error(e) => {
+                    return Err(ConnectionError::PluginError(e));
+                }
+            }
+
             let frame_read_count = match inside_io.send(data, &mut self.app_state) {
                 IOCallbackResult::Ok(_nr) => 1,
                 IOCallbackResult::Err(err) => {
