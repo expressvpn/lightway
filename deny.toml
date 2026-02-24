@@ -86,9 +86,6 @@ skip = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = [
-    "https://github.com/expressvpn/wolfssl-rs",
-]
 
 # See https://github.com/briansmith/ring/blob/main/LICENSE Ring
 # contains elements liscensed under all of ISC, MIT and OpenSSL
