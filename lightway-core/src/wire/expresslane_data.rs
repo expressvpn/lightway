@@ -193,7 +193,10 @@ pub(crate) struct ExpresslaneData {
     // prev key
     next_self: Option<ExpresslaneDataCipher>,
     prev_peer: Option<ExpresslaneDataCipher>,
-    // Snapshot tracking for expresslane health monitoring
+    /// Peer's total packets sent as of the last received Pong
+    pub(crate) prev_peer_sent: u64,
+    /// Peer's total packets received as of the last received Pong
+    pub(crate) prev_peer_recv: u64,
     /// Packets sent at the time of last keepalive exchange
     pub(crate) last_snapshot_sent: u64,
     /// Packets received at the time of last keepalive exchange

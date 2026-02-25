@@ -1064,7 +1064,7 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         };
 
-        // Calculate expresslane health deltas if expresslane is ready
+        // Calculate expresslane metrics if expresslane is ready
         let payload = self.encode_expresslane_metrics_payload();
 
         debug!(session = ?self.session_id, payload_len = payload.len(), "Sending ping");
@@ -1462,7 +1462,7 @@ impl<AppState: Send> Connection<AppState> {
             "Received ping"
         );
 
-        // Calculate expresslane health deltas for keepalive pongs if expresslane is ready
+        // Encode absolute expresslane counters for keepalive pongs if expresslane is ready
         let payload = if ping.id == wire::Ping::KEEPALIVE_ID {
             self.encode_expresslane_metrics_payload()
         } else {
@@ -1527,16 +1527,21 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        let peer_sent_delta = payload.get_u64();
-        let peer_recv_delta = payload.get_u64();
+        let total_peer_sent = payload.get_u64();
+        let total_peer_recv = payload.get_u64();
 
-        // Calculate my deltas
         let current_sent = self.expresslane.packets_sent();
         let current_recv = self.expresslane.packets_received();
+
+        // Compute per-interval deltas for both sides.
         let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
         let my_recv_delta = current_recv - self.expresslane.last_snapshot_recv;
+        let peer_sent_delta = total_peer_sent - self.expresslane.prev_peer_sent;
+        let peer_recv_delta = total_peer_recv - self.expresslane.prev_peer_recv;
 
         // Update snapshots
+        self.expresslane.prev_peer_sent = total_peer_sent;
+        self.expresslane.prev_peer_recv = total_peer_recv;
         self.expresslane.last_snapshot_sent = current_sent;
         self.expresslane.last_snapshot_recv = current_recv;
 
@@ -1648,11 +1653,9 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Encode expresslane metrics as a binary payload.
     ///
-    /// Calculates the delta of packets sent and received since the last snapshot
-    /// and encodes the deltas as a 16-byte binary payload.
-    ///
-    /// Note: Snapshots are NOT updated here. They are updated in check_expresslane_health()
-    /// after receiving the pong and comparing metrics.
+    /// Encodes absolute cumulative counters: [packets_sent: u64, packets_received: u64].
+    /// The receiving side computes per-interval deltas by comparing against
+    /// the previous exchange's values.
     ///
     /// Returns an empty payload if expresslane is not ready.
     fn encode_expresslane_metrics_payload(&mut self) -> Bytes {
@@ -1663,13 +1666,9 @@ impl<AppState: Send> Connection<AppState> {
         let current_sent = self.expresslane.packets_sent();
         let current_recv = self.expresslane.packets_received();
 
-        let sent_delta = current_sent - self.expresslane.last_snapshot_sent;
-        let recv_delta = current_recv - self.expresslane.last_snapshot_recv;
-
-        // Encode deltas as binary: [sent_delta: u64][recv_delta: u64]
         let mut buf = bytes::BytesMut::with_capacity(16);
-        buf.put_u64(sent_delta);
-        buf.put_u64(recv_delta);
+        buf.put_u64(current_sent);
+        buf.put_u64(current_recv);
         buf.freeze()
     }
 
