@@ -145,6 +145,11 @@ async fn main() -> Result<()> {
         tun_config.tun_name(tun_name);
     }
 
+    #[cfg(windows)]
+    if let Some(wintun_file) = config.wintun_file {
+        tun_config.wintun_file(wintun_file);
+    }
+
     // TODO: Fix in future PR
     tun_config
         .mtu(1350)

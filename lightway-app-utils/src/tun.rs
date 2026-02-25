@@ -49,6 +49,9 @@ pub struct TunConfig {
     #[cfg(unix)]
     #[educe(Default = true)]
     pub close_fd_on_drop: bool,
+    #[cfg(windows)]
+    /// Optional wintun file path for Windows TUN interfaces
+    pub wintun_file: Option<String>,
 }
 
 impl Debug for TunConfig {
@@ -137,6 +140,13 @@ impl TunConfig {
         self
     }
 
+    /// Set the wintun file path (Windows only).
+    #[cfg(windows)]
+    pub fn wintun_file<T: Into<String>>(&mut self, wintun_file: T) -> &mut Self {
+        self.wintun_file = Some(wintun_file.into());
+        self
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -144,7 +154,11 @@ impl TunConfig {
         if let Some(name) = self.tun_name.as_ref() {
             builder = builder.name(name);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(windows)]
+        if let Some(wintun_file) = self.wintun_file.as_ref() {
+            builder = builder.wintun_file(wintun_file.clone());
+        }
+        #[cfg(macos)]
         {
             builder = builder.associate_route(false);
         }

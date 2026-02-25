@@ -70,6 +70,11 @@ pub struct Config {
     #[clap(short, long, default_value = None)]
     pub tun_name: Option<String>,
 
+    /// Path to wintun.dll file (Windows only)
+    #[cfg(windows)]
+    #[clap(long, default_value = None)]
+    pub wintun_file: Option<String>,
+
     /// Local IP to use in Tun device
     #[clap(long, default_value = "100.64.0.6")]
     pub tun_local_ip: Ipv4Addr,
