@@ -8,7 +8,7 @@ mod key_update;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
-use rand::Rng;
+use rand::distr::{Distribution, StandardUniform};
 use std::borrow::Cow;
 use std::net::AddrParseError;
 use std::num::{NonZeroU16, Wrapping};
@@ -1170,7 +1170,7 @@ impl<AppState: Send> Connection<AppState> {
                 ref mut pending_session_id,
                 ..
             } => {
-                let new_session_id = self.rng.lock().unwrap().random();
+                let new_session_id = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
                 self.session.io_cb_mut().set_session_id(new_session_id);
 
@@ -1735,8 +1735,8 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        let key: ExpresslaneKey = self.rng.lock().unwrap().random();
-        // Do not update current encryption key. Just update self key and
+        let key: ExpresslaneKey = StandardUniform.sample(&mut *self.rng.lock().unwrap());
+        // Do not update current encrpytion key. Just update self key and
         // share it with peer. Only after peer acknowledged, update it in
         // [`self::handle_expresslane_config`]
         //
@@ -1810,7 +1810,7 @@ impl<AppState: Send> Connection<AppState> {
         is_encoded: bool,
     ) -> ConnectionResult<()> {
         // Generate random IV
-        let iv: [u8; 12] = self.rng.lock().unwrap().random();
+        let iv: [u8; 12] = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
         let mut buf = BytesMut::new();
         // In case of server, pending sesssion id will be used immediately in the Lightway Header

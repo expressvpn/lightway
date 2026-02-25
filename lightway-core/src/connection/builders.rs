@@ -1,7 +1,7 @@
 use std::{num::NonZeroU16, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
-use rand::Rng;
+use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
 #[cfg(feature = "debug")]
@@ -294,7 +294,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let auth = ctx.auth.clone();
         let ip_pool = ctx.ip_pool.clone();
 
-        let session_id = ctx.rng.lock().unwrap().random();
+        let session_id = StandardUniform.sample(&mut *ctx.rng.lock().unwrap());
 
         let outside_mtu = MAX_OUTSIDE_MTU;
         let outside_plugins = ctx.outside_plugins.build()?;
