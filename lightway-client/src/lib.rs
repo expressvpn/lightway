@@ -644,23 +644,6 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     }
 }
 
-async fn expresslane_key_rotation<T: Send + Sync>(
-    conn: Weak<Mutex<Connection<ConnectionState<T>>>>,
-) {
-    const EXPRESSLANE_REFRESH_KEYS: Duration = Duration::from_secs(60 * 15);
-    loop {
-        tokio::time::sleep(EXPRESSLANE_REFRESH_KEYS).await;
-        let Some(conn) = conn.upgrade() else {
-            break;
-        };
-
-        let mut conn = conn.lock().unwrap();
-        if matches!(conn.state(), State::Online) {
-            let _ = conn.rotate_expresslane_key();
-        }
-    }
-}
-
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -772,9 +755,6 @@ pub async fn connect<
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
-    if connection_type.is_datagram() {
-        tokio::spawn(expresslane_key_rotation(Arc::downgrade(&conn)));
-    }
     let keepalive_config = keepalive::Config {
         interval: config.keepalive_interval,
         timeout: config.keepalive_timeout,
