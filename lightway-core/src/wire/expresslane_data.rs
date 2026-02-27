@@ -1,4 +1,7 @@
-use std::{fmt::Debug, time::Duration};
+use std::{
+    fmt::Debug,
+    time::{Duration, Instant},
+};
 
 use crate::borrowed_bytesmut::BorrowedBytesMut;
 use crate::metrics;
@@ -56,6 +59,7 @@ impl ExpresslaneKey {
 }
 
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
+pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
 
 impl rand::distr::Distribution<ExpresslaneKey> for rand::distr::StandardUniform {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> ExpresslaneKey {
@@ -201,6 +205,8 @@ pub(crate) struct ExpresslaneData {
     pub(crate) last_snapshot_sent: u64,
     /// Packets received at the time of last keepalive exchange
     pub(crate) last_snapshot_recv: u64,
+    /// Last key rotation timestamp
+    pub(crate) last_key_rotation: Option<Instant>,
 }
 
 impl Debug for ExpresslaneData {
@@ -379,6 +385,22 @@ impl ExpresslaneData {
         buf.put_u16(0);
 
         buf.put(&cipher_text[..])
+    }
+
+    /// Update the last key rotation timestamp
+    pub(crate) fn update_last_key_rotation(&mut self) {
+        self.last_key_rotation = Some(Instant::now());
+    }
+
+    /// Check if time delta since last rotation has passed [`EXPRESSLANE_KEYS_ROTATION_INTERVAL`] duration
+    pub(crate) fn time_to_rotate_key(&self) -> bool {
+        match self.last_key_rotation {
+            // When establishing initial expresslane connection
+            // last_key_rotation will be None
+            None => true,
+            // For subsequent rotations, check the time delta
+            Some(last) => last.elapsed() > EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+        }
     }
 }
 

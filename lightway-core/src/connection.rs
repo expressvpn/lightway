@@ -929,6 +929,9 @@ impl<AppState: Send> Connection<AppState> {
             return Err(InvalidInsidePacket(InvalidIpv4Packet));
         }
 
+        // Rotate keys only when there is live traffic
+        let _ = self.rotate_expresslane_key();
+
         // This should be enabled only for client for now.
         // But since we enable PMTU check only on client, there is no direct
         // check for client/server
@@ -1689,7 +1692,6 @@ impl<AppState: Send> Connection<AppState> {
                 // Peer acknowledged, can update local key now
                 self.expresslane.update_self_key();
                 self.publish_expresslane_key();
-
                 self.expresslane.retransmit_count = 0;
                 // Self key updated, check if expresslane is now ready
                 if self.expresslane.has_valid_keys() {
@@ -1733,13 +1735,18 @@ impl<AppState: Send> Connection<AppState> {
         if !self.expresslane_supported() {
             return Ok(());
         }
+
         // Don't allow key rotation if expresslane is degraded
         if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
             return Err(ConnectionError::ExpreslaneDegraded);
         }
 
+        if !self.expresslane.time_to_rotate_key() {
+            return Ok(());
+        }
+
         let key: ExpresslaneKey = self.rng.lock().unwrap().random();
-        // Do not update current encrpytion key. Just update self key and
+        // Do not update current encryption key. Just update self key and
         // share it with peer. Only after peer acknowledged, update it in
         // [`self::handle_expresslane_config`]
         //
@@ -1757,6 +1764,8 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
+
+        self.expresslane.update_last_key_rotation();
 
         // Callback to schedule re-transmission if required
         (self.schedule_tick_cb)(
