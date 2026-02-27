@@ -5,6 +5,7 @@ use std::{
 
 use crate::borrowed_bytesmut::BorrowedBytesMut;
 use crate::metrics;
+use bitfield_struct::bitfield;
 use bytes::{Buf, BufMut, BytesMut};
 use more_asserts::*;
 use rand::Rng;
@@ -46,7 +47,7 @@ use super::{FromWireError, FromWireResult, SessionId, expresslane_config::Expres
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                        AuthTag                                |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |        data length            |         RESERVED              |
+/// |        data length            |E|       RESERVED              |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// | ... length bytes of data
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -219,6 +220,14 @@ impl Debug for ExpresslaneData {
     }
 }
 
+/// Flags field layout: |E|reserved|
+#[bitfield(u16, order = Msb)]
+struct Flags {
+    encoded: bool,
+    #[bits(15)]
+    reserved: u16,
+}
+
 impl ExpresslaneData {
     /// Wire overhead in bytes
     const WIRE_OVERHEAD: usize = 40;
@@ -295,7 +304,7 @@ impl ExpresslaneData {
         &mut self,
         buf: &mut BorrowedBytesMut,
         session_id: SessionId,
-    ) -> FromWireResult<BytesMut> {
+    ) -> FromWireResult<(BytesMut, bool)> {
         if buf.len() < Self::WIRE_OVERHEAD {
             return Err(FromWireError::InsufficientData);
         };
@@ -316,7 +325,8 @@ impl ExpresslaneData {
         let mut auth_tag = [0u8; 16];
         buf.copy_to_slice(&mut auth_tag);
         let data_len = buf.get_u16() as usize;
-        let _reserved = buf.get_u16();
+        let flags = Flags::from(buf.get_u16());
+        let is_encoded = flags.encoded();
 
         if buf.len() < data_len {
             return Err(FromWireError::InsufficientData);
@@ -348,7 +358,7 @@ impl ExpresslaneData {
             }
         };
 
-        Ok(plain_text)
+        Ok((plain_text, is_encoded))
     }
 
     pub(crate) fn append_to_wire(
@@ -357,6 +367,7 @@ impl ExpresslaneData {
         session_id: SessionId,
         plain_text: &[u8],
         iv: [u8; 12],
+        is_encoded: bool,
     ) {
         debug_assert_le!(plain_text.len(), u16::MAX as usize);
         buf.reserve(Self::WIRE_OVERHEAD + plain_text.len());
@@ -377,12 +388,13 @@ impl ExpresslaneData {
             .encrypt(iv, plain_text.as_ref(), &auth_vec)
             .expect("Encrypt failed");
 
+        let flags = Flags::new().with_encoded(is_encoded);
+
         buf.put_u64(self.wire_counter);
         buf.put(iv.as_ref());
         buf.put(auth_tag.as_ref());
         buf.put_u16(cipher_text.len() as u16);
-        // Reserved
-        buf.put_u16(0);
+        buf.put_u16(flags.into());
 
         buf.put(&cipher_text[..])
     }
@@ -487,7 +499,7 @@ mod tests {
         let plain_text = b"test data";
         let iv = [0u8; 12];
 
-        data.append_to_wire(&mut buf, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf, session_id, plain_text, iv, false);
 
         assert_eq!(buf.len(), 0);
     }
@@ -504,7 +516,7 @@ mod tests {
         let plain_text = b"test data";
         let iv = [0u8; 12];
 
-        data.append_to_wire(&mut buf, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf, session_id, plain_text, iv, false);
 
         // Should have wire overhead (40 bytes) + encrypted data length
         assert!(buf.len() >= ExpresslaneData::WIRE_OVERHEAD);
@@ -544,18 +556,49 @@ mod tests {
 
         // Encrypt
         let mut buf = BytesMut::new();
-        sender_data.append_to_wire(&mut buf, session_id, plain_text, iv);
+        sender_data.append_to_wire(&mut buf, session_id, plain_text, iv, false);
 
         assert!(!buf.is_empty());
 
         // Decrypt
         let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
-        let decrypted = receiver_data
+        let (decrypted, is_encoded) = receiver_data
             .try_from_wire(&mut borrowed_buf, session_id)
             .unwrap();
 
         assert_eq!(decrypted.as_ref(), plain_text);
+        assert!(!is_encoded);
         assert!(borrowed_buf.is_empty(), "All data should be consumed");
+    }
+
+    #[test]
+    fn round_trip_with_encoded_flag() {
+        let mut sender_data = ExpresslaneData::default();
+        let mut receiver_data = ExpresslaneData::default();
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender_data.update_next_self_key(test_key).unwrap();
+        sender_data.update_self_key();
+        receiver_data.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8]);
+        let plain_text = b"Encoded payload";
+        let iv = [
+            9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8, 19u8, 20u8,
+        ];
+
+        // Encrypt with is_encoded=true
+        let mut buf = BytesMut::new();
+        sender_data.append_to_wire(&mut buf, session_id, plain_text, iv, true);
+
+        // Decrypt and verify the flag is preserved
+        let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let (decrypted, is_encoded) = receiver_data
+            .try_from_wire(&mut borrowed_buf, session_id)
+            .unwrap();
+
+        assert_eq!(decrypted.as_ref(), plain_text);
+        assert!(is_encoded);
     }
 
     #[test]
@@ -571,7 +614,7 @@ mod tests {
 
         // First packet
         let mut buf1 = BytesMut::new();
-        data.append_to_wire(&mut buf1, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf1, session_id, plain_text, iv, false);
         let wire_counter1 = u64::from_be_bytes([
             buf1[0], buf1[1], buf1[2], buf1[3], buf1[4], buf1[5], buf1[6], buf1[7],
         ]);
@@ -579,7 +622,7 @@ mod tests {
 
         // Second packet
         let mut buf2 = BytesMut::new();
-        data.append_to_wire(&mut buf2, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf2, session_id, plain_text, iv, false);
         let wire_counter2 = u64::from_be_bytes([
             buf2[0], buf2[1], buf2[2], buf2[3], buf2[4], buf2[5], buf2[6], buf2[7],
         ]);
@@ -587,7 +630,7 @@ mod tests {
 
         // Third packet
         let mut buf3 = BytesMut::new();
-        data.append_to_wire(&mut buf3, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf3, session_id, plain_text, iv, false);
         let wire_counter3 = u64::from_be_bytes([
             buf3[0], buf3[1], buf3[2], buf3[3], buf3[4], buf3[5], buf3[6], buf3[7],
         ]);
@@ -610,7 +653,7 @@ mod tests {
 
         // First packet should wrap from MAX-1 to MAX
         let mut buf1 = BytesMut::new();
-        data.append_to_wire(&mut buf1, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf1, session_id, plain_text, iv, false);
         let wire_counter1 = u64::from_be_bytes([
             buf1[0], buf1[1], buf1[2], buf1[3], buf1[4], buf1[5], buf1[6], buf1[7],
         ]);
@@ -618,7 +661,7 @@ mod tests {
 
         // Second packet should wrap from MAX to 0
         let mut buf2 = BytesMut::new();
-        data.append_to_wire(&mut buf2, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf2, session_id, plain_text, iv, false);
         let wire_counter2 = u64::from_be_bytes([
             buf2[0], buf2[1], buf2[2], buf2[3], buf2[4], buf2[5], buf2[6], buf2[7],
         ]);
@@ -626,7 +669,7 @@ mod tests {
 
         // Third packet should be 1
         let mut buf3 = BytesMut::new();
-        data.append_to_wire(&mut buf3, session_id, plain_text, iv);
+        data.append_to_wire(&mut buf3, session_id, plain_text, iv, false);
         let wire_counter3 = u64::from_be_bytes([
             buf3[0], buf3[1], buf3[2], buf3[3], buf3[4], buf3[5], buf3[6], buf3[7],
         ]);
@@ -754,11 +797,11 @@ mod tests {
 
         // Send and receive packet 1
         let mut buf1 = BytesMut::new();
-        sender.append_to_wire(&mut buf1, session_id, plain_text, iv);
+        sender.append_to_wire(&mut buf1, session_id, plain_text, iv, false);
         let buf1_clone = buf1.clone();
 
         let mut borrowed_buf1 = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf1);
-        let decrypted1 = receiver
+        let (decrypted1, _) = receiver
             .try_from_wire(&mut borrowed_buf1, session_id)
             .unwrap();
         assert_eq!(decrypted1.as_ref(), plain_text);
@@ -775,9 +818,9 @@ mod tests {
 
         // Send and receive packet 2
         let mut buf2 = BytesMut::new();
-        sender.append_to_wire(&mut buf2, session_id, plain_text, iv);
+        sender.append_to_wire(&mut buf2, session_id, plain_text, iv, false);
         let mut borrowed_buf2 = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf2);
-        let decrypted2 = receiver
+        let (decrypted2, _) = receiver
             .try_from_wire(&mut borrowed_buf2, session_id)
             .unwrap();
         assert_eq!(decrypted2.as_ref(), plain_text);
@@ -811,7 +854,7 @@ mod tests {
         let mut packets = Vec::new();
         for _ in 0..5 {
             let mut buf = BytesMut::new();
-            sender.append_to_wire(&mut buf, session_id, plain_text, iv);
+            sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
             packets.push(buf);
         }
 

@@ -1317,37 +1317,12 @@ impl<AppState: Send> Connection<AppState> {
         if let Some(hdr) = hdr
             && hdr.expresslane_data
         {
-            let Some(inside_io) = &self.inside_io else {
-                return Err(ConnectionError::InvalidInsideIo);
-            };
-
-            let mut data = self
+            let (data, is_encoded) = self
                 .expresslane
                 .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
 
-            match self.inside_plugins.do_egress(&mut data) {
-                PluginResult::Accept => {}
-                PluginResult::Drop => return Ok(0),
-                PluginResult::DropWithReply(b) => {
-                    return Err(ConnectionError::PluginDropWithReply(b));
-                }
-                PluginResult::Error(e) => {
-                    return Err(ConnectionError::PluginError(e));
-                }
-            }
-
-            let frame_read_count = match inside_io.send(data, &mut self.app_state) {
-                IOCallbackResult::Ok(_nr) => 1,
-                IOCallbackResult::Err(err) => {
-                    metrics::inside_io_send_failed(err);
-                    0
-                }
-                IOCallbackResult::WouldBlock => {
-                    metrics::inside_io_send_failed(std::io::Error::other("Would block"));
-                    0
-                }
-            };
-            return Ok(frame_read_count);
+            self.handle_outside_data_bytes(data, is_encoded)?;
+            return Ok(1);
         }
 
         let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
@@ -1637,7 +1612,6 @@ impl<AppState: Send> Connection<AppState> {
             && self
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
-            && self.inside_pkt_encoder.is_none()
             && !matches!(
                 self.expresslane_state,
                 ExpresslaneState::Disabled | ExpresslaneState::WaitingForClient
@@ -1833,7 +1807,7 @@ impl<AppState: Send> Connection<AppState> {
     fn send_expresslane_data(
         &mut self,
         data: &mut BytesMut,
-        _is_encoded: bool,
+        is_encoded: bool,
     ) -> ConnectionResult<()> {
         // Generate random IV
         let iv: [u8; 12] = self.rng.lock().unwrap().random();
@@ -1844,7 +1818,7 @@ impl<AppState: Send> Connection<AppState> {
         // In case of client there will be no pending_session_id, so it is fine
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
         self.expresslane
-            .append_to_wire(&mut buf, session_id, data.as_ref(), iv);
+            .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 
         match self.session.io_cb().udp_send(buf.as_ref(), true) {

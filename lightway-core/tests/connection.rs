@@ -209,20 +209,11 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bo
     let mut last_inside_rx = std::time::Instant::now();
 
     let packet_codec = TestPacketCodecFactory::default().build();
-    // Expresslane and inside packet codec are mutually exclusive
-    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = if enable_expresslane {
-        (
-            None,
-            packet_codec.encoded_pkt_receiver,
-            packet_codec.decoded_pkt_receiver,
-        )
-    } else {
-        (
-            Some((packet_codec.encoder, packet_codec.decoder)),
-            packet_codec.encoded_pkt_receiver,
-            packet_codec.decoded_pkt_receiver,
-        )
-    };
+    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = (
+        Some((packet_codec.encoder, packet_codec.decoder)),
+        packet_codec.encoded_pkt_receiver,
+        packet_codec.decoded_pkt_receiver,
+    );
 
     let connection_type = sock.connection_type();
     let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
@@ -403,20 +394,11 @@ async fn client<S: TestSock>(
 
     let packet_codec = TestPacketCodecFactory::default().build();
     let encoder = packet_codec.encoder.clone();
-    // Expresslane and inside packet codec are mutually exclusive
-    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = if enable_expresslane {
-        (
-            None,
-            packet_codec.encoded_pkt_receiver,
-            packet_codec.decoded_pkt_receiver,
-        )
-    } else {
-        (
-            Some((packet_codec.encoder, packet_codec.decoder)),
-            packet_codec.encoded_pkt_receiver,
-            packet_codec.decoded_pkt_receiver,
-        )
-    };
+    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = (
+        Some((packet_codec.encoder, packet_codec.decoder)),
+        packet_codec.encoded_pkt_receiver,
+        packet_codec.decoded_pkt_receiver,
+    );
 
     let (ticker, ticker_task) = ConnectionTicker::new();
 
