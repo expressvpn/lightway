@@ -1875,6 +1875,10 @@ impl<AppState: Send> Connection<AppState> {
                 tunnel_protocol_version,
                 handle,
             } => {
+                debug!(
+                    "Setting tunnel protocol version : {:?}",
+                    tunnel_protocol_version
+                );
                 key_update.online();
 
                 let msg = wire::Frame::AuthSuccessWithConfigV4(wire::AuthSuccessWithConfigV4 {

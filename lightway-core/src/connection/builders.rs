@@ -78,11 +78,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         let io = super::WolfSSLIOAdapter {
             connection_type,
-            protocol_version: if ctx.expresslane {
-                Version::MAXIMUM
-            } else {
-                Version::try_new(1, 2).unwrap()
-            },
+            protocol_version: Version::MAXIMUM,
             aggressive_send: connection_type.is_datagram(),
             outside_mtu,
             recv_buf: BytesMut::new(),
@@ -239,11 +235,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         tracing::info!("New Connection");
 
-        let protocol_version = if self.ctx.expresslane {
-            Version::MAXIMUM
-        } else {
-            Version::try_new(1, 2).unwrap()
-        };
+        let protocol_version = Version::MAXIMUM;
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,

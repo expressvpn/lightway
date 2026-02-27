@@ -245,13 +245,9 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bo
     .unwrap();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
-    // Use Version(1, 2) to match default client version (when expresslane is not enabled)
+    // Use Version::MAXIMUM to match default client version
     // This mirrors the real server which reads version from client packet header
-    let version = if enable_expresslane {
-        Version::try_new(1, 3).unwrap()
-    } else {
-        Version::try_new(1, 2).unwrap()
-    };
+    let version = Version::MAXIMUM;
     let conn = Arc::new(Mutex::new(
         server_ctx
             .start_accept(version, sock.clone().into_io_send_callback())
