@@ -345,6 +345,8 @@ pub enum ExpresslaneState {
     /// Expresslane not enabled in the config
     #[default]
     Disabled,
+    /// Server: configured but waiting for the client to initiate the key exchange
+    WaitingForClient,
     /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
     Inactive,
     /// Expresslane enabled and being used in the current connection
@@ -496,10 +498,10 @@ impl<AppState: Send> Connection<AppState> {
             Some(e) => (Some(e.0), Some(e.1)),
             None => (None, None),
         };
-        let expresslane_state = if args.expresslane {
-            ExpresslaneState::Inactive
-        } else {
-            ExpresslaneState::Disabled
+        let expresslane_state = match (&args.mode, args.expresslane) {
+            (ConnectionMode::Client { .. }, true) => ExpresslaneState::Inactive,
+            (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
+            (_, false) => ExpresslaneState::Disabled,
         };
         let mut conn = Connection {
             connection_type: args.connection_type,
@@ -1636,7 +1638,10 @@ impl<AppState: Send> Connection<AppState> {
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && self.inside_pkt_encoder.is_none()
-            && !matches!(self.expresslane_state, ExpresslaneState::Disabled)
+            && !matches!(
+                self.expresslane_state,
+                ExpresslaneState::Disabled | ExpresslaneState::WaitingForClient
+            )
     }
 
     fn expresslane_ready(&self) -> bool {
@@ -1709,6 +1714,13 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
+        // Server starts in WaitingForClient. The client's first config
+        // transitions the server to Pending, which enables
+        // expresslane_supported() and allows the server to send its own key.
+        if matches!(self.expresslane_state, ExpresslaneState::WaitingForClient) {
+            self.set_expresslane_state(ExpresslaneState::Inactive);
+        }
+
         if config.enabled {
             info!("Enabling expresslane for peer");
             self.expresslane.update_peer_key(config.key)?;
@@ -1726,6 +1738,10 @@ impl<AppState: Send> Connection<AppState> {
         config.ack = true;
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
+
+        // Send our own key share so the peer can set our peer key.
+        // No-op if we already have a pending key.
+        let _ = self.rotate_expresslane_key();
 
         Ok(())
     }
