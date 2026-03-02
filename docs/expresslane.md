@@ -59,7 +59,7 @@ The following describes the wire format of the expresslane data packet:
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                 Authentication Tag (continued)               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    Data Length (16-bit)       |         Reserved (16-bit)     |
+|    Data Length (16-bit)       |E|          Reserved          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                    Encrypted Payload Data                    |
 ~                                                               ~
@@ -70,7 +70,8 @@ The following describes the wire format of the expresslane data packet:
 - **IV (12 bytes)**: Cryptographically random initialization vector, unique per packet
 - **Authentication Tag (16 bytes)**: GCM authentication tag ensuring packet integrity and authenticity
 - **Data Length (2 bytes)**: Encrypted payload size (less than TUN mtu size)
-- **Reserved (2 bytes)**: Reserved bytes for future use and alignment
+- **E(ncoded) flag (1 bit)**: Whether the payload is packet_codec encoded
+- **Reserved (15 bits)**: Reserved for future use
 - **Encrypted Payload**: Variable-length user data encrypted with AES-256-GCM
 
 #### 2. Expresslane Configuration (`expresslane_config.rs`)
@@ -171,8 +172,7 @@ The feature is automatically enabled when all prerequisite conditions are satisf
 
 1. Datagram (UDP) transport protocol
 2. Lightway Protocol v1.3 or newer
-3. No conflicting inside packet encoders active
-4. Successful key exchange completion
+3. Successful key exchange completion
 
 **Automatic Fallback Behavior**:
 
@@ -257,17 +257,19 @@ sequenceDiagram
 
 #### Transmission (Egress)
 1. Check if Expresslane is supported and ready
-2. Generate random IV using cryptographic RNG
-3. Increment packet counter
-4. Encrypt data using AES-256-GCM
-5. Send packet with `expresslane_data` header flag set
+2. If packet_codec is active, encode the payload and set the encoded flag
+3. Generate random IV using cryptographic RNG
+4. Increment packet counter
+5. Encrypt data using AES-256-GCM
+6. Send packet with `expresslane_data` header flag set
 
 #### Reception (Ingress)
 1. Detect Expresslane packet via header flag
-2. Extract counter, IV, auth tag, and encrypted data
+2. Extract counter, IV, auth tag, encoded flag, and encrypted data
 3. Attempt decryption with current key
 4. Fall back to previous key if current fails
-5. Forward decrypted data to inside interface
+5. If the encoded flag is set, decode the payload via packet_codec
+6. Forward decrypted data to inside interface
 
 ### Security Considerations
 

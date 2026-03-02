@@ -345,6 +345,8 @@ pub enum ExpresslaneState {
     /// Expresslane not enabled in the config
     #[default]
     Disabled,
+    /// Server: configured but waiting for the client to initiate the key exchange
+    WaitingForClient,
     /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
     Inactive,
     /// Expresslane enabled and being used in the current connection
@@ -496,10 +498,10 @@ impl<AppState: Send> Connection<AppState> {
             Some(e) => (Some(e.0), Some(e.1)),
             None => (None, None),
         };
-        let expresslane_state = if args.expresslane {
-            ExpresslaneState::Inactive
-        } else {
-            ExpresslaneState::Disabled
+        let expresslane_state = match (&args.mode, args.expresslane) {
+            (ConnectionMode::Client { .. }, true) => ExpresslaneState::Inactive,
+            (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
+            (_, false) => ExpresslaneState::Disabled,
         };
         let mut conn = Connection {
             connection_type: args.connection_type,
@@ -1315,37 +1317,12 @@ impl<AppState: Send> Connection<AppState> {
         if let Some(hdr) = hdr
             && hdr.expresslane_data
         {
-            let Some(inside_io) = &self.inside_io else {
-                return Err(ConnectionError::InvalidInsideIo);
-            };
-
-            let mut data = self
+            let (data, is_encoded) = self
                 .expresslane
                 .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
 
-            match self.inside_plugins.do_egress(&mut data) {
-                PluginResult::Accept => {}
-                PluginResult::Drop => return Ok(0),
-                PluginResult::DropWithReply(b) => {
-                    return Err(ConnectionError::PluginDropWithReply(b));
-                }
-                PluginResult::Error(e) => {
-                    return Err(ConnectionError::PluginError(e));
-                }
-            }
-
-            let frame_read_count = match inside_io.send(data, &mut self.app_state) {
-                IOCallbackResult::Ok(_nr) => 1,
-                IOCallbackResult::Err(err) => {
-                    metrics::inside_io_send_failed(err);
-                    0
-                }
-                IOCallbackResult::WouldBlock => {
-                    metrics::inside_io_send_failed(std::io::Error::other("Would block"));
-                    0
-                }
-            };
-            return Ok(frame_read_count);
+            self.handle_outside_data_bytes(data, is_encoded)?;
+            return Ok(1);
         }
 
         let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
@@ -1635,8 +1612,10 @@ impl<AppState: Send> Connection<AppState> {
             && self
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
-            && self.inside_pkt_encoder.is_none()
-            && !matches!(self.expresslane_state, ExpresslaneState::Disabled)
+            && !matches!(
+                self.expresslane_state,
+                ExpresslaneState::Disabled | ExpresslaneState::WaitingForClient
+            )
     }
 
     fn expresslane_ready(&self) -> bool {
@@ -1709,8 +1688,15 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
+        // Server starts in WaitingForClient. The client's first config
+        // transitions the server to Pending, which enables
+        // expresslane_supported() and allows the server to send its own key.
+        if matches!(self.expresslane_state, ExpresslaneState::WaitingForClient) {
+            self.set_expresslane_state(ExpresslaneState::Inactive);
+        }
+
         if config.enabled {
-            info!("Enabling expresslane for peer");
+            debug!("Peer has enabled expresslane");
             self.expresslane.update_peer_key(config.key)?;
             self.publish_expresslane_key();
             if self.expresslane.has_valid_keys() {
@@ -1726,6 +1712,10 @@ impl<AppState: Send> Connection<AppState> {
         config.ack = true;
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
+
+        // Send our own key share so the peer can set our peer key.
+        // No-op if we already have a pending key.
+        let _ = self.rotate_expresslane_key();
 
         Ok(())
     }
@@ -1817,7 +1807,7 @@ impl<AppState: Send> Connection<AppState> {
     fn send_expresslane_data(
         &mut self,
         data: &mut BytesMut,
-        _is_encoded: bool,
+        is_encoded: bool,
     ) -> ConnectionResult<()> {
         // Generate random IV
         let iv: [u8; 12] = self.rng.lock().unwrap().random();
@@ -1828,7 +1818,7 @@ impl<AppState: Send> Connection<AppState> {
         // In case of client there will be no pending_session_id, so it is fine
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
         self.expresslane
-            .append_to_wire(&mut buf, session_id, data.as_ref(), iv);
+            .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 
         match self.session.io_cb().udp_send(buf.as_ref(), true) {
@@ -1875,6 +1865,10 @@ impl<AppState: Send> Connection<AppState> {
                 tunnel_protocol_version,
                 handle,
             } => {
+                debug!(
+                    "Setting tunnel protocol version : {:?}",
+                    tunnel_protocol_version
+                );
                 key_update.online();
 
                 let msg = wire::Frame::AuthSuccessWithConfigV4(wire::AuthSuccessWithConfigV4 {
