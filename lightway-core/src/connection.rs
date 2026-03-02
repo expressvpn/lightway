@@ -1696,7 +1696,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if config.enabled {
-            info!("Enabling expresslane for peer");
+            debug!("Peer has enabled expresslane");
             self.expresslane.update_peer_key(config.key)?;
             self.publish_expresslane_key();
             if self.expresslane.has_valid_keys() {
