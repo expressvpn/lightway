@@ -20,7 +20,8 @@ use lightway_app_utils::{
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
+    InsideIpConfig, OutsidePacket, State, WolfsslConnection, ipv4_update_destination,
+    ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -283,7 +284,7 @@ impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppS
 async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sync>(
     mut stream: EventStream,
     keepalive: Keepalive,
-    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    weak: Weak<Mutex<WolfsslConnection<ConnectionState<ExtAppState>>>>,
     enable_encoding_when_online: bool,
     mut event_handler: Option<A>,
     connected_signal: oneshot::Sender<()>,
@@ -341,7 +342,7 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
-    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    conn: Arc<Mutex<WolfsslConnection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
     connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
@@ -386,7 +387,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn inside_io_task<ExtAppState: Send + Sync>(
-    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    conn: Arc<Mutex<WolfsslConnection<ConnectionState<ExtAppState>>>>,
     inside_io: Arc<dyn io::inside::InsideIORecv<ExtAppState>>,
     tun_dns_ip: Ipv4Addr,
     keepalive: Keepalive,
@@ -467,7 +468,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
 async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
-    weak: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
+    weak: Weak<Mutex<lightway_core::WolfsslConnection<ConnectionState<ExtAppState>>>>,
 ) -> ClientResult {
     while (network_change_signal.recv().await).is_some() {
         let Some(conn) = weak.upgrade() else {
@@ -490,7 +491,7 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 }
 
 pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
-    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
+    conn: Weak<Mutex<lightway_core::WolfsslConnection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
 ) -> Result<()> {
     let Some(mut rx) = rx else {
@@ -528,7 +529,7 @@ pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
 }
 
 pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
-    conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
+    conn: Weak<Mutex<lightway_core::WolfsslConnection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
 ) -> Result<()> {
     let Some(mut rx) = rx else {
@@ -559,7 +560,7 @@ pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
 }
 
 pub async fn encoding_request_task<ExtAppState: Send + Sync>(
-    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    weak: Weak<Mutex<WolfsslConnection<ConnectionState<ExtAppState>>>>,
     mut signal: tokio::sync::mpsc::Receiver<bool>,
 ) {
     while let Some(enable) = signal.recv().await {
@@ -581,7 +582,7 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
 /// Represents a connection to a server. When dropped, the route table will be removed.
 pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
-    conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    conn: Arc<Mutex<WolfsslConnection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
     outside_io: Arc<dyn io::outside::OutsideIO>,
     connected_signal: Option<oneshot::Receiver<()>>,

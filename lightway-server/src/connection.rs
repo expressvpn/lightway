@@ -12,7 +12,7 @@ use crate::{
 };
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
 use lightway_core::{
-    ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType,
+    Connection as _, ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType,
     OutsideIOSendCallbackArg, OutsidePacket, PacketDecoderType, PacketEncoderType, ProtocolVersion,
     ServerContext, SessionId, State, TickType, Version,
 };
@@ -38,7 +38,7 @@ impl ConnectionTickerState for ConnectionState {
 
 pub(crate) struct Connection {
     manager: Arc<ConnectionManager>,
-    lw_conn: Mutex<lightway_core::Connection<ConnectionState>>,
+    lw_conn: Mutex<lightway_core::WolfsslConnection<ConnectionState>>,
     pub(crate) connection_started: std::time::Instant,
 }
 

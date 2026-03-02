@@ -301,7 +301,7 @@ pub trait EventCallback {
 
 /// Convenience type to use as function arguments
 ///
-/// Take care if calling [`Connection`] methods from within the
+/// Take care if calling [`WolfsslConnection`] methods from within the
 /// callback to avoid deadlock with any application lock you have
 /// wrapped the connection in.
 pub type EventCallbackArg = Box<dyn EventCallback + Send + Sync>;
@@ -355,8 +355,56 @@ pub enum ExpresslaneState {
     Degraded,
 }
 
-/// A lightway connection
-pub struct Connection<AppState: Send = ()> {
+/// Transport-agnostic interface for a lightway connection.
+///
+/// This trait provides state accessors, I/O entry points, and tick-based
+/// scheduling methods common to all transport implementations
+/// (WolfSSL/DTLS, QUIC, etc.).
+pub trait Connection<AppState: Send = ()> {
+    /// Input type for [`Connection::outside_data_received`].
+    type OutsideData<'a>;
+
+    /// Gets the application state for this connection.
+    fn app_state(&self) -> &AppState;
+    /// Gets mutable application state for this connection.
+    fn app_state_mut(&mut self) -> &mut AppState;
+    /// Sets inside_io
+    fn inside_io(&mut self, inside_io: InsideIOSendCallbackArg<AppState>);
+    /// Get the [`ConnectionType`] of this connection
+    fn connection_type(&self) -> ConnectionType;
+    /// Get the current session ID.
+    fn session_id(&self) -> SessionId;
+    /// Get the current pending session ID, if any
+    fn pending_session_id(&self) -> Option<SessionId>;
+    /// Get the current state.
+    fn state(&self) -> State;
+    /// Get the current connection activity statistics.
+    fn activity(&self) -> ConnectionActivity;
+    /// Query the address of this connection's peer
+    fn peer_addr(&self) -> SocketAddr;
+    /// Set the address of this connection's peer, returning the previous address
+    fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr;
+    /// Send a keepalive packet to the peer.
+    fn keepalive(&mut self) -> ConnectionResult<()>;
+    /// Disconnect this connection
+    fn disconnect(&mut self) -> ConnectionResult<()>;
+
+    /// Feed data arriving from the outside network into the connection.
+    fn outside_data_received(&mut self, input: Self::OutsideData<'_>) -> ConnectionResult<usize>;
+
+    /// Consume data from the inside path and send it out.
+    fn inside_data_received(&mut self, pkt: &mut BytesMut) -> ConnectionResult<()>;
+
+    /// Returns the interval the application should wait before calling
+    /// [`Connection::tick`], or `None` if no tick is needed.
+    fn tick_interval(&self) -> Option<Duration>;
+
+    /// Inject a tick into the connection.
+    fn tick(&mut self, tick_type: TickType) -> ConnectionResult<()>;
+}
+
+/// A DTLS-based lightway connection
+pub struct WolfsslConnection<AppState: Send = ()> {
     /// Type of connection
     connection_type: ConnectionType,
 
@@ -366,7 +414,7 @@ pub struct Connection<AppState: Send = ()> {
     /// App specific state.
     ///
     /// If you want to recover a Sync/Send handle to the
-    /// [`Connection`] in callbacks then it can be added here but be
+    /// [`WolfsslConnection`] in callbacks then it can be added here but be
     /// sure to use a weak handle (e.g. a `Weak<Connection>`) rather
     /// than a strong one (e.g. `Arc<Connection>`) to avoid a ref
     /// count loop.
@@ -421,7 +469,7 @@ pub struct Connection<AppState: Send = ()> {
 
     /// When is next tick due (independent of
     /// `is_tick_timer_running`, since application might be using
-    /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
+    /// [`WolfsslConnection::tick_interval`] and [`WolfsslConnection::tick`] instead)
     wolfssl_tick_interval: Option<Duration>,
 
     /// Pending packet to write to WolfSSL
@@ -489,7 +537,7 @@ struct NewConnectionArgs<AppState> {
     expresslane_cb: Option<ExpresslaneCbType>,
 }
 
-impl<AppState: Send> Connection<AppState> {
+impl<AppState: Send> WolfsslConnection<AppState> {
     /// Construct a new connection
     fn new(args: NewConnectionArgs<AppState>) -> ConnectionResult<Self> {
         let now = Instant::now();
@@ -503,7 +551,7 @@ impl<AppState: Send> Connection<AppState> {
             (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
             (_, false) => ExpresslaneState::Disabled,
         };
-        let mut conn = Connection {
+        let mut conn = WolfsslConnection {
             connection_type: args.connection_type,
             tunnel_protocol_version: args.protocol_version,
             app_state: args.app_state,
@@ -565,43 +613,6 @@ impl<AppState: Send> Connection<AppState> {
         Ok(conn)
     }
 
-    /// Gets the application state for this [`Connection`].
-    pub fn app_state(&self) -> &AppState {
-        &self.app_state
-    }
-
-    /// Gets mutable application state for this [`Connection`].
-    pub fn app_state_mut(&mut self) -> &mut AppState {
-        &mut self.app_state
-    }
-
-    /// Sets inside_io
-    pub fn inside_io(&mut self, inside_io: InsideIOSendCallbackArg<AppState>) {
-        self.inside_io = Some(inside_io)
-    }
-
-    /// Get the [`ConnectionType`] of this [`Connection`]
-    pub fn connection_type(&self) -> ConnectionType {
-        self.connection_type
-    }
-
-    /// Get the current session ID.
-    pub fn session_id(&self) -> SessionId {
-        self.session_id
-    }
-
-    /// Get the current pending session ID, if any
-    pub fn pending_session_id(&self) -> Option<SessionId> {
-        use ConnectionMode::*;
-
-        match self.mode {
-            Client { .. } => None,
-            Server {
-                pending_session_id, ..
-            } => pending_session_id,
-        }
-    }
-
     fn set_state(&mut self, new_state: State) -> ConnectionResult<()> {
         if self.state == new_state {
             return Ok(());
@@ -633,16 +644,6 @@ impl<AppState: Send> Connection<AppState> {
             self.authenticate(auth_method.clone())?;
         };
         Ok(())
-    }
-
-    /// Get the current state.
-    pub fn state(&self) -> State {
-        self.state
-    }
-
-    /// Get the current connection activity statistics.
-    pub fn activity(&self) -> ConnectionActivity {
-        self.activity
     }
 
     /// Query the TLS protocol version of this connection, only valid
@@ -694,16 +695,6 @@ impl<AppState: Send> Connection<AppState> {
         self.tunnel_protocol_version = v;
 
         Ok(())
-    }
-
-    /// Query the address of this connection's peer
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.session.io_cb().io.peer_addr()
-    }
-
-    /// Set the address of this connection's peer
-    pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        self.session.io_cb_mut().io.set_peer_addr(addr)
     }
 
     /// Get the negotiated cipher, only valid after [`State::LinkUp`]
@@ -759,7 +750,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Returns the time the application should wait before calling
-    /// [`Connection::tick`].
+    /// [`WolfsslConnection::tick`].
     ///
     /// Lightway uses D/TLS which needs to be able to resend certain
     /// messages if they are not received in time. As Lightway does not
@@ -769,14 +760,14 @@ impl<AppState: Send> Connection<AppState> {
     /// can change after every read.
     ///
     /// If in use this should be called after every read cycle and, if
-    /// `Some(_)`, [`Connection::tick`] should be called that amount
+    /// `Some(_)`, [`WolfsslConnection::tick`] should be called that amount
     /// of time later.
     pub fn tick_interval(&self) -> Option<Duration> {
         self.wolfssl_tick_interval
     }
 
     /// Inject a tick to the connection. See
-    /// [`Connection::tick_interval`] for usage.
+    /// [`WolfsslConnection::tick_interval`] for usage.
     pub fn tick(&mut self, tick_type: TickType) -> ConnectionResult<()> {
         match tick_type {
             TickType::ConnectionTick => self.connection_tick(),
@@ -786,7 +777,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Inject a tick to the connection. See
-    /// [`Connection::tick_interval`] for usage.
+    /// [`WolfsslConnection::tick_interval`] for usage.
     pub fn connection_tick(&mut self) -> ConnectionResult<()> {
         self.is_tick_timer_running = false;
         trace!(session_id = ?self.session_id, "Processing connection tick");
@@ -1060,55 +1051,6 @@ impl<AppState: Send> Connection<AppState> {
             self.send_frame_or_drop(msg)?;
             offset += mps;
         }
-        Ok(())
-    }
-
-    /// Send a keepalive packet to the peer.
-    pub fn keepalive(&mut self) -> ConnectionResult<()> {
-        if !matches!(self.state, State::Online) {
-            return Ok(());
-        };
-
-        // Calculate expresslane metrics if expresslane is ready
-        let payload = self.encode_expresslane_metrics_payload();
-
-        debug!(session = ?self.session_id, payload_len = payload.len(), "Sending ping");
-
-        let ping = wire::Ping {
-            id: wire::Ping::KEEPALIVE_ID,
-            payload,
-        };
-
-        let msg = wire::Frame::Ping(ping);
-
-        self.send_frame_or_drop(msg)
-    }
-
-    /// Disconnect this connection
-    pub fn disconnect(&mut self) -> ConnectionResult<()> {
-        // Return error if in the wrong state
-        if matches!(
-            self.state,
-            State::Disconnecting | State::Connecting | State::Disconnected
-        ) {
-            return Err(ConnectionError::InvalidState);
-        }
-
-        self.set_state(State::Disconnecting)?;
-
-        // Free the allocated IP to this connection
-        if let ConnectionMode::Server { ip_pool, .. } = &self.mode {
-            ip_pool.free(&mut self.app_state);
-        }
-
-        let msg = wire::Frame::Goodbye;
-
-        // here, goodbye + shutdown are just a courtesy.
-        let _ = self.send_frame_or_drop(msg);
-        let _ = self.session.try_shutdown();
-
-        self.set_state(State::Disconnected)?;
-
         Ok(())
     }
 
@@ -2286,5 +2228,119 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());
         self.send_frame_or_drop(msg)
+    }
+}
+
+impl<AppState: Send> Connection<AppState> for WolfsslConnection<AppState> {
+    fn app_state(&self) -> &AppState {
+        &self.app_state
+    }
+
+    fn app_state_mut(&mut self) -> &mut AppState {
+        &mut self.app_state
+    }
+
+    fn inside_io(&mut self, inside_io: InsideIOSendCallbackArg<AppState>) {
+        self.inside_io = Some(inside_io)
+    }
+
+    fn connection_type(&self) -> ConnectionType {
+        self.connection_type
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    fn pending_session_id(&self) -> Option<SessionId> {
+        use ConnectionMode::*;
+
+        match self.mode {
+            Client { .. } => None,
+            Server {
+                pending_session_id, ..
+            } => pending_session_id,
+        }
+    }
+
+    fn state(&self) -> State {
+        self.state
+    }
+
+    fn activity(&self) -> ConnectionActivity {
+        self.activity
+    }
+
+    fn peer_addr(&self) -> SocketAddr {
+        self.session.io_cb().io.peer_addr()
+    }
+
+    fn keepalive(&mut self) -> ConnectionResult<()> {
+        if !matches!(self.state, State::Online) {
+            return Ok(());
+        };
+
+        // Calculate expresslane metrics if expresslane is ready
+        let payload = self.encode_expresslane_metrics_payload();
+
+        debug!(session = ?self.session_id, payload_len = payload.len(), "Sending ping");
+
+        let ping = wire::Ping {
+            id: wire::Ping::KEEPALIVE_ID,
+            payload,
+        };
+
+        let msg = wire::Frame::Ping(ping);
+
+        self.send_frame_or_drop(msg)
+    }
+
+    fn disconnect(&mut self) -> ConnectionResult<()> {
+        // Return error if in the wrong state
+        if matches!(
+            self.state,
+            State::Disconnecting | State::Connecting | State::Disconnected
+        ) {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        self.set_state(State::Disconnecting)?;
+
+        // Free the allocated IP to this connection
+        if let ConnectionMode::Server { ip_pool, .. } = &self.mode {
+            ip_pool.free(&mut self.app_state);
+        }
+
+        let msg = wire::Frame::Goodbye;
+
+        // here, goodbye + shutdown are just a courtesy.
+        let _ = self.send_frame_or_drop(msg);
+        let _ = self.session.try_shutdown();
+
+        self.set_state(State::Disconnected)?;
+
+        Ok(())
+    }
+
+    fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
+        self.session.io_cb_mut().io.set_peer_addr(addr)
+    }
+
+    type OutsideData<'a> = OutsidePacket<'a>;
+
+    fn outside_data_received(&mut self, input: OutsidePacket<'_>) -> ConnectionResult<usize> {
+        WolfsslConnection::outside_data_received(self, input)
+    }
+
+    fn inside_data_received(&mut self, pkt: &mut BytesMut) -> ConnectionResult<()> {
+        WolfsslConnection::inside_data_received(self, pkt)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        WolfsslConnection::tick_interval(self)
+    }
+
+    fn tick(&mut self, tick_type: TickType) -> ConnectionResult<()> {
+        WolfsslConnection::tick(self, tick_type)
     }
 }

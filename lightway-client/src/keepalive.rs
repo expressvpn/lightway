@@ -8,18 +8,21 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::ConnectionState;
+use lightway_core::Connection as LightwayConnection;
 
 pub trait Connection: Send {
     fn keepalive(&self) -> lightway_core::ConnectionResult<()>;
 }
 
-impl<T: Send + Sync> Connection for Weak<Mutex<lightway_core::Connection<ConnectionState<T>>>> {
+impl<T: Send + Sync> Connection
+    for Weak<Mutex<lightway_core::WolfsslConnection<ConnectionState<T>>>>
+{
     fn keepalive(&self) -> lightway_core::ConnectionResult<()> {
         let Some(conn) = self.upgrade() else {
             return Ok(());
         };
         let mut conn = conn.lock().unwrap();
-        conn.keepalive()
+        LightwayConnection::keepalive(&mut *conn)
     }
 }
 

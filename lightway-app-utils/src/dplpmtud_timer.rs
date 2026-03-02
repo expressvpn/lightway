@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use lightway_core::{Connection, ConnectionResult};
+use lightway_core::{ConnectionResult, WolfsslConnection};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -64,7 +64,7 @@ pub trait DplpmtudTickable: Send + Sync {
     fn pmtud_tick(&self) -> ConnectionResult<()>;
 }
 
-impl<AppState: Send> DplpmtudTickable for Mutex<Connection<AppState>> {
+impl<AppState: Send> DplpmtudTickable for Mutex<WolfsslConnection<AppState>> {
     fn pmtud_tick(&self) -> ConnectionResult<()> {
         self.lock().unwrap().pmtud_tick()
     }

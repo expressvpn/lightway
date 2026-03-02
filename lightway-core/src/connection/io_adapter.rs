@@ -78,7 +78,7 @@ impl SendBuffer {
     }
 }
 
-/// Adapt requirements of [`crate::Connection`] to those of the
+/// Adapt requirements of [`crate::WolfsslConnection`] to those of the
 /// [`wolfssl::IOCallbacks`] API.
 pub(crate) struct WolfSSLIOAdapter {
     pub(crate) connection_type: ConnectionType,

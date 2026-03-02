@@ -8,9 +8,9 @@ use thiserror::Error;
 use wolfssl::Tls13SecretCallbacksArg;
 
 use crate::{
-    AuthMethod, BuilderPredicates, ClientContext, Connection, ConnectionType, MAX_OUTSIDE_MTU,
-    MIN_OUTSIDE_MTU, OutsideIOSendCallbackArg, PacketDecoderType, PacketEncoderType, ServerContext,
-    ServerIpPoolArg, Version,
+    AuthMethod, BuilderPredicates, ClientContext, ConnectionType, MAX_OUTSIDE_MTU, MIN_OUTSIDE_MTU,
+    OutsideIOSendCallbackArg, PacketDecoderType, PacketEncoderType, ServerContext, ServerIpPoolArg,
+    Version, WolfsslConnection,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
     max_dtls_outside_mtu,
@@ -20,7 +20,7 @@ use crate::{
 
 use super::{ConnectionError, ConnectionMode, NewConnectionArgs, PluginList};
 
-/// An error while building a [`Connection`] via [`ClientConnectionBuilder`]
+/// An error while building a [`WolfsslConnection`] via [`ClientConnectionBuilder`]
 /// or [`ServerConnectionBuilder`].
 #[derive(Debug, Error)]
 pub enum ConnectionBuilderError {
@@ -46,7 +46,7 @@ pub enum ConnectionBuilderError {
 
 type ConnectionBuilderResult<T> = Result<T, ConnectionBuilderError>;
 
-/// Builder for a client  [`Connection`].
+/// Builder for a client  [`WolfsslConnection`].
 pub struct ClientConnectionBuilder<AppState> {
     connection_type: ConnectionType,
     ctx: ClientContext<AppState>,
@@ -225,8 +225,11 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
-    /// Finalize the builder to create a [`Connection`] and begin the connection process.
-    pub fn connect(self, app_state: AppState) -> ConnectionBuilderResult<Connection<AppState>> {
+    /// Finalize the builder to create a [`WolfsslConnection`] and begin the connection process.
+    pub fn connect(
+        self,
+        app_state: AppState,
+    ) -> ConnectionBuilderResult<WolfsslConnection<AppState>> {
         let auth_method = self
             .auth_method
             .ok_or(ConnectionBuilderError::AuthRequired)?;
@@ -237,7 +240,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         let protocol_version = Version::MAXIMUM;
 
-        Ok(Connection::new(NewConnectionArgs {
+        Ok(WolfsslConnection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
             protocol_version,
@@ -268,7 +271,7 @@ impl<AppState> BuilderPredicates for ClientConnectionBuilder<AppState> {
     type Error = ConnectionBuilderError;
 }
 
-/// Builder for a server  [`Connection`].
+/// Builder for a server  [`WolfsslConnection`].
 pub struct ServerConnectionBuilder<'a, AppState> {
     connection_type: ConnectionType,
     protocol_version: Version,
@@ -361,8 +364,11 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         }
     }
 
-    /// Finalize the builder to accept [`Connection`] and begin the connection process.
-    pub fn accept(self, app_state: AppState) -> ConnectionBuilderResult<Connection<AppState>> {
+    /// Finalize the builder to accept [`WolfsslConnection`] and begin the connection process.
+    pub fn accept(
+        self,
+        app_state: AppState,
+    ) -> ConnectionBuilderResult<WolfsslConnection<AppState>> {
         if !self.ctx.is_supported_version(self.protocol_version) {
             return Err(ConnectionBuilderError::UnsupportedProtocolVersion(
                 self.protocol_version,
@@ -371,7 +377,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
 
         let session = self.ctx.wolfssl.new_session(self.session_config)?;
 
-        Ok(Connection::new(NewConnectionArgs {
+        Ok(WolfsslConnection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
             protocol_version: self.protocol_version,

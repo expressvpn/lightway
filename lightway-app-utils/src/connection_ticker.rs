@@ -1,6 +1,6 @@
 //! Handle `lightway_core::ScheduleTickCb` callbacks using Tokio.
 
-use lightway_core::{Connection, ConnectionError, ConnectionResult, TickType};
+use lightway_core::{ConnectionError, ConnectionResult, TickType, WolfsslConnection};
 use std::{
     sync::{Mutex, Weak},
     time::Duration,
@@ -18,7 +18,7 @@ pub trait ConnectionTickerState {
 }
 
 /// Callback for use with
-/// [`lightway_core::Connection::schedule_tick_cb`] and
+/// [`lightway_core::ScheduleTickCb`].
 pub fn connection_ticker_cb<AppState: ConnectionTickerState>(
     d: std::time::Duration,
     state: &mut AppState,
@@ -27,7 +27,7 @@ pub fn connection_ticker_cb<AppState: ConnectionTickerState>(
     state.connection_ticker().schedule(d, tick_type);
 }
 
-/// Embed this into a [`Connection`]'s `AppState` and call
+/// Embed this into a [`WolfsslConnection`]'s `AppState` and call
 /// [`ConnectionTicker::schedule`] from your
 /// `lightway_core::ScheduleTickCb` implementation. `tick_channel_cb`
 /// is a helper callback.
@@ -69,7 +69,7 @@ pub trait Tickable: Send + Sync {
     fn tick(&self, t: TickType) -> ConnectionResult<()>;
 }
 
-impl<AppState: Send> Tickable for Mutex<Connection<AppState>> {
+impl<AppState: Send> Tickable for Mutex<WolfsslConnection<AppState>> {
     fn tick(&self, t: TickType) -> ConnectionResult<()> {
         self.lock().unwrap().tick(t)
     }

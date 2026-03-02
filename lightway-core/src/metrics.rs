@@ -28,7 +28,7 @@ static METRIC_EXPRESSLANE_DECRYPT_NO_KEY: LazyLock<Counter> =
 static METRIC_EXPRESSLANE_DECRYPT_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("expresslane_decrypt_failed"));
 
-/// [`crate::Connection`] has allocated its [`crate::Connection::fragment_map`]
+/// [`crate::WolfsslConnection`] has allocated its fragment map
 pub(crate) fn connection_alloc_frag_map() {
     METRIC_CONNECTION_ALLOC_FRAG_MAP.increment(1);
 }

@@ -6,10 +6,10 @@ use crate::{SessionId, State};
 pub enum Event {
     /// The connection state has changed
     StateChanged(State),
-    /// A reply was received after a [`crate::Connection::keepalive()`]
+    /// A reply was received after a keepalive
     KeepaliveReply,
     /// A pending session id change (following a call to
-    /// [`crate::Connection::rotate_session_id`]) has been
+    /// [`crate::WolfsslConnection::rotate_session_id`]) has been
     /// acknowledged and applied to the connection.
     ///
     /// Server connections only
