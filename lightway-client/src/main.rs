@@ -203,36 +203,38 @@ async fn main() -> Result<()> {
         tun_local_ip: config.tun_local_ip,
         tun_peer_ip: config.tun_peer_ip,
         tun_dns_ip: config.tun_dns_ip,
-        #[cfg(feature = "postquantum")]
-        enable_pqc: config.enable_pqc,
         enable_expresslane: config.enable_expresslane,
         keepalive_interval: config.keepalive_interval.into(),
         keepalive_timeout: config.keepalive_timeout.into(),
-        continuous_keepalive: config.keepalive_continuous,
-        tracer_packet_timeout: config.tracer_packet_timeout.into(),
-        preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
-        sndbuf: config.sndbuf,
-        rcvbuf: config.rcvbuf,
+        inside_pkt_codec_config: None,
+        stop_signal: ctrlc_rx,
+        network_change_signal: None,
         #[cfg(desktop)]
         route_mode: config.route_mode,
         #[cfg(desktop)]
         dns_config_mode: config.dns_config_mode,
-        enable_pmtud: config.enable_pmtud,
-        pmtud_base_mtu: config.pmtud_base_mtu,
-        #[cfg(feature = "io-uring")]
-        enable_tun_iouring: config.enable_tun_iouring,
-        #[cfg(feature = "io-uring")]
-        iouring_entry_count: config.iouring_entry_count,
-        #[cfg(feature = "io-uring")]
-        iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        inside_pkt_codec_config: None,
-        stop_signal: ctrlc_rx,
-        network_change_signal: None,
         best_connection_selected_signal: None,
-        #[cfg(feature = "debug")]
-        tls_debug: config.tls_debug,
-        #[cfg(feature = "debug")]
-        keylog: config.keylog,
+        transport: ClientTransport::Wolfssl(WolfsslClientTransport {
+            #[cfg(feature = "postquantum")]
+            enable_pqc: config.enable_pqc,
+            enable_pmtud: config.enable_pmtud,
+            pmtud_base_mtu: config.pmtud_base_mtu,
+            sndbuf: config.sndbuf,
+            rcvbuf: config.rcvbuf,
+            continuous_keepalive: config.keepalive_continuous,
+            tracer_packet_timeout: config.tracer_packet_timeout.into(),
+            preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
+            #[cfg(feature = "io-uring")]
+            enable_tun_iouring: config.enable_tun_iouring,
+            #[cfg(feature = "io-uring")]
+            iouring_entry_count: config.iouring_entry_count,
+            #[cfg(feature = "io-uring")]
+            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            #[cfg(feature = "debug")]
+            tls_debug: config.tls_debug,
+            #[cfg(feature = "debug")]
+            keylog: config.keylog,
+        }),
     };
 
     client(config, servers).await.map(|_| ())
