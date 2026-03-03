@@ -159,36 +159,38 @@ async fn main() -> Result<()> {
     };
 
     let config = ServerConfig {
-        mode,
         auth,
         server_cert: config.server_cert,
         server_key: config.server_key,
         tun_config,
         ip_pool: config.ip_pool,
         ip_map: config.ip_map.unwrap_or_default().try_into()?,
-        inside_io: None,
         tun_ip: config.tun_ip,
         lightway_server_ip: config.lightway_server_ip,
         lightway_client_ip: config.lightway_client_ip,
         lightway_dns_ip: config.lightway_dns_ip,
         use_dynamic_client_ip: false,
-        enable_expresslane: config.enable_expresslane,
-        enable_pqc: config.enable_pqc,
+        bind_address: config.bind_address,
+        inside_io: None,
         #[cfg(feature = "io-uring")]
         enable_tun_iouring: config.enable_tun_iouring,
         #[cfg(feature = "io-uring")]
         iouring_entry_count: config.iouring_entry_count,
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        key_update_interval: config.key_update_interval.into(),
+        enable_expresslane: config.enable_expresslane,
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         inside_pkt_codec: None,
-        bind_address: config.bind_address,
-        proxy_protocol: config.proxy_protocol,
-        udp_buffer_size: config.udp_buffer_size,
         #[cfg(feature = "debug")]
         randomize_ippool: config.randomize_ippool,
+        transport: ServerTransport::Wolfssl(WolfsslServerTransport {
+            mode,
+            udp_buffer_size: config.udp_buffer_size,
+            enable_pqc: config.enable_pqc,
+            key_update_interval: config.key_update_interval.into(),
+            proxy_protocol: config.proxy_protocol,
+        }),
     };
 
     server(config).await
