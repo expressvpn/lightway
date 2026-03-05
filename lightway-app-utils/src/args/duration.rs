@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 
+// TODO: implement schemars::JsonSchema for "tools" feature
 /// Wrapper for compatibility with both clap and twelf at the same time
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize)]

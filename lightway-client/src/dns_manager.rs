@@ -6,6 +6,7 @@ use tracing::warn;
 
 /// DNS configuration mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "tools", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum DnsConfigMode {

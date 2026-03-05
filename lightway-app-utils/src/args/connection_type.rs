@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use lightway_core::ConnectionType as LWConnectionType;
 
 #[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "tools", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// [`lightway_core::ConnectionType`] wrapper compatible with clap and twelf

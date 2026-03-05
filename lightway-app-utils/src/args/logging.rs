@@ -7,6 +7,7 @@ use tracing_subscriber::{
 };
 
 #[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "tools", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log format type compatible with clap and twelf
@@ -52,6 +53,7 @@ impl LogFormat {
 }
 
 #[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "tools", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log level type compatible with clap and twelf
