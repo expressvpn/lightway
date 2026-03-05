@@ -1,4 +1,4 @@
-name: Weekly `cargo update`
+name: Weekly `cargo update` and `nix flake update`
 on:
   workflow_dispatch:
   schedule:
@@ -24,15 +24,32 @@ jobs:
     # Updates indirect and direct dependencies according to semver
     # constraints from `*/Cargo.toml`.
     - name: Update cargo dependencies
+      id: cargo-update
+      run: |
+        cargo update 2>&1 | tee /tmp/cargo-update.log
+
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v21
+
+    # Update flake.lock after cargo update so nix sees the new Cargo.lock.
+    - name: Update nix flake inputs
+      id: nix-update
+      run: |
+        nix flake update 2>&1 | tee /tmp/nix-update.log
+
+    - name: Prepare PR outputs
       id: update
       run: |
-        cargo update 2>&1 | tee /tmp/update.log
-
-        title="[auto] Update cargo dependencies"
+        title="[auto] Update cargo and nix flake dependencies"
         body=$(
             echo '```console'
             echo '$ cargo update'
-            cat /tmp/update.log
+            cat /tmp/cargo-update.log
+            echo '```'
+            echo ''
+            echo '```console'
+            echo '$ nix flake update'
+            cat /tmp/nix-update.log
             echo '```'
         )
 
