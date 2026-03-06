@@ -138,7 +138,7 @@ impl OutsideIOSendCallback for TestDatagramSock {
         match self.0.try_send(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                // Real sockets never block (and doing so confuses WolfSSL!), but they do drop, so we do too!
+                // Real sockets never block (and doing so confuses the TLS library!), but they do drop, so we do too!
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) => IOCallbackResult::Err(err),
@@ -642,7 +642,8 @@ impl PQCrypto {
         match self.keyshare {
             Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
             Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
-            None => "X25519MLKEM768", // wolfSSL 5.0.0 default
+            // Based on the default set in KeyShare
+            None => "X25519MLKEM768", // wolfssl 5.0.0 default
         }
     }
 }
@@ -752,7 +753,7 @@ async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
 
 #[test_case(None; "No server domain name")]
 #[test_case(Some("example.com"); "Valid server domain name")]
-#[test_case(Some("invalid") => panics "WolfSSL Error: Fatal: Domain name mismatch"; "Invalid server domain name")]
+#[test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name")]
 #[tokio::test]
 async fn test_server_dn(server_dn: Option<&str>) {
     // Communicate over a local stream socket for simplicity

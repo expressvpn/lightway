@@ -1,6 +1,6 @@
+use crate::tls::IOCallbackResult;
 use bytes::BytesMut;
 use std::{net::SocketAddr, sync::Arc};
-use wolfssl::IOCallbackResult;
 
 /// Maximum number of packets handled in a single batched IO call —
 /// covers both inbound (recvmmsg-style) reads and outbound
@@ -39,7 +39,7 @@ pub trait OutsideIOSendCallback {
     /// block [`std::io::ErrorKind::WouldBlock`] then return
     /// [`IOCallbackResult::WouldBlock`].
     ///
-    /// This is the same method as [`wolfssl::IOCallbacks::send`].
+    /// This is the same method as [`crate::tls::IOCallbacks::send`].
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize>;
 
     /// Get the peer's [`SocketAddr`]

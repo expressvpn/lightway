@@ -136,7 +136,7 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable WolfSSL debug logging"))]
+    #[patch(attribute(doc = "Enable TLS debug logging"))]
     pub tls_debug: bool,
 
     #[cfg(feature = "debug")]

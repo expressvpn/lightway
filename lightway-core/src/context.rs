@@ -26,12 +26,12 @@ pub enum ContextBuilderError {
     InvalidInsideMtu(usize),
 
     /// Failed to create a new ContextBuilder
-    #[error("WolfSSL Error: {0}")]
-    FailedNew(#[from] wolfssl::NewContextBuilderError),
+    #[error("TLS Error: {0}")]
+    FailedNew(#[from] crate::tls::NewContextBuilderError),
 
-    /// A WolfSSL error occurred
-    #[error("WolfSSL Error: {0}")]
-    WolfSSL(#[from] wolfssl::Error),
+    /// A TLS error occurred
+    #[error("TLS Error: {0}")]
+    Tls(#[from] crate::tls::Error),
 
     /// Plugin factory error occurred
     #[error("PluginFactory Error: {0}")]
@@ -111,7 +111,7 @@ pub type ScheduleTickCb<AppState> =
 
 /// The core Lightway Client-side context.
 pub struct ClientContext<AppState> {
-    pub(crate) wolfssl: wolfssl::Context,
+    pub(crate) tls_ctx: crate::tls::Context,
     pub(crate) connection_type: ConnectionType,
     pub(crate) inside_io: Option<InsideIOSendCallbackArg<AppState>>,
     pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
@@ -138,7 +138,7 @@ impl<AppState: Send + 'static> ClientContext<AppState> {
 
 /// Builder for a client side instance of [`ClientContext`].
 pub struct ClientContextBuilder<AppState> {
-    wolfssl: wolfssl::ContextBuilder,
+    tls_ctx: crate::tls::ContextBuilder,
     connection_type: ConnectionType,
     inside_io: Option<InsideIOSendCallbackArg<AppState>>,
     schedule_tick_cb: ScheduleTickCb<AppState>,
@@ -160,16 +160,16 @@ impl<AppState> ClientContextBuilder<AppState> {
         schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
-            ConnectionType::Stream => wolfssl::Method::TlsClientV1_3,
-            ConnectionType::Datagram => wolfssl::Method::DtlsClientV1_3,
+            ConnectionType::Stream => crate::tls::Method::TlsClientV1_3,
+            ConnectionType::Datagram => crate::tls::Method::DtlsClientV1_3,
         };
 
-        let wolfssl = wolfssl::ContextBuilder::new(protocol)?
+        let tls_ctx = crate::tls::ContextBuilder::new(protocol)?
             .with_root_certificate(root_ca)?
             .with_cipher_list(Cipher::default().as_cipher_list(connection_type))?;
 
         Ok(Self {
-            wolfssl,
+            tls_ctx,
             connection_type,
             inside_io,
             schedule_tick_cb,
@@ -203,10 +203,10 @@ impl<AppState> ClientContextBuilder<AppState> {
     /// Sets the cipher which should be used for Lightway connection.
     /// See [`Cipher`].
     pub fn with_cipher(self, cipher: Cipher) -> ContextBuilderResult<Self> {
-        let wolfssl = self
-            .wolfssl
+        let tls_ctx = self
+            .tls_ctx
             .with_cipher_list(cipher.as_cipher_list(self.connection_type))?;
-        Ok(Self { wolfssl, ..self })
+        Ok(Self { tls_ctx, ..self })
     }
 
     /// Enable expresslane data path
@@ -235,9 +235,9 @@ impl<AppState> ClientContextBuilder<AppState> {
 
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
-        let wolfssl = self.wolfssl.build();
+        let tls_ctx = self.tls_ctx.build();
         ClientContext {
-            wolfssl,
+            tls_ctx,
             connection_type: self.connection_type,
             inside_io: self.inside_io,
             schedule_tick_cb: self.schedule_tick_cb,
@@ -282,7 +282,7 @@ pub enum ContextError {
 
 /// The core Lightway Server-side context.
 pub struct ServerContext<AppState = ()> {
-    pub(crate) wolfssl: wolfssl::Context,
+    pub(crate) tls_ctx: crate::tls::Context,
     pub(crate) connection_type: ConnectionType,
     pub(crate) schedule_tick_cb: ScheduleTickCb<AppState>,
     pub(crate) inside_io: InsideIOSendCallbackArg<AppState>,
@@ -341,7 +341,7 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
 
 /// Builder for a server side instance of [`ServerContext`].
 pub struct ServerContextBuilder<AppState> {
-    wolfssl: wolfssl::ContextBuilder,
+    tls_ctx: crate::tls::ContextBuilder,
     connection_type: ConnectionType,
     schedule_tick_cb: ScheduleTickCb<AppState>,
     inside_io: InsideIOSendCallbackArg<AppState>,
@@ -357,21 +357,21 @@ pub struct ServerContextBuilder<AppState> {
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
-const SERVER_CURVE_BASE_GROUPS: &[wolfssl::CurveGroup] = &[
-    wolfssl::CurveGroup::EccSecp256R1,
-    wolfssl::CurveGroup::EccX25519,
+const SERVER_CURVE_BASE_GROUPS: &[crate::tls::CurveGroup] = &[
+    crate::tls::CurveGroup::EccSecp256R1,
+    crate::tls::CurveGroup::EccX25519,
 ];
 
 /// server curves when PQC is enabled, in decreasing order of preference.
 #[cfg(feature = "postquantum")]
-const SERVER_CURVE_PQC_GROUPS: &[wolfssl::CurveGroup] = &[
-    wolfssl::CurveGroup::P521MLKEM1024,
-    wolfssl::CurveGroup::P521KyberLevel5,
-    wolfssl::CurveGroup::X25519MLKEM768,
-    wolfssl::CurveGroup::P256MLKEM512,
-    wolfssl::CurveGroup::P256KyberLevel1,
-    wolfssl::CurveGroup::EccSecp256R1,
-    wolfssl::CurveGroup::EccX25519,
+const SERVER_CURVE_PQC_GROUPS: &[crate::tls::CurveGroup] = &[
+    crate::tls::CurveGroup::P521MLKEM1024,
+    crate::tls::CurveGroup::P521KyberLevel5,
+    crate::tls::CurveGroup::X25519MLKEM768,
+    crate::tls::CurveGroup::P256MLKEM512,
+    crate::tls::CurveGroup::P256KyberLevel1,
+    crate::tls::CurveGroup::EccSecp256R1,
+    crate::tls::CurveGroup::EccX25519,
 ];
 
 impl<AppState> ServerContextBuilder<AppState> {
@@ -386,9 +386,9 @@ impl<AppState> ServerContextBuilder<AppState> {
         schedule_tick_cb: ScheduleTickCb<AppState>,
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
-            ConnectionType::Stream => wolfssl::Method::TlsServerV1_3,
-            // `wolfssl::Method::DtlsServer` supports both DTLS 1.2 and 1.3
-            ConnectionType::Datagram => wolfssl::Method::DtlsServer,
+            ConnectionType::Stream => crate::tls::Method::TlsServerV1_3,
+            // `crate::tls::Method::DtlsServer` supports both DTLS 1.2 and 1.3
+            ConnectionType::Datagram => crate::tls::Method::DtlsServer,
         };
 
         let cipher_list = match connection_type {
@@ -398,14 +398,14 @@ impl<AppState> ServerContextBuilder<AppState> {
             }
         };
 
-        let wolfssl = wolfssl::ContextBuilder::new(protocol)?
+        let tls_ctx = crate::tls::ContextBuilder::new(protocol)?
             .with_private_key(server_key)?
             .with_certificate(server_cert)?
             .with_groups(SERVER_CURVE_BASE_GROUPS)?
             .with_cipher_list(cipher_list)?;
 
         Ok(Self {
-            wolfssl,
+            tls_ctx,
             connection_type,
             auth,
             ip_pool,
@@ -499,7 +499,7 @@ impl<AppState> ServerContextBuilder<AppState> {
     #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
         Ok(Self {
-            wolfssl: self.wolfssl.with_groups(SERVER_CURVE_PQC_GROUPS)?,
+            tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,
             ..self
         })
     }
@@ -509,9 +509,9 @@ impl<AppState> ServerContextBuilder<AppState> {
         debug_assert!(self.supported_protocol_versions.valid());
         let outside_plugins_instance = self.outside_plugins.build()?;
 
-        let wolfssl = self.wolfssl.build();
+        let tls_ctx = self.tls_ctx.build();
         Ok(ServerContext {
-            wolfssl,
+            tls_ctx,
             connection_type: self.connection_type,
             auth: self.auth,
             ip_pool: self.ip_pool,

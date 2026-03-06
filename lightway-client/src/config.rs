@@ -250,7 +250,7 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable WolfSSL debug logging"))]
+    #[patch(attribute(doc = "Enable TLS debug logging"))]
     pub tls_debug: bool,
 
     #[cfg(windows)]
@@ -284,7 +284,7 @@ impl Config {
     }
 
     /// Try build CA from ca_crt
-    pub fn load_ca(&self) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
+    pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         load_ca(&self.ca_cert)
     }
 
@@ -293,7 +293,7 @@ impl Config {
     pub fn load_ca_file<'a>(
         &self,
         ca_path: &'a mut Option<PathBuf>,
-    ) -> lightway_core::wolfssl::RootCertificate<'a> {
+    ) -> lightway_core::tls::RootCertificate<'a> {
         if ca_path.is_none() {
             *ca_path = Some(PathBuf::from(&self.ca_cert));
         }
@@ -461,7 +461,7 @@ impl ConnectionConfig {
 
     /// Try build CA from ca_crt
     #[cfg(feature = "mobile")]
-    pub fn load_ca(&self) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
+    pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
             .map(|ca| load_ca(ca))
@@ -644,7 +644,7 @@ fn take_auth(
     }
 }
 
-fn load_ca(ca: &String) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
+fn load_ca(ca: &String) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
     if ca.starts_with("-----BEGIN CERTIFICATE-----") {
         Ok(RootCertificate::PemBuffer(ca.as_bytes()))
     } else {

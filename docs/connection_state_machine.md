@@ -19,7 +19,7 @@ stateDiagram-v2
     note left of Connecting
       Secure (D)TLS connection negotiated
 
-      wolfssl#colon;#colon;Session#colon;#colon;try_negotiate()
+      tls#colon;#colon;Session#colon;#colon;try_negotiate()
       called until success or failure.
     end note
 

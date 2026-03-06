@@ -3,8 +3,8 @@
 Lightway core in UDP supports encoding the inside packets through the packet codec interface.
 
 A codec consists of:
-- An encoder that encodes the inside packets that are sent from the tunnel (i.e., before they are encrypted by WolfSSL).
-- A decoder that decodes the inside packets that are to be sent to the tunnel (i.e., after they are decrypted by WolfSSL).
+- An encoder that encodes the inside packets that are sent from the tunnel (i.e., before they are encrypted by TLS).
+- A decoder that decodes the inside packets that are to be sent to the tunnel (i.e., after they are decrypted by TLS).
 
 The codec is not necessarily used all the time; it is not required that all packets are encoded throughout the connection. 
 1. The codec can decide whether the packet should be encoded based on its internal implementation.
@@ -18,11 +18,11 @@ Lightway-core accepts either encoded or non-encoded packets when its state is `C
 The following describes the path the packet flows through when a codec is enabled and the packet is accepted by the codec:
 ### Inside to Outside
 ```
-Tunnel -> Inside IO Loop -> Plugin -> Encoder -> Encoded Packet Handler Loop -> WolfSSL Encrypt -> ...
+Tunnel -> Inside IO Loop -> Plugin -> Encoder -> Encoded Packet Handler Loop -> TLS Encrypt -> ...
 ```
 ### Outside to Inside
 ```
-... -> WolfSSL Decrypt -> Decoder -> Decoded Packet Handler Loop -> Plugin -> Tunnel
+... -> TLS Decrypt -> Decoder -> Decoded Packet Handler Loop -> Plugin -> Tunnel
 ```
 
 ## Implementation

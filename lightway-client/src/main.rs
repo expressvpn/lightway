@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
 
     let mut config = Config::default();
     // NOTE:
-    // RootCertificate of wolfssl is not a self handled Struct
+    // RootCertificate of TLS library is not a self handled Struct
     // we need keep the PathBuf live outside
     let mut _root_ca_cert_path: Option<PathBuf> = None;
 
