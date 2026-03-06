@@ -52,13 +52,12 @@ skip = [
     { name = "hashbrown", version = "0.12.3" },
     { name = "hashbrown", version = "0.15.5" },
     { name = "heck", version = "0.4.1" },
-    { name = "hmac", version = "0.10.1" },
     { name = "indexmap", version = "1.9.3" },
+    { name = "libloading", version = "0.8.9" },
     { name = "netlink-packet-core", version = "0.7.0" },
     { name = "netlink-packet-route", version = "0.24.0" },
     { name = "nix", version = "0.30.1" },
     { name = "serde_yaml", version = "0.8.26" },
-    { name = "sha2", version = "0.9.9" },
     { name = "strsim", version = "0.10.0" },
     { name = "syn", version = "1.0.109" },
     { name = "thiserror", version = "1.0.69" },
@@ -80,7 +79,6 @@ skip = [
     { name = "rand", version = "0.8.5" },
     { name = "rand_chacha", version = "0.3.1" },
     { name = "rand_core", version = "0.6.4" },
-    { name = "nix", version = "0.29.0" }
 ]
 
 [sources]
