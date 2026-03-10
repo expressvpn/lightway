@@ -44,6 +44,12 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
   };
 
+  # The boring submodule declares its own workspace including hyper-boring and
+  # tokio-boring crates we don't depend on. cargo-auditable runs `cargo metadata`
+  # eagerly across the whole discovered workspace and fails on those crates'
+  # missing transitive deps. cargo build itself is fine.
+  auditable = false;
+
   buildFeatures = features;
   cargoBuildFlags = "-p ${package}";
 

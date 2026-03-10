@@ -396,8 +396,13 @@ impl<AppState> ServerContextBuilder<AppState> {
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => crate::tls::Method::TlsServerV1_3,
-            // `crate::tls::Method::DtlsServer` supports both DTLS 1.2 and 1.3
+            // Since "DtlsServer" refers to both 1.2 and 1.3,
+            // and 1.2 is not yet implemented on boringssl side, we will feature gate this to
+            // prevent breaking change on wolfssl side for this commit.
+            #[cfg(wolfssl)]
             ConnectionType::Datagram => crate::tls::Method::DtlsServer,
+            #[cfg(boringssl)]
+            ConnectionType::Datagram => crate::tls::Method::DtlsServerV1_3,
         };
 
         let cipher_list = match connection_type {
