@@ -396,8 +396,7 @@ impl<AppState> ServerContextBuilder<AppState> {
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => crate::tls::Method::TlsServerV1_3,
-            // `crate::tls::Method::DtlsServer` supports both DTLS 1.2 and 1.3
-            ConnectionType::Datagram => crate::tls::Method::DtlsServer,
+            ConnectionType::Datagram => crate::tls::Method::DtlsServerV1_3,
         };
 
         let cipher_list = match connection_type {

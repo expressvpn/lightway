@@ -367,6 +367,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "boring"
+version = "5.1.0"
+source = "git+https://github.com/cloudflare/boring.git?rev=3921f35aa406c4cbff6efca9688f1fc9ead2508f#3921f35aa406c4cbff6efca9688f1fc9ead2508f"
+dependencies = [
+ "bitflags",
+ "boring-sys",
+ "foreign-types",
+ "libc",
+ "openssl-macros",
+]
+
+[[package]]
+name = "boring-sys"
+version = "5.1.0"
+source = "git+https://github.com/cloudflare/boring.git?rev=3921f35aa406c4cbff6efca9688f1fc9ead2508f#3921f35aa406c4cbff6efca9688f1fc9ead2508f"
+dependencies = [
+ "bindgen",
+ "cmake",
+ "fs_extra",
+ "fslock",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1014,6 +1037,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "foreign-types"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
+dependencies = [
+ "foreign-types-macros",
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-macros"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a5c6c585bc94aaf2c7b51dd4c2ba22680844aba4c687be581871a6f518c5742"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+
+[[package]]
 name = "fragile"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1049,6 +1099,16 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
+name = "fslock"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04412b8935272e3a9bae6f48c7bfff74c2911f60525404edfdd28e49884c3bfb"
+dependencies = [
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "futures"
@@ -1574,6 +1634,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightway-boring"
+version = "0.1.0"
+dependencies = [
+ "boring",
+ "boring-sys",
+ "bytes",
+ "foreign-types",
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lightway-client"
 version = "0.1.0"
 dependencies = [
@@ -1632,9 +1704,11 @@ dependencies = [
  "async-trait",
  "bitfield-struct",
  "bytes",
+ "cfg_aliases",
  "delegate",
  "itertools 0.14.0",
  "lightway-app-utils",
+ "lightway-boring",
  "lru",
  "metrics",
  "more-asserts",
@@ -2148,6 +2222,17 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "ordered-float"

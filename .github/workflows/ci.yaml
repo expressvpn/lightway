@@ -53,6 +53,8 @@ jobs:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
       - name: Run +${{ matrix.target }} on Earthly
         run: earthly --ci --output ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
 
@@ -112,6 +114,8 @@ jobs:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
       - name: Run +e2e on Earthly
         run: earthly --ci --allow-privileged +e2e --debian ${{ matrix.distro }}
   coverage:
@@ -124,6 +128,8 @@ jobs:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
       - name: Run +coverage on Earthly
         id: coverage
         run: |
@@ -284,6 +290,8 @@ jobs:
             build_msrv: false
     steps:
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
@@ -332,6 +340,8 @@ jobs:
         os: [macos-26, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
@@ -367,6 +377,8 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
       - name: Get Rust version
         id: rust-version
         shell: bash
@@ -421,6 +433,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4.3.0
