@@ -33,6 +33,11 @@ impl Udp {
             Some(s) => s,
             None => tokio::net::UdpSocket::bind((unspecified_ip, 0)).await?,
         };
+        // Connect the UDP socket to the peer address. This enables the kernel
+        // to cache the route, avoiding per-packet route lookups on send/recv
+        // and allowing use of the more efficient send()/recv() syscalls
+        // instead of sendto()/recvfrom().
+        sock.connect(peer_addr).await?;
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
         // Check for the socket's writable ready status, so that it can be used
         // successfuly in WolfSsl's `OutsideIOSendCallback` callback
@@ -89,7 +94,7 @@ impl OutsideIO for Udp {
 
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
+        match self.sock.try_send(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
