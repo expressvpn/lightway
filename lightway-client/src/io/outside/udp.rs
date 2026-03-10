@@ -1,14 +1,14 @@
+use super::OutsideIO;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use lightway_app_utils::sockopt;
+use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 use tokio::net::UdpSocket;
-
-use super::OutsideIO;
-use lightway_app_utils::sockopt;
-use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+use tracing::{error, warn};
 
 pub struct Udp {
     sock: tokio::net::UdpSocket,
@@ -127,6 +127,12 @@ impl OutsideIOSendCallback for Udp {
                 // Otherwise, WolfSSL perceives that no data is sent and try
                 // to send the same data again, creating a live-lock until the
                 // network is reachable.
+                error!("Network unreachable");
+                let socket = socket2::SockRef::from(&self.sock);
+                let peer_addr = self.peer_addr().into();
+                if let Err(e) = socket.connect(&peer_addr) {
+                    warn!("failed to connect peer: {e:?}");
+                }
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
