@@ -141,6 +141,20 @@ impl OutsideIOSendCallback for Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
                 IOCallbackResult::Ok(buf.len())
             }
+            #[cfg(macos)]
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
+                // The source address is no longer valid (e.g. Switched WiFi
+                // changed). It should eventually recover by itself after a while.
+                // If the user has disconnected from the internet, keepalive should fail
+                // eventually due to missed reply (`keepalive_timeout`).
+                //
+                // Returning the number of bytes requested to be sent to mock
+                // that the send is successful.
+                // Otherwise, WolfSSL perceives that no data is sent and try
+                // to send the same data again, creating a live-lock until the
+                // network is reachable.
+                IOCallbackResult::Ok(buf.len())
+            }
             Err(err) => {
                 tracing::warn!("Outside IO Send failed: {err:?}");
                 IOCallbackResult::Err(err)
