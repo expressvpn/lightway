@@ -98,7 +98,7 @@ impl OutsideIOSendCallback for Udp {
                 // Possibly the server isn't listening (yet).
                 //
                 // Swallow the error so the WolfSSL socket does not
-                // enter the error state.
+                // enter the error state, and DTLS would handle retransmission as well.
                 //
                 // This way we can continue if/when the server shows up.
                 //
@@ -112,33 +112,22 @@ impl OutsideIOSendCallback for Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
                 // This case indicates network unreachable error.
                 // Possibly there is a network change at the moment.
-                //
-                // Swallow the socket error so the error is not passed to the
-                // WolfSSL layer. Then the WolfSSL layer would not enter a
-                // fatal error state
-                //
-                // Returning the number of bytes requested to be sent to mock
-                // that the send is successful.
-                // Otherwise, WolfSSL perceives that no data is sent and try
-                // to send the same data again, creating a live-lock until the
-                // network is reachable.
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
                 // No buffer space available
                 // UDP sockets may have this error when the system is overloaded.
-                //
-                // Swallow the socket error so the error is not passed to the
-                // WolfSSL layer, and DTLS would handle retransmission as well.
-                //
-                // Returning the number of bytes requested to be sent to mock
-                // that to send is successful.
-                // Otherwise, WolfSSL perceives that no data is sent and try
-                // to send the same data again, creating a live-lock as it may take a while
-                // to clear up send buffer.
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                IOCallbackResult::Ok(buf.len())
+            }
+            #[cfg(macos)]
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
+                // The source address is no longer valid (e.g. Switched WiFi hotspots)
+                // It should eventually recover by itself after a while.
+                // If the user has disconnected from the internet, keepalive should fail
+                // due to missed reply (`keepalive_timeout`).
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) => {
