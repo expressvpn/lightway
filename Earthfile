@@ -156,7 +156,16 @@ fmt:
 # lint runs cargo clippy on the source code
 lint:
     FROM +source
-    DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --all-targets -- -D warnings"
+    # Lint each TLS backend separately. The crate::tls abstraction requires
+    # exactly one of `wolfssl` or `boringssl` to be enabled, so we cannot
+    # rely on a single --no-default-features pass.
+    #
+    # `-A unnecessary_transmutes` is needed for the boringssl backend because
+    # boring-sys's auto-generated bindgen output contains transmute patterns
+    # that newer rustc flags as warnings. The submodule is upstream code we
+    # do not modify; the allow scopes the suppression to lint only.
+    DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --features wolfssl --all-targets -- -D warnings"
+    DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --features boringssl --all-targets -- -D warnings -A unnecessary_transmutes"
     ENV RUSTDOCFLAGS="-D warnings"
     DO lib-rust+CARGO --args="doc --document-private-items"
     # Run lint for shell scripts inside tests/ directory
