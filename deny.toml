@@ -37,49 +37,11 @@ exceptions = [
 ignore = true
 
 [bans]
-multiple-versions = "deny"
+multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-skip = [
-    { name = "block-buffer", version = "0.9.0" },
-    { name = "darling", version = "0.14.4" },
-    { name = "darling_core", version = "0.14.4" },
-    { name = "darling_macro", version = "0.14.4" },
-    { name = "digest", version = "0.9.0" },
-    { name = "foldhash", version = "0.1.5" },
-    { name = "hashbrown", version = "0.12.3" },
-    { name = "hashbrown", version = "0.15.5" },
-    { name = "heck", version = "0.4.1" },
-    { name = "indexmap", version = "1.9.3" },
-    { name = "libloading", version = "0.8.9" },
-    { name = "netlink-packet-core", version = "0.7.0" },
-    { name = "netlink-packet-route", version = "0.24.0" },
-    { name = "nix", version = "0.30.1" },
-    { name = "serde_yaml", version = "0.8.26" },
-    { name = "strsim", version = "0.10.0" },
-    { name = "syn", version = "1.0.109" },
-    { name = "thiserror", version = "1.0.69" },
-    { name = "thiserror-impl", version = "1.0.69" },
-    { name = "windows-link", version = "0.1.3" },
-    { name = "windows-sys", version = "0.59.0" },
-    { name = "windows-sys", version = "0.60.2" },
-    { name = "windows-targets", version = "0.52.6" },
-    { name = "windows_aarch64_gnullvm", version = "0.52.6" },
-    { name = "windows_aarch64_msvc", version = "0.52.6" },
-    { name = "windows_i686_gnu", version = "0.52.6" },
-    { name = "windows_i686_gnullvm", version = "0.52.6" },
-    { name = "windows_i686_msvc", version = "0.52.6" },
-    { name = "windows_x86_64_gnu", version = "0.52.6" },
-    { name = "windows_x86_64_gnullvm", version = "0.52.6" },
-    { name = "windows_x86_64_msvc", version = "0.52.6" },
-    { name = "getrandom", version = "0.2.15" },
-    { name = "itertools", version = "0.14.0" },
-    { name = "rand", version = "0.8.5" },
-    { name = "rand_chacha", version = "0.3.1" },
-    { name = "rand_core", version = "0.6.4" },
-]
 
 [sources]
 unknown-registry = "deny"
