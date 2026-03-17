@@ -138,6 +138,12 @@ where
             // This is a TODO for full parity with WolfSSL API
         }
 
+        #[cfg(feature = "debug")]
+        if let Some(ref _key_logger) = config.key_logger {
+            // BoringSSL key logging can be configured via SSL_CTX_set_keylog_callback
+            // For now, this is a placeholder
+        }
+
         // Create BIO adapter and SSL stream
         let bio_adapter = BioAdapter { io: config.io };
         let ssl_stream = SslStream::new(ssl, bio_adapter)?;

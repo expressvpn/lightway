@@ -8,15 +8,18 @@
 //! the configuration to the underlying BoringSSL `SSL_CTX`.
 
 #![allow(unsafe_code)]
-use crate::error::Result;
 use crate::NewContextBuilderError;
+use crate::error::Result;
+
+#[cfg(feature = "debug")]
+use crate::debug::Tls13SecretCallbacksArg;
 
 use super::{CurveGroup, IOCallbacks, Method, RootCertificate, Secret, TlsError};
 use boring::error::ErrorStack;
 use boring::pkey::PKey;
 use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
-use boring::x509::store::X509StoreBuilder;
 use boring::x509::X509;
+use boring::x509::store::X509StoreBuilder;
 
 use super::config::SessionConfig;
 use super::session::Session;
@@ -74,11 +77,7 @@ impl ContextBuilder {
     where
         F: FnOnce(Self) -> Result<Self>,
     {
-        if cond {
-            func(self)
-        } else {
-            Ok(self)
-        }
+        if cond { func(self) } else { Ok(self) }
     }
 
     /// When `maybe` is Some(_) call fallible `func` on `Self` and the contained value
@@ -187,11 +186,35 @@ impl ContextBuilder {
         Ok(self)
     }
 
+    /// Register a TLS 1.3 key logger on the context.
+    ///
+    /// BoringSSL exposes keylog only at the `SSL_CTX` level
+    /// (`SSL_CTX_set_keylog_callback`), so it is set on the context here and
+    /// every session the context spawns inherits it. wolfSSL logs per session.
+    #[cfg(feature = "debug")]
+    pub fn with_key_logger(mut self, callback: Tls13SecretCallbacksArg) -> Self {
+        self.builder
+            .set_keylog_callback(move |_ssl, line| callback.wireshark_keylog(line.to_string()));
+        self
+    }
+
     /// Finalize and build the context.
     pub fn build(self) -> Context {
+        #[allow(unused_mut)]
+        let Self {
+            mut builder,
+            method,
+        } = self;
+
+        #[cfg(feature = "debug")]
+        {
+            crate::debug::attach_info_callback(&mut builder);
+            crate::debug::attach_msg_callback(&mut builder);
+        }
+
         Context {
-            ssl_ctx: self.builder.build(),
-            method: self.method,
+            ssl_ctx: builder.build(),
+            method,
         }
     }
 }

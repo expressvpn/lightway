@@ -18,6 +18,7 @@ mod aes256;
 mod cert;
 mod config;
 mod context;
+mod debug;
 mod error;
 mod session;
 #[cfg(test)]
@@ -34,4 +35,10 @@ pub use error::{Error, ErrorKind, NewContextBuilderError, NewSessionError, TlsEr
 pub use session::Session;
 pub use types::{
     CurveGroup, IOCallbackResult, IOCallbacks, Method, Poll, PollResult, ProtocolVersion,
+};
+
+#[cfg(feature = "debug")]
+pub use debug::{
+    LoggingCallback, Tls13SecretCallbacks, Tls13SecretCallbacksArg, enable_debugging,
+    install_logging_callback,
 };
