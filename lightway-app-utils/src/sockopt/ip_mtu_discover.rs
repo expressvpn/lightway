@@ -19,6 +19,8 @@ use std::os::windows::io::AsRawSocket;
 #[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
 mod internal {
     use libc::{IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT};
+    #[cfg(target_os = "linux")]
+    use libc::{IP_PMTUDISC_INTERFACE, IP_PMTUDISC_OMIT};
 
     /// Enum to represent PMTUd values
     #[derive(Copy, Clone)]
@@ -31,6 +33,12 @@ mod internal {
         Do,
         /// Ignore dst pmtu
         Probe,
+        /// Ignore ICMP PMTU updates, does not support local fragmentation
+        #[cfg(target_os = "linux")]
+        Interface,
+        /// Ignore ICMP PMTU updates, supports local fragmentation
+        #[cfg(target_os = "linux")]
+        Omit,
     }
 
     impl From<IpPmtudisc> for libc::c_int {
@@ -40,6 +48,10 @@ mod internal {
                 IpPmtudisc::Want => IP_PMTUDISC_WANT,
                 IpPmtudisc::Do => IP_PMTUDISC_DO,
                 IpPmtudisc::Probe => IP_PMTUDISC_PROBE,
+                #[cfg(target_os = "linux")]
+                IpPmtudisc::Interface => IP_PMTUDISC_INTERFACE,
+                #[cfg(target_os = "linux")]
+                IpPmtudisc::Omit => IP_PMTUDISC_OMIT,
             }
         }
     }
@@ -53,6 +65,10 @@ mod internal {
                 IP_PMTUDISC_WANT => Ok(IpPmtudisc::Want),
                 IP_PMTUDISC_DO => Ok(IpPmtudisc::Do),
                 IP_PMTUDISC_PROBE => Ok(IpPmtudisc::Probe),
+                #[cfg(target_os = "linux")]
+                IP_PMTUDISC_INTERFACE => Ok(IpPmtudisc::Interface),
+                #[cfg(target_os = "linux")]
+                IP_PMTUDISC_OMIT => Ok(IpPmtudisc::Omit),
                 v => Err(std::io::Error::other(format!(
                     "unexpected value for IP_PMTUDISC: {:?}",
                     v
