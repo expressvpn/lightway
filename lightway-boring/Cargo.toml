@@ -1,0 +1,18 @@
+[package]
+name = "lightway-boring"
+version = "0.1.0"
+edition.workspace = true
+description = "BoringSSL-backed TLS/DTLS abstraction layer for Lightway"
+repository.workspace = true
+license = "Apache-2.0"
+
+[features]
+debug = []
+
+[dependencies]
+# Pinned until upstream releases the SslVersion::DTLS1_2 / DTLS1_3 constants after 5.1.0
+boring = { git = "https://github.com/cloudflare/boring.git", rev = "3921f35aa406c4cbff6efca9688f1fc9ead2508f" }
+boring-sys = { git = "https://github.com/cloudflare/boring.git", rev = "3921f35aa406c4cbff6efca9688f1fc9ead2508f" }
+bytes = { workspace = true }
+foreign-types = "0.5"
+thiserror = { workspace = true }
