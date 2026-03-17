@@ -9,6 +9,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use bytesize::ByteSize;
+#[cfg(target_os = "linux")]
+use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
 use lightway_core::{
     ConnectionType, Header, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback,
@@ -126,6 +128,12 @@ impl UdpServer {
             Some(s) => s,
             None => tokio::net::UdpSocket::bind(bind_address).await?,
         };
+
+        // Set Omit to ignore ICMP FragNeeded PMTU updates. If fragmentation is needed
+        // in the path, routers will take care of fragmenting, since we do not set DF
+        // This is to avoid PMTU poisoning by attackers
+        #[cfg(target_os = "linux")]
+        sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Omit)?;
 
         // Check for the socket's writable ready status, so that it can be used
         // successfuly in WolfSsl's `OutsideIOSendCallback` callback
