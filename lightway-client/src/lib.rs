@@ -187,6 +187,10 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Callback for expresslane key updates
+    #[educe(Debug(ignore))]
+    pub expresslane_cb: Option<lightway_core::ExpresslaneCbType>,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -788,6 +792,9 @@ pub async fn connect<
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)
     .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.expresslane_cb.is_some(), |b| {
+        b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),

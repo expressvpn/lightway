@@ -11,8 +11,8 @@ use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
-    ServerAuthResult, Version,
+    ConnectionType, ExpresslaneCbType, PluginFactoryError, PluginFactoryList, ServerAuth,
+    ServerAuthHandle, ServerAuthResult, Version,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -172,6 +172,10 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Callback for expresslane key updates
+    #[educe(Debug(ignore))]
+    pub expresslane_cb: Option<ExpresslaneCbType>,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -314,6 +318,9 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     )?
     .with_key_update_interval(config.key_update_interval)
     .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.expresslane_cb.is_some(), |b| {
+        b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
