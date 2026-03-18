@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,8 @@ pub struct ExpresslaneCbData {
     pub self_key: ExpresslaneKey,
     /// Peer key
     pub peer_key: ExpresslaneKey,
+    /// Peer socket address
+    pub peer_sockaddr: SocketAddr,
 }
 
 /// Callback trait for expresslane key updates.

@@ -1778,7 +1778,11 @@ impl<AppState: Send> Connection<AppState> {
         if let Some(xp_config_cb) = &self.expresslane.cb {
             let self_key = self.expresslane.data.self_key();
             let peer_key = self.expresslane.data.peer_key();
-            let data = ExpresslaneCbData { self_key, peer_key };
+            let data = ExpresslaneCbData {
+                self_key,
+                peer_key,
+                peer_sockaddr: self.peer_addr(),
+            };
             xp_config_cb.update(self.session_id, data);
         }
     }
