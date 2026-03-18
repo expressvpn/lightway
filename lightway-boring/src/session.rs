@@ -44,6 +44,7 @@ pub struct Session<IOCB> {
     ssl_stream: SslStream<BioAdapter<IOCB>>,
     is_client: bool,
     is_dtls: bool,
+    pending_key_update: bool,
 }
 
 /// Adapter for integrating I/O operations with BoringSSL BIO
@@ -152,6 +153,7 @@ where
             ssl_stream,
             is_client,
             is_dtls,
+            pending_key_update: false,
         })
     }
 
@@ -228,6 +230,9 @@ where
 
         match stream.ssl_write(buf) {
             Ok(n) => {
+                // A successful SSL_write flushes any queued KeyUpdate, so the
+                // key rotation is committed even if the transport write is partial.
+                self.pending_key_update = false;
                 buf.advance(n);
                 Ok(super::Poll::Ready(n))
             }
@@ -247,10 +252,19 @@ where
 
     /// Initiate TLS key update
     fn initiate_key_update(&mut self) -> Result<(), super::Error> {
-        // TLS 1.3 key updates in BoringSSL
-        // Note: This requires FFI access to SSL_key_update
-        // For now, we'll return Ok as TLS 1.3 handles key updates automatically
-        // TODO: Implement when foreign_types_shared is available
+        // SAFETY: `ssl().as_ptr()` is the SSL owned by the SslStream, valid for
+        // this call; SSL_key_update only mutates that SSL's state.
+        unsafe {
+            let ssl_ptr = self.ssl_stream.ssl().as_ptr();
+            let ret = boring_sys::SSL_key_update(ssl_ptr, boring_sys::SSL_KEY_UPDATE_NOT_REQUESTED);
+            if ret != 1 {
+                return Err(super::Error::Fatal(super::ErrorKind::Other {
+                    what: format!("SSL_key_update failed (ret={})", ret),
+                    code: ret,
+                }));
+            }
+        }
+        self.pending_key_update = true;
         Ok(())
     }
 
@@ -377,7 +391,7 @@ where
 
     /// Check if key update is pending (TLS 1.3 compatibility)
     pub fn is_update_keys_pending(&self) -> bool {
-        false
+        self.pending_key_update
     }
 }
 
@@ -558,5 +572,53 @@ mod tests {
         let (client, server) = make_connected_tls_pair();
         assert!(client.is_init_finished());
         assert!(server.is_init_finished());
+    }
+
+    #[test]
+    fn try_trigger_update_key() {
+        use bytes::BytesMut;
+
+        let (mut client, mut _server) = make_connected_tls_pair();
+
+        let result = client.try_trigger_update_key();
+        assert!(
+            matches!(result, Ok(Poll::Ready(()))),
+            "try_trigger_update_key failed: {:?}",
+            result
+        );
+
+        // The queued KeyUpdate is flushed on the next ssl_write.
+        let mut buf = BytesMut::from(b"post-key-update".as_ref());
+        let result = client.try_write(&mut buf);
+        assert!(
+            result.is_ok(),
+            "try_write after key update failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn is_update_keys_pending_clears_on_write() {
+        use bytes::BytesMut;
+
+        let (mut client, mut _server) = make_connected_tls_pair();
+
+        client.try_trigger_update_key().unwrap();
+        assert!(
+            client.is_update_keys_pending(),
+            "expected pending_key_update=true"
+        );
+
+        let mut buf = BytesMut::from(b"data".as_ref());
+        let result = client.try_write(&mut buf).unwrap();
+        assert!(
+            matches!(result, Poll::Ready(_)),
+            "expected Ready after write, got {:?}",
+            result
+        );
+        assert!(
+            !client.is_update_keys_pending(),
+            "expected pending_key_update=false after write"
+        );
     }
 }
