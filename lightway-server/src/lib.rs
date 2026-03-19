@@ -387,7 +387,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         io = inside_io_loop =>  io.map_err(|e| anyhow!(e).context("Inside IO loop panicked"))?.context("Inside IO loop exited"),
         _ = ctrlc_rx => {
             info!("Sigterm or Sigint received");
-            conn_manager.close_all_connections();
+            conn_manager.shutdown();
             Ok(())
         }
     }

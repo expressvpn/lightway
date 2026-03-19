@@ -535,7 +535,11 @@ impl ConnectionManager {
             .retain(|_session_id, conn| conn.upgrade().is_some());
     }
 
-    pub(crate) fn close_all_connections(&self) {
+    pub(crate) fn shutdown(&self) {
+        // Send shutdown signal, so that packet codec can do fast cleanup
+        if let Some(factory) = &self.inside_io_codec_factory {
+            factory.shutdown();
+        }
         let connections = self.connections.lock().remove_connections();
         for conn in connections {
             let _ = conn.lw_disconnect();

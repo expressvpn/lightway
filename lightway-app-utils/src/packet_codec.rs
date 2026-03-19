@@ -11,6 +11,9 @@ pub trait PacketCodecFactory {
 
     /// Returns the codec name for debugging purpose
     fn get_codec_name(&self) -> String;
+
+    /// Sends shutdown signal to codec factory
+    fn shutdown(&self) {}
 }
 
 /// Type for [`PacketCodecFactory`]
