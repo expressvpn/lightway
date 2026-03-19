@@ -40,9 +40,6 @@ const INTERNAL_MTU: u16 = 1350;
 const MAX_SOCKET_BUFFER_LEN: usize = 1024000;
 const ENABLE_PMTUD: bool = false;
 
-pub(crate) const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 2);
-pub(crate) const DNS_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 3);
-
 enum OutsideSocket {
     Tcp(TcpSocket),
     Udp(UdpSocket),
@@ -161,7 +158,11 @@ impl InsideIOSendCallback<ConnectionState<TunnelState>> for MobileInsideIo {
     }
 }
 
-async fn setup_tunnel_interface(tun_fd: RawFd) -> uniffi::Result<Arc<io::inside::Tun>> {
+async fn setup_tunnel_interface(
+    tun_fd: RawFd,
+    local_ip: Ipv4Addr,
+    dns_ip: Ipv4Addr,
+) -> uniffi::Result<Arc<io::inside::Tun>> {
     let mut tun_config = TunConfig::default();
 
     // Tun device should not be closed on client exit, since the same tunnel will be
@@ -169,7 +170,7 @@ async fn setup_tunnel_interface(tun_fd: RawFd) -> uniffi::Result<Arc<io::inside:
     tun_config.raw_fd(tun_fd).close_fd_on_drop(false);
 
     Ok(Arc::new(
-        io::inside::Tun::new(&tun_config, LOCAL_IP, DNS_IP)
+        io::inside::Tun::new(&tun_config, local_ip, dns_ip)
             .await
             .context("Tun creation")?,
     ))
@@ -187,7 +188,8 @@ pub(crate) async fn async_lightway_start(
         .map(|e| OutsideSocket::new(e.use_tcp, Some(external_event_handler.clone())).ok())
         .collect::<Vec<Option<OutsideSocket>>>();
 
-    let inside_io = setup_tunnel_interface(tun_fd).await?;
+    let inside_io =
+        setup_tunnel_interface(tun_fd, user_settings.local_ip(), user_settings.dns_ip()).await?;
 
     let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
 
@@ -387,7 +389,7 @@ pub(crate) async fn async_lightway_start(
     let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(
         conn.clone(),
         inside_io,
-        DNS_IP,
+        user_settings.dns_ip(),
         keepalive,
         keepalive_config,
     ));

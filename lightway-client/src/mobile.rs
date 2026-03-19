@@ -2,6 +2,7 @@ use crate::LightwayError;
 pub(crate) mod lightway;
 pub(crate) mod tracing_utils;
 
+use std::net::Ipv4Addr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -115,10 +116,17 @@ pub struct LightwayUserSettings {
     defer_timeout: i64,
     /// Enable Expresslane for UDP connections
     pub enable_expresslane: bool,
+    /// The local ip for TUN interface in ipv4 format
+    pub local_ip: String,
+    /// The dns ip in ipv4 format
+    pub dns_ip: String,
 }
 
 impl LightwayUserSettings {
     const DEFAULT_PREFERRED_CONNECTION_WAIT_INTERVAL_IN_MILLISECS: u64 = 2000;
+    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 2);
+    const DNS_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 3);
+
     pub fn get_defer_timeout_duration(&self) -> Duration {
         let defer_timeout = self.defer_timeout;
         let defer_interval = u64::try_from(defer_timeout).unwrap_or_else(|_| {
@@ -127,6 +135,20 @@ impl LightwayUserSettings {
         });
         info!("Using defer timeout value: {defer_timeout} ms");
         Duration::from_millis(defer_interval)
+    }
+
+    pub fn local_ip(&self) -> Ipv4Addr {
+        self.local_ip.parse::<Ipv4Addr>().unwrap_or_else(|e| {
+            warn!("local ip is invalid: {e}. Using default.");
+            Self::LOCAL_IP
+        })
+    }
+
+    pub fn dns_ip(&self) -> Ipv4Addr {
+        self.dns_ip.parse::<Ipv4Addr>().unwrap_or_else(|e| {
+            warn!("dns ip is invalid: {e}. Using default.");
+            Self::DNS_IP
+        })
     }
 }
 
