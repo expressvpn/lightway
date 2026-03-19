@@ -15,5 +15,6 @@ boring = { git = "https://github.com/cloudflare/boring.git", rev = "3921f35aa406
 boring-sys = { git = "https://github.com/cloudflare/boring.git", rev = "3921f35aa406c4cbff6efca9688f1fc9ead2508f" }
 bytes = { workspace = true }
 foreign-types = "0.5"
+libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

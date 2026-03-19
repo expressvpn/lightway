@@ -17,6 +17,12 @@ use super::config::SessionConfig;
 use super::context::Context;
 use std::time::Duration;
 
+/// Poll interval reported when DTLS has no retransmit timer armed (handshake not
+/// started yet or already finished). BoringSSL returns 0 from
+/// `DTLSv1_get_timeout` in that state; we surface a non-zero default so callers
+/// re-poll periodically instead of treating it as "fire immediately".
+const DTLS_DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
 /// Map a TLS handshake failure to an [`ErrorKind`](super::ErrorKind) using
 /// BoringSSL's structured X509 verify result rather than string matching.
 fn classify_handshake_error(verify_result: boring::x509::X509VerifyResult) -> super::ErrorKind {
@@ -312,13 +318,23 @@ where
     /// Callers should not use this value to implement their own timeout logic.
     /// Instead, rely on BoringSSL's internal timeout handling via normal
     /// read/write operations.
-    pub fn dtls_current_timeout(&self) -> Duration {
+    pub fn dtls_current_timeout(&mut self) -> Duration {
         if !self.is_dtls {
             return Duration::from_millis(0); // Not DTLS
         }
-        // Return typical initial timeout value for compatibility
-        // BoringSSL manages actual timeouts internally
-        Duration::from_millis(1000)
+        // SAFETY: `ssl().as_ptr()` is the SSL owned by the SslStream, valid for
+        // this call. `tv` is a stack timeval; `zeroed` is a valid bit pattern
+        // for it, and DTLSv1_get_timeout only reads the SSL and writes `tv`.
+        unsafe {
+            let ssl_ptr = self.ssl_stream.ssl().as_ptr();
+            let mut tv = std::mem::zeroed::<libc::timeval>();
+            if DTLSv1_get_timeout(ssl_ptr, &mut tv) == 1 {
+                Duration::new(tv.tv_sec as u64, (tv.tv_usec as u32) * 1000)
+            } else {
+                // No active timer (handshake not in flight).
+                DTLS_DEFAULT_POLL_INTERVAL
+            }
+        }
     }
 
     /// Check if DTLS should use quick timeout (DTLS 1.3 compatibility)
@@ -339,25 +355,47 @@ where
         self.is_dtls && !self.is_init_finished()
     }
 
-    /// Check if DTLS has timed out (DTLS compatibility)
+    /// Handle an expired DTLS retransmit timer (wraps `DTLSv1_handle_timeout`).
     ///
-    /// **Implementation Note:**
-    /// Always returns `false`. BoringSSL handles DTLS timeout detection internally
-    /// and will surface timeout conditions as errors from `SSL_read`/`SSL_write`.
+    /// The return value breaks the usual convention (BoringSSL's own header
+    /// warns about this):
+    ///   0  => no timer had expired, nothing to do
+    ///   1  => the flight was retransmitted
+    ///   -1 => error; SSL_get_error must be consulted to interpret it
     ///
-    /// This method exists for API compatibility with the WolfSSL interface but
-    /// does not provide meaningful timeout state information.
+    /// A -1 is NOT automatically fatal. If the retransmit could not be written
+    /// because the transport would block, SSL_get_error reports
+    /// SSL_ERROR_WANT_WRITE and the caller retries when writable. Only a
+    /// different error is a genuine timeout. Do NOT collapse this to
+    /// `ret != 1 => fatal`: that turns ordinary write backpressure into a
+    /// dropped connection.
     ///
-    /// **Caller Responsibility:**
-    /// Instead of checking this method, rely on error returns from read/write
-    /// operations to detect timeout and connection issues.
-    pub fn dtls_has_timed_out(&self) -> super::Poll<bool> {
+    /// Ref: <https://github.com/google/boringssl/blob/master/include/openssl/ssl.h> (DTLSv1_handle_timeout)
+    pub fn dtls_has_timed_out(&mut self) -> super::Poll<bool> {
         if !self.is_dtls {
             return super::Poll::Ready(false);
         }
-        // BoringSSL handles DTLS timeouts internally
-        // Timeout conditions surface as errors from SSL_read/SSL_write
-        super::Poll::Ready(false)
+        // SAFETY: `ssl().as_ptr()` is the SSL owned by the SslStream, valid for
+        // these calls; DTLSv1_handle_timeout and SSL_get_error only operate on
+        // that SSL.
+        unsafe {
+            let ssl_ptr = self.ssl_stream.ssl().as_ptr();
+            match DTLSv1_handle_timeout(ssl_ptr) {
+                0 => super::Poll::Ready(false), // no timer expired
+                1 => super::Poll::Ready(false), // retransmitted the flight
+                ret => {
+                    // -1: classify via SSL_get_error. WANT_WRITE = transport
+                    // backpressure, retry when writable (documented by the
+                    // header).
+                    let err = boring_sys::SSL_get_error(ssl_ptr, ret);
+                    match err {
+                        boring_sys::SSL_ERROR_WANT_WRITE => super::Poll::PendingWrite,
+                        boring_sys::SSL_ERROR_WANT_READ => super::Poll::PendingRead,
+                        _ => super::Poll::Ready(true),
+                    }
+                }
+            }
+        }
     }
 
     /// Try to negotiate the handshake (WolfSSL compatibility)
@@ -408,12 +446,22 @@ where
     }
 }
 
+// Declared by hand: boring-sys at the pinned revision does not bind the DTLS
+// timeout helpers, so we link BoringSSL's exported symbols directly.
+unsafe extern "C" {
+    /// Ref: <https://github.com/google/boringssl/blob/master/include/openssl/ssl.h> (DTLSv1_get_timeout)
+    fn DTLSv1_get_timeout(ssl: *const boring_sys::SSL, out: *mut libc::timeval) -> i32;
+    /// Ref: <https://github.com/google/boringssl/blob/master/include/openssl/ssl.h> (DTLSv1_handle_timeout)
+    fn DTLSv1_handle_timeout(ssl: *mut boring_sys::SSL) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use crate::test_utils::mock::{
         make_connected_dtls_pair, make_connected_tls_pair, MockIOAdapter, UdpIOCallbacks,
     };
     use crate::{ContextBuilder, Method, Poll, SessionConfig};
+    use std::time::Duration;
 
     #[test]
     fn try_negotiate_tls() {
@@ -620,5 +668,46 @@ mod tests {
             !client.is_update_keys_pending(),
             "expected pending_key_update=false after write"
         );
+    }
+
+    #[test]
+    fn test_dtls_current_timeout() {
+        let ctx = ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
+        let mut session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        let timeout = session.dtls_current_timeout();
+        assert_eq!(timeout, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_dtls_current_timeout_non_dtls() {
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let mut session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        let timeout = session.dtls_current_timeout();
+        assert_eq!(timeout, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn test_dtls_has_timed_out_non_dtls() {
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let mut session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        let result = session.dtls_has_timed_out();
+        assert!(matches!(result, Poll::Ready(false)));
+    }
+
+    #[test]
+    fn test_dtls_has_timed_out_no_timeout() {
+        let ctx = ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
+        let mut session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        // No time has passed, so no timeout should have expired
+        let result = session.dtls_has_timed_out();
+        assert!(matches!(result, Poll::Ready(false)));
     }
 }
