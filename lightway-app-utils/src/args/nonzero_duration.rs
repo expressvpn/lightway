@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 
-/// Wrapper for compatibility with both clap and twelf at the same time
+/// Wrapper for compatibility with both clap
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NonZeroDuration(#[serde_as(as = "DisplayFromStr")] humantime::Duration);
 
 impl std::fmt::Display for NonZeroDuration {
@@ -33,5 +33,12 @@ impl std::str::FromStr for NonZeroDuration {
             return Err(humantime::DurationError::Empty);
         }
         Ok(duration)
+    }
+}
+
+impl NonZeroDuration {
+    /// Build from std duration
+    pub fn from_std_duration(duration: std::time::Duration) -> Self {
+        NonZeroDuration(duration.into())
     }
 }

@@ -1,4 +1,4 @@
-//! Types useful for integrating with clap (CLI) and twelf (config file)
+//! Types useful for integrating with clap (CLI)
 
 mod cipher;
 mod connection_type;

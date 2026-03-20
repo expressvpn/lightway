@@ -39,14 +39,16 @@ lightway-app-utils.workspace = true
 lightway-core.workspace = true
 pnet_packet.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde-env.workspace = true
+serde-saphyr.workspace = true
 socket2.workspace = true
+struct-patch.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
+tokio.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-twelf.workspace = true
 
 # mobile feature
 uniffi = { workspace = true, optional = true }

@@ -9,11 +9,13 @@ use clap::Parser;
 use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
+use serde::Deserialize;
+use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
-use twelf::config;
+use struct_patch::Patch;
 
-#[config]
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Deserialize, Patch)]
+#[patch(attribute(derive(Deserialize)))]
 #[command(about = "A lightway client")]
 pub struct Config {
     /// Config File to load
@@ -227,8 +229,64 @@ impl Config {
     }
 }
 
-#[config]
-#[derive(Parser, Debug)]
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            config_file: PathBuf::default(),
+            servers: Vec::default(),
+            server: String::default(),
+            mode: ConnectionType::Tcp,
+            server_dn: None,
+            cipher: Cipher::Aes256,
+            token: None,
+            user: None,
+            password: None,
+            ca_cert: "./ca_cert.crt".to_string(),
+            outside_mtu: MAX_OUTSIDE_MTU,
+            tun_name: None,
+            #[cfg(windows)]
+            wintun_file: None,
+            tun_local_ip: Ipv4Addr::new(100, 64, 0, 6),
+            tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
+            tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
+            #[cfg(feature = "postquantum")]
+            keyshare: KeyShare::default(),
+            keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
+            keepalive_continuous: true,
+            tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            preferred_connection_wait_interval: Duration::from_std_duration(
+                StdDuration::from_secs(0),
+            ),
+            sndbuf: ByteSize::mib(8),
+            rcvbuf: ByteSize::mib(8),
+            #[cfg(batch_receive)]
+            enable_batch_receive: false,
+            #[cfg(desktop)]
+            route_mode: RouteMode::default(),
+            #[cfg(desktop)]
+            dns_config_mode: DnsConfigMode::default(),
+            log_level: LogLevel::Info,
+            enable_expresslane: false,
+            enable_pmtud: false,
+            pmtud_base_mtu: None,
+            enable_tun_iouring: false,
+            iouring_entry_count: 1024,
+            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+            enable_inside_pkt_encoding_at_connect: false,
+            #[cfg(feature = "debug")]
+            keylog: None,
+            #[cfg(feature = "debug")]
+            tls_debug: false,
+            #[cfg(windows)]
+            wintun_ring_capacity: ByteSize::mib(8),
+            #[cfg(windows)]
+            enable_dpapi: false,
+        }
+    }
+}
+
+#[derive(Parser, Debug, Deserialize, PartialEq)]
 pub struct ConnectionConfig {
     /// Server to connect to in `<hostname>:<port>` format
     pub server: String,
@@ -248,12 +306,11 @@ pub struct ConnectionConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::read_to_string;
     use std::str::FromStr;
 
     use super::*;
-    use clap::CommandFactory;
     use test_case::test_case;
-    use twelf::Layer;
 
     #[test_case("../tests/client/client_config.yaml", true, 0)]
     #[test_case(
@@ -269,11 +326,15 @@ mod tests {
     )]
     #[test_case("../tests/client/parallel_connect/client_config.udp.yaml", false, 10)]
     fn test_parse_config(config_file: &str, has_top_level_server: bool, servers_len: usize) {
-        let matches =
-            Config::command().get_matches_from(["lightway-client", "--config-file", config_file]);
+        let matches = Config::try_parse_from(["lightway-client", "--config-file", config_file]);
+        let mut config = Config::default();
         let config_file = PathBuf::from_str(config_file).unwrap();
-        let config =
-            Config::with_layers(&[Layer::Yaml(config_file), Layer::Clap(matches)]).unwrap();
+        let yaml_patch =
+            serde_saphyr::from_str::<ConfigPatch>(&read_to_string(config_file).unwrap()).unwrap();
+        config.apply(yaml_patch);
+
+        let options = matches.unwrap().into_patch_by_diff(Config::default());
+        config.apply(options);
 
         assert_eq!(config.server.is_empty(), !has_top_level_server);
         assert_eq!(config.servers.len(), servers_len);

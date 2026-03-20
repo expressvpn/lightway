@@ -1,4 +1,6 @@
+use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
 #[cfg(windows)]
@@ -6,7 +8,7 @@ use clap::ArgMatches;
 use clap::CommandFactory;
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
-use twelf::Layer;
+use tokio::fs::read_to_string;
 
 use lightway_app_utils::{
     TunConfig, Validate,
@@ -15,7 +17,7 @@ use lightway_app_utils::{
 };
 use lightway_client::{io::inside::InsideIO, *};
 mod args;
-use args::Config;
+use args::{Config, ConfigPatch};
 
 use crate::args::ConnectionConfig;
 
@@ -63,10 +65,8 @@ async fn make_client_connection_config(
 }
 
 #[cfg(windows)]
-fn load_config_layer(matches: &ArgMatches, config_file: &PathBuf) -> Result<Layer> {
-    use crate::platform::windows::crypto::{
-        decrypt_dpapi_config_file, into_config_layer_from_dpapi,
-    };
+async fn load_patch(matches: &ArgMatches, config_file: &PathBuf) -> Result<ConfigPatch> {
+    use crate::platform::windows::crypto::decrypt_dpapi_config_file;
     use windows_dpapi::Scope::User;
 
     // Fetch whether DPAPI is enabled from CLI args
@@ -75,18 +75,15 @@ fn load_config_layer(matches: &ArgMatches, config_file: &PathBuf) -> Result<Laye
         .copied()
         .unwrap_or(false);
 
-    if enable_dpapi {
+    let content = if enable_dpapi {
         tracing::info!("DPAPI decryption enabled for config file");
-        let decrypted_content = decrypt_dpapi_config_file(config_file, User)
-            .context("Failed to decrypt DPAPI-protected config file")?;
-
-        // Convert decrypted content into config layer
-        return into_config_layer_from_dpapi(decrypted_content)
-            .context("Failed to parse decrypted config content");
-    }
-
-    tracing::debug!("Loading config file directly (no DPAPI)");
-    Ok(Layer::Yaml(config_file.to_owned()))
+        decrypt_dpapi_config_file(config_file, User)
+            .context("Failed to decrypt DPAPI-protected config file")?
+    } else {
+        tracing::debug!("Loading config file directly (no DPAPI)");
+        read_to_string(config_file).await?
+    };
+    Ok(serde_saphyr::from_str::<ConfigPatch>(&content)?)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -101,18 +98,18 @@ async fn main() -> Result<()> {
     validate_configuration_file_path(config_file, Validate::OwnerOnly)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
+    let mut config = Config::default();
+
+    // Load config patch with DPAPI support
     #[cfg(windows)]
-    // Load config layer with DPAPI support
-    let config_layer = load_config_layer(&matches, config_file)?;
-
+    config.apply(load_patch(&matches, config_file).await?);
     #[cfg(not(windows))]
-    let config_layer = Layer::Yaml(config_file.to_owned());
-
-    let mut config = Config::with_layers(&[
-        config_layer,
-        Layer::Env(Some(String::from("LW_CLIENT_"))),
-        Layer::Clap(matches),
-    ])?;
+    config.apply(serde_saphyr::from_str::<ConfigPatch>(
+        &read_to_string(config_file).await?,
+    )?);
+    config.apply(serde_env::from_env_with_prefix("LW_CLIENT")?);
+    let options = Config::parse().into_patch_by_diff(Config::default());
+    config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
@@ -147,7 +144,7 @@ async fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
-        if let Some(wintun_file) = config.wintun_file {
+        if let Some(ref wintun_file) = config.wintun_file {
             tun_config.wintun_file(wintun_file);
         }
         tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;

@@ -1,19 +1,21 @@
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
 };
 
 use bytesize::ByteSize;
 use clap::Parser;
 use ipnet::Ipv4Net;
-use twelf::config;
+use serde::Deserialize;
+use std::time::Duration as StdDuration;
+use struct_patch::Patch;
 
 use lightway_app_utils::args::{
     ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration,
 };
 
-#[config]
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Deserialize, Patch)]
+#[patch(attribute(derive(Deserialize)))]
 #[clap(about = "A lightway server")]
 pub struct Config {
     /// Config File to load
@@ -127,4 +129,47 @@ pub struct Config {
     #[cfg(feature = "debug")]
     #[clap(long, default_value_t = true)]
     pub randomize_ippool: bool,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        const IP_POOL: Ipv4Net = match Ipv4Net::new(Ipv4Addr::new(10, 125, 0, 0), 16) {
+            Ok(v) => v,
+            Err(_) => panic!("Invalid ip pool default constant!"),
+        };
+
+        Config {
+            config_file: PathBuf::default(),
+            mode: ConnectionType::Tcp,
+            user_db: None,
+            token_rsa_pub_key_pem: None,
+            server_cert: PathBuf::from("./server.crt"),
+            server_key: PathBuf::from("./server.key"),
+            tun_name: None,
+            ip_pool: IP_POOL,
+            ip_map: None,
+            tun_ip: None,
+            lightway_server_ip: Ipv4Addr::new(10, 125, 0, 6),
+            lightway_client_ip: Ipv4Addr::new(10, 125, 0, 5),
+            lightway_dns_ip: Ipv4Addr::new(10, 125, 0, 1),
+            enable_expresslane: false,
+            enable_pqc: false,
+            enable_tun_iouring: false,
+            iouring_entry_count: 1024,
+            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+            log_format: LogFormat::Full,
+            log_level: LogLevel::Info,
+            // TODO: use from_mins, if MSRV > 1.91
+            key_update_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(
+                15 * 60,
+            )),
+            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 27690),
+            proxy_protocol: false,
+            udp_buffer_size: ByteSize::mib(15),
+            #[cfg(feature = "debug")]
+            tls_debug: false,
+            #[cfg(feature = "debug")]
+            randomize_ippool: true,
+        }
+    }
 }

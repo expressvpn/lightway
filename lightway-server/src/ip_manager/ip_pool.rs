@@ -1,11 +1,14 @@
 use ipnet::Ipv4Net;
+use serde::Deserialize;
 use std::{
     collections::{HashSet, VecDeque},
     net::Ipv4Addr,
 };
+use struct_patch::Patch;
 use tracing::warn;
 
 /// Manages the alloction of a pool of IPs
+#[derive(Deserialize, Patch, PartialEq)]
 pub struct IpPool {
     /// Reserved IPs, must never be allocated to a client.
     reserved_ips: HashSet<Ipv4Addr>,
