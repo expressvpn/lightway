@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 
-/// Wrapper for compatibility with both clap and twelf at the same time
+/// Wrapper for compatibility with clap
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Duration(#[serde_as(as = "DisplayFromStr")] humantime::Duration);
 
 impl std::fmt::Display for Duration {
@@ -36,5 +36,10 @@ impl Duration {
     /// Returns true if this `Duration` spans no time.
     pub fn is_zero(&self) -> bool {
         self.0.is_zero()
+    }
+
+    /// Build from std duration
+    pub fn from_std_duration(duration: std::time::Duration) -> Self {
+        Duration(duration.into())
     }
 }

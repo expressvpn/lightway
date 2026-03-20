@@ -10,7 +10,7 @@ use thiserror::Error;
 ///
 /// When used via clap in the CLI the variant is always [`Self::Path`]
 /// but in the configuration file either form can be used.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum IpMap {
     /// A path pointing to a file containing YAML (NB: a superset of

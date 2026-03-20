@@ -4,12 +4,13 @@ mod auth;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
-use clap::CommandFactory;
+use clap::{CommandFactory, Parser};
+use struct_patch::Patch;
 
 use metrics_util::debugging::DebuggingRecorder;
+use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
-use twelf::Layer;
 
 use args::Config;
 #[cfg(feature = "debug")]
@@ -86,11 +87,15 @@ async fn main() -> Result<()> {
     validate_configuration_file_path(config_file, Validate::AllowWorldRead)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
-    let config = Config::with_layers(&[
-        Layer::Yaml(config_file.to_owned()),
-        Layer::Env(Some(String::from("LW_SERVER_"))),
-        Layer::Clap(matches),
-    ])?;
+    let mut config = Config::default();
+    config.apply(serde_saphyr::from_str(&read_to_string(config_file).await?)?);
+    config.apply(
+        envious::Config::default()
+            .with_prefix("LW_SERVER_")
+            .build_from_env()?,
+    );
+    let options = Config::parse().into_patch_by_diff(Config::default());
+    config.apply(options);
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)
         .with_context(|| format!("Invalid server key file {}", config.server_key.display()))?;

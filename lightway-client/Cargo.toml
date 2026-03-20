@@ -34,20 +34,23 @@ bytesize.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 educe.workspace = true
+envious.workspace = true 
 futures = "0.3.30"
 libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core.workspace = true
 pnet_packet.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde-saphyr.workspace = true
 socket2.workspace = true
+struct-patch.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
+tokio.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-twelf.workspace = true
+rtrb = { version = "0.3.3", optional = true }
 
 # mobile feature
 uniffi = { workspace = true, optional = true }
