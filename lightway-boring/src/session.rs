@@ -5,9 +5,11 @@
 //! WolfSSL-compatible accessors for protocol version, cipher, curve, and DTLS
 //! timeout information.
 
-#![allow(unsafe_code)] // Required for BoringSSL FFI
+#![allow(unsafe_code)]
+
+// Required for BoringSSL FFI
 use super::{IOCallbackResult, IOCallbacks, Method, ProtocolVersion, TlsError};
-use boring::ssl::{ErrorCode, Ssl, SslMode, SslStream};
+use boring::ssl::{ErrorCode, ShutdownResult, Ssl, SslMode, SslStream};
 use boring::x509::verify::X509VerifyFlags;
 use boring::x509::X509VerifyError;
 use bytes::{Buf, BytesMut};
@@ -409,13 +411,22 @@ where
         Ok(super::Poll::Ready(()))
     }
 
-    /// Try to shutdown the session
+    /// Send a close_notify, returning a `Poll<bool>`.
     ///
-    /// **Note:** This is currently a no-op kept for API compatibility.
-    /// We do not send a TLS close_notify alert. Callers should treat
-    /// dropping the underlying IO/session as the termination mechanism.
-    pub fn try_shutdown(&mut self) -> Result<(), super::Error> {
-        Ok(())
+    /// `Ready(false)` means our close_notify was sent; `Ready(true)` means the
+    /// peer's close_notify was received. WANT_READ / WANT_WRITE map to
+    /// PendingRead / PendingWrite.
+    pub fn try_shutdown(&mut self) -> super::PollResult<bool> {
+        match self.ssl_stream.shutdown() {
+            Ok(ShutdownResult::Sent) => Ok(super::Poll::Ready(false)),
+            Ok(ShutdownResult::Received) => Ok(super::Poll::Ready(true)),
+            Err(ref e) if e.code() == ErrorCode::WANT_WRITE => Ok(super::Poll::PendingWrite),
+            Err(ref e) if e.code() == ErrorCode::WANT_READ => Ok(super::Poll::PendingRead),
+            Err(e) => Err(super::Error::Fatal(super::ErrorKind::Other {
+                what: format!("Shutdown failed: {:?}", e.code()),
+                code: e.code().as_raw(),
+            })),
+        }
     }
 
     /// Check if key update is pending (TLS 1.3 compatibility)
@@ -700,5 +711,25 @@ mod tests {
         // No time has passed, so no timeout should have expired
         let result = session.dtls_has_timed_out();
         assert!(matches!(result, Poll::Ready(false)));
+    }
+
+    #[test]
+    fn try_shutdown_tls() {
+        let (mut client, mut _server) = make_connected_tls_pair();
+        // Shutdown should not panic or return a fatal error.
+        // The first call sends our close_notify (Sent = Ready(false)).
+        // Under single-threaded in-memory IO the peer alert may or may not
+        // have arrived yet, so we accept Sent, Received, or pending states.
+        let result = client.try_shutdown();
+        assert!(result.is_ok(), "try_shutdown returned error: {:?}", result);
+        let poll = result.unwrap();
+        assert!(
+            matches!(
+                poll,
+                Poll::Ready(_) | Poll::PendingRead | Poll::PendingWrite
+            ),
+            "unexpected shutdown poll: {:?}",
+            poll
+        );
     }
 }
