@@ -5,9 +5,11 @@ use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use clap::Parser;
-use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
+use lightway_app_utils::args::{
+    Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
+};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::Patch;
@@ -18,18 +20,25 @@ use struct_patch::Patch;
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
-#[derive(Debug, Deserialize, Patch)]
+#[derive(Debug, Deserialize, Serialize, Patch)]
 #[patch(attribute(derive(Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
 pub struct Config {
     #[patch(attribute(clap(short, long)))]
+    #[patch(attribute(doc = "Generate configure for single server in the format to path from `-c, --config-file`"))]
+    #[serde(skip_serializing)]
+    pub generate: ConfigFormat,
+
+    #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = "Config File to load"))]
+    #[serde(skip_serializing)]
     pub config_file: PathBuf,
 
     /// Servers to attempt to connect to. Configuration is only supported in
     /// config file, not command line or environment variable
     #[patch(attribute(clap(skip)))]
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub servers: Vec<ConnectionConfig>,
 
     #[patch(attribute(clap(short, long)))]
@@ -246,6 +255,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             config_file: PathBuf::default(),
+            generate: ConfigFormat::Yaml,
             servers: Vec::default(),
             server: String::default(),
             mode: ConnectionType::Tcp,
@@ -300,7 +310,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Parser, Debug, Deserialize, PartialEq)]
+#[derive(Parser, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     /// Server to connect to in `<hostname>:<port>` format
     pub server: String,

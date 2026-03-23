@@ -9,7 +9,7 @@ use tokio::fs::read_to_string;
 
 use lightway_app_utils::{
     TunConfig, Validate,
-    args::{ConnectionType, LogFormat},
+    args::{ConfigFormat, ConnectionType, LogFormat},
     validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
@@ -80,6 +80,21 @@ async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<Conf
     Ok(serde_saphyr::from_str::<ConfigPatch>(&content)?)
 }
 
+fn generate_config(format: ConfigFormat, config_file: &PathBuf) -> Result<()> {
+    println!("Create {format:?} config to {}", config_file.display());
+
+    match format {
+        ConfigFormat::Yaml => {
+            let default_configs = Config::default();
+            let mut file = std::fs::File::create(config_file)?;
+            serde_saphyr::to_io_writer(&mut file, &default_configs)?;
+        }
+        ConfigFormat::JsonSchema => todo!(),
+    }
+
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let mut options = ConfigPatch::parse();
@@ -88,6 +103,10 @@ async fn main() -> Result<()> {
     let Some(config_file) = options.config_file.take() else {
         return Err(anyhow!("Config file not present"));
     };
+
+    if let Some(config_format) = options.generate.take() {
+        return generate_config(config_format, &config_file);
+    }
 
     validate_configuration_file_path(&config_file, Validate::OwnerOnly)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
