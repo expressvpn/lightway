@@ -89,7 +89,13 @@ fn generate_config(format: ConfigFormat, config_file: &PathBuf) -> Result<()> {
             let mut file = std::fs::File::create(config_file)?;
             serde_saphyr::to_io_writer(&mut file, &default_configs)?;
         }
-        ConfigFormat::JsonSchema => todo!(),
+        ConfigFormat::JsonSchema => {
+            let settings = schemars::generate::SchemaSettings::draft07().with(|s| {
+                s.inline_subschemas = true;
+            });
+            let schema = settings.into_generator().into_root_schema_for::<Config>();
+            std::fs::write(config_file, serde_json::to_string_pretty(&schema)?)?;
+        }
     }
 
     Ok(())

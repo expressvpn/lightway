@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{
     EnvFilter,
@@ -51,7 +52,7 @@ impl LogFormat {
     }
 }
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, ValueEnum, Debug, JsonSchema, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log level type compatible with clap
