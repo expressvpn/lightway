@@ -2,6 +2,7 @@ use anyhow::Result;
 use route_manager::{
     AsyncRouteListener, AsyncRouteManager, Route, RouteManager as SyncRouteManager,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
@@ -59,7 +60,9 @@ const TUNNEL_ROUTES: [(IpAddr, u8); 2] = [
     ),
 ];
 
-#[derive(Debug, PartialEq, Copy, Clone, clap::ValueEnum, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, PartialEq, Copy, Clone, clap::ValueEnum, JsonSchema, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum RouteMode {

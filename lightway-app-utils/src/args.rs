@@ -12,6 +12,8 @@ pub use cipher::Cipher;
 pub use config_format::ConfigFormat;
 pub use connection_type::ConnectionType;
 pub use duration::Duration;
+pub use duration::custom_schema as duration_schema;
 pub use ip_map::IpMap;
 pub use logging::{LogFormat, LogLevel};
 pub use nonzero_duration::NonZeroDuration;
+pub use nonzero_duration::custom_schema as nonzero_duration_schema;

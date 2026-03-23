@@ -9,6 +9,7 @@ use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
 };
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
@@ -20,12 +21,14 @@ use struct_patch::Patch;
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
-#[derive(Debug, Deserialize, Serialize, Patch)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
 pub struct Config {
     #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = "Generate configure for single server in the format to path from `-c, --config-file`"))]
+    #[patch(attribute(
+        doc = "Generate configure for single server in the format to path from `-c, --config-file`"
+    ))]
     #[serde(skip_serializing)]
     pub generate: ConfigFormat,
 
@@ -115,10 +118,12 @@ pub struct Config {
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Interval between keepalives"))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
     pub keepalive_interval: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Keepalive timeout"))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
     pub keepalive_timeout: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
@@ -130,6 +135,7 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
     when we haven't received an outside packet"#))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
     pub tracer_packet_timeout: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
@@ -137,14 +143,17 @@ pub struct Config {
         attribute(doc = r#"How long to wait before selecting the best connection.
     If the preferred connection connects before the timeout, it will be used immediately."#)
     )]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
     pub preferred_connection_wait_interval: Duration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket send buffer size"))]
+    #[schemars(schema_with = "byte_size_schema")]
     pub sndbuf: Option<ByteSize>,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket receive buffer size"))]
+    #[schemars(schema_with = "byte_size_schema")]
     pub rcvbuf: Option<ByteSize>,
 
     #[cfg(batch_receive)]
@@ -207,6 +216,7 @@ pub struct Config {
     #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
     If non-zero use a kernel thread to perform submission queue polling.
     After the given idle time the thread will go to sleep."#))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
     pub iouring_sqpoll_idle_time: Duration,
 
     #[patch(attribute(clap(short, long)))]
@@ -310,7 +320,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Parser, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Parser, Debug, Deserialize, JsonSchema, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     /// Server to connect to in `<hostname>:<port>` format
     pub server: String,
@@ -328,12 +338,23 @@ pub struct ConnectionConfig {
     pub cipher: Cipher,
 }
 
+fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = String::json_schema(generator);
+    schema.insert(
+        "pattern".into(),
+        "^[0-9]+(\\.[0-9]+)?\\s*(EB|EIB|GB|GIB|KB|KIB|MB|MIB|PB|PIB|TB|TIB|eb|eib|gb|gib|kb|kib|mb|mib|pb|pib|tb|tib)$".into(),
+    );
+    schema
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::read_to_string;
     use std::str::FromStr;
 
     use super::*;
+    use regex::Regex;
+    use schemars::SchemaGenerator;
     use test_case::test_case;
 
     #[test_case("../tests/client/client_config.yaml", true, 0)]
@@ -361,5 +382,92 @@ mod tests {
 
         assert_eq!(config.server.is_empty(), !has_top_level_server);
         assert_eq!(config.servers.len(), servers_len);
+    }
+
+    fn get_byte_pattern() -> String {
+        let schema = byte_size_schema(&mut SchemaGenerator::default());
+        schema
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .expect("pattern key must exist and be a string")
+            .to_string()
+    }
+
+    #[test]
+    fn valid_byte_size_input() {
+        let re = Regex::new(&get_byte_pattern()).unwrap();
+        for s in &["1KB", "1MB", "1GB", "1TB", "1PB", "1EB"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with si units uppercase input: {s}"
+            );
+        }
+        for s in &["1KIB", "1MIB", "1GIB", "1TIB", "1PIB", "1EIB"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with iec units uppercase input: {s}"
+            );
+        }
+        for s in &["1kb", "1mb", "1gb", "1tb", "1pb", "1eb"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with si units lowercase input: {s}"
+            );
+        }
+        for s in &["1kib", "1mib", "1gib", "1tib", "1pib", "1eib"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with iec units lowercase input: {s}"
+            );
+        }
+        for s in &["1.5KB", "0.5mb", "2.25GIB", "10.0tb"] {
+            assert!(re.is_match(s), "expected valid with decimal input: {s}");
+        }
+        for s in &["1 KB", "10  MB", "1.5\tGIB", "100 tb"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with whitespace spacer input: {s}"
+            );
+        }
+        for s in &["512MB", "1024KIB", "8gb"] {
+            assert!(re.is_match(s), "expected valid with no spacer input: {s}");
+        }
+        for s in &["999999GB", "123456789TB", "1000000EIB"] {
+            assert!(
+                re.is_match(s),
+                "expected valid with larger number input: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_byte_size_input() {
+        let re = Regex::new(&get_byte_pattern()).unwrap();
+        assert!(!re.is_match(""), "empty string must not match");
+        assert!(!re.is_match("1024"), "bare number must not match");
+        for s in &["KB", "MIB", "gb"] {
+            assert!(!re.is_match(s), "unit without number must not match: {s}");
+        }
+        for s in &["1B", "1YB", "1ZB", "1bit", "1byte", "1kbps"] {
+            assert!(!re.is_match(s), "unknown unit must not match: {s}");
+        }
+        for s in &["1Kb", "1mB", "1Gib", "1tIb"] {
+            assert!(!re.is_match(s), "mixed case must not match: {s}");
+        }
+        assert!(!re.is_match(".5KB"), "leading dot must not match");
+        assert!(!re.is_match("1.2.3KB"), "multiple dots must not match");
+        assert!(!re.is_match("-1KB"), "negative value must not match");
+        for s in &["1KBs", "1MB/s", "1GIB "] {
+            assert!(!re.is_match(s), "trailing content must not match: {s}");
+        }
+        for s in &["~1KB", "about 1MB", " 1GB"] {
+            assert!(!re.is_match(s), "leading text must not match: {s}");
+        }
+        for s in &["1GB 512MB", "1TB1GB"] {
+            assert!(
+                !re.is_match(s),
+                "multi-component byte size must not match: {s}"
+            );
+        }
     }
 }

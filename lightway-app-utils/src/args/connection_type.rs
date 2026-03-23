@@ -1,9 +1,10 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use lightway_core::ConnectionType as LWConnectionType;
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Copy, Clone, ValueEnum, Debug, JsonSchema, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// [`lightway_core::ConnectionType`] wrapper compatible with clap

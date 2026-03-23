@@ -1,7 +1,8 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, ValueEnum, Debug, JsonSchema, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log format type compatible with clap

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
 use ipnet::Ipv4Net;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,5 +57,15 @@ impl TryFrom<IpMap> for HashMap<IpAddr, Ipv4Net> {
             }
             IpMap::Inline(m) => Ok(m),
         }
+    }
+}
+
+impl JsonSchema for IpMap {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IpMap".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        generator.subschema_for::<std::collections::HashMap<String, String>>()
     }
 }

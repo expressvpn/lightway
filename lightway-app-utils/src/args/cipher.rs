@@ -1,9 +1,10 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use lightway_core::Cipher as LWCipher;
 
-#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, JsonSchema, ValueEnum, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// [`LWCipher`] wrapper compatible with clap

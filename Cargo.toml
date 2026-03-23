@@ -55,6 +55,8 @@ parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }
 pnet_packet = { version = "0.35.0" }
 pnet = { version = "0.35.0", default-features = false}
 rand = "0.10.0"
+regex = "1"
+schemars = "1.2.1"
 serde = "1.0.189"
 serde-saphyr = "0.0.22"
 socket2 = "0.6.0"
