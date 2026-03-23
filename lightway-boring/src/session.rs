@@ -10,8 +10,8 @@
 // Required for BoringSSL FFI
 use super::{IOCallbackResult, IOCallbacks, Method, ProtocolVersion, TlsError};
 use boring::ssl::{ErrorCode, ShutdownResult, Ssl, SslMode, SslStream};
-use boring::x509::verify::X509VerifyFlags;
 use boring::x509::X509VerifyError;
+use boring::x509::verify::X509VerifyFlags;
 use bytes::{Buf, BytesMut};
 use foreign_types::ForeignTypeRef;
 
@@ -141,10 +141,27 @@ where
 
         // Configure key share group if specified
         if let Some(group) = config.keyshare_group {
-            let _group_id = group.to_ssl_group()?;
-            // Note: Setting curves per-session in BoringSSL requires direct FFI
-            // For now, we'll rely on context-level curve configuration
-            // This is a TODO for full parity with WolfSSL API
+            let group_id = group.to_ssl_group()?;
+            // SAFETY: `ssl.as_ptr()` is the SSL owned by `ssl`, valid for this
+            // call. `key_shares` is a stack array valid for its length;
+            // SSL_set1_client_key_shares copies the group ids and does not
+            // retain the pointer.
+            unsafe {
+                let ssl_ptr = ssl.as_ptr();
+                if is_client && group.is_pq() {
+                    let key_shares: [u16; 1] = [group_id];
+                    let ret = boring_sys::SSL_set1_client_key_shares(
+                        ssl_ptr,
+                        key_shares.as_ptr(),
+                        key_shares.len(),
+                    );
+                    if ret != 1 {
+                        return Err(super::TlsError::InvalidParameter(
+                            "Failed to set client key shares".into(),
+                        ));
+                    }
+                }
+            }
         }
 
         #[cfg(feature = "debug")]
@@ -469,9 +486,9 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::mock::{
-        make_connected_dtls_pair, make_connected_tls_pair, MockIOAdapter, UdpIOCallbacks,
+        MockIOAdapter, UdpIOCallbacks, make_connected_dtls_pair, make_connected_tls_pair,
     };
-    use crate::{ContextBuilder, Method, Poll, SessionConfig};
+    use crate::{ContextBuilder, CurveGroup, Method, Poll, SessionConfig};
     use std::time::Duration;
 
     #[test]
@@ -563,11 +580,10 @@ mod tests {
         let client_curve = client.get_current_curve_name();
         let server_curve = server.get_current_curve_name();
 
-        // Assert concrete value — BoringSSL's default preferred group is X25519
         assert_eq!(
             client_curve.as_deref(),
-            Some("X25519"),
-            "client should report X25519 as the negotiated curve"
+            Some("X25519MLKEM768"),
+            "client should report X25519MLKEM768 as the negotiated curve"
         );
         assert_eq!(
             client_curve, server_curve,
@@ -740,5 +756,57 @@ mod tests {
             "unexpected shutdown poll: {:?}",
             poll
         );
+    }
+
+    #[test]
+    fn test_session_with_keyshare_group_classical() {
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let config =
+            SessionConfig::new(MockIOAdapter::new()).with_keyshare_group(CurveGroup::EccX25519);
+        // Session creation succeeds → SSL_set1_group_ids accepted the group
+        ctx.new_session(config).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "postquantum")]
+    fn test_session_with_keyshare_group_pq() {
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .with_groups(&[CurveGroup::X25519MLKEM768])
+            .unwrap()
+            .build();
+        let config = SessionConfig::new(MockIOAdapter::new())
+            .with_keyshare_group(CurveGroup::X25519MLKEM768);
+        ctx.new_session(config).unwrap();
+    }
+
+    #[test]
+    fn test_session_with_each_curve_group() {
+        let classical_groups = [CurveGroup::EccSecp256R1, CurveGroup::EccX25519];
+
+        for group in classical_groups {
+            let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+            let config = SessionConfig::new(MockIOAdapter::new()).with_keyshare_group(group);
+            ctx.new_session(config)
+                .unwrap_or_else(|e| panic!("Session creation failed for {:?}: {}", group, e));
+        }
+
+        #[cfg(feature = "postquantum")]
+        {
+            let pq_groups = [CurveGroup::X25519MLKEM768];
+
+            for group in pq_groups {
+                // The context must include all PQ groups in its supported list
+                // so that SSL_set1_client_key_shares can reference them.
+                let ctx = ContextBuilder::new(Method::TlsClientV1_3)
+                    .unwrap()
+                    .with_groups(&pq_groups)
+                    .unwrap()
+                    .build();
+                let config = SessionConfig::new(MockIOAdapter::new()).with_keyshare_group(group);
+                ctx.new_session(config)
+                    .unwrap_or_else(|e| panic!("Session creation failed for {:?}: {}", group, e));
+            }
+        }
     }
 }

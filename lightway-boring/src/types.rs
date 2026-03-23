@@ -55,6 +55,10 @@ impl CurveGroup {
             CurveGroup::X25519MLKEM768 => Ok(SSL_GROUP_X25519_MLKEM768 as u16),
         }
     }
+
+    pub fn is_pq(self) -> bool {
+        !matches!(self, CurveGroup::EccX25519 | CurveGroup::EccSecp256R1)
+    }
 }
 
 /// Protocol version
@@ -186,5 +190,16 @@ mod tests {
         assert!(!result.is_ok());
         assert!(!result.is_would_block());
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "postquantum")]
+    fn test_post_quantum_curves() {
+        // Verify all PQ curves are available
+        let curves = vec![CurveGroup::X25519MLKEM768];
+
+        for curve in curves {
+            assert!(curve.to_ssl_group().is_ok());
+        }
     }
 }
