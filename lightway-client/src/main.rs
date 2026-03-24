@@ -128,16 +128,8 @@ async fn main() -> Result<()> {
 
     let auth = config.take_auth()?;
 
-    let root_ca_path = PathBuf::from(&config.ca_cert);
-    let root_ca_cert = if config
-        .ca_cert
-        .as_str()
-        .starts_with("-----BEGIN CERTIFICATE-----")
-    {
-        RootCertificate::PemBuffer(config.ca_cert.as_bytes())
-    } else {
-        RootCertificate::PemFileOrDirectory(&root_ca_path)
-    };
+    const EMBEDDED_CA_CERT: &[u8] = include_bytes!("ca_cert.pem");
+    let root_ca_cert = RootCertificate::PemBuffer(EMBEDDED_CA_CERT);
 
     let mut tun_config = TunConfig::default();
 
