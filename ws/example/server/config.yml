@@ -1,0 +1,22 @@
+---
+bind_address: 0.0.0.0:9443
+mode: tcp
+websocket: true
+ws_path: "/api"
+server_cert: "server.crt"
+server_key: "server.key"
+user_db: "lwpasswd"
+tun_name: lightway
+ip_pool: 10.125.0.0/16
+tun_ip: 10.125.0.1
+lightway_server_ip: 169.254.10.1
+lightway_client_ip: 169.254.10.2
+lightway_dns_ip: 169.254.10.5
+log_level: info
+log_format: full
+enable_pqc: false
+enable_expresslane: false
+enable_tun_iouring: false
+iouring_entry_count: 1024
+key_update_interval: 15m
+udp_buffer_size: 15 MiB

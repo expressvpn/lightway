@@ -64,7 +64,11 @@ pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
     /// TCP wrapped in WebSocket framing for DPI resistance
-    WebSocket { ws_host: String, ws_path: String },
+    WebSocket {
+        ws_host: String,
+        ws_path: String,
+        ws_tls: bool,
+    },
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -72,10 +76,15 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
-            Self::WebSocket { ws_host, ws_path } => f
+            Self::WebSocket {
+                ws_host,
+                ws_path,
+                ws_tls,
+            } => f
                 .debug_struct("WebSocket")
                 .field("host", ws_host)
                 .field("path", ws_path)
+                .field("tls", ws_tls)
                 .finish(),
         }
     }
@@ -687,9 +696,13 @@ pub async fn connect<
                     .context("Outside IO TCP")?;
                 (ConnectionType::Stream, sock)
             }
-            ClientConnectionMode::WebSocket { ws_host, ws_path } => {
+            ClientConnectionMode::WebSocket {
+                ws_host,
+                ws_path,
+                ws_tls,
+            } => {
                 let sock =
-                    io::outside::WsTcp::new(server_config.server, &ws_host, &ws_path)
+                    io::outside::WsTcp::new(server_config.server, &ws_host, &ws_path, ws_tls)
                         .await
                         .inspect_err(|e| {
                             tracing::error!("Failed to create outside IO WebSocket: {e}")

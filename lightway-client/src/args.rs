@@ -199,6 +199,11 @@ pub struct Config {
     #[clap(long, default_value = "/ws")]
     pub ws_path: String,
 
+    /// Enable TLS for the outer WebSocket transport connection.
+    /// Required when connecting through an nginx/caddy TLS reverse proxy on port 443.
+    #[clap(long, default_value_t)]
+    pub ws_tls: bool,
+
     /// Enable DPAPI encryption/decryption for config file
     /// Only for Windows platform
     #[cfg(windows)]

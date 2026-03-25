@@ -39,6 +39,7 @@ struct WsOptions {
     enabled: bool,
     host: Option<String>,
     path: String,
+    tls: bool,
 }
 
 async fn make_client_connection_config(
@@ -61,6 +62,7 @@ async fn make_client_connection_config(
             ClientConnectionMode::WebSocket {
                 ws_host,
                 ws_path: ws.path.clone(),
+                ws_tls: ws.tls,
             }
         }
         ConnectionType::Tcp => ClientConnectionMode::Stream(None),
@@ -188,6 +190,7 @@ async fn main() -> Result<()> {
         enabled: config.websocket,
         host: config.ws_host,
         path: config.ws_path,
+        tls: config.ws_tls,
     };
 
     let servers = if config.servers.is_empty() {

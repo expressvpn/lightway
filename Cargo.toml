@@ -65,4 +65,6 @@ tracing = "0.1.37"
 tracing-subscriber = "0.3.17"
 tun-rs = { version = "2.5.1", features = ["async"] }
 twelf = { version = "0.15.0", default-features = false, features = ["env", "clap", "yaml", "custom_fn"]}
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
 windows-sys = "0.61.0"
