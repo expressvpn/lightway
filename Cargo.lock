@@ -1641,6 +1641,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde-env",
+ "serde-inline-default",
  "serde-saphyr",
  "serde_json",
  "serial_test",
@@ -2769,6 +2770,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9d29a4f822b7a7e7eada47da087a9d29d9b266dba45edc375fdc700965860d7"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde-inline-default"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf03b7a5281cfd4013bc788d057b0f09fc634397d83bc8973c955bd4f32727a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

@@ -13,10 +13,9 @@ use lightway_app_utils::{
     validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
-mod args;
-use args::{Config, ConfigPatch};
 
-use crate::args::ConnectionConfig;
+mod config;
+use config::{Config, ConfigPatch, ConnectionConfig};
 
 struct EventHandler;
 
@@ -118,6 +117,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
     let mut config = Config::default();
+    // NOTE:
+    // RootCertificate of wolfssl is not a self handled Struct
+    // we need keep the PathBuf live outside
+    let mut _root_ca_cert_path: Option<PathBuf> = None;
 
     // Load config patch with DPAPI support
     #[cfg(windows)]
@@ -140,19 +143,6 @@ async fn main() -> Result<()> {
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     LogFormat::Full.init_with_env_filter(fmt);
-
-    let auth = config.take_auth()?;
-
-    let root_ca_path = PathBuf::from(&config.ca_cert);
-    let root_ca_cert = if config
-        .ca_cert
-        .as_str()
-        .starts_with("-----BEGIN CERTIFICATE-----")
-    {
-        RootCertificate::PemBuffer(config.ca_cert.as_bytes())
-    } else {
-        RootCertificate::PemFileOrDirectory(&root_ca_path)
-    };
 
     let mut tun_config = TunConfig::default();
 
@@ -193,20 +183,23 @@ async fn main() -> Result<()> {
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
-    let servers = if config.servers.is_empty() {
-        vec![ConnectionConfig {
-            server: config.server,
+    if config.servers.is_empty() {
+        config.servers = vec![ConnectionConfig {
+            server: config.server.clone(),
             mode: config.mode,
-            server_dn: config.server_dn,
+            server_dn: config.server_dn.clone(),
             cipher: config.cipher,
-        }]
-    } else {
-        config.servers
-    };
+            ..Default::default()
+        }];
+    }
 
-    let servers = join_all(servers.into_iter().map(make_client_connection_config));
-    let servers = tokio::select! {
-        results = servers => {
+    let conn_confs = join_all(
+        std::mem::take::<Vec<ConnectionConfig>>(&mut config.servers)
+            .into_iter()
+            .map(make_client_connection_config),
+    );
+    let conn_confs = tokio::select! {
+        results = conn_confs => {
             results.into_iter()
                 .flat_map(|result| result.map_err(|e| tracing::error!("{e}")))
                 .collect::<Vec<_>>()
@@ -221,8 +214,10 @@ async fn main() -> Result<()> {
     };
 
     let config = ClientConfig {
-        auth,
-        root_ca_cert,
+        auth: config.take_auth()?,
+        root_ca_cert: config
+            .load_ca()
+            .unwrap_or(config.load_ca_file(&mut _root_ca_cert_path)),
         outside_mtu: config.outside_mtu,
         inside_io,
         tun_config,
@@ -261,8 +256,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "debug")]
         tls_debug: config.tls_debug,
         #[cfg(feature = "debug")]
-        keylog: config.keylog,
+        keylog: config.keylog.clone(),
     };
 
-    client(config, ctrlc_rx, servers).await.map(|_| ())
+    client(config, ctrlc_rx, conn_confs).await.map(|_| ())
 }

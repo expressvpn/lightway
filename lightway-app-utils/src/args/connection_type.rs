@@ -16,6 +16,13 @@ pub enum ConnectionType {
     Tcp,
 }
 
+impl ConnectionType {
+    /// A helper function easier to use especially in mobile
+    pub fn is_tcp(&self) -> bool {
+        *self == ConnectionType::Tcp
+    }
+}
+
 impl From<ConnectionType> for LWConnectionType {
     fn from(item: ConnectionType) -> LWConnectionType {
         match item {

@@ -1,5 +1,5 @@
-mod args;
 mod auth;
+mod config;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
@@ -10,7 +10,7 @@ use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 
-use args::{Config, ConfigPatch};
+use config::{Config, ConfigPatch};
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
 use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
