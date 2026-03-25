@@ -422,7 +422,7 @@ async fn client<S: TestSock>(
     .with_inside_pkt_codec(packet_codec)
     .when(pqc.enable_client(), |b| b.with_pq_crypto())
     .when_some(server_dn, |b, sdn| {
-        b.with_server_domain_name_validation(sdn.to_string())
+        b.with_server_domain_name_validation(sdn)
     })
     .connect(state)
     .unwrap();
