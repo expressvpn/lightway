@@ -19,7 +19,6 @@ install-build-dependencies:
         g++-aarch64-linux-gnu \
         libc6:arm64 \
         libtool-bin \
-        musl-tools \
         qemu-user-static \
         shellcheck \ 
         g++-riscv64-linux-gnu \ 
@@ -35,7 +34,6 @@ install-build-dependencies:
     RUN rustup component add llvm-tools-preview
     RUN rustup target add aarch64-unknown-linux-gnu
     RUN rustup target add riscv64gc-unknown-linux-gnu
-    RUN rustup target add x86_64-unknown-linux-musl
 
     RUN rustup +nightly component add miri
     RUN rustup +nightly component add rust-src
@@ -64,20 +62,6 @@ build-cross-arm64:
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
 
     DO lib-rust+CARGO --args="build --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
-
-    SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
-    SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
-
-# build-openwrt-x64 cross-compiles a statically-linked musl binary for OpenWrt x86_64.
-# io-uring is intentionally omitted as OpenWrt kernels may not support it.
-build-openwrt-x64:
-    FROM +source
-    LET target = "x86_64-unknown-linux-musl"
-    ENV CC_x86_64_unknown_linux_musl="musl-gcc"
-    ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="musl-gcc"
-    ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C relocation-model=static"
-
-    DO lib-rust+CARGO --args="build --release --target=$target" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
