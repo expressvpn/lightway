@@ -247,14 +247,12 @@ ${DOMAIN} {
     root * ${site}
     file_server
 
-    @websocket {
-        path ${WS_PATH}
-        header Connection *Upgrade*
-        header Upgrade websocket
-    }
-    reverse_proxy @websocket 127.0.0.1:${LW_PORT}
-
-    handle ${WS_PATH} {
+    route ${WS_PATH} {
+        @ws_upgrade {
+            header Connection *Upgrade*
+            header Upgrade websocket
+        }
+        reverse_proxy @ws_upgrade 127.0.0.1:${LW_PORT}
         respond "Not Found" 404
     }
 }

@@ -11,15 +11,14 @@ YOUR_DOMAIN {
 	root * /var/www/html
 	file_server
 
-	# WebSocket proxy to lightway-server (with --websocket enabled)
-	@websocket {
-		path /ws
-		header Connection *Upgrade*
-		header Upgrade websocket
-	}
-	reverse_proxy @websocket lightway-server:9443
-
-	handle /ws {
+	# route preserves written order (Caddy's default directive sort
+	# would put handle before reverse_proxy, breaking WebSocket upgrades)
+	route /ws {
+		@ws_upgrade {
+			header Connection *Upgrade*
+			header Upgrade websocket
+		}
+		reverse_proxy @ws_upgrade lightway-server:9443
 		respond "Not Found" 404
 	}
 }
