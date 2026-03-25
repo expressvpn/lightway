@@ -68,8 +68,7 @@ build-cross-arm64:
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
 
-# build-openwrt-x64 cross-compiles a statically-linked musl binary for OpenWrt x86_64.
-# io-uring is intentionally omitted as OpenWrt kernels may not support it.
+# build-openwrt-x64 cross-compiles a statically-linked musl binary for OpenWrt x86_64 (with io-uring).
 build-openwrt-x64:
     FROM +source
     LET target = "x86_64-unknown-linux-musl"
@@ -77,7 +76,7 @@ build-openwrt-x64:
     ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="musl-gcc"
     ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C relocation-model=static"
 
-    DO lib-rust+CARGO --args="build --release --target=$target" --output="$target/release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/

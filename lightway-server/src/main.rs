@@ -186,6 +186,8 @@ async fn main() -> Result<()> {
         inside_pkt_codec: None,
         bind_address: config.bind_address,
         proxy_protocol: config.proxy_protocol,
+        websocket: config.websocket,
+        ws_path: config.ws_path,
         udp_buffer_size: config.udp_buffer_size,
         #[cfg(feature = "debug")]
         randomize_ippool: config.randomize_ippool,

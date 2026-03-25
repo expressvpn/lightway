@@ -113,6 +113,15 @@ pub struct Config {
     #[clap(long)]
     pub proxy_protocol: bool,
 
+    /// Enable WebSocket mode for TCP connections.
+    /// Accepts WebSocket Upgrade handshake before processing Lightway protocol.
+    #[clap(long, default_value_t)]
+    pub websocket: bool,
+
+    /// URL path for WebSocket handshake (must match client's --ws-path)
+    #[clap(long, default_value = "/ws")]
+    pub ws_path: String,
+
     /// Set UDP buffer size. Default value is 15 MiB.
     #[clap(long, default_value_t = ByteSize::mib(15))]
     pub udp_buffer_size: ByteSize,

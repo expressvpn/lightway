@@ -63,6 +63,8 @@ use tracing::info;
 pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
+    /// TCP wrapped in WebSocket framing for DPI resistance
+    WebSocket { ws_host: String, ws_path: String },
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -70,6 +72,11 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
+            Self::WebSocket { ws_host, ws_path } => f
+                .debug_struct("WebSocket")
+                .field("host", ws_host)
+                .field("path", ws_path)
+                .finish(),
         }
     }
 }
@@ -678,6 +685,16 @@ pub async fn connect<
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
+                (ConnectionType::Stream, sock)
+            }
+            ClientConnectionMode::WebSocket { ws_host, ws_path } => {
+                let sock =
+                    io::outside::WsTcp::new(server_config.server, &ws_host, &ws_path)
+                        .await
+                        .inspect_err(|e| {
+                            tracing::error!("Failed to create outside IO WebSocket: {e}")
+                        })
+                        .context("Outside IO WebSocket")?;
                 (ConnectionType::Stream, sock)
             }
         };
