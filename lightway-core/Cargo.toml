@@ -36,7 +36,7 @@ rand.workspace = true
 rand_core = "0.9.3"
 thiserror.workspace = true
 tracing.workspace = true
-wolfssl = "4.0.0"
+wolfssl = "5.0.0"
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -66,3 +66,7 @@ tracing-subscriber = "0.3.17"
 tun-rs = { version = "2.5.1", features = ["async"] }
 twelf = { version = "0.15.0", default-features = false, features = ["env", "clap", "yaml", "custom_fn"]}
 windows-sys = "0.61.0"
+
+[patch.crates-io]
+wolfssl = { git = "https://github.com/expressvpn/wolfssl-rs.git", branch = "upgrade/wolfssl-5.9.0" }
+wolfssl-sys = { git = "https://github.com/expressvpn/wolfssl-rs.git", branch = "upgrade/wolfssl-5.9.0" }
