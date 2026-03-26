@@ -645,7 +645,17 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_dns_ip: IpAddr,
     ) -> Result<(), DnsManagerError> {
         if dns_config_mode == DnsConfigMode::Default {
+            #[cfg(windows)]
+            let mut dns_manager = {
+                let if_index = self
+                    .inside_io
+                    .if_index()
+                    .map_err(|e| DnsManagerError::FailedToSetDnsConfig(e.to_string()))?;
+                DnsManager::with_if_index(if_index)
+            };
+            #[cfg(not(windows))]
             let mut dns_manager = DnsManager::default();
+
             dns_manager.set_dns(tun_dns_ip)?;
             self.dns_manager = Some(dns_manager);
             info!(?dns_config_mode, %tun_dns_ip, "DNS configured");
