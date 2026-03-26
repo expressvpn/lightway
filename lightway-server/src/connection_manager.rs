@@ -91,6 +91,8 @@ pub(crate) struct ConnectionManager {
     /// Total number of sessions there have ever been
     total_sessions: AtomicUsize,
     inside_io_codec_factory: Option<PacketCodecFactoryType>,
+    /// Optional callback to forward per-connection events with session ID
+    event_cb: Option<crate::ServerEventCbType>,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -156,8 +158,19 @@ fn handle_encoding_state_changed(enabled: bool) {
 }
 
 #[instrument(level = "trace", skip_all)]
-async fn handle_events(mut stream: EventStream, conn: Weak<Connection>) {
+async fn handle_events(
+    mut stream: EventStream,
+    conn: Weak<Connection>,
+    event_cb: Option<crate::ServerEventCbType>,
+) {
     while let Some(event) = stream.next().await {
+        // Forward event to external callback if set
+        if let Some(cb) = &event_cb
+            && let Some(c) = conn.upgrade()
+        {
+            cb(c.session_id(), &event);
+        }
+
         match event {
             Event::StateChanged(state) => handle_state_change(state, &conn).await,
             Event::KeepaliveReply => {}
@@ -230,6 +243,7 @@ fn new_connection(
     outside_io: OutsideIOSendCallbackArg,
 ) -> Result<Arc<Connection>, ConnectionManagerError> {
     let (event_cb, event_stream) = EventStreamCallback::new();
+    let server_event_cb = manager.event_cb.clone();
 
     manager.total_sessions.fetch_add(1, Ordering::Relaxed);
 
@@ -258,7 +272,11 @@ fn new_connection(
         warn!(?err, "Failed to create new connection");
     })?;
 
-    tokio::spawn(handle_events(event_stream, Arc::downgrade(&conn)));
+    tokio::spawn(handle_events(
+        event_stream,
+        Arc::downgrade(&conn),
+        server_event_cb,
+    ));
     tokio::spawn(handle_stale(Arc::downgrade(&conn)));
 
     if let Some((encoded_pkt_receiver, decoded_pkt_receiver)) = pkt_receivers {
@@ -279,6 +297,7 @@ impl ConnectionManager {
     pub(crate) fn new(
         ctx: ServerContext<ConnectionState>,
         inside_io_codec_factory: Option<PacketCodecFactoryType>,
+        event_cb: Option<crate::ServerEventCbType>,
     ) -> Arc<Self> {
         let conn_manager = Arc::new(Self {
             ctx,
@@ -286,6 +305,7 @@ impl ConnectionManager {
             pending_session_id_rotations: Mutex::new(Default::default()),
             total_sessions: Default::default(),
             inside_io_codec_factory,
+            event_cb,
         });
 
         conn_manager.spawn_periodic_task(

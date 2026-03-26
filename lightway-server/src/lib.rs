@@ -11,9 +11,13 @@ use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, ExpresslaneCbType, PluginFactoryError, PluginFactoryList, ServerAuth,
-    ServerAuthHandle, ServerAuthResult, Version,
+    ConnectionType, Event, ExpresslaneCbType, PluginFactoryError, PluginFactoryList, ServerAuth,
+    ServerAuthHandle, ServerAuthResult, SessionId, Version,
 };
+
+/// Callback type for receiving per-connection events with session ID.
+/// Implement this to handle events like session rotation and disconnection.
+pub type ServerEventCbType = Arc<dyn Fn(SessionId, &Event) + Send + Sync>;
 
 use anyhow::{Context, Result, anyhow};
 use ipnet::Ipv4Net;
@@ -176,6 +180,11 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(ignore))]
     pub expresslane_cb: Option<ExpresslaneCbType>,
 
+    /// Optional callback to receive per-connection events with session ID.
+    /// Called for every event (state changes, session rotation, etc.).
+    #[educe(Debug(ignore))]
+    pub event_cb: Option<ServerEventCbType>,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -326,7 +335,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .with_outside_plugins(config.outside_plugins)
     .build()?;
 
-    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec);
+    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec, config.event_cb);
 
     tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
 
