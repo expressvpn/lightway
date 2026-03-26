@@ -10,6 +10,7 @@ use std::process::Command;
 const DEFAULT_SEARCH_DOMAIN: &str = "expressvpn";
 const DEFAULT_DNS_CONFIG_NAME: &str = "lightway-dns-config";
 const IPV4_STATE_PATH: &str = "State:/Network/Global/IPv4";
+const PUBLIC_DNS: &[&str] = &["8.8.8.8", "1.1.1.1"];
 
 pub struct DnsManager {
     service_id: Option<CFRetained<CFString>>,
@@ -150,15 +151,17 @@ impl DnsManager {
 
 impl DnsSetup for DnsManager {
     #[allow(unsafe_code)]
-    fn set_dns(&mut self, dns_server: IpAddr) -> Result<(), DnsManagerError> {
+    fn set_dns(&mut self, _dns_server: IpAddr) -> Result<(), DnsManagerError> {
         let primary_service_id = self.get_primary_service_id()?;
         let primary_service_path = Self::get_primary_service_path(&primary_service_id);
 
         // Store the service ID for cleanup
         self.service_id = Some(primary_service_id);
 
-        // Create DNS configuration dictionary with default search domain
-        let dns_addresses = vec![CFString::from_str(&dns_server.to_string())];
+        // Use public DNS servers routed via VPN tunnel instead of tun_dns_ip
+        // which requires server-side DNS support
+        let dns_addresses: Vec<CFRetained<CFString>> =
+            PUBLIC_DNS.iter().map(|s| CFString::from_str(s)).collect();
         let search_domains = vec![CFString::from_str(DEFAULT_SEARCH_DOMAIN)];
         let dns_dictionary = self.get_dns_dictionary(&dns_addresses, &search_domains);
 

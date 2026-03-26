@@ -1,0 +1,1 @@
+cargo build --release --bin lightway-client --target x86_64-pc-windows-msvc

@@ -60,6 +60,15 @@ pub struct DnsManager {
     dns_manager: super::platform::windows::dns_manager::DnsManager,
 }
 
+impl DnsManager {
+    #[cfg(windows)]
+    pub fn with_if_index(if_index: u32) -> Self {
+        Self {
+            dns_manager: super::platform::windows::dns_manager::DnsManager::with_if_index(if_index),
+        }
+    }
+}
+
 impl DnsSetup for DnsManager {
     fn set_dns(&mut self, dns_server: IpAddr) -> Result<(), DnsManagerError> {
         self.dns_manager.set_dns(dns_server)

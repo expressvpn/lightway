@@ -185,6 +185,25 @@ pub struct Config {
     #[clap(long)]
     pub tls_debug: bool,
 
+    /// Enable WebSocket encapsulation for TCP connections (DPI resistance).
+    /// Wraps TLS traffic inside WebSocket binary frames.
+    #[clap(long, default_value_t)]
+    pub websocket: bool,
+
+    /// Host header for WebSocket handshake.
+    /// Defaults to the server hostname if not specified.
+    #[clap(long, default_value = None)]
+    pub ws_host: Option<String>,
+
+    /// URL path for WebSocket handshake
+    #[clap(long, default_value = "/ws")]
+    pub ws_path: String,
+
+    /// Enable TLS for the outer WebSocket transport connection.
+    /// Required when connecting through an nginx/caddy TLS reverse proxy on port 443.
+    #[clap(long, default_value_t)]
+    pub ws_tls: bool,
+
     /// Enable DPAPI encryption/decryption for config file
     /// Only for Windows platform
     #[cfg(windows)]

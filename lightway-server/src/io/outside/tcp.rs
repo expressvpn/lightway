@@ -14,6 +14,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::{connection_manager::ConnectionManager, metrics};
 
 use super::Server;
+use super::ws_tcp::WsTcpStream;
 
 struct TcpStream {
     sock: Arc<tokio::net::TcpStream>,
@@ -96,6 +97,8 @@ async fn handle_connection(
     local_addr: SocketAddr,
     conn_manager: Arc<ConnectionManager>,
     proxy_protocol: bool,
+    websocket: bool,
+    ws_path: Arc<String>,
 ) {
     if proxy_protocol {
         peer_addr = match handle_proxy_protocol(&mut sock).await {
@@ -110,19 +113,28 @@ async fn handle_connection(
 
     let sock = Arc::new(sock);
 
+    if websocket {
+        handle_ws_read_loop(sock, peer_addr, local_addr, conn_manager, &ws_path).await;
+    } else {
+        handle_tcp_read_loop(sock, peer_addr, local_addr, conn_manager).await;
+    }
+}
+
+async fn handle_tcp_read_loop(
+    sock: Arc<tokio::net::TcpStream>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    conn_manager: Arc<ConnectionManager>,
+) {
     let outside_io = Arc::new(TcpStream {
         sock: sock.clone(),
         peer_addr,
     });
-    // TCP has no version indication, default to the minimum
-    // supported version.
     let Ok(conn) =
         conn_manager.create_streaming_connection(Version::MINIMUM, local_addr, outside_io)
     else {
         return;
     };
-
-    // We no longer need to hold this reference.
     drop(conn_manager);
 
     let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
@@ -145,18 +157,15 @@ async fn handle_connection(
             }
         }
 
-        // Recover full capacity
         buf.clear();
         buf.reserve(MAX_OUTSIDE_MTU);
 
         match sock.try_read_buf(&mut buf) {
             Ok(0) => {
-                // EOF
                 break anyhow!("End of stream");
             }
             Ok(_nr) => {}
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                // Spuriously failed to read, keep waiting
                 continue;
             }
             Err(err) => break anyhow!(err).context("TCP read error"),
@@ -171,22 +180,80 @@ async fn handle_connection(
         }
     };
 
-    // Disconnect the session in case of TCP shutdown or other fatal failures.
-    //
-    // Note that it is possible, disconnect has been called in `conn.handle_outside_data_error` already
-    // in case of fatal error case. It is still fine to call it again, since `disconnect`
-    // call is idempotent and no-op if it is already disconnected
-    //
-    // But we need this disconnect in case of TCP connection shutdown
     let _ = conn.disconnect();
-
     info!("Connection closed: {:?}", err);
+}
+
+async fn handle_ws_read_loop(
+    sock: Arc<tokio::net::TcpStream>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    conn_manager: Arc<ConnectionManager>,
+    ws_path: &str,
+) {
+    let ws = match WsTcpStream::accept(sock, peer_addr, ws_path).await {
+        Ok(ws) => Arc::new(ws),
+        Err(err) => {
+            debug!(?err, %peer_addr, "WebSocket handshake failed");
+            return;
+        }
+    };
+
+    let Ok(conn) =
+        conn_manager.create_streaming_connection(Version::MINIMUM, local_addr, ws.clone())
+    else {
+        return;
+    };
+    drop(conn_manager);
+
+    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+    let age_expiration_interval: Duration =
+        crate::connection_manager::CONNECTION_AGE_EXPIRATION_INTERVAL
+            .try_into()
+            .unwrap();
+    let err: anyhow::Error = loop {
+        tokio::select! {
+            res = ws.readable() => {
+                if let Err(e) = res {
+                    break anyhow!(e).context("Sock readable error");
+                }
+            },
+            _ = tokio::time::sleep(age_expiration_interval) => {
+                if !matches!(conn.state(), State::Online) {
+                    break anyhow!("Connection not online (may be aged out or evicted)");
+                }
+                continue;
+            }
+        }
+
+        buf.clear();
+        buf.reserve(MAX_OUTSIDE_MTU);
+
+        match ws.recv_buf(&mut buf) {
+            IOCallbackResult::Ok(_) => {}
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => break anyhow!(err).context("WebSocket read error"),
+        };
+
+        let pkt = OutsidePacket::Wire(&mut buf, ConnectionType::Stream);
+        if let Err(err) = conn.outside_data_received(pkt) {
+            warn!("Failed to process outside data: {err}");
+            if conn.handle_outside_data_error(&err).is_break() {
+                break anyhow!(err).context("Outside data fatal error");
+            }
+        }
+    };
+
+    let _ = conn.disconnect();
+    info!("WebSocket connection closed: {:?}", err);
 }
 
 pub(crate) struct TcpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::TcpListener>,
     proxy_protocol: bool,
+    websocket: bool,
+    ws_path: Arc<String>,
 }
 
 impl TcpServer {
@@ -195,6 +262,8 @@ impl TcpServer {
         bind_address: SocketAddr,
         proxy_protocol: bool,
         sock: Option<tokio::net::TcpListener>,
+        websocket: bool,
+        ws_path: String,
     ) -> Result<TcpServer> {
         let sock = match sock {
             Some(s) => s,
@@ -206,6 +275,8 @@ impl TcpServer {
             conn_manager,
             sock,
             proxy_protocol,
+            websocket,
+            ws_path: Arc::new(ws_path),
         })
     }
 }
@@ -213,18 +284,16 @@ impl TcpServer {
 #[async_trait]
 impl Server for TcpServer {
     async fn run(&mut self) -> Result<()> {
-        info!("Accepting traffic on {}", self.sock.local_addr()?);
+        info!(
+            "Accepting traffic on {} (websocket={})",
+            self.sock.local_addr()?,
+            self.websocket
+        );
 
         loop {
             let (sock, peer_addr) = match self.sock.accept().await {
                 Ok(r) => r,
                 Err(err) => {
-                    // Some of the errors which accept(2) can return
-                    // <https://pubs.opengroup.org/onlinepubs/9699919799.2013edition/functions/accept.html>
-                    // while never a good thing needn't necessarily be
-                    // fatal to the entire server and prevent us from
-                    // servicing existing connections or potentially
-                    // new connections in the future.
                     warn!(?err, "Failed to accept a new connection");
                     metrics::connection_accept_failed();
                     continue;
@@ -235,13 +304,11 @@ impl Server for TcpServer {
             let local_addr = match SockRef::from(&sock).local_addr() {
                 Ok(local_addr) => local_addr,
                 Err(err) => {
-                    // Since we have a bound socket this shouldn't happen.
                     debug!(?err, "Failed to get local addr");
                     return Err(err.into());
                 }
             };
             let Some(local_addr) = local_addr.as_socket() else {
-                // Since we only bind to IP sockets this shouldn't happen.
                 debug!("Failed to convert local addr to socketaddr");
                 return Err(anyhow!("Failed to convert local addr to socketaddr"));
             };
@@ -252,6 +319,8 @@ impl Server for TcpServer {
                 local_addr,
                 self.conn_manager.clone(),
                 self.proxy_protocol,
+                self.websocket,
+                self.ws_path.clone(),
             ));
         }
     }

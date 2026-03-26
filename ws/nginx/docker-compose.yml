@@ -1,0 +1,51 @@
+version: "3.8"
+
+# Lightway WebSocket deployment with nginx
+#
+# Prerequisites:
+#   - Place TLS cert/key in ./certs/
+#   - Place lightway-server binary, CA cert, and lwpasswd in ./lightway/
+#   - Place server_config.yaml in ./lightway/ (with websocket: true)
+#   - Optionally place a static site in ./html/ for camouflage
+#
+# Usage:
+#   docker compose up -d
+
+services:
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./lightway-ws.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./html:/var/www/html:ro
+    depends_on:
+      - lightway-server
+    networks:
+      - lightway-net
+
+  lightway-server:
+    image: ubuntu:24.04
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./lightway:/opt/lightway:ro
+    command: >
+      /opt/lightway/lightway-server
+      --config-file /opt/lightway/server_config.yaml
+    expose:
+      - "9443"
+    networks:
+      - lightway-net
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+networks:
+  lightway-net:
+    driver: bridge

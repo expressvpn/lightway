@@ -46,15 +46,25 @@ const LAN_NETWORKS: [(IpAddr, u8); 5] = [
 ];
 
 // Tunnel routes for high priority default routing
-const TUNNEL_ROUTES: [(IpAddr, u8); 2] = [
+const TUNNEL_ROUTES: [(IpAddr, u8); 4] = [
     (
-        // First half default route (0.0.0.0/1)
+        // First half IPv4 default route (0.0.0.0/1)
         IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
         1,
     ),
     (
-        // Second half default route (128.0.0.0/1)
+        // Second half IPv4 default route (128.0.0.0/1)
         IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)),
+        1,
+    ),
+    (
+        // First half IPv6 default route (::/1)
+        IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)),
+        1,
+    ),
+    (
+        // Second half IPv6 default route (8000::/1)
+        IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
         1,
     ),
 ];
@@ -450,9 +460,11 @@ impl RouteManagerInner {
 
         // Add standard tunnel routes (high priority default routing)
         for (network, prefix) in TUNNEL_ROUTES {
-            let tunnel_route = Route::new(network, prefix)
-                .with_gateway(self.tun_peer_ip)
-                .with_if_index(self.tun_index);
+            let mut tunnel_route = Route::new(network, prefix).with_if_index(self.tun_index);
+            // Only set gateway when address families match (IPv4 gateway for IPv4 routes)
+            if same_ip_family(&network, &self.tun_peer_ip) {
+                tunnel_route = tunnel_route.with_gateway(self.tun_peer_ip);
+            }
 
             #[cfg(windows)]
             let tunnel_route = tunnel_route.with_metric(0);
@@ -1198,17 +1210,21 @@ mod tests {
                 "IPv6 server route with /128 prefix not found"
             );
 
-            // Tunnel routes remain IPv4
+            // Tunnel routes: IPv4 with gateway, IPv6 without gateway
             for (network, prefix) in TUNNEL_ROUTES {
                 let route_in_system = routes_after_init.iter().any(|r| {
                     r.destination() == network
                         && r.prefix() == prefix
-                        && r.gateway() == Some(TUN_PEER_IP)
                         && r.if_index() == Some(tun_index)
+                        && if network.is_ipv4() {
+                            r.gateway() == Some(TUN_PEER_IP)
+                        } else {
+                            true
+                        }
                 });
                 assert!(
                     route_in_system,
-                    "IPv4 tunnel route not found for {:?}",
+                    "Tunnel route not found for {:?}",
                     network
                 );
             }

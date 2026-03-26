@@ -35,17 +35,36 @@ impl EventCallback for EventHandler {
     }
 }
 
+struct WsOptions {
+    enabled: bool,
+    host: Option<String>,
+    path: String,
+    tls: bool,
+}
+
 async fn make_client_connection_config(
     config: ConnectionConfig,
+    ws: &WsOptions,
 ) -> Result<ClientConnectionConfig<EventHandler>> {
     tracing::info!("Resolving server address: {}", &config.server);
 
-    let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
+    let server_addr: SocketAddr = tokio::net::lookup_host(&config.server)
         .await?
         .next()
         .ok_or_else(|| anyhow!("No addresses resolved"))?;
 
     let mode = match config.mode {
+        ConnectionType::Tcp if ws.enabled => {
+            let ws_host = ws
+                .host
+                .clone()
+                .unwrap_or_else(|| config.server.split(':').next().unwrap_or("").to_string());
+            ClientConnectionMode::WebSocket {
+                ws_host,
+                ws_path: ws.path.clone(),
+                ws_tls: ws.tls,
+            }
+        }
         ConnectionType::Tcp => ClientConnectionMode::Stream(None),
         ConnectionType::Udp => ClientConnectionMode::Datagram(None),
     };
@@ -167,6 +186,13 @@ async fn main() -> Result<()> {
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
+    let ws_options = WsOptions {
+        enabled: config.websocket,
+        host: config.ws_host,
+        path: config.ws_path,
+        tls: config.ws_tls,
+    };
+
     let servers = if config.servers.is_empty() {
         vec![ConnectionConfig {
             server: config.server,
@@ -178,7 +204,11 @@ async fn main() -> Result<()> {
         config.servers
     };
 
-    let servers = join_all(servers.into_iter().map(make_client_connection_config));
+    let servers = join_all(
+        servers
+            .into_iter()
+            .map(|s| make_client_connection_config(s, &ws_options)),
+    );
     let servers = tokio::select! {
         results = servers => {
             results.into_iter()

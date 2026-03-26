@@ -1,8 +1,10 @@
 pub mod tcp;
 pub mod udp;
+pub mod ws_tcp;
 
 pub use tcp::Tcp;
 pub use udp::Udp;
+pub use ws_tcp::WsTcp;
 
 use anyhow::Result;
 use async_trait::async_trait;

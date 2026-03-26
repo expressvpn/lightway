@@ -1,5 +1,6 @@
 pub(crate) mod tcp;
 pub(crate) mod udp;
+pub(crate) mod ws_tcp;
 
 pub(crate) use tcp::TcpServer;
 pub(crate) use udp::UdpServer;

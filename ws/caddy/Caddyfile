@@ -1,0 +1,24 @@
+# Lightway WebSocket reverse proxy configuration for Caddy
+#
+# Caddy automatically obtains and renews TLS certificates via Let's Encrypt.
+#
+# Replace the following placeholders before use:
+#   YOUR_DOMAIN  - your domain name (e.g. vpn.example.com)
+#   /ws          - WebSocket path (should match client's --ws-path)
+
+YOUR_DOMAIN {
+	# Camouflage: serve a static site on the root path
+	root * /var/www/html
+	file_server
+
+	# route preserves written order (Caddy's default directive sort
+	# would put handle before reverse_proxy, breaking WebSocket upgrades)
+	route /ws {
+		@ws_upgrade {
+			header Connection *Upgrade*
+			header Upgrade websocket
+		}
+		reverse_proxy @ws_upgrade lightway-server:9443
+		respond "Not Found" 404
+	}
+}

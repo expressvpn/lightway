@@ -208,6 +208,12 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable PROXY protocol support (TCP only)
     pub proxy_protocol: bool,
 
+    /// Enable WebSocket mode for TCP connections
+    pub websocket: bool,
+
+    /// WebSocket handshake path
+    pub ws_path: String,
+
     /// UDP Buffer size for the server
     pub udp_buffer_size: ByteSize,
 
@@ -339,6 +345,8 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 config.bind_address,
                 config.proxy_protocol,
                 may_be_sock,
+                config.websocket,
+                config.ws_path,
             )
             .await?,
         ),
