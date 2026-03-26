@@ -156,6 +156,7 @@ setup_nginx() {
         cat > "$conf" <<NGINX_EOF
 server {
     listen 80;
+    listen [::]:80;
     server_name ${DOMAIN};
     root ${site};
     location / {
@@ -175,6 +176,7 @@ NGINX_EOF
     cat > "$conf" <<NGINX_EOF
 server {
     listen 80;
+    listen [::]:80;
     server_name ${DOMAIN};
 
     location /.well-known/acme-challenge/ {
@@ -187,6 +189,7 @@ server {
 
 server {
     listen 443 ssl;
+    listen [::]:443 ssl;
     server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
