@@ -1,4 +1,5 @@
 mod direct_file;
+mod resolvconf;
 mod resolvectl;
 
 use std::fs;
@@ -38,9 +39,10 @@ fn ifname_from_index(ifindex: u32) -> Option<String> {
     for entry in net_dir.flatten() {
         let index_path = entry.path().join("ifindex");
         if let Ok(content) = fs::read_to_string(&index_path)
-            && content.trim().parse::<u32>().ok() == Some(ifindex) {
-                return Some(entry.file_name().to_string_lossy().into_owned());
-            }
+            && content.trim().parse::<u32>().ok() == Some(ifindex)
+        {
+            return Some(entry.file_name().to_string_lossy().into_owned());
+        }
     }
     None
 }
@@ -55,12 +57,26 @@ fn systemd_resolved_running() -> bool {
     std::path::Path::new("/run/systemd/resolve/stub-resolv.conf").exists()
 }
 
+/// Returns `true` when openresolv is actively managing DNS.
+///
+/// `/run/resolvconf/resolv.conf` is the merged output file written by resolvconf
+/// whenever it processes an update. Its presence on tmpfs `/run` means it only
+/// exists while resolvconf is live — no stale files across reboots.
+fn resolvconf_running() -> bool {
+    std::path::Path::new("/run/resolvconf/resolv.conf").exists()
+}
+
 fn detect_backend(ifindex: u32) -> Box<dyn DnsBackend> {
-    if let Some(iface_name) = ifname_from_index(ifindex)
-        && binary_in_path("resolvectl") && systemd_resolved_running() {
+    if let Some(iface_name) = ifname_from_index(ifindex) {
+        if binary_in_path("resolvectl") && systemd_resolved_running() {
             tracing::debug!("Using resolvectl DNS backend for interface {iface_name}");
             return Box::new(resolvectl::Resolvectl { iface_name });
         }
+        if binary_in_path("resolvconf") && resolvconf_running() {
+            tracing::debug!("Using resolvconf DNS backend for interface {iface_name}");
+            return Box::new(resolvconf::Resolvconf::new(iface_name));
+        }
+    }
     tracing::debug!("Using direct /etc/resolv.conf DNS backend");
     Box::new(direct_file::DirectFile)
 }
