@@ -60,6 +60,26 @@ pub struct DnsManager {
     dns_manager: super::platform::windows::dns_manager::DnsManager,
 }
 
+impl DnsManager {
+    /// Create a DNS manager using `ifindex` on Linux to select the best backend.
+    ///
+    /// On Linux, auto-detection order:
+    /// 1. `resolvectl` (systemd-resolved) — preferred on modern distros
+    /// 2. `resolvconf` (openresolv)
+    /// 3. Direct `/etc/resolv.conf` manipulation (fallback)
+    #[cfg(linux)]
+    pub fn new(ifindex: u32) -> Self {
+        Self {
+            dns_manager: super::platform::linux::dns_manager::DnsManager::new(ifindex),
+        }
+    }
+
+    #[cfg(not(linux))]
+    pub fn new(_ifindex: u32) -> Self {
+        Self::default()
+    }
+}
+
 impl DnsSetup for DnsManager {
     fn set_dns(&mut self, dns_server: IpAddr) -> Result<(), DnsManagerError> {
         self.dns_manager.set_dns(dns_server)

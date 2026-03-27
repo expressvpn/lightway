@@ -629,7 +629,11 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_dns_ip: IpAddr,
     ) -> Result<(), DnsManagerError> {
         if dns_config_mode == DnsConfigMode::Default {
-            let mut dns_manager = DnsManager::default();
+            let tun_index = self
+                .inside_io
+                .if_index()
+                .map_err(|e| DnsManagerError::FailedToSetDnsConfig(e.to_string()))?;
+            let mut dns_manager = DnsManager::new(tun_index);
             dns_manager.set_dns(tun_dns_ip)?;
             self.dns_manager = Some(dns_manager);
             info!(?dns_config_mode, %tun_dns_ip, "DNS configured");
