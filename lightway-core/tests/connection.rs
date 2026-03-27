@@ -662,9 +662,11 @@ impl PQCrypto {
 }
 
 fn get_test_timeout() -> u64 {
-    #[cfg(target_arch = "riscv64")]
-    return 5000;
-    2000
+    if cfg!(target_arch = "riscv64") {
+        5000
+    } else {
+        2000
+    }
 }
 
 async fn run_test_tcp<S: TestSock>(
