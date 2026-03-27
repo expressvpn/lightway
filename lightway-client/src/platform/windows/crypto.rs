@@ -7,7 +7,7 @@ use windows_dpapi::{Scope, decrypt_data};
 
 pub fn decrypt_dpapi_config_file(encrypted_path: &Path, scope: Scope) -> Result<String> {
     let encrypted_bytes = fs::read(encrypted_path)?;
-    let decrypted_bytes = decrypt_data(&encrypted_bytes, scope)?;
+    let decrypted_bytes = decrypt_data(&encrypted_bytes, scope, None)?;
     Ok(String::from_utf8(decrypted_bytes)?)
 }
 
@@ -45,7 +45,7 @@ mod tests {
 
     // helper function to encrypt and write DPAPI config file
     fn encrypt_dpapi_config_file(output_path: &Path, content: &str, scope: Scope) -> Result<()> {
-        let encrypted = windows_dpapi::encrypt_data(content.as_bytes(), scope)?;
+        let encrypted = windows_dpapi::encrypt_data(content.as_bytes(), scope, None)?;
         fs::write(output_path, encrypted)?;
         Ok(())
     }
