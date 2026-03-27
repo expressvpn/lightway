@@ -1,8 +1,10 @@
 # .github/workflows/ci.yml
 name: CI
 on:
-  # Running CI on all commits on all branches (implicitly covers pull request too)
   push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
