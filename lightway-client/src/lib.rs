@@ -4,12 +4,13 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
+#[cfg(feature = "mobile")]
+pub mod mobile;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
-
 #[cfg(feature = "mobile")]
-pub mod mobile;
+pub mod state;
 
 #[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
@@ -111,6 +112,9 @@ pub enum LightwayError {
     #[cfg(feature = "mobile")]
     #[error("Logging bridge initialization error: `{0}`")]
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
+    #[cfg(feature = "mobile")]
+    #[error("State Error: `{0}`")]
+    StateError(#[from] crate::state::Error),
 }
 
 #[derive(educe::Educe)]

@@ -2,7 +2,7 @@ use crate::config::{Config, ConnectionConfig};
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
 use crate::mobile::RustEventHandlers;
-use crate::mobile::{DeviceNetworkState, ExpresslaneState};
+use crate::state::{DeviceNetworkState, ExpresslaneState};
 use crate::{
     ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,

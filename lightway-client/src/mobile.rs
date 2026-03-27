@@ -5,33 +5,6 @@ pub(crate) mod tracing_utils;
 use std::sync::{Arc, OnceLock};
 use tracing::info;
 
-#[derive(Debug, uniffi::Enum, PartialEq, Eq)]
-/// Current state of Expresslane
-pub enum ExpresslaneState {
-    /// Expresslane not enabled in the config
-    Disabled,
-    /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
-    Inactive,
-    /// Expresslane enabled and being used in the current connection
-    Active,
-    /// Expresslane enabled, but connection is degraded and back to normal D/TLS for data packets
-    Degraded,
-}
-
-impl TryFrom<lightway_core::ExpresslaneState> for ExpresslaneState {
-    type Error = ();
-
-    fn try_from(state: lightway_core::ExpresslaneState) -> Result<Self, Self::Error> {
-        match state {
-            lightway_core::ExpresslaneState::Disabled => Ok(ExpresslaneState::Disabled),
-            lightway_core::ExpresslaneState::Inactive => Ok(ExpresslaneState::Inactive),
-            lightway_core::ExpresslaneState::Active => Ok(ExpresslaneState::Active),
-            lightway_core::ExpresslaneState::Degraded => Ok(ExpresslaneState::Degraded),
-            lightway_core::ExpresslaneState::WaitingForClient => Err(()),
-        }
-    }
-}
-
 #[uniffi::export(with_foreign)]
 #[cfg_attr(test, mockall::automock)]
 pub trait RustEventHandlers: Send + Sync {
@@ -43,7 +16,7 @@ pub trait RustEventHandlers: Send + Sync {
 
     /// Handles Expresslane state change. This will be called whenever there's a new update on
     /// the Expresslane state change, see `ExpresslaneState` enum for details.
-    fn handle_expresslane_state_change(&self, state: ExpresslaneState);
+    fn handle_expresslane_state_change(&self, state: crate::state::ExpresslaneState);
 
     /// Called when the first packet is received from the server.
     ///
@@ -85,22 +58,6 @@ fn initialize_rust_logging_bridge(
 ) -> Result<(), LightwayError> {
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
     tracing_utils::set_global_default_subscriber(logger_callback).map_err(|e| e.into())
-}
-
-#[derive(Debug, uniffi::Enum)]
-/// Current network state of the device
-/// For Android, all the 3 enums (Online/InterfaceChanged/RouteUpdated) have the same behaviour
-pub enum DeviceNetworkState {
-    /// Device transitioned from offline to online
-    /// Socket recreation is required on iOS due to potential interface changes after we have gone online
-    /// for UDP connections.
-    Online,
-    /// Network interface changed has changed (e.g. WiFi -> Cellular)
-    InterfaceChanged,
-    /// Network updated, but the interface remains unchanged
-    RouteUpdated,
-    /// No usable route
-    Offline,
 }
 
 #[derive(uniffi::Object)]
@@ -203,7 +160,10 @@ impl RustVpnConnection {
         Ok(self.connected_index.get().map(|&i| i as u8))
     }
 
-    fn notify_network_changed(&self, state: DeviceNetworkState) -> Result<(), LightwayError> {
+    fn notify_network_changed(
+        &self,
+        state: crate::state::DeviceNetworkState,
+    ) -> Result<(), LightwayError> {
         info!("device had a network change: {:?}", state);
         Ok(())
     }
