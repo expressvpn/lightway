@@ -810,6 +810,7 @@ mod tests {
     #[test_case(RouteMode::NoExec)]
     #[tokio::test]
     #[ignore = "May falsely fail during development due to local route settings"]
+    #[serial_test::serial(route_manager)]
     async fn test_privileged_new_route_manager(route_mode: RouteMode) {
         let (_restorer, _tun_device, route_manager) =
             create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
