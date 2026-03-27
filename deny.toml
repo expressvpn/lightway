@@ -30,7 +30,6 @@ exceptions = [
     { name = "lightway-core", allow = ["AGPL-3.0-only"], version = "*" },
     { name = "lightway-server", allow = ["AGPL-3.0-only"], version = "*" },
     { name = "lightway-app-utils", allow = ["AGPL-3.0-only"], version = "*" },
-    { name = "aws-lc-sys", allow = ["OpenSSL"], version = "*" },
 ]
 
 [licenses.private]
@@ -47,6 +46,10 @@ external-default-features = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # Temporary: wolfssl-rs v5.9.0 upgrade branch (remove once published to crates.io)
+    "https://github.com/expressvpn/wolfssl-rs",
+]
 
 # See https://github.com/briansmith/ring/blob/main/LICENSE Ring
 # contains elements liscensed under all of ISC, MIT and OpenSSL
