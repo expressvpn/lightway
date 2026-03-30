@@ -674,7 +674,8 @@ pub async fn connect<
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match server_config.mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(server_config.server, maybe_sock)
+                #[cfg_attr(not(batch_receive), allow(unused_mut))]
+                let mut sock = io::outside::Udp::new(server_config.server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                     .context("Outside IO UDP")?;
@@ -684,14 +685,14 @@ pub async fn connect<
                     sock.enable_batch_receive();
                 }
 
-                (ConnectionType::Datagram, sock)
+                (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
                 let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
-                (ConnectionType::Stream, sock)
+                (ConnectionType::Stream, Arc::new(sock))
             }
         };
 

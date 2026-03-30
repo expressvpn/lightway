@@ -34,7 +34,7 @@ pub struct Udp {
 const MAX_BUFFER_SIZE: usize = 1024;
 
 impl Udp {
-    pub async fn new(remote_addr: SocketAddr, sock: Option<UdpSocket>) -> Result<Arc<Self>> {
+    pub async fn new(remote_addr: SocketAddr, sock: Option<UdpSocket>) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
             .next()
@@ -61,7 +61,7 @@ impl Udp {
         #[cfg(batch_receive)]
         let (recv_queue_sender, recv_queue_receiver) = RingBuffer::new(MAX_BUFFER_SIZE);
 
-        Ok(Arc::new(Self {
+        Ok(Self {
             sock,
             peer_addr,
             default_ip_pmtudisc,
@@ -71,7 +71,7 @@ impl Udp {
             recv_ready,
             #[cfg(batch_receive)]
             recv_queue: Mutex::new(recv_queue_receiver),
-        }))
+        })
     }
 
     #[cfg(batch_receive)]
