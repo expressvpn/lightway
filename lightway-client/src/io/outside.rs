@@ -16,6 +16,13 @@ pub trait OutsideIO: Sync + Send {
 
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready>;
 
+    /// Poll whenever this socket is readable or not. By default, it will call
+    /// `poll(tokio::io::Interest::READABLE)` on the socket itself.
+    async fn readable(&self) -> Result<()> {
+        self.poll(tokio::io::Interest::READABLE).await?;
+        Ok(())
+    }
+
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize>;
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg;

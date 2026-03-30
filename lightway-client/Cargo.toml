@@ -14,7 +14,7 @@ debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum"]
 kyber_only = ["postquantum", "lightway-core/kyber_only"]
-batch_receive = []
+batch_receive = ["rtrb"]
 
 [lints]
 workspace = true
@@ -41,6 +41,7 @@ tokio-util.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twelf.workspace = true
+rtrb = { version = "0.3.3", optional = true }
 
 [dev-dependencies]
 more-asserts.workspace = true

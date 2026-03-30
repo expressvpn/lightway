@@ -1,16 +1,20 @@
+use super::OutsideIO;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use bytes::BytesMut;
+use lightway_app_utils::sockopt;
+use lightway_app_utils::sockopt::IpPmtudisc;
+use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+use rtrb::RingBuffer;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 use tokio::net::UdpSocket;
-
-use super::OutsideIO;
-use lightway_app_utils::sockopt;
-use lightway_app_utils::sockopt::IpPmtudisc;
-use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+#[cfg(batch_receive)]
+use tokio::sync::Semaphore;
 
 pub struct Udp {
     sock: tokio::net::UdpSocket,
@@ -18,7 +22,16 @@ pub struct Udp {
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
     use_batch_receive: AtomicBool,
+    #[cfg(batch_receive)]
+    /// Semaphore used to signal that a packet is ready in recv_queue.
+    /// One permit is added per packet pushed by the recv task.
+    recv_ready: Arc<Semaphore>,
+    #[cfg(batch_receive)]
+    recv_queue: Mutex<rtrb::Consumer<BytesMut>>,
 }
+
+#[cfg(batch_receive)]
+const MAX_BUFFER_SIZE: usize = 1024;
 
 impl Udp {
     pub async fn new(remote_addr: SocketAddr, sock: Option<UdpSocket>) -> Result<Arc<Self>> {
@@ -42,12 +55,22 @@ impl Udp {
         // successfuly in WolfSsl's `OutsideIOSendCallback` callback
         sock.writable().await?;
 
+        #[cfg(batch_receive)]
+        let recv_ready = Arc::new(Semaphore::new(0));
+
+        #[cfg(batch_receive)]
+        let (recv_queue_sender, recv_queue_receiver) = RingBuffer::new(MAX_BUFFER_SIZE);
+
         Ok(Arc::new(Self {
             sock,
             peer_addr,
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
             use_batch_receive: AtomicBool::new(false),
+            #[cfg(batch_receive)]
+            recv_ready,
+            #[cfg(batch_receive)]
+            recv_queue: Mutex::new(recv_queue_receiver),
         }))
     }
 
@@ -55,6 +78,12 @@ impl Udp {
     pub fn enable_batch_receive(&self) {
         self.use_batch_receive
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(batch_receive)]
+    pub fn using_batch_receive(&self) -> bool {
+        self.use_batch_receive
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -78,6 +107,25 @@ impl OutsideIO for Udp {
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready> {
         let r = self.sock.ready(interest).await?;
         Ok(r)
+    }
+
+    #[cfg(batch_receive)]
+    /// If `batch_receiver` is on, it will try to acquire a permit
+    /// of a Semaphore to see if the ring buffer has any packets in it.
+    async fn readable(&self) -> Result<()> {
+        if self.using_batch_receive() {
+            // Wait until the recv task has pushed at least one packet into recv_queue.
+            // Using a semaphore so bursts are counted correctly: each
+            // received packet adds exactly one permit, and each readable() consumes one.
+            self.recv_ready
+                .acquire()
+                .await
+                .map_err(|e| anyhow::anyhow!("recv_ready semaphore closed: {e}"))?
+                .forget(); // consume the permit without dropping it back
+        } else {
+            self.poll(tokio::io::Interest::READABLE).await?;
+        }
+        Ok(())
     }
 
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize> {

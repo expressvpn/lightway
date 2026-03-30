@@ -359,7 +359,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
         buf.reserve(mtu);
 
         // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
-        outside_io.poll(tokio::io::Interest::READABLE).await?;
+        outside_io.readable().await?;
 
         // Send ready signal after first successful poll
         if let Some(tx) = ready_signal.take() {
