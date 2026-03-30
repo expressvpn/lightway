@@ -42,7 +42,7 @@ use crate::borrowed_bytesmut::BorrowedBytesMut;
 use bytes::{Buf, BufMut, BytesMut};
 use more_asserts::*;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use rand::Rng;
+use rand::distr::{Distribution, StandardUniform};
 
 // A module for each frame type with a payload
 mod auth_failure;
@@ -149,10 +149,10 @@ impl SessionId {
     }
 }
 
-impl rand::distr::Distribution<SessionId> for rand::distr::StandardUniform {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> SessionId {
+impl Distribution<SessionId> for StandardUniform {
+    fn sample<R: rand_core::Rng + ?Sized>(&self, rng: &mut R) -> SessionId {
         loop {
-            let candidate = SessionId(rng.random());
+            let candidate = SessionId(StandardUniform.sample(rng));
             if !candidate.is_reserved() {
                 break candidate;
             }
@@ -459,6 +459,7 @@ mod session_id {
 
     #[test]
     fn gen_random() {
+        use rand::RngExt;
         let a: SessionId = rand::rng().random();
         let b: SessionId = rand::rng().random();
         assert_ne!(a, b, "Two genuinely random sessions IDs should not match");

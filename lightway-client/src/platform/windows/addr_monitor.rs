@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_addr_listener_as_stream() {
         let listener = AsyncAddrListener::new().unwrap();
-        let mut stream = listener.take(1); // Take only 1 event for test
+        let stream = listener.take(1); // Take only 1 event for test
 
         // This test would hang waiting for actual address changes, so we just verify
         // that we can create the stream without error

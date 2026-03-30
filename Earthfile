@@ -28,7 +28,8 @@ install-build-dependencies:
     RUN rustup toolchain install nightly
 
     DO lib-rust+INIT --keep_fingerprints=true
-    DO lib-rust+CARGO --args="install --locked cargo-deny cargo-llvm-cov cargo-make"
+    RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/refs/tags/v1.17.8/install-from-binstall-release.sh | bash
+    DO lib-rust+CARGO --args="binstall --no-confirm cargo-deny cargo-llvm-cov cargo-make"
     RUN rustup component add clippy
     RUN rustup component add rustfmt
     RUN rustup component add llvm-tools-preview

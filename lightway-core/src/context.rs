@@ -1,7 +1,6 @@
 pub mod ip_pool;
 mod server_auth;
 
-use rand::SeedableRng;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -233,7 +232,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             ip_config: self.ip_config,
             inside_plugins: self.inside_plugins,
             outside_plugins: self.outside_plugins,
-            rng: Arc::new(Mutex::new(rand::rngs::StdRng::from_os_rng())),
+            rng: Arc::new(Mutex::new(rand::make_rng::<rand::rngs::StdRng>())),
             expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
         }
@@ -497,7 +496,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             ip_pool: self.ip_pool,
             inside_io: self.inside_io,
             key_update_interval: self.key_update_interval,
-            rng: Arc::new(Mutex::new(rand::rngs::StdRng::from_os_rng())),
+            rng: Arc::new(Mutex::new(rand::make_rng::<rand::rngs::StdRng>())),
             schedule_tick_cb: self.schedule_tick_cb,
             supported_protocol_versions: self.supported_protocol_versions,
             inside_plugins: self.inside_plugins,

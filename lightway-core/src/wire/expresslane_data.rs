@@ -8,7 +8,7 @@ use crate::metrics;
 use bitfield_struct::bitfield;
 use bytes::{Buf, BufMut, BytesMut};
 use more_asserts::*;
-use rand::Rng;
+use rand::distr::{Distribution, StandardUniform};
 use tracing::debug;
 
 use super::{FromWireError, FromWireResult, SessionId, expresslane_config::ExpresslaneVersion};
@@ -62,9 +62,9 @@ impl ExpresslaneKey {
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
 pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
 
-impl rand::distr::Distribution<ExpresslaneKey> for rand::distr::StandardUniform {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> ExpresslaneKey {
-        ExpresslaneKey(rng.random())
+impl Distribution<ExpresslaneKey> for StandardUniform {
+    fn sample<R: rand_core::Rng + ?Sized>(&self, rng: &mut R) -> ExpresslaneKey {
+        ExpresslaneKey(StandardUniform.sample(rng))
     }
 }
 

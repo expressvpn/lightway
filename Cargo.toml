@@ -22,7 +22,7 @@ repository = "https://github.com/expressvpn/lightway"
 edition = "2024"
 authors = ["lightway-developers@expressvpn.com"]
 license = "AGPL-3.0-only"
-rust-version = "1.88.0"
+rust-version = "1.89.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -53,7 +53,7 @@ more-asserts = "0.3.1"
 parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }
 pnet_packet = { version = "0.35.0" }
 pnet = { version = "0.35.0", default-features = false}
-rand = "0.9.0"
+rand = "0.10.0"
 serde = "1.0.189"
 socket2 = "0.6.0"
 test-case = "3.1.0"
