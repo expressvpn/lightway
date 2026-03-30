@@ -137,6 +137,10 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Socket receive buffer size
     pub rcvbuf: Option<ByteSize>,
 
+    /// Enable batch receive (`recvmsg_x` on macOS)
+    #[cfg(batch_receive)]
+    pub enable_batch_receive: bool,
+
     /// Route Mode
     #[cfg(desktop)]
     pub route_mode: RouteMode,
@@ -674,6 +678,11 @@ pub async fn connect<
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                     .context("Outside IO UDP")?;
+
+                #[cfg(batch_receive)]
+                if config.enable_batch_receive {
+                    sock.enable_batch_receive();
+                }
 
                 (ConnectionType::Datagram, sock)
             }

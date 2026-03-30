@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use std::sync::atomic::AtomicBool;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -8,12 +9,15 @@ use tokio::net::UdpSocket;
 
 use super::OutsideIO;
 use lightway_app_utils::sockopt;
+use lightway_app_utils::sockopt::IpPmtudisc;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 
 pub struct Udp {
     sock: tokio::net::UdpSocket,
     peer_addr: SocketAddr,
     default_ip_pmtudisc: sockopt::IpPmtudisc,
+    #[cfg(batch_receive)]
+    use_batch_receive: AtomicBool,
 }
 
 impl Udp {
@@ -42,7 +46,15 @@ impl Udp {
             sock,
             peer_addr,
             default_ip_pmtudisc,
+            #[cfg(batch_receive)]
+            use_batch_receive: AtomicBool::new(false),
         }))
+    }
+
+    #[cfg(batch_receive)]
+    pub fn enable_batch_receive(&self) {
+        self.use_batch_receive
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn peer_addr(&self) -> SocketAddr {

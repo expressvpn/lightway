@@ -213,6 +213,8 @@ async fn main() -> Result<()> {
         preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
         sndbuf: config.sndbuf,
         rcvbuf: config.rcvbuf,
+        #[cfg(batch_receive)]
+        enable_batch_receive: config.enable_batch_receive,
         #[cfg(desktop)]
         route_mode: config.route_mode,
         #[cfg(desktop)]
