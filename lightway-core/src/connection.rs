@@ -2,7 +2,6 @@ mod builders;
 pub(crate) mod dplpmtud;
 mod event;
 pub(crate) mod expresslane;
-pub(crate) mod expresslane_cb;
 mod fragment_map;
 mod io_adapter;
 mod key_update;

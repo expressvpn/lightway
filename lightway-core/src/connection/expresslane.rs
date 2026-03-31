@@ -1,8 +1,26 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::wire::ExpresslaneData;
-use crate::{ExpresslaneCbType, SessionId};
+use crate::SessionId;
+use crate::wire::{ExpresslaneData, ExpresslaneKey};
+
+/// Data published when expresslane keys are updated.
+#[derive(Debug)]
+pub struct ExpresslaneCbData {
+    /// Self key
+    pub self_key: ExpresslaneKey,
+    /// Peer key
+    pub peer_key: ExpresslaneKey,
+}
+
+/// Callback trait for expresslane key updates.
+pub trait ExpresslaneCb {
+    /// Called when expresslane keys are updated for a session.
+    fn update(&self, session_id: SessionId, data: ExpresslaneCbData);
+}
+
+/// Convenience type for [`ExpresslaneCb`] trait objects.
+pub type ExpresslaneCbType = Arc<dyn ExpresslaneCb + Sync + Send>;
 
 /// Interval between expresslane key rotations
 pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);

@@ -31,7 +31,6 @@ pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
     ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg, ExpresslaneState,
     ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer, expresslane::*,
-    expresslane_cb::*,
 };
 pub use context::{
     ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleTickCb, ServerAuth,
