@@ -458,8 +458,8 @@ pub struct Connection<AppState: Send = ()> {
     // Expresslane State
     expresslane_state: ExpresslaneState,
 
-    // Expresslane engine
-    expresslane: ExpresslaneData,
+    // Expresslane data engine (wire crypto)
+    expresslane_data: ExpresslaneData,
 
     // Express data config update callback
     expresslane_cb: Option<ExpresslaneCbType>,
@@ -547,7 +547,7 @@ impl<AppState: Send> Connection<AppState> {
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
             expresslane_state,
-            expresslane: ExpresslaneData::default(),
+            expresslane_data: ExpresslaneData::default(),
             expresslane_cb: args.expresslane_cb,
         };
 
@@ -1318,7 +1318,7 @@ impl<AppState: Send> Connection<AppState> {
             && hdr.expresslane_data
         {
             let (data, is_encoded) = self
-                .expresslane
+                .expresslane_data
                 .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
 
             self.handle_outside_data_bytes(data, is_encoded)?;
@@ -1510,20 +1510,20 @@ impl<AppState: Send> Connection<AppState> {
         let total_peer_sent = payload.get_u64();
         let total_peer_recv = payload.get_u64();
 
-        let current_sent = self.expresslane.packets_sent();
-        let current_recv = self.expresslane.packets_received();
+        let current_sent = self.expresslane_data.packets_sent();
+        let current_recv = self.expresslane_data.packets_received();
 
         // Compute per-interval deltas for both sides.
-        let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
-        let my_recv_delta = current_recv - self.expresslane.last_snapshot_recv;
-        let peer_sent_delta = total_peer_sent - self.expresslane.prev_peer_sent;
-        let peer_recv_delta = total_peer_recv - self.expresslane.prev_peer_recv;
+        let my_sent_delta = current_sent - self.expresslane_data.last_snapshot_sent;
+        let my_recv_delta = current_recv - self.expresslane_data.last_snapshot_recv;
+        let peer_sent_delta = total_peer_sent - self.expresslane_data.prev_peer_sent;
+        let peer_recv_delta = total_peer_recv - self.expresslane_data.prev_peer_recv;
 
         // Update snapshots
-        self.expresslane.prev_peer_sent = total_peer_sent;
-        self.expresslane.prev_peer_recv = total_peer_recv;
-        self.expresslane.last_snapshot_sent = current_sent;
-        self.expresslane.last_snapshot_recv = current_recv;
+        self.expresslane_data.prev_peer_sent = total_peer_sent;
+        self.expresslane_data.prev_peer_recv = total_peer_recv;
+        self.expresslane_data.last_snapshot_sent = current_sent;
+        self.expresslane_data.last_snapshot_recv = current_recv;
 
         trace!(
             peer_sent_delta,
@@ -1569,7 +1569,7 @@ impl<AppState: Send> Connection<AppState> {
         let last_config = last_config.0;
 
         // Ignore retransmit calls for the stale (previous) requests.
-        if last_config.counter != self.expresslane.config_counter {
+        if last_config.counter != self.expresslane_data.config_counter {
             debug!(
                 "Expresslane config stale retransmit {}",
                 last_config.counter
@@ -1579,26 +1579,26 @@ impl<AppState: Send> Connection<AppState> {
 
         // If self key is equal to last retransmit key, it means peer has
         // already acknowledged. We can ignore the tick
-        if last_config.key == self.expresslane.self_key() {
+        if last_config.key == self.expresslane_data.self_key() {
             debug!("Expresslane config {} ack successful", last_config.counter);
             return Ok(());
         }
 
-        if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
+        if self.expresslane_data.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
             warn!("Expresslane config transmit timed out, setting expresslane to inactive");
             self.set_expresslane_state(ExpresslaneState::Inactive);
             return Ok(());
         }
 
-        self.expresslane.retransmit_count += 1;
+        self.expresslane_data.retransmit_count += 1;
         debug!(
             "Expresslane config retransmitting {} ({} time)",
-            last_config.counter, self.expresslane.retransmit_count
+            last_config.counter, self.expresslane_data.retransmit_count
         );
 
         // Callback to schedule another re-transmission
         (self.schedule_tick_cb)(
-            self.expresslane.retransmit_wait_time(),
+            self.expresslane_data.retransmit_wait_time(),
             &mut self.app_state,
             TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(last_config)),
         );
@@ -1645,8 +1645,8 @@ impl<AppState: Send> Connection<AppState> {
             return Default::default();
         }
 
-        let current_sent = self.expresslane.packets_sent();
-        let current_recv = self.expresslane.packets_received();
+        let current_sent = self.expresslane_data.packets_sent();
+        let current_recv = self.expresslane_data.packets_received();
 
         let mut buf = bytes::BytesMut::with_capacity(16);
         buf.put_u64(current_sent);
@@ -1661,19 +1661,19 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        if config.version != self.expresslane.version {
+        if config.version != self.expresslane_data.version {
             return Err(ConnectionError::ExpresslaneVersionMismatch);
         }
 
         // Handle acknowledgement from peer
         if config.ack {
-            if config.counter == self.expresslane.config_counter {
+            if config.counter == self.expresslane_data.config_counter {
                 // Peer acknowledged, can update local key now
-                self.expresslane.update_self_key();
+                self.expresslane_data.update_self_key();
                 self.publish_expresslane_key();
-                self.expresslane.retransmit_count = 0;
+                self.expresslane_data.retransmit_count = 0;
                 // Self key updated, check if expresslane is now ready
-                if self.expresslane.has_valid_keys() {
+                if self.expresslane_data.has_valid_keys() {
                     self.set_expresslane_state(ExpresslaneState::Active);
                 }
             }
@@ -1697,9 +1697,9 @@ impl<AppState: Send> Connection<AppState> {
 
         if config.enabled {
             debug!("Peer has enabled expresslane");
-            self.expresslane.update_peer_key(config.key)?;
+            self.expresslane_data.update_peer_key(config.key)?;
             self.publish_expresslane_key();
-            if self.expresslane.has_valid_keys() {
+            if self.expresslane_data.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
             }
         } else {
@@ -1731,7 +1731,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::ExpreslaneDegraded);
         }
 
-        if !self.expresslane.time_to_rotate_key() {
+        if !self.expresslane_data.time_to_rotate_key() {
             return Ok(());
         }
 
@@ -1741,25 +1741,25 @@ impl<AppState: Send> Connection<AppState> {
         // [`self::handle_expresslane_config`]
         //
         // If updating key failed, send disabled to peer
-        let enabled = self.expresslane.update_next_self_key(key).is_ok();
+        let enabled = self.expresslane_data.update_next_self_key(key).is_ok();
 
-        self.expresslane.config_counter += 1;
+        self.expresslane_data.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled,
             key,
             version: ExpresslaneVersion::Version1,
             ack: false,
-            counter: self.expresslane.config_counter,
+            counter: self.expresslane_data.config_counter,
         };
 
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
 
-        self.expresslane.update_last_key_rotation();
+        self.expresslane_data.update_last_key_rotation();
 
         // Callback to schedule re-transmission if required
         (self.schedule_tick_cb)(
-            self.expresslane.retransmit_wait_time(),
+            self.expresslane_data.retransmit_wait_time(),
             &mut self.app_state,
             TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
         );
@@ -1771,15 +1771,15 @@ impl<AppState: Send> Connection<AppState> {
         self.set_expresslane_state(ExpresslaneState::Degraded);
 
         let key = ExpresslaneKey::INVALID;
-        let _ = self.expresslane.update_next_self_key(key);
+        let _ = self.expresslane_data.update_next_self_key(key);
 
-        self.expresslane.config_counter += 1;
+        self.expresslane_data.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled: false,
             key,
             version: ExpresslaneVersion::Version1,
             ack: false,
-            counter: self.expresslane.config_counter,
+            counter: self.expresslane_data.config_counter,
         };
 
         let msg = wire::Frame::ExpresslaneConfig(config);
@@ -1788,7 +1788,7 @@ impl<AppState: Send> Connection<AppState> {
         // Callback to schedule re-transmission if required
         // reuses same retry logic as key rotation
         (self.schedule_tick_cb)(
-            self.expresslane.retransmit_wait_time(),
+            self.expresslane_data.retransmit_wait_time(),
             &mut self.app_state,
             TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
         );
@@ -1796,8 +1796,8 @@ impl<AppState: Send> Connection<AppState> {
 
     fn publish_expresslane_key(&self) {
         if let Some(xp_config_cb) = &self.expresslane_cb {
-            let self_key = self.expresslane.self_key();
-            let peer_key = self.expresslane.peer_key();
+            let self_key = self.expresslane_data.self_key();
+            let peer_key = self.expresslane_data.peer_key();
 
             let data = ExpresslaneCbData { self_key, peer_key };
             xp_config_cb.update(self.session_id, data);
@@ -1817,7 +1817,7 @@ impl<AppState: Send> Connection<AppState> {
         // So use it if there is one.
         // In case of client there will be no pending_session_id, so it is fine
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
-        self.expresslane
+        self.expresslane_data
             .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 
