@@ -191,6 +191,11 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     #[educe(Debug(ignore))]
     pub expresslane_cb: Option<lightway_core::ExpresslaneCbType>,
 
+    /// External metrics provider for expresslane packet stats,
+    /// supplied when packet processing happens outside the lightway runtime.
+    #[educe(Debug(ignore))]
+    pub expresslane_metrics: Option<lightway_core::ExpresslaneMetricsType>,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -794,6 +799,9 @@ pub async fn connect<
     .when(config.enable_expresslane, |b| b.with_expresslane())
     .when(config.expresslane_cb.is_some(), |b| {
         b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
+    .when(config.expresslane_metrics.is_some(), |b| {
+        b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
     })
     .build()
     .start_connect(

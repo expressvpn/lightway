@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
         use_dynamic_client_ip: false,
         enable_expresslane: config.enable_expresslane,
         expresslane_cb: None,
+        expresslane_metrics: None,
         event_cb: None,
         enable_pqc: config.enable_pqc,
         #[cfg(feature = "io-uring")]

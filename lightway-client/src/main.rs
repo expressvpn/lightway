@@ -210,6 +210,7 @@ async fn main() -> Result<()> {
         enable_pqc: config.enable_pqc,
         enable_expresslane: config.enable_expresslane,
         expresslane_cb: None,
+        expresslane_metrics: None,
         keepalive_interval: config.keepalive_interval.into(),
         keepalive_timeout: config.keepalive_timeout.into(),
         continuous_keepalive: config.keepalive_continuous,

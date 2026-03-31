@@ -11,8 +11,8 @@ use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, Event, ExpresslaneCbType, PluginFactoryError, PluginFactoryList, ServerAuth,
-    ServerAuthHandle, ServerAuthResult, SessionId, Version,
+    ConnectionType, Event, ExpresslaneCbType, ExpresslaneMetricsType, PluginFactoryError,
+    PluginFactoryList, ServerAuth, ServerAuthHandle, ServerAuthResult, SessionId, Version,
 };
 
 /// Callback type for receiving per-connection events with session ID.
@@ -180,6 +180,11 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(ignore))]
     pub expresslane_cb: Option<ExpresslaneCbType>,
 
+    /// External metrics provider for expresslane packet stats,
+    /// supplied when packet processing happens outside the lightway runtime.
+    #[educe(Debug(ignore))]
+    pub expresslane_metrics: Option<ExpresslaneMetricsType>,
+
     /// Optional callback to receive per-connection events with session ID.
     /// Called for every event (state changes, session rotation, etc.).
     #[educe(Debug(ignore))]
@@ -329,6 +334,9 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .when(config.enable_expresslane, |b| b.with_expresslane())
     .when(config.expresslane_cb.is_some(), |b| {
         b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
+    .when(config.expresslane_metrics.is_some(), |b| {
+        b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
     })
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
