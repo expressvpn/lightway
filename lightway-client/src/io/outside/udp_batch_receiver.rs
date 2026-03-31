@@ -84,7 +84,7 @@ const BATCH_SIZE: usize = 32;
 
 /// Tokio task: receives packets from the socket via `recvmsg_x` and pushes them
 /// into the rx ring buffer.
-async fn handle_udp_recv(
+pub(crate) async fn handle_udp_recv(
     sock: Arc<UdpSocket>,
     mut rx_queue: rtrb::Producer<BytesMut>,
     rx_ready: Arc<Semaphore>,
@@ -224,4 +224,225 @@ mod apple {
 
         Ok(count)
     }
+}
+
+#[cfg(test)]
+#[serial_test::serial]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::UdpSocket;
+
+    async fn make_socket_pair() -> (UdpSocket, Arc<UdpSocket>) {
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .connect(receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+        (sender, Arc::new(receiver))
+    }
+
+    #[tokio::test]
+    async fn single_packet_received() {
+        let (sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        sender.send(b"hello").await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+            .await
+            .unwrap()
+            .unwrap();
+        let pkt = batch.pop_recv_consumer().unwrap();
+        assert_eq!(&pkt[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn multiple_packets_received_in_order() {
+        let (sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        for i in 0..10u8 {
+            sender.send(&[i]).await.unwrap();
+        }
+
+        for i in 0..10u8 {
+            tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+                .await
+                .unwrap()
+                .unwrap();
+            let pkt = batch.pop_recv_consumer().unwrap();
+            assert_eq!(pkt[0], i);
+        }
+    }
+
+    #[tokio::test]
+    async fn pop_on_empty_returns_error() {
+        let (_sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+        assert!(matches!(
+            batch.pop_recv_consumer(),
+            Err(BatchReceiverConsumerError::EmptyBuffer(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ring_buffer_full_no_data_loss() {
+        let (sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        // Fill the ring buffer to capacity.
+        for i in 0..MAX_BUFFER_SIZE as u32 {
+            sender.send(&i.to_le_bytes()).await.unwrap();
+        }
+
+        // Drain and verify every packet arrived in order.
+        for i in 0..MAX_BUFFER_SIZE as u32 {
+            tokio::time::timeout(Duration::from_secs(5), batch.recv_queue_ready())
+                .await
+                .unwrap()
+                .unwrap();
+            let pkt = batch.pop_recv_consumer().unwrap();
+            assert_eq!(
+                u32::from_le_bytes(pkt[..4].try_into().unwrap()),
+                i,
+                "packet {i} out of order"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn packets_after_drain() {
+        let (sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        // First burst.
+        sender.send(b"first").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+            .await
+            .unwrap()
+            .unwrap();
+        let pkt = batch.pop_recv_consumer().unwrap();
+        assert_eq!(&pkt[..], b"first");
+
+        // Second burst after draining.
+        sender.send(b"second").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+            .await
+            .unwrap()
+            .unwrap();
+        let pkt = batch.pop_recv_consumer().unwrap();
+        assert_eq!(&pkt[..], b"second");
+    }
+
+    #[tokio::test]
+    async fn closed_sender_socket_propagates_error() {
+        let (sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        // Send one packet, then drop the sender.
+        sender.send(b"bye").await.unwrap();
+        drop(sender);
+
+        // The already-queued packet should still be readable.
+        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+            .await
+            .unwrap()
+            .unwrap();
+        let pkt = batch.pop_recv_consumer().unwrap();
+        assert_eq!(&pkt[..], b"bye");
+    }
+
+    #[tokio::test]
+    async fn pop_after_semaphore_closed_returns_semaphore_closed() {
+        let (_sender, receiver) = make_socket_pair().await;
+        let batch = BatchReceiver::new(receiver);
+
+        // Manually close the semaphore to simulate the recv task dying with an IO error.
+        batch.recv_ready.close();
+        batch
+            .io_error
+            .lock()
+            .unwrap()
+            .replace(io::Error::other("simulated IO failure"));
+
+        assert!(matches!(
+            batch.pop_recv_consumer(),
+            Err(BatchReceiverConsumerError::SemaphoreClosed(_))
+        ));
+    }
+
+    // ---- Direct handle_udp_recv tests ----
+
+    /// Helper: spawn handle_udp_recv with our own ring buffer and semaphore.
+    #[allow(clippy::type_complexity)]
+    fn spawn_handle_udp_recv(
+        sock: Arc<UdpSocket>,
+        buffer_size: usize,
+    ) -> (
+        rtrb::Consumer<BytesMut>,
+        Arc<Semaphore>,
+        CancellationToken,
+        Arc<Mutex<Option<io::Error>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let rx_ready = Arc::new(Semaphore::new(0));
+        let (producer, consumer) = RingBuffer::new(buffer_size);
+        let cancel = CancellationToken::new();
+        let io_error = Arc::new(Mutex::new(None));
+        let handle = tokio::task::spawn(handle_udp_recv(
+            sock,
+            producer,
+            rx_ready.clone(),
+            cancel.clone(),
+            io_error.clone(),
+        ));
+        (consumer, rx_ready, cancel, io_error, handle)
+    }
+
+    #[tokio::test]
+    async fn handle_recv_cancellation_stops_task() {
+        let (_sender, receiver) = make_socket_pair().await;
+        let (_, _, cancel, _, handle) = spawn_handle_udp_recv(receiver, MAX_BUFFER_SIZE);
+
+        cancel.cancel();
+
+        // Task should exit promptly.
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("task did not finish in time")
+            .expect("task panicked");
+    }
+
+    #[tokio::test]
+    async fn handle_recv_pushes_packets_and_adds_permits() {
+        let (sender, receiver) = make_socket_pair().await;
+        let (mut consumer, rx_ready, cancel, _, _handle) =
+            spawn_handle_udp_recv(receiver, MAX_BUFFER_SIZE);
+
+        sender.send(b"pkt1").await.unwrap();
+        sender.send(b"pkt2").await.unwrap();
+
+        // Wait for both permits.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), rx_ready.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+        }
+
+        let p1 = consumer.pop().unwrap();
+        let p2 = consumer.pop().unwrap();
+        assert_eq!(&p1[..], b"pkt1");
+        assert_eq!(&p2[..], b"pkt2");
+
+        cancel.cancel();
+    }
+
+    // TODO: Add handle_recv error path test once recv_multiple is behind a trait,
+    // allowing injection of fatal IO errors. Closing the raw fd doesn't wake
+    // tokio's event loop, so the task stays blocked on readable() indefinitely.
 }
