@@ -108,6 +108,12 @@ async fn handle_udp_recv(
                 }
                 let msg_count = rx_queue.slots().min(BATCH_SIZE);
                 if msg_count == 0 {
+                    // The ring buffer is full. We must yield here because
+                    // the socket is still readable (data in the kernel buffer),
+                    // so `readable()` would return immediately on the next
+                    // iteration — creating a busy spin that starves the
+                    // consumer task and prevents it from draining the buffer.
+                    tokio::task::yield_now().await;
                     continue;
                 }
 
