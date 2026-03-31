@@ -1,10 +1,33 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ExpresslaneCbType;
 use crate::wire::ExpresslaneData;
+use crate::{ExpresslaneCbType, SessionId};
 
 /// Interval between expresslane key rotations
 pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
+
+/// Packet counters for ExpressLane health monitoring.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExpresslanePacketStats {
+    /// Total sent via expresslane
+    pub sent: u64,
+    /// Total received via expresslane
+    pub received: u64,
+}
+
+/// Provider of ExpressLane packet metrics.
+///
+/// When expresslane encryption/decryption is offloaded, the userspace
+/// packet counters stay at zero. Implementors of this trait supply the
+/// real packet counters from wherever the offload happens.
+pub trait ExpresslaneMetrics {
+    /// Returns cumulative packet counters for the given session.
+    fn get_stats(&self, session_id: SessionId) -> ExpresslanePacketStats;
+}
+
+/// Convenience type for [`ExpresslaneMetrics`] trait objects.
+pub type ExpresslaneMetricsType = Arc<dyn ExpresslaneMetrics + Send + Sync>;
 
 /// Expresslane state machine and connection-level state.
 ///
@@ -33,10 +56,16 @@ pub(crate) struct Expresslane {
     /// Callback invoked on session key updates so the application can
     /// propagate them to an external consumer.
     pub(crate) cb: Option<ExpresslaneCbType>,
+    /// External metrics provider
+    pub(crate) metrics: Option<ExpresslaneMetricsType>,
 }
 
 impl Expresslane {
-    pub(crate) fn new(state: ExpresslaneState, cb: Option<ExpresslaneCbType>) -> Self {
+    pub(crate) fn new(
+        state: ExpresslaneState,
+        cb: Option<ExpresslaneCbType>,
+        metrics: Option<ExpresslaneMetricsType>,
+    ) -> Self {
         Self {
             state,
             config_counter: 0,
@@ -48,6 +77,18 @@ impl Expresslane {
             last_snapshot_recv: 0,
             data: ExpresslaneData::default(),
             cb,
+            metrics,
+        }
+    }
+
+    /// Get current Expresslane packet stats
+    pub(crate) fn stats(&self, session_id: SessionId) -> (u64, u64) {
+        match &self.metrics {
+            Some(provider) => {
+                let stats = provider.get_stats(session_id);
+                (stats.sent, stats.received)
+            }
+            None => (self.data.packets_sent(), self.data.packets_received()),
         }
     }
 

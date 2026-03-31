@@ -466,6 +466,7 @@ struct NewConnectionArgs<AppState> {
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -525,7 +526,11 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder,
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
-            expresslane: expresslane::Expresslane::new(expresslane_state, args.expresslane_cb),
+            expresslane: expresslane::Expresslane::new(
+                expresslane_state,
+                args.expresslane_cb,
+                args.expresslane_metrics,
+            ),
         };
 
         // This will very likely fail since negotiation always needs
@@ -1488,8 +1493,7 @@ impl<AppState: Send> Connection<AppState> {
         let total_peer_sent = payload.get_u64();
         let total_peer_recv = payload.get_u64();
 
-        let current_sent = self.expresslane.data.packets_sent();
-        let current_recv = self.expresslane.data.packets_received();
+        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
 
         // Compute per-interval deltas for both sides.
         let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
@@ -1623,8 +1627,7 @@ impl<AppState: Send> Connection<AppState> {
             return Default::default();
         }
 
-        let current_sent = self.expresslane.data.packets_sent();
-        let current_recv = self.expresslane.data.packets_received();
+        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
 
         let mut buf = bytes::BytesMut::with_capacity(16);
         buf.put_u64(current_sent);
