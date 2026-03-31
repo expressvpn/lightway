@@ -140,6 +140,11 @@ impl SessionId {
         self == &Self::EMPTY || self == &Self::REJECTED
     }
 
+    /// Get the raw bytes of this session ID
+    pub fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
+    }
+
     fn as_slice(&self) -> &[u8] {
         &self.0[..]
     }
