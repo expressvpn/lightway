@@ -1,7 +1,4 @@
-use std::{
-    fmt::Debug,
-    time::{Duration, Instant},
-};
+use std::fmt::Debug;
 
 use crate::borrowed_bytesmut::BorrowedBytesMut;
 use crate::metrics;
@@ -60,7 +57,6 @@ impl ExpresslaneKey {
 }
 
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
-pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
 
 impl Distribution<ExpresslaneKey> for StandardUniform {
     fn sample<R: rand_core::Rng + ?Sized>(&self, rng: &mut R) -> ExpresslaneKey {
@@ -184,10 +180,6 @@ impl ReplayWindow {
 #[derive(Default)]
 pub(crate) struct ExpresslaneData {
     pub(crate) version: ExpresslaneVersion,
-    // Counter value last send in the [`ExpresslaneConfig`] message
-    pub(crate) config_counter: u64,
-    /// Number of retransmissions done with the latest pending encoding request packet
-    pub(crate) retransmit_count: u8,
     // Counter which is used in Expresslane wire packets (for sending)
     wire_counter: u64,
     // Replay protection window for received packets
@@ -198,22 +190,11 @@ pub(crate) struct ExpresslaneData {
     // prev key
     next_self: Option<ExpresslaneDataCipher>,
     prev_peer: Option<ExpresslaneDataCipher>,
-    /// Peer's total packets sent as of the last received Pong
-    pub(crate) prev_peer_sent: u64,
-    /// Peer's total packets received as of the last received Pong
-    pub(crate) prev_peer_recv: u64,
-    /// Packets sent at the time of last keepalive exchange
-    pub(crate) last_snapshot_sent: u64,
-    /// Packets received at the time of last keepalive exchange
-    pub(crate) last_snapshot_recv: u64,
-    /// Last key rotation timestamp
-    pub(crate) last_key_rotation: Option<Instant>,
 }
 
 impl Debug for ExpresslaneData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Expresslane")
-            .field("count", &self.config_counter)
+        f.debug_struct("ExpresslaneData")
             .field("self", &self.current_self)
             .field("peer", &self.current_peer)
             .finish()
@@ -290,14 +271,6 @@ impl ExpresslaneData {
 
         debug!("Updating expresslane peer keys: {:?}", self);
         Ok(())
-    }
-
-    pub(crate) fn retransmit_wait_time(&self) -> Duration {
-        const INITIAL_WAIT_TIME: Duration = Duration::from_millis(500);
-
-        // To begin with, wait for INITIAL_WAIT_TIME.
-        // Then, linearly increase the wait time with the number of retransmission attempted.
-        INITIAL_WAIT_TIME * ((1 + self.retransmit_count) as u32)
     }
 
     pub(crate) fn try_from_wire(
@@ -397,22 +370,6 @@ impl ExpresslaneData {
         buf.put_u16(flags.into());
 
         buf.put(&cipher_text[..])
-    }
-
-    /// Update the last key rotation timestamp
-    pub(crate) fn update_last_key_rotation(&mut self) {
-        self.last_key_rotation = Some(Instant::now());
-    }
-
-    /// Check if time delta since last rotation has passed [`EXPRESSLANE_KEYS_ROTATION_INTERVAL`] duration
-    pub(crate) fn time_to_rotate_key(&self) -> bool {
-        match self.last_key_rotation {
-            // When establishing initial expresslane connection
-            // last_key_rotation will be None
-            None => true,
-            // For subsequent rotations, check the time delta
-            Some(last) => last.elapsed() > EXPRESSLANE_KEYS_ROTATION_INTERVAL,
-        }
     }
 }
 
