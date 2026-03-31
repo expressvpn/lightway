@@ -91,7 +91,8 @@ async fn handle_udp_recv(
     cancel: CancellationToken,
     io_error: Arc<Mutex<Option<io::Error>>>,
 ) {
-    let mut recv_bufs = [[0u8; MAX_OUTSIDE_MTU]; BATCH_SIZE];
+    let mut recv_bufs: [BytesMut; BATCH_SIZE] =
+        std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
 
     loop {
         tokio::select! {
@@ -120,6 +121,7 @@ async fn handle_udp_recv(
                 // Retry if we received Interrupted
                 let recv_count = loop {
                     match sock.try_io(tokio::io::Interest::READABLE, || {
+                        // TODO: Make this a trait so that other platforms can use the same interface
                         apple::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
                     }) {
                         Ok(n) => break n,
@@ -143,7 +145,7 @@ async fn handle_udp_recv(
                         .write_chunk_uninit(recv_count)
                         .expect("slots() guaranteed enough space");
                     let pushed = chunk.fill_from_iter((0..recv_count).map(|i| {
-                        BytesMut::from(&recv_bufs[i][..])
+                        std::mem::replace(&mut recv_bufs[i], BytesMut::with_capacity(MAX_OUTSIDE_MTU))
                     }));
                     rx_ready.add_permits(pushed);
                 }
@@ -155,6 +157,7 @@ async fn handle_udp_recv(
 #[cfg(apple)]
 mod apple {
     use crate::io::outside::udp_batch_receiver::BATCH_SIZE;
+    use bytes::BytesMut;
     use lightway_core::MAX_OUTSIDE_MTU;
     use std::{io, mem};
 
@@ -187,7 +190,7 @@ mod apple {
     #[allow(unsafe_code)]
     pub(crate) fn recv_multiple(
         fd: libc::c_int,
-        recv_bufs: &mut [[u8; MAX_OUTSIDE_MTU]; BATCH_SIZE],
+        recv_bufs: &mut [BytesMut; BATCH_SIZE],
         msg_count: usize,
     ) -> io::Result<usize> {
         // SAFETY: zeroed iovec is valid (null pointer + zero length).
@@ -195,7 +198,8 @@ mod apple {
         // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
         let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
         for i in 0..msg_count {
-            iovecs[i].iov_base = recv_bufs[i].as_mut_ptr() as *mut libc::c_void;
+            iovecs[i].iov_base =
+                recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
             iovecs[i].iov_len = MAX_OUTSIDE_MTU;
             hdrs[i].msg_iov = &mut iovecs[i];
             hdrs[i].msg_iovlen = 1;
@@ -208,6 +212,16 @@ mod apple {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(n as usize)
+        let count = n as usize;
+        for i in 0..count {
+            let len = hdrs[i].msg_datalen;
+            // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
+            // and we have early returned already if we have received no packets from the kernel.
+            unsafe {
+                recv_bufs[i].set_len(len);
+            }
+        }
+
+        Ok(count)
     }
 }
