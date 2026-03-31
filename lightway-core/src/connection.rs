@@ -1157,6 +1157,11 @@ impl<AppState: Send> Connection<AppState> {
 
                 *pending_session_id = Some(new_session_id);
 
+                self.event(Event::SessionIdRotationStarted {
+                    old: self.session_id,
+                    new: new_session_id,
+                });
+
                 Ok(new_session_id)
             }
         }

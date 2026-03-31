@@ -370,7 +370,8 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
             }
 
             // Server only events
-            Event::SessionIdRotationAcknowledged { .. }
+            Event::SessionIdRotationStarted { .. }
+            | Event::SessionIdRotationAcknowledged { .. }
             | Event::TlsKeysUpdateStart
             | Event::TlsKeysUpdateCompleted => {
                 unreachable!("server only event received");

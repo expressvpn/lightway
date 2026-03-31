@@ -174,6 +174,7 @@ async fn handle_events(
         match event {
             Event::StateChanged(state) => handle_state_change(state, &conn).await,
             Event::KeepaliveReply => {}
+            Event::SessionIdRotationStarted { .. } => {}
             Event::SessionIdRotationAcknowledged { old, new } => {
                 handle_finalize_session_rotation(&conn, old, new);
             }
