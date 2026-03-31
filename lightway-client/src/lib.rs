@@ -189,7 +189,7 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
 
     /// Callback for expresslane key updates
     #[educe(Debug(ignore))]
-    pub expresslane_cb: Option<lightway_core::ExpresslaneCbType>,
+    pub expresslane_cb: Option<lightway_core::ExpresslaneCbType<ConnectionState<ExtAppState>>>,
 
     /// External metrics provider for expresslane packet stats,
     /// supplied when packet processing happens outside the lightway runtime.

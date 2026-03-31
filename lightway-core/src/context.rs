@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::{
-    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError, ExpresslaneCbType,
+    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError,
     InsideIOSendCallbackArg, OutsideIOSendCallbackArg, OutsidePacket, PluginResult,
     RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg, Version,
-    connection::expresslane::ExpresslaneMetricsType,
+    connection::expresslane::{ExpresslaneCbType, ExpresslaneMetricsType},
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
@@ -120,7 +120,7 @@ pub struct ClientContext<AppState> {
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
     pub(crate) rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
     pub(crate) expresslane: bool,
-    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
@@ -146,7 +146,7 @@ pub struct ClientContextBuilder<AppState> {
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
@@ -218,7 +218,7 @@ impl<AppState> ClientContextBuilder<AppState> {
     }
 
     /// Sets callback for expresslane key update
-    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType<AppState>) -> Self {
         Self {
             expresslane_cb: Some(cb),
             ..self
@@ -295,7 +295,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
     pub(crate) expresslane: bool,
-    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
@@ -352,7 +352,7 @@ pub struct ServerContextBuilder<AppState> {
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
@@ -480,7 +480,7 @@ impl<AppState> ServerContextBuilder<AppState> {
     }
 
     /// Sets callback for expresslane key update
-    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType<AppState>) -> Self {
         Self {
             expresslane_cb: Some(cb),
             ..self

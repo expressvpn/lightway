@@ -35,8 +35,8 @@ use crate::{
     wire::{self, AuthMethod},
 };
 use crate::{
-    ExpresslaneCbData, ExpresslaneCbType, Header, LightwayFeature, OutsideIOSendCallbackArg,
-    TickType, dtls_required_outside_mtu, max_dtls_mtu,
+    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType,
+    dtls_required_outside_mtu, max_dtls_mtu,
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
@@ -440,7 +440,7 @@ pub struct Connection<AppState: Send = ()> {
     encoding_request_states: EncodingRequestStates,
 
     // Expresslane state, config exchange, health monitoring, wire crypto, and callbacks
-    expresslane: expresslane::Expresslane,
+    expresslane: expresslane::Expresslane<AppState>,
 }
 
 /// Information about the new session being established with a new
@@ -464,7 +464,7 @@ struct NewConnectionArgs<AppState> {
     pmtud_base_mtu: Option<u16>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
 }
 
@@ -1783,7 +1783,7 @@ impl<AppState: Send> Connection<AppState> {
                 peer_key,
                 peer_sockaddr: self.peer_addr(),
             };
-            xp_config_cb.update(self.session_id, data);
+            xp_config_cb.update(self.session_id, data, &self.app_state);
         }
     }
 

@@ -178,7 +178,7 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
     /// Callback for expresslane key updates
     #[educe(Debug(ignore))]
-    pub expresslane_cb: Option<ExpresslaneCbType>,
+    pub expresslane_cb: Option<ExpresslaneCbType<ConnectionState>>,
 
     /// External metrics provider for expresslane packet stats,
     /// supplied when packet processing happens outside the lightway runtime.

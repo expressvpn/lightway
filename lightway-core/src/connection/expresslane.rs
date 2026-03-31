@@ -17,13 +17,16 @@ pub struct ExpresslaneCbData {
 }
 
 /// Callback trait for expresslane key updates.
-pub trait ExpresslaneCb {
+///
+/// Generic over `AppState` so consumers can read connection state directly
+/// (e.g. server reads `internal_ip` from its `ConnectionState`).
+pub trait ExpresslaneCb<AppState> {
     /// Called when expresslane keys are updated for a session.
-    fn update(&self, session_id: SessionId, data: ExpresslaneCbData);
+    fn update(&self, session_id: SessionId, data: ExpresslaneCbData, state: &AppState);
 }
 
 /// Convenience type for [`ExpresslaneCb`] trait objects.
-pub type ExpresslaneCbType = Arc<dyn ExpresslaneCb + Sync + Send>;
+pub type ExpresslaneCbType<AppState> = Arc<dyn ExpresslaneCb<AppState> + Sync + Send>;
 
 /// Interval between expresslane key rotations
 pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
@@ -55,7 +58,7 @@ pub type ExpresslaneMetricsType = Arc<dyn ExpresslaneMetrics + Send + Sync>;
 /// Groups all expresslane-related connection state: the state machine,
 /// config exchange tracking, health monitoring snapshots, the wire-level
 /// crypto engine, and the key update callback.
-pub(crate) struct Expresslane {
+pub(crate) struct Expresslane<AppState: Send> {
     /// Current expresslane state
     pub(crate) state: ExpresslaneState,
     /// Counter value last sent in the ExpresslaneConfig message
@@ -76,15 +79,15 @@ pub(crate) struct Expresslane {
     pub(crate) data: ExpresslaneData,
     /// Callback invoked on session key updates so the application can
     /// propagate them to an external consumer.
-    pub(crate) cb: Option<ExpresslaneCbType>,
+    pub(crate) cb: Option<ExpresslaneCbType<AppState>>,
     /// External metrics provider
     pub(crate) metrics: Option<ExpresslaneMetricsType>,
 }
 
-impl Expresslane {
+impl<AppState: Send> Expresslane<AppState> {
     pub(crate) fn new(
         state: ExpresslaneState,
-        cb: Option<ExpresslaneCbType>,
+        cb: Option<ExpresslaneCbType<AppState>>,
         metrics: Option<ExpresslaneMetricsType>,
     ) -> Self {
         Self {
