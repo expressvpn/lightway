@@ -5,8 +5,6 @@ use crate::io::outside::udp_batch_receiver::BatchReceiver;
 use crate::io::outside::udp_batch_receiver::BatchReceiverConsumerError;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-#[cfg(batch_receive)]
-use bytes::BufMut;
 use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::IpPmtudisc;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
@@ -97,6 +95,18 @@ impl OutsideIO for Udp {
     }
 
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize> {
+        #[cfg(batch_receive)]
+        if let Some(receiver) = self.batch_receiver.as_ref() {
+            return match receiver.pop_recv_consumer() {
+                Ok(b) => {
+                    let len = b.len();
+                    *buf = b;
+                    IOCallbackResult::Ok(len)
+                }
+                Err(BatchReceiverConsumerError::EmptyBuffer(_)) => IOCallbackResult::WouldBlock,
+                Err(BatchReceiverConsumerError::SemaphoreClosed(e)) => IOCallbackResult::Err(e),
+            };
+        }
         match self.sock.try_recv_buf(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
