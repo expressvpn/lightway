@@ -6,7 +6,6 @@ use crate::io::outside::udp_batch_receiver::BatchReceiverConsumerError;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use lightway_app_utils::sockopt;
-use lightway_app_utils::sockopt::IpPmtudisc;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -180,10 +179,10 @@ impl OutsideIOSendCallback for Udp {
     }
 
     fn enable_pmtud_probe(&self) -> std::io::Result<()> {
-        sockopt::set_ip_mtu_discover(&self.sock, sockopt::IpPmtudisc::Probe)
+        sockopt::set_ip_mtu_discover(self.sock.as_ref(), sockopt::IpPmtudisc::Probe)
     }
 
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
-        sockopt::set_ip_mtu_discover(&self.sock, self.default_ip_pmtudisc)
+        sockopt::set_ip_mtu_discover(self.sock.as_ref(), self.default_ip_pmtudisc)
     }
 }
