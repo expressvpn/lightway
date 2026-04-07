@@ -875,7 +875,18 @@ impl<AppState: Send> Connection<AppState> {
         let result = self.process_new_outside_data(payload, hdr);
         match result {
             // We only look into the session id after we verify the connection is valid
-            Ok(frames_read) if frames_read > 0 => self.update_session_id(hdr.map(|h| h.session)),
+            Ok(frames_read) if frames_read > 0 => {
+                if let Some(h) = hdr
+                    && h.session != self.session_id
+                {
+                    debug!(
+                        wire_session = ?h.session,
+                        current_session = ?self.session_id,
+                        "Received packet with different session ID"
+                    );
+                }
+                self.update_session_id(hdr.map(|h| h.session));
+            }
             _ => {}
         }
         result
@@ -1685,8 +1696,13 @@ impl<AppState: Send> Connection<AppState> {
                 self.expresslane.data.update_self_key();
                 self.publish_expresslane_key();
                 self.expresslane.retransmit_count = 0;
-                // Self key updated, check if expresslane is now ready
-                if self.expresslane.data.has_valid_keys() {
+                // Self key updated, check if expresslane is now ready.
+                // Don't re-activate if we're degraded — the degradation
+                // config ACK uses an INVALID key which must not be used
+                // for data packets.
+                if !matches!(self.expresslane.state, ExpresslaneState::Degraded)
+                    && self.expresslane.data.has_valid_keys()
+                {
                     self.set_expresslane_state(ExpresslaneState::Active);
                 }
             }
@@ -1709,7 +1725,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if config.enabled {
-            debug!("Peer has enabled expresslane");
+            debug!("Peer has updated expresslane key");
             self.expresslane.data.update_peer_key(config.key)?;
             self.publish_expresslane_key();
             if self.expresslane.data.has_valid_keys() {
