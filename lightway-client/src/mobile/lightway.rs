@@ -1,11 +1,11 @@
-use crate::config::{Config, ConnectionConfig};
+use crate::config::Config;
 use crate::event_handlers::EventHandlers;
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
 use crate::state::{DeviceNetworkState, ExpresslaneState};
 use crate::{
-    ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
-    keepalive::Config as KeepaliveConfig, outside_io_task,
+    ClientConnectionConfig, ClientConnectionMode, ClientIpConfigCb, ClientResult, ConnectionState,
+    inside_io_task, io, keepalive::Config as KeepaliveConfig, outside_io_task,
 };
 use futures::StreamExt;
 use futures::future::{FutureExt, OptionFuture, select_all};
@@ -20,10 +20,9 @@ use lightway_core::{
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
-use tokio::net::{TcpSocket, UdpSocket};
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::{Notify, oneshot};
@@ -38,47 +37,17 @@ const INTERNAL_MTU: u16 = 1350;
 const MAX_SOCKET_BUFFER_LEN: usize = 1024000;
 const ENABLE_PMTUD: bool = false;
 
-enum OutsideSocket {
-    Tcp(TcpSocket),
-    Udp(UdpSocket),
-}
-
-impl OutsideSocket {
-    fn new(use_tcp: bool, event_handler: Option<Arc<dyn EventHandlers>>) -> uniffi::Result<Self> {
-        if use_tcp {
-            let socket = TcpSocket::new_v4()?;
-            let fd = socket.as_raw_fd();
-
-            debug!("Created OutsideIO TCP FD: {}", fd);
-            if let Some(e) = event_handler {
-                e.created_outside_fd(fd)
-            }
-            Ok(OutsideSocket::Tcp(socket))
-        } else {
-            let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            let fd = socket.as_raw_fd();
-
-            debug!("Created OutsideIO UDP FD: {}", fd);
-            if let Some(e) = event_handler {
-                e.created_outside_fd(fd)
-            }
-            socket.set_nonblocking(true)?;
-            Ok(OutsideSocket::Udp(UdpSocket::from_std(socket)?))
-        }
-    }
-}
-
 /// Builder for creating OutsideIO connections with optional obfuscation and proxy
 ///
 /// Handles both initial connections (which may need obfuscation and proxy) and network
 /// changes (which don't need obfuscation or proxy).
 struct OutsideIOBuilder {
-    socket: OutsideSocket,
+    socket: crate::OutsideSocket,
     server_sockaddr: SocketAddr,
 }
 
 impl<'a> OutsideIOBuilder {
-    fn new(socket: OutsideSocket, server_sockaddr: SocketAddr) -> Self {
+    fn new(socket: crate::OutsideSocket, server_sockaddr: SocketAddr) -> Self {
         Self {
             socket,
             server_sockaddr,
@@ -90,14 +59,14 @@ impl<'a> OutsideIOBuilder {
         _plugins: &mut PluginFactoryList,
     ) -> uniffi::Result<(ConnectionType, Arc<dyn OutsideIO>)> {
         let result: Result<(ConnectionType, Arc<dyn OutsideIO>), _> = match self.socket {
-            OutsideSocket::Tcp(s) => {
+            crate::OutsideSocket::Tcp(s) => {
                 let stream = s.connect(self.server_sockaddr).await?;
                 let sock = io::outside::Tcp::new(self.server_sockaddr, Some(stream))
                     .await
                     .context("Outside IO TCP")?;
                 Ok((ConnectionType::Stream, Arc::new(sock)))
             }
-            OutsideSocket::Udp(s) => {
+            crate::OutsideSocket::Udp(s) => {
                 let sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
                     .await
                     .context("Outside IO UDP")?;
@@ -174,18 +143,21 @@ async fn setup_tunnel_interface(
 pub(crate) async fn async_lightway_start(
     tun_fd: RawFd,
     external_event_handler: Arc<dyn EventHandlers>,
-    config: Config,
+    mut config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
     let mut outside_sockets = config
         .servers
         .iter()
-        .map(|s| OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok())
-        .collect::<Vec<Option<OutsideSocket>>>();
+        .map(|s| {
+            crate::OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok()
+        })
+        .collect::<Vec<Option<crate::OutsideSocket>>>();
 
     // Strore meta data before the server consumed
     let server_len = config.servers.len();
     let tcp_connections_only = config.servers.iter().all(|s| s.mode.is_tcp());
+    let servers = std::mem::take(&mut config.servers);
 
     let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
 
@@ -199,28 +171,29 @@ pub(crate) async fn async_lightway_start(
         connection_start,
         external_event_handler.clone(),
     ));
+    let mut client_connect_configs = Vec::new();
+    for (instance_id, conn_conf) in servers.into_iter().enumerate() {
+        let client_connect_config = conn_conf.into_client_connection_config(
+            instance_id,
+            &config,
+            &mut outside_sockets,
+            online_signal_sender.clone(),
+            event_handler.clone(),
+            external_event_handler.clone(),
+        )?;
+        client_connect_configs.push(client_connect_config)
+    }
 
     let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
         Vec<_>,
         FuturesUnordered<_>,
-    ) = config
-        .servers
+    ) = client_connect_configs
         .into_iter()
-        .enumerate()
-        .map(|(instance_id, connect_conf)| {
+        .map(|c| {
+            let instance_id = c.instance_id;
             let task = tokio::spawn(
-                lightway_client_connect(LightwayClientConnectArgs {
-                    instance_id,
-                    connect_conf,
-                    sni_header: config.sni_header.clone(),
-                    socket: outside_sockets[instance_id].take(),
-                    enable_keepalive: config.keepalive_continuous,
-                    enable_expresslane: config.enable_expresslane,
-                    online_signal_sender: online_signal_sender.clone(),
-                    event_stream_handler: event_handler.clone(),
-                    external_event_handler: external_event_handler.clone(),
-                })
-                .instrument(info_span!("LightwayConnection", instance_id = instance_id)),
+                lightway_client_connect(c)
+                    .instrument(info_span!("LightwayConnection", instance_id)),
             );
             (task.abort_handle(), task)
         })
@@ -476,7 +449,7 @@ async fn restartable_outside_io_task(
                     Some(_) => {
                         info!("Restarting outside_io_task with new socket");
                         let peer_addr = conn.lock().unwrap().peer_addr();
-                        let socket = OutsideSocket::new(false, None)?;
+                        let socket = crate::OutsideSocket::new(false, None)?;
                         let mut outside_plugins = PluginFactoryList::new();
                         let (_, new_socket) = OutsideIOBuilder::new(socket, peer_addr)
                             .build(&mut outside_plugins)
@@ -546,23 +519,17 @@ struct LightwayConnection {
     expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
 }
 
-struct LightwayClientConnectArgs {
-    instance_id: usize,
-    connect_conf: ConnectionConfig,
-    sni_header: String,
-    socket: Option<OutsideSocket>,
-    enable_keepalive: bool,
-    enable_expresslane: bool,
-    online_signal_sender: tokio::sync::mpsc::Sender<usize>,
-    event_stream_handler: EventStreamCallback,
-    external_event_handler: Arc<dyn EventHandlers>,
-}
-
 /// Individual connection to a lightway server
 async fn lightway_client_connect(
-    LightwayClientConnectArgs {
+    ClientConnectionConfig {
         instance_id,
-        mut connect_conf,
+        mode,
+        cipher,
+        outside_mtu,
+        server_dn,
+        auth,
+        ca_content,
+        server,
         sni_header,
         socket,
         enable_keepalive,
@@ -570,7 +537,7 @@ async fn lightway_client_connect(
         online_signal_sender,
         event_stream_handler,
         external_event_handler,
-    }: LightwayClientConnectArgs,
+    }: ClientConnectionConfig,
 ) -> uniffi::Result<LightwayConnection> {
     let mut join_set = JoinSet::new();
 
@@ -581,14 +548,10 @@ async fn lightway_client_connect(
 
     let mut outside_plugins = PluginFactoryList::new();
 
-    let server_sockaddr = connect_conf.skt_addr()?;
-
     let (connection_type, outside_io): (ConnectionType, Arc<dyn OutsideIO>) = {
-        let builder = OutsideIOBuilder::new(socket, server_sockaddr);
+        let builder = OutsideIOBuilder::new(socket, server);
         builder.build(&mut outside_plugins).await?
     };
-
-    let root_ca_cert = connect_conf.load_ca()?;
 
     let inside_io = MobileInsideIo {
         mtu: INTERNAL_MTU as usize,
@@ -608,31 +571,25 @@ async fn lightway_client_connect(
 
     let conn_builder = ClientContextBuilder::new(
         connection_type,
-        root_ca_cert,
+        lightway_core::wolfssl::RootCertificate::PemBuffer(ca_content.as_bytes()),
         Some(inside_io),
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
     )?
     // TODO: Do we really need wrapper and a core::Cipher instance to call as_cipher_list?
-    .with_cipher(connect_conf.cipher.clone().into())?
+    .with_cipher(cipher.into())?
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(connection_type.is_datagram() && enable_expresslane, |b| {
         b.with_expresslane()
     })
     .build()
-    .start_connect(
-        outside_io.clone().into_io_send_callback(),
-        connect_conf.outside_mtu,
-    )?
-    .with_auth(connect_conf.take_auth()?)
+    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
+    .with_auth(auth)
     .with_event_cb(Box::new(event_cb))
-    .when(connect_conf.server_dn.is_some(), |b| {
+    .when(server_dn.is_some(), |b| {
         b.with_server_domain_name_validation(
-            connect_conf
-                .server_dn
-                .as_ref()
-                .expect("checked in builder pattern"),
+            server_dn.as_ref().expect("checked in builder pattern"),
         )
     })
     .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
@@ -656,7 +613,7 @@ async fn lightway_client_connect(
 
     let notify_keepalive_reply = Arc::new(Notify::new());
     let (expresslane_event_tx, expresslane_event_rx) =
-        if enable_expresslane && !connect_conf.mode.is_tcp() {
+        if enable_expresslane && matches!(mode, ClientConnectionMode::Datagram(_)) {
             Some(tokio::sync::mpsc::channel(5))
         } else {
             None
@@ -682,7 +639,7 @@ async fn lightway_client_connect(
         restartable_outside_io_task(
             conn.clone(),
             OutsideIOConfig {
-                mtu: connect_conf.outside_mtu,
+                mtu: outside_mtu,
                 connection_type,
                 outside_io,
             },

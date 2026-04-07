@@ -1,64 +1,20 @@
 use clap::Parser;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
-use lightway_core::{Event, EventCallback};
 use tokio::fs::read_to_string;
 
 use lightway_app_utils::{
     TunConfig, Validate,
-    args::{ConfigFormat, ConnectionType, LogFormat},
+    args::{ConfigFormat, LogFormat},
     validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
 
 mod config;
 use config::{Config, ConfigPatch, ConnectionConfig};
-
-struct EventHandler;
-
-impl EventCallback for EventHandler {
-    fn event(&mut self, event: lightway_core::Event) {
-        match event {
-            Event::StateChanged(state) => {
-                tracing::debug!("State changed to {:?}", state);
-            }
-            Event::EncodingStateChanged { enabled } => {
-                tracing::debug!("Encoding state changed to {:?}", enabled);
-            }
-            _ => {}
-        }
-    }
-}
-
-async fn make_client_connection_config(
-    config: ConnectionConfig,
-) -> Result<ClientConnectionConfig<EventHandler>> {
-    tracing::info!("Resolving server address: {}", &config.server);
-
-    let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow!("No addresses resolved"))?;
-
-    let mode = match config.mode {
-        ConnectionType::Tcp => ClientConnectionMode::Stream(None),
-        ConnectionType::Udp => ClientConnectionMode::Datagram(None),
-    };
-
-    Ok(ClientConnectionConfig {
-        mode,
-        cipher: config.cipher,
-        server_dn: config.server_dn,
-        server: server_addr,
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
-        event_handler: Some(EventHandler),
-    })
-}
 
 #[cfg(windows)]
 async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<ConfigPatch> {
@@ -193,7 +149,7 @@ async fn main() -> Result<()> {
     let conn_confs = join_all(
         std::mem::take::<Vec<ConnectionConfig>>(&mut config.servers)
             .into_iter()
-            .map(make_client_connection_config),
+            .map(|c| c.into_client_connection_config()),
     );
     let conn_confs = tokio::select! {
         results = conn_confs => {

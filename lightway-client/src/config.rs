@@ -463,6 +463,80 @@ impl ConnectionConfig {
             .parse()
             .map_err(|_e| Error::InvalidSocketAddress)?)
     }
+
+    /// Convert the ConnectionConfig to ClientConnectionConfig
+    #[cfg(desktop)]
+    pub async fn into_client_connection_config(
+        self,
+    ) -> Result<crate::ClientConnectionConfig<crate::event_handlers::EventHandler>, Error> {
+        let ConnectionConfig {
+            mode,
+            cipher,
+            server_dn,
+            server,
+            ..
+        } = self;
+        tracing::info!("Resolving server address: {server:}");
+        let server = tokio::net::lookup_host(server)
+            .await
+            .map_err(|e| {
+                tracing::error!("Fail to resolve server address: {e:}");
+                Error::FailToResolve
+            })?
+            .next()
+            .ok_or(Error::AddressNotResolved)?;
+
+        Ok(crate::ClientConnectionConfig {
+            mode: mode.into(),
+            cipher,
+            server_dn,
+            server,
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            inside_pkt_codec: None,
+            event_handler: Some(crate::event_handlers::EventHandler),
+        })
+    }
+
+    /// Convert the ConnectionConfig to ClientConnectionConfig
+    #[cfg(feature = "mobile")]
+    pub fn into_client_connection_config(
+        mut self,
+        instance_id: usize,
+        config: &Config,
+        outside_sockets: &mut Vec<Option<crate::OutsideSocket>>,
+        online_signal_sender: tokio::sync::mpsc::Sender<usize>,
+        event_stream_handler: lightway_app_utils::EventStreamCallback,
+        external_event_handler: std::sync::Arc<dyn crate::event_handlers::EventHandlers>,
+    ) -> Result<crate::ClientConnectionConfig, Error> {
+        let auth = self.take_auth()?;
+        let server = self.skt_addr()?;
+        let crate::config::ConnectionConfig {
+            mode,
+            cipher,
+            outside_mtu,
+            server_dn,
+            ca_cert,
+            ..
+        } = self;
+        Ok(crate::ClientConnectionConfig {
+            instance_id,
+            mode: mode.into(),
+            cipher,
+            outside_mtu,
+            server_dn,
+            auth,
+            ca_content: ca_cert.unwrap(),
+            server,
+            sni_header: config.sni_header.clone(),
+            socket: outside_sockets[instance_id].take(),
+            enable_keepalive: config.keepalive_continuous,
+            enable_expresslane: config.enable_expresslane,
+            online_signal_sender,
+            event_stream_handler,
+            external_event_handler,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -485,6 +559,13 @@ pub enum Error {
     /// Lack information to Authentication
     #[error("Insufficient information for Authentication")]
     InsufficientAuth,
+
+    #[error("Fail to resolve address")]
+    FailToResolve,
+
+    /// No addresses resolved
+    #[error("No addresses resolved")]
+    AddressNotResolved,
 }
 
 #[cfg(feature = "mobile")]

@@ -25,15 +25,16 @@ use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
-use lightway_app_utils::{
-    ConnectionTicker, ConnectionTickerState, PacketCodecFactoryType, TunConfig, args::Cipher,
-};
+use lightway_app_utils::EventStreamCallback;
 #[cfg(desktop)]
-use lightway_app_utils::{DplpmtudTimer, EventStreamCallback, connection_ticker_cb};
+use lightway_app_utils::PacketCodecFactoryType;
+use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, TunConfig, args::Cipher};
 #[cfg(desktop)]
-use lightway_core::{BuilderPredicates, ClientContextBuilder};
+use lightway_app_utils::{DplpmtudTimer, connection_ticker_cb};
+#[cfg(desktop)]
+use lightway_core::{BuilderPredicates, ClientContextBuilder, EventCallback};
 use lightway_core::{
-    ClientIpConfig, Connection, ConnectionError, ConnectionType, EventCallback, IOCallbackResult,
+    ClientIpConfig, Connection, ConnectionError, ConnectionType, IOCallbackResult,
     InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, ipv4_update_destination,
     ipv4_update_source,
 };
@@ -94,6 +95,16 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
+        }
+    }
+}
+
+impl std::convert::From<lightway_app_utils::args::ConnectionType> for ClientConnectionMode {
+    fn from(val: lightway_app_utils::args::ConnectionType) -> Self {
+        if val.is_tcp() {
+            ClientConnectionMode::Stream(None)
+        } else {
+            ClientConnectionMode::Datagram(None)
         }
     }
 }
@@ -244,6 +255,8 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     pub keylog: Option<PathBuf>,
 }
 
+/// The Conection configures for desktop clients
+#[cfg(not(feature = "mobile"))]
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
@@ -276,6 +289,64 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     pub event_handler: Option<EventHandler>,
 }
 
+/// The Conection configures for mobile clients
+#[cfg(feature = "mobile")]
+pub struct ClientConnectionConfig {
+    auth: lightway_core::AuthMethod,
+    ca_content: String,
+    mode: ClientConnectionMode,
+    cipher: Cipher,
+    server_dn: Option<String>,
+    server: SocketAddr,
+
+    instance_id: usize,
+    outside_mtu: usize,
+    sni_header: String,
+    socket: Option<OutsideSocket>,
+    enable_keepalive: bool,
+    enable_expresslane: bool,
+    online_signal_sender: tokio::sync::mpsc::Sender<usize>,
+    event_stream_handler: EventStreamCallback,
+    external_event_handler: Arc<dyn event_handlers::EventHandlers>,
+}
+
+#[cfg(feature = "mobile")]
+pub enum OutsideSocket {
+    Tcp(tokio::net::TcpSocket),
+    Udp(tokio::net::UdpSocket),
+}
+
+#[cfg(feature = "mobile")]
+impl OutsideSocket {
+    fn new(
+        use_tcp: bool,
+        event_handler: Option<Arc<dyn event_handlers::EventHandlers>>,
+    ) -> uniffi::Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        if use_tcp {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            let fd = socket.as_raw_fd();
+
+            tracing::debug!("Created OutsideIO TCP FD: {}", fd);
+            if let Some(e) = event_handler {
+                e.created_outside_fd(fd)
+            }
+            Ok(OutsideSocket::Tcp(socket))
+        } else {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+            let fd = socket.as_raw_fd();
+
+            tracing::debug!("Created OutsideIO UDP FD: {}", fd);
+            if let Some(e) = event_handler {
+                e.created_outside_fd(fd)
+            }
+            socket.set_nonblocking(true)?;
+            Ok(OutsideSocket::Udp(UdpSocket::from_std(socket)?))
+        }
+    }
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientInsidePacketCodecConfig {
@@ -287,6 +358,7 @@ pub struct ClientInsidePacketCodecConfig {
     pub encoding_request_signal: tokio::sync::mpsc::Receiver<bool>,
 }
 
+#[cfg(desktop)]
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
     f: &mut std::fmt::Formatter,
@@ -294,6 +366,7 @@ fn debug_fmt_plugin_list(
     write!(f, "{} plugins", list.len())
 }
 
+#[cfg(desktop)]
 fn debug_pkt_codec_fac(
     codec_fac: &Option<PacketCodecFactoryType>,
     f: &mut std::fmt::Formatter,
