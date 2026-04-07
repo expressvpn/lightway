@@ -163,12 +163,25 @@ async fn handle_events(
     conn: Weak<Connection>,
     event_cb: Option<crate::ServerEventCbType>,
 ) {
+    // This task runs per-connection. Cache the session_id so we can still
+    // deliver Disconnecting/Disconnected events after the Connection Arc
+    // is dropped (which happens before these events are processed).
+    let mut last_session_id: Option<SessionId> = None;
+
     while let Some(event) = stream.next().await {
         // Forward event to external callback if set
-        if let Some(cb) = &event_cb
-            && let Some(c) = conn.upgrade()
-        {
-            cb(c.session_id(), &event);
+        if let Some(cb) = &event_cb {
+            if let Some(c) = conn.upgrade() {
+                last_session_id = Some(c.session_id());
+                cb(c.session_id(), &event);
+            } else if let Some(sid) = last_session_id
+                && matches!(
+                    event,
+                    Event::StateChanged(State::Disconnecting | State::Disconnected)
+                )
+            {
+                cb(sid, &event);
+            }
         }
 
         match event {
@@ -180,7 +193,8 @@ async fn handle_events(
             }
             Event::TlsKeysUpdateStart => handle_tls_keys_update_start(&conn),
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
-            Event::FirstPacketReceived | Event::ExpresslaneStateChanged(_) => {
+            Event::ExpresslaneStateChanged(_) => {}
+            Event::FirstPacketReceived => {
                 unreachable!("client only event received");
             }
             Event::EncodingStateChanged { enabled } => handle_encoding_state_changed(enabled),

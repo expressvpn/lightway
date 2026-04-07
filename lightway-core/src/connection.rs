@@ -1647,15 +1647,13 @@ impl<AppState: Send> Connection<AppState> {
         self.expresslane_supported() && matches!(self.expresslane.state, ExpresslaneState::Active)
     }
 
-    /// Set the expresslane state and emit the event if the state has changed (on the client-side)
+    /// Set the expresslane state and emit the event if the state has changed.
     fn set_expresslane_state(&mut self, new_state: ExpresslaneState) {
         if self.expresslane.state == new_state {
             return;
         }
         self.expresslane.state = new_state;
-        if matches!(self.mode, ConnectionMode::Client { .. }) {
-            self.event(Event::ExpresslaneStateChanged(new_state));
-        }
+        self.event(Event::ExpresslaneStateChanged(new_state));
     }
 
     /// Encode expresslane metrics as a binary payload.
