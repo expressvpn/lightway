@@ -1499,11 +1499,39 @@ impl<AppState: Send> Connection<AppState> {
 
         let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
 
+        // Detect counter reset: cumulative stats should never decrease.
+        // If they do, an external stats provider re-initialized its state
+        // with fresh counters. Log for debugging but continue with the
+        // health check — the underflow will trigger degradation and fall
+        // back to DTLS as a safe default.
+        if total_peer_sent < self.expresslane.prev_peer_sent
+            || total_peer_recv < self.expresslane.prev_peer_recv
+        {
+            warn!(
+                total_peer_sent,
+                total_peer_recv,
+                prev_peer_sent = self.expresslane.prev_peer_sent,
+                prev_peer_recv = self.expresslane.prev_peer_recv,
+                "Peer expresslane counter reset detected"
+            );
+        }
+        if current_sent < self.expresslane.last_snapshot_sent
+            || current_recv < self.expresslane.last_snapshot_recv
+        {
+            warn!(
+                current_sent,
+                current_recv,
+                last_snapshot_sent = self.expresslane.last_snapshot_sent,
+                last_snapshot_recv = self.expresslane.last_snapshot_recv,
+                "Local expresslane counter reset detected"
+            );
+        }
+
         // Compute per-interval deltas for both sides.
-        let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
-        let my_recv_delta = current_recv - self.expresslane.last_snapshot_recv;
-        let peer_sent_delta = total_peer_sent - self.expresslane.prev_peer_sent;
-        let peer_recv_delta = total_peer_recv - self.expresslane.prev_peer_recv;
+        let my_sent_delta = current_sent.wrapping_sub(self.expresslane.last_snapshot_sent);
+        let my_recv_delta = current_recv.wrapping_sub(self.expresslane.last_snapshot_recv);
+        let peer_sent_delta = total_peer_sent.wrapping_sub(self.expresslane.prev_peer_sent);
+        let peer_recv_delta = total_peer_recv.wrapping_sub(self.expresslane.prev_peer_recv);
 
         // Update snapshots
         self.expresslane.prev_peer_sent = total_peer_sent;
