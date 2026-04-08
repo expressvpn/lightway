@@ -88,8 +88,18 @@ pub(crate) fn is_batch_receive_available() -> bool {
 /// Maximum number of messages to send/receive in a single syscall.
 const BATCH_SIZE: usize = 32;
 
-/// Tokio task: receives packets from the socket via `recvmsg_x` and pushes them
-/// into the rx ring buffer.
+/// Platform-specific batch receive syscall.
+trait BatchRecvSyscall {
+    /// Receive up to `msg_count` packets from `fd` into `recv_bufs`.
+    /// Returns the number of packets actually received.
+    fn recv_multiple(
+        fd: libc::c_int,
+        recv_bufs: &mut [BytesMut; BATCH_SIZE],
+        msg_count: usize,
+    ) -> io::Result<usize>;
+}
+/// Tokio task: receives packets from the socket using the platform-specific
+/// batch syscall and pushes them into the rx ring buffer.
 pub(crate) async fn handle_udp_recv(
     sock: Arc<UdpSocket>,
     mut rx_queue: rtrb::Producer<BytesMut>,
