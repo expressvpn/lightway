@@ -23,7 +23,7 @@ fn main() {
             )
         },
         // Feature alias
-        batch_receive: { all(apple, feature = "batch_receive") },
+        batch_receive: { all(any(linux, apple, android), feature = "batch_receive") },
     }
 
     let git_hash = get_git_hash();
