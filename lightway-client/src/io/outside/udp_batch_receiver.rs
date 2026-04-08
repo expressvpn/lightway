@@ -98,6 +98,10 @@ trait BatchRecvSyscall {
         msg_count: usize,
     ) -> io::Result<usize>;
 }
+
+#[cfg(apple)]
+type PlatformBatchRecv = apple::RecvmsgX;
+
 /// Tokio task: receives packets from the socket using the platform-specific
 /// batch syscall and pushes them into the rx ring buffer.
 pub(crate) async fn handle_udp_recv(
@@ -137,8 +141,7 @@ pub(crate) async fn handle_udp_recv(
                 // Retry if we received Interrupted
                 let recv_count = loop {
                     match sock.try_io(tokio::io::Interest::READABLE, || {
-                        // TODO: Make this a trait so that other platforms can use the same interface
-                        apple::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
+                        PlatformBatchRecv::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
                     }) {
                         Ok(n) => break n,
                         // try_io may return WouldBlock even if the socket isn't actually
@@ -224,44 +227,48 @@ mod apple {
         ) -> isize;
     }
 
-    /// Receive packets from the socket using the `recvmsg_x` batch syscall.
-    /// Fills `recv_bufs` with up to `msg_count` messages and returns the number received.
-    #[allow(unsafe_code)]
-    pub(crate) fn recv_multiple(
-        fd: libc::c_int,
-        recv_bufs: &mut [BytesMut; BATCH_SIZE],
-        msg_count: usize,
-    ) -> io::Result<usize> {
-        // SAFETY: zeroed iovec is valid (null pointer + zero length).
-        let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_SIZE]>() };
-        // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
-        let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
-        for i in 0..msg_count {
-            iovecs[i].iov_base =
-                recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
-            iovecs[i].iov_len = MAX_OUTSIDE_MTU;
-            hdrs[i].msg_iov = &mut iovecs[i];
-            hdrs[i].msg_iovlen = 1;
-        }
+    pub(crate) struct RecvmsgX;
 
-        // SAFETY: hdrs and iovecs are valid for msg_count entries, fd is a valid and borrowed socket.
-        let n = unsafe { recvmsg_x(fd, hdrs.as_mut_ptr(), msg_count as _, 0) };
-
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let count = n as usize;
-        for i in 0..count {
-            let len = hdrs[i].msg_datalen;
-            // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
-            // and we have early returned already if we have received no packets from the kernel.
-            unsafe {
-                recv_bufs[i].set_len(len);
+    impl super::BatchRecvSyscall for RecvmsgX {
+        /// Receive packets from the socket using the `recvmsg_x` batch syscall.
+        /// Fills `recv_bufs` with up to `msg_count` messages and returns the number received.
+        #[allow(unsafe_code)]
+        fn recv_multiple(
+            fd: libc::c_int,
+            recv_bufs: &mut [BytesMut; BATCH_SIZE],
+            msg_count: usize,
+        ) -> io::Result<usize> {
+            // SAFETY: zeroed iovec is valid (null pointer + zero length).
+            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_SIZE]>() };
+            // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
+            let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
+            for i in 0..msg_count {
+                iovecs[i].iov_base =
+                    recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
+                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
+                hdrs[i].msg_iov = &mut iovecs[i];
+                hdrs[i].msg_iovlen = 1;
             }
-        }
 
-        Ok(count)
+            // SAFETY: hdrs and iovecs are valid for msg_count entries, fd is a valid and borrowed socket.
+            let n = unsafe { recvmsg_x(fd, hdrs.as_mut_ptr(), msg_count as _, 0) };
+
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let count = n as usize;
+            for i in 0..count {
+                let len = hdrs[i].msg_datalen;
+                // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
+                // and we have early returned already if we have received no packets from the kernel.
+                unsafe {
+                    recv_bufs[i].set_len(len);
+                }
+            }
+
+            Ok(count)
+        }
     }
 
     #[cfg(test)]
