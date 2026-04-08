@@ -7,7 +7,7 @@ use clap::Parser;
 use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
 };
-use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, RootCertificate};
+use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
@@ -41,10 +41,12 @@ pub struct Config {
 
     /// Servers to attempt to connect to. Configuration is only supported in
     /// config file, not command line or environment variable
+    /// This field is private, due to only `take_servers` can take out these,
+    /// and also normalize these configures when taking out.
     #[patch(attribute(clap(skip)))]
     #[serde(default)]
     #[serde(skip_serializing)]
-    pub servers: Vec<ConnectionConfig>,
+    servers: Vec<ConnectionConfig>,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
@@ -258,30 +260,57 @@ pub struct Config {
 }
 
 impl Config {
-    /// Try build auth from config
-    pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
-        take_auth(self.token.take(), self.user.take(), self.password.take())
+    /// Check ca input is a path
+    fn use_ca_file(&self) -> bool {
+        !self.ca_cert.starts_with("-----BEGIN CERTIFICATE-----")
     }
 
-    /// Try build CA from ca_crt
-    pub fn load_ca(&self) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
-        load_ca(&self.ca_cert)
-    }
-
-    /// Try build CA from ca_crt file
-    /// If input ca_path is none, will take ca_cert field as path and pass to SSL
-    pub fn load_ca_file<'a>(
-        &self,
-        ca_path: &'a mut Option<PathBuf>,
-    ) -> lightway_core::wolfssl::RootCertificate<'a> {
-        if ca_path.is_none() {
-            *ca_path = Some(PathBuf::from(&self.ca_cert));
+    /// Take out configures for servers
+    /// and normalize the auth and ca of ConnectionConfig of servers
+    pub fn take_servers(&mut self) -> Result<Vec<ConnectionConfig>, Error> {
+        if self.servers.is_empty() {
+            self.servers = vec![ConnectionConfig {
+                server: self.server.clone(),
+                mode: self.mode,
+                server_dn: self.server_dn.take(),
+                cipher: self.cipher,
+                outside_mtu: self.outside_mtu,
+                ..Default::default()
+            }];
         }
-        RootCertificate::PemFileOrDirectory(
-            ca_path
-                .as_ref()
-                .expect("the path already initialized if it is none"),
-        )
+        let ca_content = if self.use_ca_file() {
+            // NOTE: only desktop support load ca from file path
+            if cfg!(desktop) {
+                std::fs::read_to_string(&self.ca_cert).ok()
+            } else {
+                None
+            }
+        } else {
+            Some(self.ca_cert.clone())
+        };
+        for server in self.servers.iter_mut() {
+            if server.username.is_none() && server.password.is_none() && server.token.is_none() {
+                server.username = self.user.clone();
+                server.password = self.password.clone();
+                server.token = self.token.clone();
+            }
+            if let Some(ref mut ca_cert) = server.ca_cert {
+                if !ca_cert.starts_with("-----BEGIN CERTIFICATE-----") {
+                    if cfg!(desktop) {
+                        *ca_cert = std::fs::read_to_string(&mut *ca_cert)
+                            .map_err(|_| Error::CaFileNotFound)?;
+                    } else {
+                        return Err(Error::InvalidCertificate);
+                    }
+                }
+            } else {
+                if ca_content.is_none() {
+                    return Err(Error::CaFileNotFound);
+                }
+                server.ca_cert = ca_content.clone();
+            }
+        }
+        Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
     }
 
     #[cfg(feature = "mobile")]
@@ -437,7 +466,6 @@ pub struct ConnectionConfig {
 
 impl ConnectionConfig {
     /// Try build auth from config
-    #[cfg(feature = "mobile")]
     pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
         take_auth(
             self.token.take(),
@@ -451,7 +479,13 @@ impl ConnectionConfig {
     pub fn load_ca(&self) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
-            .map(|ca| load_ca(ca))
+            .map(|ca| {
+                if ca.starts_with("-----BEGIN CERTIFICATE-----") {
+                    Ok(lightway_core::RootCertificate::PemBuffer(ca.as_bytes()))
+                } else {
+                    Err(Error::InvalidCertificate)
+                }
+            })
             .ok_or(Error::InvalidCertificate)?
     }
 
@@ -467,13 +501,15 @@ impl ConnectionConfig {
     /// Convert the ConnectionConfig to ClientConnectionConfig
     #[cfg(desktop)]
     pub async fn into_client_connection_config(
-        self,
+        mut self,
     ) -> Result<crate::ClientConnectionConfig<crate::event_handlers::EventHandler>, Error> {
+        let auth = self.take_auth()?;
         let ConnectionConfig {
             mode,
             cipher,
             server_dn,
             server,
+            ca_cert,
             ..
         } = self;
         tracing::info!("Resolving server address: {server:}");
@@ -487,7 +523,10 @@ impl ConnectionConfig {
             .ok_or(Error::AddressNotResolved)?;
 
         Ok(crate::ClientConnectionConfig {
+            auth,
             mode: mode.into(),
+            ca_content: ca_cert
+                .expect("ConnectionConfig should be taken by `take_servers` and normalized"),
             cipher,
             server_dn,
             server,
@@ -526,7 +565,8 @@ impl ConnectionConfig {
             outside_mtu,
             server_dn,
             auth,
-            ca_content: ca_cert.unwrap(),
+            ca_content: ca_cert
+                .expect("ConnectionConfig should be taken by `take_servers` and normalized"),
             server,
             sni_header: config.sni_header.clone(),
             socket: outside_sockets[instance_id].take(),
@@ -566,6 +606,10 @@ pub enum Error {
     /// No addresses resolved
     #[error("No addresses resolved")]
     AddressNotResolved,
+
+    /// No Ca file in user's input
+    #[error("Ca file is absent")]
+    CaFileNotFound,
 }
 
 #[cfg(feature = "mobile")]
@@ -698,14 +742,6 @@ fn take_auth(
         (Some(token), _, _) => Ok(AuthMethod::Token { token }),
         (_, Some(user), Some(password)) => Ok(AuthMethod::UserPass { user, password }),
         _ => Err(Error::InsufficientAuth),
-    }
-}
-
-fn load_ca(ca: &String) -> Result<lightway_core::wolfssl::RootCertificate<'_>, Error> {
-    if ca.starts_with("-----BEGIN CERTIFICATE-----") {
-        Ok(RootCertificate::PemBuffer(ca.as_bytes()))
-    } else {
-        Err(Error::InvalidCertificate)
     }
 }
 

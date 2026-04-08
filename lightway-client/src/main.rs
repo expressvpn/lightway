@@ -14,7 +14,7 @@ use lightway_app_utils::{
 use lightway_client::{io::inside::InsideIO, *};
 
 mod config;
-use config::{Config, ConfigPatch, ConnectionConfig};
+use config::{Config, ConfigPatch};
 
 #[cfg(windows)]
 async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<ConfigPatch> {
@@ -135,19 +135,10 @@ async fn main() -> Result<()> {
     })?;
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
-
-    if config.servers.is_empty() {
-        config.servers = vec![ConnectionConfig {
-            server: config.server.clone(),
-            mode: config.mode,
-            server_dn: config.server_dn.clone(),
-            cipher: config.cipher,
-            ..Default::default()
-        }];
-    }
+    let servers = config.take_servers()?;
 
     let conn_confs = join_all(
-        std::mem::take::<Vec<ConnectionConfig>>(&mut config.servers)
+        servers
             .into_iter()
             .map(|c| c.into_client_connection_config()),
     );
@@ -167,10 +158,6 @@ async fn main() -> Result<()> {
     };
 
     let config = ClientConfig {
-        auth: config.take_auth()?,
-        root_ca_cert: config
-            .load_ca()
-            .unwrap_or(config.load_ca_file(&mut _root_ca_cert_path)),
         outside_mtu: config.outside_mtu,
         inside_io,
         tun_config,

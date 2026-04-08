@@ -141,15 +141,7 @@ pub enum LightwayError {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
-    /// Auth parameters to use for connection
-    #[educe(Debug(ignore))]
-    pub auth: AuthMethod,
-
-    /// CA certificate
-    #[educe(Debug(ignore))]
-    pub root_ca_cert: RootCertificate<'cert>,
-
+pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Outside (wire) MTU
     pub outside_mtu: usize,
 
@@ -260,6 +252,12 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
+    /// Auth for the connection
+    pub auth: lightway_core::AuthMethod,
+
+    /// CA content
+    pub ca_content: String,
+
     /// Connection mode
     pub mode: ClientConnectionMode,
 
@@ -750,7 +748,7 @@ pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     mut server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
 ) -> Result<ClientConnection<ExtAppState>> {
@@ -819,7 +817,7 @@ pub async fn connect<
 
     let conn_builder = ClientContextBuilder::new(
         connection_type,
-        config.root_ca_cert,
+        RootCertificate::PemBuffer(server_config.ca_content.as_bytes()),
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
@@ -833,7 +831,7 @@ pub async fn connect<
         outside_io.clone().into_io_send_callback(),
         config.outside_mtu,
     )?
-    .with_auth(config.auth.clone())
+    .with_auth(server_config.auth)
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
@@ -1118,7 +1116,7 @@ fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
@@ -1154,7 +1152,7 @@ pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    mut config: ClientConfig<'_, ExtAppState>,
+    mut config: ClientConfig<ExtAppState>,
     mut stop_signal: oneshot::Receiver<()>,
     conn_confs: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {

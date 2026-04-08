@@ -146,8 +146,8 @@ pub(crate) async fn async_lightway_start(
     mut config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
-    let mut outside_sockets = config
-        .servers
+    let servers = config.take_servers()?;
+    let mut outside_sockets = servers
         .iter()
         .map(|s| {
             crate::OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok()
@@ -155,9 +155,8 @@ pub(crate) async fn async_lightway_start(
         .collect::<Vec<Option<crate::OutsideSocket>>>();
 
     // Strore meta data before the server consumed
-    let server_len = config.servers.len();
-    let tcp_connections_only = config.servers.iter().all(|s| s.mode.is_tcp());
-    let servers = std::mem::take(&mut config.servers);
+    let server_len = servers.len();
+    let tcp_connections_only = servers.iter().all(|s| s.mode.is_tcp());
 
     let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
 
