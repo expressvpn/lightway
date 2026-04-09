@@ -54,6 +54,14 @@ impl Udp {
 
     #[cfg(batch_receive)]
     pub fn enable_batch_receive(&mut self) {
+        #[cfg(apple)]
+        if !crate::io::outside::udp_batch_receiver::is_batch_receive_available() {
+            tracing::warn!(
+                "batch receive function is not available on this system, batch receive disabled"
+            );
+            return;
+        }
+        tracing::info!("Using batch receiver");
         self.batch_receiver = Some(BatchReceiver::new(self.sock.clone()));
     }
 

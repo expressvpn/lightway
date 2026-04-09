@@ -79,6 +79,12 @@ impl BatchReceiver {
     }
 }
 
+/// Check whether the platform supports batch receiving via `recvmsg_x`.
+#[cfg(apple)]
+pub(crate) fn is_batch_receive_available() -> bool {
+    apple::is_batch_receive_available()
+}
+
 /// Maximum number of messages to send/receive in a single syscall.
 const BATCH_SIZE: usize = 32;
 
@@ -159,7 +165,30 @@ mod apple {
     use crate::io::outside::udp_batch_receiver::BATCH_SIZE;
     use bytes::BytesMut;
     use lightway_core::MAX_OUTSIDE_MTU;
+    use std::sync::LazyLock;
     use std::{io, mem};
+
+    /// Whether the `recvmsg_x` syscall is available on the running OS.
+    ///
+    /// The symbol is a private Apple API that may not exist on all macOS/iOS
+    /// versions, so we probe for it with `dlsym(RTLD_DEFAULT, …)` once.
+    static RECVMSG_X_AVAILABLE: LazyLock<bool> = LazyLock::new(|| symbol_exists(c"recvmsg_x"));
+
+    /// Probe whether a C symbol is available in the current process via `dlsym`.
+    ///
+    /// Returns `true` if `dlsym(RTLD_DEFAULT, name)` finds the symbol.
+    #[allow(unsafe_code)]
+    pub(crate) fn symbol_exists(name: &std::ffi::CStr) -> bool {
+        // SAFETY: `dlsym` with `RTLD_DEFAULT` searches all loaded libraries for
+        // the symbol. Passing a valid C string is safe; the returned pointer is
+        // only used for a null check and never dereferenced.
+        // Ref: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/dlsym.3.html
+        unsafe { !libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()).is_null() }
+    }
+
+    pub fn is_batch_receive_available() -> bool {
+        *RECVMSG_X_AVAILABLE
+    }
 
     // Ref: https://github.com/apple-oss-distributions/xnu/blob/rel/xnu-10063/bsd/sys/socket.h
     #[repr(C)]
@@ -223,6 +252,27 @@ mod apple {
         }
 
         Ok(count)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn dlsym_finds_known_symbol() {
+            // `recvmsg` is a standard POSIX symbol that must exist on any Apple platform.
+            assert!(symbol_exists(c"recvmsg"));
+        }
+
+        #[test]
+        fn dlsym_returns_false_for_nonexistent_symbol() {
+            assert!(!symbol_exists(c"definitely_should_not_exist_bruh"));
+        }
+
+        #[test]
+        fn recvmsg_x_available_is_true() {
+            // On macOS, recvmsg_x should be available as it ships with the OS kernel.
+            assert!(*RECVMSG_X_AVAILABLE);
+        }
     }
 }
 

@@ -225,13 +225,13 @@ jobs:
             package_server: lightway-server
             build_msrv: true
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-26
             package_client: lightway-client
             package_server: lightway-server
             build_msrv: false
           # Cross-compile x86_64 Darwin from Apple Silicon (much faster than Intel Mac)
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-26
             package_client: lightway-client-x86_64-darwin
             package_server: lightway-server-x86_64-darwin
             build_msrv: false
@@ -282,7 +282,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-26, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -303,11 +303,11 @@ jobs:
         run: nix develop --command cargo test --features kyber_only
 
       - name: Run recvmsg_x test (macOS only)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-26'
         run: sudo nix develop --command cargo test batch_receiver --features batch_receive
 
       - name: Run privileged tests (macOS only)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-26'
         run: sudo nix develop --command cargo test test_privileged -- --ignored
 
   windows-build:
