@@ -30,17 +30,18 @@ pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::EventStreamCallback;
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, args::Cipher};
-#[cfg(desktop)]
 use lightway_app_utils::{DplpmtudTimer, connection_ticker_cb};
 #[cfg(desktop)]
 use lightway_app_utils::{PacketCodecFactoryType, TunConfig};
 #[cfg(desktop)]
-use lightway_core::{BuilderPredicates, ClientContextBuilder, EventCallback};
+use lightway_core::EventCallback;
 use lightway_core::{
-    ClientIpConfig, Connection, ConnectionError, ConnectionType, IOCallbackResult,
-    InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, ipv4_update_destination,
-    ipv4_update_source,
+    BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
+    ConnectionType, IOCallbackResult, InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket,
+    ipv4_update_destination, ipv4_update_source,
 };
+#[cfg(mobile)]
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(feature = "debug")]
@@ -259,12 +260,16 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub keylog: Option<PathBuf>,
 }
 
-#[cfg(feature = "debug")]
+#[cfg(feature = "mobile")]
+#[derive(Clone)]
 pub struct ClientConfig {
     tun_local_ip: Ipv4Addr,
     tun_dns_ip: Ipv4Addr,
     tun_fd: std::os::fd::RawFd,
     preferred_connection_wait_interval: std::time::Duration,
+    internal_mtu: u16,
+    max_socket_buffer_len: usize,
+    enable_pmtud: bool,
 
     external_event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
     connected_index: Arc<std::sync::OnceLock<usize>>,
@@ -1073,6 +1078,153 @@ pub async fn connect<
         dns_manager: None,
     })
 }
+/// Individual connection to a lightway server
+#[cfg(mobile)]
+pub(crate) async fn connect(
+    config: ClientConfig,
+    ClientConnectionConfig {
+        instance_id,
+        mode,
+        cipher,
+        outside_mtu,
+        server_dn,
+        auth,
+        ca_content,
+        server,
+        sni_header,
+        socket,
+        enable_keepalive,
+        enable_expresslane,
+        online_signal_sender,
+        event_stream_handler,
+        external_event_handler,
+    }: ClientConnectionConfig,
+    inside_io: Arc<
+        dyn lightway_core::InsideIOSendCallback<ConnectionState<mobile::lightway::TunnelState>>
+            + Send
+            + Sync,
+    >,
+) -> uniffi::Result<mobile::lightway::LightwayConnection> {
+    let mut join_set = tokio::task::JoinSet::new();
+
+    // TODO: Should be strong type error
+    let socket = socket.ok_or(anyhow!("socket not provided"))?;
+
+    let inside_plugins = PluginFactoryList::new();
+
+    let mut outside_plugins = PluginFactoryList::new();
+
+    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) = {
+        let builder = mobile::lightway::OutsideIOBuilder::new(socket, server);
+        builder
+            .build(config.max_socket_buffer_len, &mut outside_plugins)
+            .await?
+    };
+
+    let (event_cb, event_stream) = EventStreamCallback::new();
+
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let state: ConnectionState<mobile::lightway::TunnelState> = ConnectionState {
+        ticker,
+        ip_config: None,
+        extended: None,
+    };
+    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
+
+    let conn_builder = ClientContextBuilder::new(
+        connection_type,
+        lightway_core::wolfssl::RootCertificate::PemBuffer(ca_content.as_bytes()),
+        Some(inside_io),
+        Arc::new(ClientIpConfigCb),
+        connection_ticker_cb,
+    )?
+    .with_cipher(cipher.into())?
+    .with_inside_plugins(inside_plugins)
+    .with_outside_plugins(outside_plugins)
+    .when(connection_type.is_datagram() && enable_expresslane, |b| {
+        b.with_expresslane()
+    })
+    .build()
+    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
+    .with_auth(auth)
+    .with_event_cb(Box::new(event_cb))
+    .when(server_dn.is_some(), |b| {
+        b.with_server_domain_name_validation(
+            server_dn.as_ref().expect("checked in builder pattern"),
+        )
+    })
+    .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
+    .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
+        b.with_pmtud_timer(pmtud_timer)
+    });
+
+    #[cfg(feature = "postquantum")]
+    let conn_builder = conn_builder.when(true, |b| b.with_pq_crypto());
+
+    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
+
+    let keepalive_config = KeepaliveConfig {
+        interval: Duration::new(2, 0),
+        timeout: Duration::new(6, 0),
+        continuous: enable_keepalive,
+        tracer_trigger_timeout: Some(Duration::from_secs(10)),
+    };
+    let (keepalive, keepalive_task) =
+        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    let notify_keepalive_reply = Arc::new(Notify::new());
+    let (expresslane_event_tx, expresslane_event_rx) =
+        if enable_expresslane && matches!(mode, ClientConnectionMode::Datagram(_)) {
+            Some(tokio::sync::mpsc::channel(5))
+        } else {
+            None
+        }
+        .unzip();
+
+    join_set.spawn(event_handlers::handle_events(
+        event_stream,
+        keepalive.clone(),
+        notify_keepalive_reply.clone(),
+        Arc::downgrade(&conn),
+        event_stream_handler,
+        online_signal_sender.clone(),
+        instance_id,
+        expresslane_event_tx,
+    ));
+
+    ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
+
+    let (new_outside_io_sender, new_outside_io_receiver) = tokio::sync::mpsc::channel(1);
+    let outside_io_task: JoinHandle<uniffi::Result<()>> = tokio::spawn(
+        mobile::lightway::restartable_outside_io_task(
+            conn.clone(),
+            mobile::lightway::OutsideIOConfig {
+                mtu: outside_mtu,
+                connection_type,
+                outside_io,
+            },
+            keepalive.clone(),
+            notify_keepalive_reply,
+            new_outside_io_receiver,
+            external_event_handler,
+            config.max_socket_buffer_len,
+        )
+        .in_current_span(),
+    );
+
+    Ok(mobile::lightway::LightwayConnection {
+        conn,
+        outside_io_task,
+        new_outside_io_sender,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        join_set,
+        instance_id,
+        expresslane_event_rx,
+    })
+}
 
 /// Returns the index of the best connection.
 ///
@@ -1390,30 +1542,20 @@ pub async fn client<
 
 #[cfg(feature = "mobile")]
 pub(crate) async fn client(
-    crate::ClientConfig {
-        tun_local_ip,
-        tun_dns_ip,
-        tun_fd,
-        preferred_connection_wait_interval,
-
-        external_event_handler,
-        connected_index,
-    }: crate::ClientConfig,
+    config: crate::ClientConfig,
     conn_confs: Vec<crate::config::ConnectionConfig>,
 ) -> uniffi::Result<ClientResult> {
     let mut outside_sockets = conn_confs
         .iter()
         .map(|s| {
-            crate::OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok()
+            crate::OutsideSocket::new(s.mode.is_tcp(), Some(config.external_event_handler.clone()))
+                .ok()
         })
         .collect::<Vec<Option<crate::OutsideSocket>>>();
 
     // Strore meta data before the server consumed
     let server_len = conn_confs.len();
     let tcp_connections_only = conn_confs.iter().all(|s| s.mode.is_tcp());
-
-    let inside_io =
-        mobile::lightway::setup_tunnel_interface(tun_fd, tun_local_ip, tun_dns_ip).await?;
 
     let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
 
@@ -1422,7 +1564,7 @@ pub(crate) async fn client(
     tokio::spawn(event_handlers::handle_global_events(
         stream,
         tokio::time::Instant::now(),
-        external_event_handler.clone(),
+        config.external_event_handler.clone(),
     ));
     let mut client_connect_configs = Vec::new();
     for (instance_id, conn_conf) in conn_confs.into_iter().enumerate() {
@@ -1431,10 +1573,19 @@ pub(crate) async fn client(
             &mut outside_sockets,
             online_signal_sender.clone(),
             event_handler.clone(),
-            external_event_handler.clone(),
+            config.external_event_handler.clone(),
         )?;
         client_connect_configs.push(client_connect_config)
     }
+
+    let inside_io = mobile::lightway::MobileInsideIo {
+        mtu: config.internal_mtu as usize,
+    };
+    let inside_io: Arc<
+        dyn lightway_core::InsideIOSendCallback<ConnectionState<mobile::lightway::TunnelState>>
+            + Send
+            + Sync,
+    > = Arc::new(inside_io);
 
     let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
         Vec<_>,
@@ -1444,14 +1595,18 @@ pub(crate) async fn client(
         .map(|c| {
             let instance_id = c.instance_id;
             let task = tokio::spawn(
-                mobile::lightway::lightway_client_connect(c)
+                // TODO
+                // check if it is possible to reduce clone in mobile, or make a clear note here
+                connect(config.clone(), c, inside_io.clone())
                     .instrument(info_span!("LightwayConnection", instance_id)),
             );
             (task.abort_handle(), task)
         })
         .unzip();
 
-    let mut wait_timer_task = tokio::spawn(tokio::time::sleep(preferred_connection_wait_interval));
+    let mut wait_timer_task = tokio::spawn(tokio::time::sleep(
+        config.preferred_connection_wait_interval,
+    ));
 
     debug!(
         "Creating {} parallel connections",
@@ -1558,14 +1713,16 @@ pub(crate) async fn client(
     drop(online_signal);
 
     debug!(?active_connection.instance_id, "Using connection");
-    if let Err(e) = connected_index.set(active_connection.instance_id) {
+    if let Err(e) = config.connected_index.set(active_connection.instance_id) {
         warn!(
             "Connection index has been set already, should only be called once: {}",
             e
         );
     }
 
-    external_event_handler.handle_status_change(lightway_core::State::Online as u8);
+    config
+        .external_event_handler
+        .handle_status_change(lightway_core::State::Online as u8);
 
     non_preferred_connections.extend(pending_online_connections.drain());
     drop(pending_online_connections);
@@ -1603,16 +1760,25 @@ pub(crate) async fn client(
         tokio::spawn(async move {
             while let Some(state) = expresslane_event_rx.recv().await {
                 debug!(?state, "Expresslane State Change");
-                external_event_handler.handle_expresslane_state_change(state);
+                config
+                    .external_event_handler
+                    .handle_expresslane_state_change(state);
             }
         });
     }
 
-    conn.lock().unwrap().app_state_mut().extended = Some(inside_io.clone());
+    let tunnel_interface = mobile::lightway::setup_tunnel_interface(
+        config.tun_fd,
+        config.tun_local_ip,
+        config.tun_dns_ip,
+    )
+    .await?;
+
+    conn.lock().unwrap().app_state_mut().extended = Some(tunnel_interface.clone());
     let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(
         conn.clone(),
-        inside_io,
-        tun_dns_ip,
+        tunnel_interface,
+        config.tun_dns_ip,
         keepalive,
         keepalive_config,
     ));

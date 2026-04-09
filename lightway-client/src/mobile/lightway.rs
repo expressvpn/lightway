@@ -2,56 +2,45 @@ use crate::event_handlers::EventHandlers;
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
 use crate::state::ExpresslaneState;
-use crate::{
-    ClientConnectionConfig, ClientConnectionMode, ClientIpConfigCb, ConnectionState, io,
-    keepalive::Config as KeepaliveConfig, outside_io_task,
-};
+use crate::{ConnectionState, io, keepalive::Config as KeepaliveConfig, outside_io_task};
 use futures::future::{FutureExt, OptionFuture, select_all};
-use lightway_app_utils::{
-    ConnectionTicker, DplpmtudTimer, EventStreamCallback, TunConfig, connection_ticker_cb,
-};
+use lightway_app_utils::TunConfig;
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, Connection, ConnectionType, IOCallbackResult,
-    InsideIOSendCallback, PluginFactoryList,
+    Connection, ConnectionType, IOCallbackResult, InsideIOSendCallback, PluginFactoryList,
 };
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
-use tracing::{Instrument, debug, error, info, info_span};
-use uniffi::deps::anyhow::{Context, anyhow, bail};
+use tracing::{debug, error, info, info_span};
+use uniffi::deps::anyhow::{Context, bail};
 use uniffi::deps::bytes::BytesMut;
-
-const INTERNAL_MTU: u16 = 1350;
-#[cfg(apple)]
-const MAX_SOCKET_BUFFER_LEN: usize = 1024000;
-const ENABLE_PMTUD: bool = false;
 
 /// Builder for creating OutsideIO connections with optional obfuscation and proxy
 ///
 /// Handles both initial connections (which may need obfuscation and proxy) and network
 /// changes (which don't need obfuscation or proxy).
-struct OutsideIOBuilder {
+pub struct OutsideIOBuilder {
     socket: crate::OutsideSocket,
     server_sockaddr: SocketAddr,
 }
 
 impl<'a> OutsideIOBuilder {
-    fn new(socket: crate::OutsideSocket, server_sockaddr: SocketAddr) -> Self {
+    pub fn new(socket: crate::OutsideSocket, server_sockaddr: SocketAddr) -> Self {
         Self {
             socket,
             server_sockaddr,
         }
     }
 
-    async fn build(
+    pub async fn build(
         self,
+        #[cfg_attr(not(apple), allow(unused_variables))] buffer_size: usize,
         _plugins: &mut PluginFactoryList,
     ) -> uniffi::Result<(ConnectionType, Arc<dyn OutsideIO>)> {
         let result: Result<(ConnectionType, Arc<dyn OutsideIO>), _> = match self.socket {
@@ -69,8 +58,8 @@ impl<'a> OutsideIOBuilder {
                 // TODO: Skip setting send/recv buffer size on Android for now
                 #[cfg(apple)]
                 {
-                    sock.set_send_buffer_size(MAX_SOCKET_BUFFER_LEN)?;
-                    sock.set_recv_buffer_size(MAX_SOCKET_BUFFER_LEN)?;
+                    sock.set_send_buffer_size(buffer_size)?;
+                    sock.set_recv_buffer_size(buffer_size)?;
                 }
                 Ok((ConnectionType::Datagram, Arc::new(sock)))
             }
@@ -87,8 +76,8 @@ pub type TunnelState = Option<Arc<io::inside::Tun>>;
 /// The actual tunnel `InsideIO` is stored inside `ConnectionState::extended`
 /// After a connection becomes active, it updates the connection state with tunnel `InsideIO`
 #[derive(Clone)]
-struct MobileInsideIo {
-    mtu: usize,
+pub(crate) struct MobileInsideIo {
+    pub(crate) mtu: usize,
 }
 
 impl InsideIOSendCallback<ConnectionState<TunnelState>> for MobileInsideIo {
@@ -136,21 +125,22 @@ pub(crate) async fn setup_tunnel_interface(
     ))
 }
 
-struct OutsideIOConfig {
-    mtu: usize,
-    connection_type: ConnectionType,
-    outside_io: Arc<dyn OutsideIO>,
+pub(crate) struct OutsideIOConfig {
+    pub(crate) mtu: usize,
+    pub(crate) connection_type: ConnectionType,
+    pub(crate) outside_io: Arc<dyn OutsideIO>,
 }
 
 /// This function is responsible for running `outside_io_task` to handle outside packet.
 /// It can restart the task with an updated ` outside_io ` upon receiving a new outside IO callback.
-async fn restartable_outside_io_task(
+pub(crate) async fn restartable_outside_io_task(
     conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
     outside_io_config: OutsideIOConfig,
     keepalive: Keepalive,
     notify_keepalive_reply: Arc<Notify>,
     mut new_outside_io_receiver: MpscReceiver<()>,
     external_event_handler: Arc<dyn EventHandlers>,
+    max_socket_buffer_len: usize,
 ) -> uniffi::Result<()> {
     let mut current_outside_io = outside_io_config.outside_io;
     let mut first_run = true;
@@ -191,7 +181,7 @@ async fn restartable_outside_io_task(
                         let socket = crate::OutsideSocket::new(false, None)?;
                         let mut outside_plugins = PluginFactoryList::new();
                         let (_, new_socket) = OutsideIOBuilder::new(socket, peer_addr)
-                            .build(&mut outside_plugins)
+                            .build(max_socket_buffer_len, &mut outside_plugins)
                             .await?;
                         let mut conn = conn.lock().unwrap();
                         current_outside_io = new_socket.clone();
@@ -256,151 +246,6 @@ pub(crate) struct LightwayConnection {
     pub(crate) join_set: JoinSet<()>,
     pub(crate) instance_id: usize,
     pub(crate) expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
-}
-
-/// Individual connection to a lightway server
-pub(crate) async fn lightway_client_connect(
-    ClientConnectionConfig {
-        instance_id,
-        mode,
-        cipher,
-        outside_mtu,
-        server_dn,
-        auth,
-        ca_content,
-        server,
-        sni_header,
-        socket,
-        enable_keepalive,
-        enable_expresslane,
-        online_signal_sender,
-        event_stream_handler,
-        external_event_handler,
-    }: ClientConnectionConfig,
-) -> uniffi::Result<LightwayConnection> {
-    let mut join_set = JoinSet::new();
-
-    // TODO: Should be strong type error
-    let socket = socket.ok_or(anyhow!("socket not provided"))?;
-
-    let inside_plugins = PluginFactoryList::new();
-
-    let mut outside_plugins = PluginFactoryList::new();
-
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn OutsideIO>) = {
-        let builder = OutsideIOBuilder::new(socket, server);
-        builder.build(&mut outside_plugins).await?
-    };
-
-    let inside_io = MobileInsideIo {
-        mtu: INTERNAL_MTU as usize,
-    };
-    let inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync> =
-        Arc::new(inside_io);
-
-    let (event_cb, event_stream) = EventStreamCallback::new();
-
-    let (ticker, ticker_task) = ConnectionTicker::new();
-    let state: ConnectionState<TunnelState> = ConnectionState {
-        ticker,
-        ip_config: None,
-        extended: None,
-    };
-    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
-
-    let conn_builder = ClientContextBuilder::new(
-        connection_type,
-        lightway_core::wolfssl::RootCertificate::PemBuffer(ca_content.as_bytes()),
-        Some(inside_io),
-        Arc::new(ClientIpConfigCb),
-        connection_ticker_cb,
-    )?
-    // TODO: Do we really need wrapper and a core::Cipher instance to call as_cipher_list?
-    .with_cipher(cipher.into())?
-    .with_inside_plugins(inside_plugins)
-    .with_outside_plugins(outside_plugins)
-    .when(connection_type.is_datagram() && enable_expresslane, |b| {
-        b.with_expresslane()
-    })
-    .build()
-    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
-    .with_auth(auth)
-    .with_event_cb(Box::new(event_cb))
-    .when(server_dn.is_some(), |b| {
-        b.with_server_domain_name_validation(
-            server_dn.as_ref().expect("checked in builder pattern"),
-        )
-    })
-    .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
-    .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
-        b.with_pmtud_timer(pmtud_timer)
-    });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(true, |b| b.with_pq_crypto());
-
-    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
-
-    let keepalive_config = KeepaliveConfig {
-        interval: Duration::new(2, 0),
-        timeout: Duration::new(6, 0),
-        continuous: enable_keepalive,
-        tracer_trigger_timeout: Some(Duration::from_secs(10)),
-    };
-    let (keepalive, keepalive_task) =
-        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
-
-    let notify_keepalive_reply = Arc::new(Notify::new());
-    let (expresslane_event_tx, expresslane_event_rx) =
-        if enable_expresslane && matches!(mode, ClientConnectionMode::Datagram(_)) {
-            Some(tokio::sync::mpsc::channel(5))
-        } else {
-            None
-        }
-        .unzip();
-
-    join_set.spawn(crate::event_handlers::handle_events(
-        event_stream,
-        keepalive.clone(),
-        notify_keepalive_reply.clone(),
-        Arc::downgrade(&conn),
-        event_stream_handler,
-        online_signal_sender.clone(),
-        instance_id,
-        expresslane_event_tx,
-    ));
-
-    ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
-    pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
-
-    let (new_outside_io_sender, new_outside_io_receiver) = tokio::sync::mpsc::channel(1);
-    let outside_io_task: JoinHandle<uniffi::Result<()>> = tokio::spawn(
-        restartable_outside_io_task(
-            conn.clone(),
-            OutsideIOConfig {
-                mtu: outside_mtu,
-                connection_type,
-                outside_io,
-            },
-            keepalive.clone(),
-            notify_keepalive_reply,
-            new_outside_io_receiver,
-            external_event_handler,
-        )
-        .in_current_span(),
-    );
-
-    Ok(LightwayConnection {
-        conn,
-        outside_io_task,
-        new_outside_io_sender,
-        keepalive,
-        keepalive_task,
-        keepalive_config,
-        join_set,
-        instance_id,
-        expresslane_event_rx,
-    })
 }
 
 #[cfg(test)]
