@@ -170,10 +170,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self) -> Self {
-        #[cfg(not(feature = "kyber_only"))]
         let curve = wolfssl::CurveGroup::P521MLKEM1024;
-        #[cfg(feature = "kyber_only")]
-        let curve = wolfssl::CurveGroup::P521KyberLevel5;
 
         Self {
             session_config: self.session_config.with_keyshare_group(curve),

@@ -78,11 +78,6 @@ build-cross-riscv64:
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
 
-build-kyber-client:
-    FROM +source
-    DO lib-rust+CARGO --args="build --release --features kyber_only --bin lightway-client --target-dir ./lightway-client-kyber" --output="lightway-client-kyber/release/lightway-client"
-    SAVE ARTIFACT ./lightway-client-kyber/release/lightway-client AS LOCAL ./target/release/lightway-client-kyber
-
 # test runs cargo to compile all unit and integration tests, natively for the host platform.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.
 test:
@@ -90,7 +85,6 @@ test:
 
     # Run all tests except privileged tests
     DO lib-rust+CARGO --args="test"
-    DO lib-rust+CARGO --args="test --features kyber_only"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client test_privileged -- --ignored
@@ -113,7 +107,6 @@ test-cross-arm64:
 
     # Run all tests except privileged tests
     DO lib-rust+CARGO --args="test --target=$target"
-    DO lib-rust+CARGO --args="test --features kyber_only --target=$target"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored
@@ -127,7 +120,6 @@ test-cross-riscv64:
 
     # Run all tests except privileged tests
     DO lib-rust+CARGO --args="test --target=$target"
-    DO lib-rust+CARGO --args="test --features kyber_only --target=$target"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored

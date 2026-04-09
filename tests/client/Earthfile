@@ -4,13 +4,8 @@ ARG --global debian
 build-container:
     ARG SERVER_ADDR
     ARG TOKIO_WORKER_THREADS
-    ARG KYBER_CLIENT
     FROM ../base+container --debian=$debian
-    IF [ "$KYBER_CLIENT" = "true" ]
-        COPY (../..+build-kyber-client/lightway-client --debian=$debian) .
-    ELSE
-        COPY (../..+build/lightway-client --debian=$debian) .
-    END
+    COPY (../..+build/lightway-client --debian=$debian) .
     COPY --dir ../certs+client/* tests/certs/
     COPY --dir --chmod 0600 client_config.yaml parallel_connect/ .
     COPY --dir docker-entrypoint.sh run-test-inside.sh check-server.sh .

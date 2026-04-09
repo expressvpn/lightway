@@ -23,8 +23,6 @@ TEST:
     ARG COMPOSE_FILE="./docker-compose.yml"
     ARG TEST_SCRIPT=./run-simple-test.sh
 
-    ARG KYBER_CLIENT
-
     ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
     ARG CLIENT_ARGS="--config-file ${CLIENT_CONFIG_FILE} --log-level trace ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
 
@@ -35,11 +33,7 @@ TEST:
         SET CLIENT_ARGS="$CLIENT_ARGS --mode=$MODE"
     END
 
-    LET CLIENT_IMAGE_CMD="./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian"
-    IF [ "$KYBER_CLIENT" = "true" ]
-        SET CLIENT_IMAGE_CMD="$CLIENT_IMAGE_CMD --KYBER_CLIENT=true"
-    END
-    ARG CLIENT_IMAGE="($CLIENT_IMAGE_CMD)"
+    ARG CLIENT_IMAGE="(./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian)"
     ARG SERVER_IMAGE="(./server+build-container --TOKIO_WORKER_THREADS=$SERVER_TOKIO_WORKER_THREADS --debian=$debian)"
     ARG NGINX_IMAGE="./base+build-test-nginx-container"
     ARG IPERF_IMAGE="(./base+build-test-iperf-container --debian=$debian)"
@@ -64,10 +58,6 @@ run-tcp-chacha20-test:
 run-tcp-pqc-test:
     DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc"
 
-# run-tcp-pqc-kyber-test runs e2e test using TCP and P521 Kyber Level 5 KEM enabled
-run-tcp-pqc-kyber-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc" --KYBER_CLIENT=true
-
 # run-udp-aes256-test runs e2e test using UDP and AES256 cipher
 run-udp-aes256-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS=""
@@ -79,10 +69,6 @@ run-udp-chacha20-test:
 # run-udp-pqc-test runs e2e test using UDP and default cipher with PQC enabled
 run-udp-pqc-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc"
-
-# run-udp-pqc-kyber-test runs e2e test using UDP and P521 Kyber Level 5 KEM enabled
-run-udp-pqc-kyber-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc" --KYBER_CLIENT=true
 
 # run-udp-floating-ip-test runs e2e test of UDP floating IP support
 run-udp-floating-ip-test:
@@ -150,11 +136,9 @@ run-all-tests:
     BUILD +run-tcp-aes256-test
     BUILD +run-tcp-chacha20-test
     BUILD +run-tcp-pqc-test
-    BUILD +run-tcp-pqc-kyber-test
     BUILD +run-udp-aes256-test
     BUILD +run-udp-chacha20-test
     BUILD +run-udp-pqc-test
-    BUILD +run-udp-pqc-kyber-test
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
