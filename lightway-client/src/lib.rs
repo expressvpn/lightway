@@ -137,6 +137,10 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Socket receive buffer size
     pub rcvbuf: Option<ByteSize>,
 
+    /// Enable batch receive (`recvmsg_x` on macOS)
+    #[cfg(batch_receive)]
+    pub enable_batch_receive: bool,
+
     /// Route Mode
     #[cfg(desktop)]
     pub route_mode: RouteMode,
@@ -355,7 +359,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
         buf.reserve(mtu);
 
         // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
-        outside_io.poll(tokio::io::Interest::READABLE).await?;
+        outside_io.readable().await?;
 
         // Send ready signal after first successful poll
         if let Some(tx) = ready_signal.take() {
@@ -670,19 +674,25 @@ pub async fn connect<
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match server_config.mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
-                let sock = io::outside::Udp::new(server_config.server, maybe_sock)
+                #[cfg_attr(not(batch_receive), allow(unused_mut))]
+                let mut sock = io::outside::Udp::new(server_config.server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                     .context("Outside IO UDP")?;
 
-                (ConnectionType::Datagram, sock)
+                #[cfg(batch_receive)]
+                if config.enable_batch_receive {
+                    sock.enable_batch_receive();
+                }
+
+                (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
                 let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
-                (ConnectionType::Stream, sock)
+                (ConnectionType::Stream, Arc::new(sock))
             }
         };
 

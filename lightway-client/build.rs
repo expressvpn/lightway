@@ -14,5 +14,15 @@ fn main() {
         // Backends
         desktop: { any(windows, linux, macos) },
         mobile: { any(android, ios, tvos) },
+        // Apple platform
+        apple: {
+            any(
+                macos,
+                ios,
+                tvos
+            )
+        },
+        // Feature alias
+        batch_receive: { all(apple, feature = "batch_receive") },
     }
 }

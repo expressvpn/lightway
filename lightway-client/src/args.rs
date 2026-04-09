@@ -121,6 +121,11 @@ pub struct Config {
     #[clap(long)]
     pub rcvbuf: Option<ByteSize>,
 
+    /// Enable batch receive (`recvmsg_x` on macOS)
+    #[cfg(batch_receive)]
+    #[clap(long, default_value_t = false)]
+    pub enable_batch_receive: bool,
+
     /// Setup of route table
     /// Modes:
     ///     default: Sets up routes as specified in server, tun_local_ip, tun_peer_ip, tun_dns_ip

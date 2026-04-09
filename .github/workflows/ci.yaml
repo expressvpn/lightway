@@ -302,6 +302,10 @@ jobs:
       - name: Run cargo tests with kyber_only feature
         run: nix develop --command cargo test --features kyber_only
 
+      - name: Run recvmsg_x test (macOS only)
+        if: matrix.os == 'macos-latest'
+        run: sudo nix develop --command cargo test batch_receiver --features batch_receive
+
       - name: Run privileged tests (macOS only)
         if: matrix.os == 'macos-latest'
         run: sudo nix develop --command cargo test test_privileged -- --ignored
