@@ -13,7 +13,6 @@ default = ["postquantum"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum"]
-kyber_only = ["postquantum", "lightway-core/kyber_only"]
 batch_receive = ["rtrb"]
 
 [lints]

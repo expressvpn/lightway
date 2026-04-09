@@ -15,7 +15,6 @@ debug = ["wolfssl/debug"]
 # Enable additional APIs to support wire protocol fuzzing
 fuzzing_api = []
 postquantum = ["wolfssl/postquantum"]
-kyber_only = ["wolfssl/kyber_only"]
 
 [lints]
 workspace = true

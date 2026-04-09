@@ -3,8 +3,8 @@ default_to_workspace = false
 
 [env]
 # Platform-specific feature sets
-FEATURES_MACOS = "default,debug,postquantum,kyber_only"
-FEATURES_LINUX = "default,debug,postquantum,kyber_only,io-uring"
+FEATURES_MACOS = "default,debug,postquantum"
+FEATURES_LINUX = "default,debug,postquantum,io-uring"
 
 [tasks.clippy]
 description = "Run Clippy with platform specific features only"
