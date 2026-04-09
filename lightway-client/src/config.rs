@@ -295,6 +295,13 @@ impl Config {
                 server.password = self.password.clone();
                 server.token = self.token.clone();
             }
+            #[cfg(feature = "mobile")]
+            {
+                server.sni_header = self.sni_header.clone();
+                server.enable_keepalive = self.keepalive_continuous;
+                server.enable_expresslane = self.enable_expresslane;
+            }
+
             if let Some(ref mut ca_cert) = server.ca_cert {
                 if !ca_cert.starts_with("-----BEGIN CERTIFICATE-----") {
                     if cfg!(desktop) {
@@ -353,7 +360,7 @@ impl Config {
         self.servers = configs.into_iter().map(|c| c.into()).collect()
     }
 
-    #[cfg(desktop)]
+    #[cfg(not(feature = "mobile"))]
     pub fn into_client_config(
         mut self,
         inside_io: Option<Arc<dyn crate::io::inside::InsideIO<()>>>,
@@ -419,6 +426,29 @@ impl Config {
             tls_debug: self.tls_debug,
             #[cfg(feature = "debug")]
             keylog: self.keylog,
+        }
+    }
+    #[cfg(feature = "mobile")]
+    pub fn into_client_config(
+        self,
+        tun_fd: std::os::fd::RawFd,
+        external_event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
+        connected_index: Arc<std::sync::OnceLock<usize>>,
+    ) -> crate::ClientConfig {
+        let Config {
+            tun_local_ip,
+            tun_dns_ip,
+            preferred_connection_wait_interval,
+            ..
+        } = self;
+        crate::ClientConfig {
+            tun_local_ip,
+            tun_dns_ip,
+            preferred_connection_wait_interval: preferred_connection_wait_interval.into(),
+
+            tun_fd,
+            external_event_handler,
+            connected_index,
         }
     }
 }
@@ -532,6 +562,15 @@ pub struct ConnectionConfig {
     /// The CA Cert content or Path
     #[serde(default)]
     pub ca_cert: Option<String>,
+
+    #[cfg(feature = "mobile")]
+    pub sni_header: String,
+
+    #[cfg(feature = "mobile")]
+    pub enable_keepalive: bool,
+
+    #[cfg(feature = "mobile")]
+    pub enable_expresslane: bool,
 }
 
 impl ConnectionConfig {
@@ -612,7 +651,6 @@ impl ConnectionConfig {
     pub fn into_client_connection_config(
         mut self,
         instance_id: usize,
-        config: &Config,
         outside_sockets: &mut Vec<Option<crate::OutsideSocket>>,
         online_signal_sender: tokio::sync::mpsc::Sender<usize>,
         event_stream_handler: lightway_app_utils::EventStreamCallback,
@@ -626,6 +664,9 @@ impl ConnectionConfig {
             outside_mtu,
             server_dn,
             ca_cert,
+            sni_header,
+            enable_keepalive,
+            enable_expresslane,
             ..
         } = self;
         Ok(crate::ClientConnectionConfig {
@@ -638,10 +679,10 @@ impl ConnectionConfig {
             ca_content: ca_cert
                 .expect("ConnectionConfig should be taken by `take_servers` and normalized"),
             server,
-            sni_header: config.sni_header.clone(),
+            sni_header,
+            enable_keepalive,
+            enable_expresslane,
             socket: outside_sockets[instance_id].take(),
-            enable_keepalive: config.keepalive_continuous,
-            enable_expresslane: config.enable_expresslane,
             online_signal_sender,
             event_stream_handler,
             external_event_handler,
@@ -758,6 +799,7 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
             } else {
                 Some(ca_cert)
             },
+            ..Default::default()
         }
     }
 }

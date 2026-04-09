@@ -1,34 +1,30 @@
-use crate::config::Config;
 use crate::event_handlers::EventHandlers;
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
-use crate::state::{DeviceNetworkState, ExpresslaneState};
+use crate::state::ExpresslaneState;
 use crate::{
-    ClientConnectionConfig, ClientConnectionMode, ClientIpConfigCb, ClientResult, ConnectionState,
-    inside_io_task, io, keepalive::Config as KeepaliveConfig, outside_io_task,
+    ClientConnectionConfig, ClientConnectionMode, ClientIpConfigCb, ConnectionState, io,
+    keepalive::Config as KeepaliveConfig, outside_io_task,
 };
-use futures::StreamExt;
 use futures::future::{FutureExt, OptionFuture, select_all};
-use futures::stream::{FusedStream, FuturesUnordered};
 use lightway_app_utils::{
     ConnectionTicker, DplpmtudTimer, EventStreamCallback, TunConfig, connection_ticker_cb,
 };
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType,
-    IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
+    BuilderPredicates, ClientContextBuilder, Connection, ConnectionType, IOCallbackResult,
+    InsideIOSendCallback, PluginFactoryList,
 };
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
-use tokio::time::Instant;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span};
 use uniffi::deps::anyhow::{Context, anyhow, bail};
 use uniffi::deps::bytes::BytesMut;
 
@@ -122,7 +118,7 @@ impl InsideIOSendCallback<ConnectionState<TunnelState>> for MobileInsideIo {
     }
 }
 
-async fn setup_tunnel_interface(
+pub(crate) async fn setup_tunnel_interface(
     tun_fd: RawFd,
     local_ip: Ipv4Addr,
     dns_ip: Ipv4Addr,
@@ -138,262 +134,6 @@ async fn setup_tunnel_interface(
             .await
             .context("Tun creation")?,
     ))
-}
-
-pub(crate) async fn async_lightway_start(
-    tun_fd: RawFd,
-    external_event_handler: Arc<dyn EventHandlers>,
-    mut config: Config,
-    connected_index: Arc<OnceLock<usize>>,
-) -> uniffi::Result<ClientResult> {
-    let servers = config.take_servers()?;
-    let mut outside_sockets = servers
-        .iter()
-        .map(|s| {
-            crate::OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok()
-        })
-        .collect::<Vec<Option<crate::OutsideSocket>>>();
-
-    // Strore meta data before the server consumed
-    let server_len = servers.len();
-    let tcp_connections_only = servers.iter().all(|s| s.mode.is_tcp());
-
-    let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
-
-    let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
-
-    let (online_signal_sender, mut online_signal) = tokio::sync::mpsc::channel(server_len);
-    let (event_handler, stream) = EventStreamCallback::new();
-    let connection_start = Instant::now();
-    tokio::spawn(crate::event_handlers::handle_global_events(
-        stream,
-        connection_start,
-        external_event_handler.clone(),
-    ));
-    let mut client_connect_configs = Vec::new();
-    for (instance_id, conn_conf) in servers.into_iter().enumerate() {
-        let client_connect_config = conn_conf.into_client_connection_config(
-            instance_id,
-            &config,
-            &mut outside_sockets,
-            online_signal_sender.clone(),
-            event_handler.clone(),
-            external_event_handler.clone(),
-        )?;
-        client_connect_configs.push(client_connect_config)
-    }
-
-    let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
-        Vec<_>,
-        FuturesUnordered<_>,
-    ) = client_connect_configs
-        .into_iter()
-        .map(|c| {
-            let instance_id = c.instance_id;
-            let task = tokio::spawn(
-                lightway_client_connect(c)
-                    .instrument(info_span!("LightwayConnection", instance_id)),
-            );
-            (task.abort_handle(), task)
-        })
-        .unzip();
-
-    let mut wait_timer_task = tokio::spawn(tokio::time::sleep(
-        config.preferred_connection_wait_interval.into(),
-    ));
-
-    debug!(
-        "Creating {} parallel connections",
-        in_progress_connections.len()
-    );
-
-    drop(outside_sockets);
-    drop(event_handler);
-
-    // Drop the last sender
-    drop(online_signal_sender);
-
-    let mut non_preferred_connections: Vec<(usize, LightwayConnection)> = Vec::new();
-    let mut pending_online_connections: HashMap<usize, LightwayConnection> =
-        HashMap::with_capacity(server_len);
-    let mut failed_connections = 0usize;
-    let mut connection_error_to_return = None;
-
-    debug!("Waiting for online signal");
-    let active_connection = loop {
-        tokio::select! {
-            // Prioritise management commands over other branches, also make sure we add
-            // LightwayConnection to HashMap first to make sure when it goes online,
-            // we can remove it from the HashMap and break the loop.
-            biased;
-            _ = futures::future::ready(()), if failed_connections == server_len => {
-                error!("All connections failed, exiting...");
-                return Err(connection_error_to_return.unwrap_or(anyhow!("All connections failed")));
-            }
-
-            // On iOS specifically:
-            // If the library is called during a network change, it is possible all the TCP sockets
-            // created during this moment are "offline", and they cannot reach the servers.
-
-            // We early return and end connections attempt earlier for both Android and iOS as
-            // the connected server are going to get reset by the network change later anyway.
-            Some(DeviceNetworkState::Online | DeviceNetworkState::RouteUpdated | DeviceNetworkState::InterfaceChanged) = network_change_receiver.recv(), if tcp_connections_only => {
-                info!("client shutting down due to network change while connecting for Lightway - TCP");
-                return Ok(ClientResult::NetworkChange)
-            },
-
-            Some(connection_result) = in_progress_connections.next(), if !in_progress_connections.is_terminated() => {
-                match connection_result {
-                    Ok(Ok(connection)) => {
-                        debug!("Adding connections to hash map");
-                        let _ = pending_online_connections.insert(connection.instance_id, connection);
-                        continue;
-                    },
-                    Ok(Err(e)) => error!("Error while waiting for connection to set up: {:?}", e),
-                    Err(e) => error!("Join Error while waiting for connection to set up: {:?}", e)
-                };
-                failed_connections += 1;
-            },
-
-            _ = &mut wait_timer_task, if !wait_timer_task.is_finished() => {
-                if !non_preferred_connections.is_empty() {
-                    non_preferred_connections.sort_by_key(|(instance_id, _)| *instance_id);
-                    let (instance_id, connection) = non_preferred_connections.swap_remove(0);
-                    info!(?instance_id, "Defer timeout, choosing best connection");
-                    break connection;
-                }
-            },
-
-            Some(instance_id) = online_signal.recv() => {
-                debug!(?instance_id, "Online received for");
-                if let Some(connection) = pending_online_connections.remove(&instance_id) {
-                    if wait_timer_task.is_finished() {
-                        info!(?instance_id, "Defer timeout, using current connection");
-                        break connection;
-                    }
-                    // We don't defer connection if it's the first endpoint from the pecking order
-                    if instance_id == 0 {
-                        info!("Using best connection");
-                        break connection;
-                    }
-                    info!("Deferring connection {}", instance_id);
-                    non_preferred_connections.push((instance_id, connection));
-                } else {
-                    warn!(?instance_id, "Cannot find LightwayConnection");
-                }
-            },
-
-            (instance_id, outside_io_result) = first_outside_io_exit(&mut pending_online_connections) => {
-                // outside_io_task should not early return here, we're not going to use this connection anyway, removing it for clean-up
-                let connection = pending_online_connections.remove(&instance_id);
-                if let Some(connection) = connection {
-                    let _ = connection.conn.lock().unwrap().disconnect();
-                    drop(connection);
-                }
-                match outside_io_result {
-                    Ok(Err(e)) if matches!(e.downcast_ref::<ConnectionError>(), Some(ConnectionError::Unauthorized)) => {
-                        error!(?instance_id, "Unauthorized connection");
-                        connection_error_to_return = Some(ConnectionError::Unauthorized.into());
-                    }
-                    _ => error!(?instance_id, "Unexpected outside_io_task early exit: {:?}", outside_io_result),
-                }
-                failed_connections += 1;
-            }
-        }
-    };
-
-    // Drop the receiver so that no more connections can be active
-    drop(online_signal);
-
-    debug!(?active_connection.instance_id, "Using connection");
-    if let Err(e) = connected_index.set(active_connection.instance_id) {
-        warn!(
-            "Connection index has been set already, should only be called once: {}",
-            e
-        );
-    }
-
-    external_event_handler.handle_status_change(State::Online as u8);
-
-    non_preferred_connections.extend(pending_online_connections.drain());
-    drop(pending_online_connections);
-
-    let _ = in_progress_connection_abort_handles.swap_remove(active_connection.instance_id);
-    tokio::spawn(cleanup_connections(
-        in_progress_connection_abort_handles,
-        non_preferred_connections
-            .into_iter()
-            .map(|(_, connection)| connection)
-            .collect(),
-    ));
-
-    let LightwayConnection {
-        conn,
-        outside_io_task,
-        new_outside_io_sender,
-        keepalive,
-        keepalive_task,
-        keepalive_config,
-        expresslane_event_rx,
-        ..
-    } = active_connection;
-
-    // We are online listen for network changes
-    let network_change_task = tokio::spawn(handle_network_change(
-        keepalive.clone(),
-        network_change_receiver,
-        Arc::downgrade(&conn),
-        new_outside_io_sender,
-    ));
-
-    if let Some(mut expresslane_event_rx) = expresslane_event_rx {
-        // We only process Expresslane state changes after we selected the best connection
-        tokio::spawn(async move {
-            while let Some(state) = expresslane_event_rx.recv().await {
-                debug!(?state, "Expresslane State Change");
-                external_event_handler.handle_expresslane_state_change(state);
-            }
-        });
-    }
-
-    conn.lock().unwrap().app_state_mut().extended = Some(inside_io.clone());
-    let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(
-        conn.clone(),
-        inside_io,
-        config.tun_dns_ip,
-        keepalive,
-        keepalive_config,
-    ));
-
-    tokio::select! {
-        // Use biased selection to prioritize management commands and prevent race conditions
-        // where network_change_task exits early due to network change, dropping its mpsc sender and
-        // causing outside_io_task to throw channel errors and return wrong result to the app.
-        biased;
-        result = network_change_task => {
-            match result {
-                Ok(Ok(client_result)) => {
-                    info!("network change task result: {client_result:?}");
-                    Ok(client_result.into())
-                },
-                Ok(Err(e)) => {
-                    Err(anyhow!("error during network change: {e:?}"))
-                }
-                Err(e) => {
-                    Err(anyhow!("network change task error: {e:?}"))
-                }
-            }
-        }
-        Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
-        io = outside_io_task => match io {
-                Ok(Err(e)) if matches!(e.downcast_ref::<ConnectionError>(), Some(ConnectionError::Goodbye)) => {
-                    info!("Received server goodbye, returning result...");
-                    Ok(ClientResult::ServerGoodbye)
-                }
-                _ => Err(anyhow!("Outside IO loop exited: {io:?}"))
-        },
-        io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
-    }
 }
 
 struct OutsideIOConfig {
@@ -467,7 +207,7 @@ async fn restartable_outside_io_task(
     }
 }
 
-fn first_outside_io_exit(
+pub(crate) fn first_outside_io_exit(
     connections: &mut HashMap<usize, LightwayConnection>,
 ) -> impl Future<Output = (usize, Result<uniffi::Result<()>, tokio::task::JoinError>)> + '_ {
     if connections.is_empty() {
@@ -483,7 +223,7 @@ fn first_outside_io_exit(
     )
 }
 
-async fn cleanup_connections(
+pub(crate) async fn cleanup_connections(
     in_progress_connections_abort_handle: Vec<AbortHandle>,
     completed_connections: Vec<LightwayConnection>,
 ) {
@@ -506,20 +246,20 @@ async fn cleanup_connections(
     info!("Cleaned up unused connections");
 }
 
-struct LightwayConnection {
-    conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    outside_io_task: JoinHandle<uniffi::Result<()>>,
-    new_outside_io_sender: MpscSender<()>,
-    keepalive: Keepalive,
-    keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
-    keepalive_config: KeepaliveConfig,
-    join_set: JoinSet<()>,
-    instance_id: usize,
-    expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
+pub(crate) struct LightwayConnection {
+    pub(crate) conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    pub(crate) outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub(crate) new_outside_io_sender: MpscSender<()>,
+    pub(crate) keepalive: Keepalive,
+    pub(crate) keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub(crate) keepalive_config: KeepaliveConfig,
+    pub(crate) join_set: JoinSet<()>,
+    pub(crate) instance_id: usize,
+    pub(crate) expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
 }
 
 /// Individual connection to a lightway server
-async fn lightway_client_connect(
+pub(crate) async fn lightway_client_connect(
     ClientConnectionConfig {
         instance_id,
         mode,
@@ -661,70 +401,6 @@ async fn lightway_client_connect(
         instance_id,
         expresslane_event_rx,
     })
-}
-
-/// Handle all the network changes on the device.
-async fn handle_network_change(
-    keepalive: Keepalive,
-    mut network_change_receiver: MpscReceiver<DeviceNetworkState>,
-    weak: Weak<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    #[cfg_attr(not(apple), allow(unused_variables))] reset_outside_io_tx: MpscSender<()>,
-) -> uniffi::Result<ClientResult> {
-    while let Some(network_state) = network_change_receiver.recv().await {
-        let Some(conn) = weak.upgrade() else {
-            return Ok(ClientResult::UserDisconnect);
-        };
-        let conn_type = conn.lock().unwrap().connection_type();
-        info!("Device network state change to {network_state:?}");
-        match network_state {
-            DeviceNetworkState::Online | DeviceNetworkState::InterfaceChanged => {
-                match conn_type {
-                    ConnectionType::Datagram => {
-                        // We only need to use reset new socket on iOS but not on Android
-                        #[cfg(apple)]
-                        {
-                            // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
-                            // via the new network path and avoid using mobile data unnecessarily.
-                            info!("resetting udp transport due to network change ..");
-                            reset_outside_io_tx.send(()).await?;
-                        }
-                        #[cfg(not(apple))]
-                        // Trigger a new keepalive on the new socket (keepalive will
-                        // be triggered after the socket has been updated on iOS)
-                        keepalive.network_changed().await;
-                    }
-                    ConnectionType::Stream => {
-                        info!("client shutting down due to network change ..");
-                        let _ = conn.lock().unwrap().disconnect();
-                        return Ok(ClientResult::NetworkChange);
-                    }
-                }
-            }
-            DeviceNetworkState::RouteUpdated => {
-                match conn_type {
-                    ConnectionType::Datagram => {
-                        // UDP survives updating the network, but to ensure that the new network
-                        // with the current endpoint works reliably, we trigger keep-alives
-                        // e.g swapping from an unrestricted network to one that blocks UDP
-                        info!("sending keepalives due to network change ..");
-                        keepalive.network_changed().await;
-                    }
-                    ConnectionType::Stream => {
-                        info!("client shutting down due to network change ..");
-                        let _ = conn.lock().unwrap().disconnect();
-                        return Ok(ClientResult::NetworkChange);
-                    }
-                }
-            }
-            DeviceNetworkState::Offline => {
-                // Suspend keepalive timers as we're guaranteed
-                // to fail and disconnect after all failed attempts
-                info!("suspending keepalive...");
-                keepalive.suspend().await;
-            }
-        }
-    }
-    Ok(ClientResult::UserDisconnect)
 }
 
 #[cfg(test)]

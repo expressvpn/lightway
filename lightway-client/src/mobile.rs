@@ -94,18 +94,16 @@ impl VpnConnection {
             );
         }
         config.apply_mobile_connect_configs(endpoints);
+        let servers = config.take_servers()?;
+        let config =
+            config.into_client_config(raw_tun_fd, event_handler, self.connected_index.clone());
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder
             .enable_all()
             .build()
             .unwrap()
-            .block_on(lightway::async_lightway_start(
-                raw_tun_fd,
-                event_handler,
-                config,
-                self.connected_index.clone(),
-            ))
+            .block_on(crate::client(config, servers))
             .map_err(|e| {
                 if let Some(lightway_core::ConnectionError::Unauthorized) =
                     e.downcast_ref::<lightway_core::ConnectionError>()
