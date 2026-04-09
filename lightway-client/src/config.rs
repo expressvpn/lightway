@@ -10,6 +10,7 @@ use lightway_app_utils::args::{
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::Patch;
@@ -351,6 +352,75 @@ impl Config {
     pub fn apply_mobile_connect_configs(&mut self, configs: Vec<MobileConnectionConfig>) {
         self.servers = configs.into_iter().map(|c| c.into()).collect()
     }
+
+    #[cfg(desktop)]
+    pub fn into_client_config(
+        mut self,
+        inside_io: Option<Arc<dyn crate::io::inside::InsideIO<()>>>,
+    ) -> crate::ClientConfig<()> {
+        assert!(
+            self.servers.is_empty(),
+            "Config should be normalized with `take_servers`"
+        );
+
+        let mut tun_config = lightway_app_utils::TunConfig::default();
+
+        if let Some(tun_name) = self.tun_name.take() {
+            tun_config.tun_name(tun_name);
+        }
+
+        #[cfg(windows)]
+        if let Some(ref wintun_file) = self.wintun_file {
+            tun_config.wintun_file(wintun_file);
+        }
+
+        // TODO: Fix in future PR
+        tun_config
+            .mtu(1350)
+            .address(self.tun_local_ip.into())
+            .destination(self.tun_peer_ip)
+            .up();
+
+        crate::ClientConfig {
+            outside_mtu: self.outside_mtu,
+            inside_io,
+            tun_config,
+            tun_local_ip: self.tun_local_ip,
+            tun_peer_ip: self.tun_peer_ip,
+            tun_dns_ip: self.tun_dns_ip,
+            #[cfg(feature = "postquantum")]
+            enable_pqc: self.enable_pqc,
+            enable_expresslane: self.enable_expresslane,
+            keepalive_interval: self.keepalive_interval.into(),
+            keepalive_timeout: self.keepalive_timeout.into(),
+            continuous_keepalive: self.keepalive_continuous,
+            tracer_packet_timeout: self.tracer_packet_timeout.into(),
+            preferred_connection_wait_interval: self.preferred_connection_wait_interval.into(),
+            sndbuf: self.sndbuf,
+            rcvbuf: self.rcvbuf,
+            #[cfg(batch_receive)]
+            enable_batch_receive: self.enable_batch_receive,
+            #[cfg(desktop)]
+            route_mode: self.route_mode,
+            #[cfg(desktop)]
+            dns_config_mode: self.dns_config_mode,
+            enable_pmtud: self.enable_pmtud,
+            pmtud_base_mtu: self.pmtud_base_mtu,
+            #[cfg(feature = "io-uring")]
+            enable_tun_iouring: self.enable_tun_iouring,
+            #[cfg(feature = "io-uring")]
+            iouring_entry_count: self.iouring_entry_count,
+            #[cfg(feature = "io-uring")]
+            iouring_sqpoll_idle_time: self.iouring_sqpoll_idle_time.into(),
+            inside_pkt_codec_config: None,
+            network_change_signal: None,
+            best_connection_selected_signal: None,
+            #[cfg(feature = "debug")]
+            tls_debug: self.tls_debug,
+            #[cfg(feature = "debug")]
+            keylog: self.keylog,
+        }
+    }
 }
 
 impl Default for Config {
@@ -546,7 +616,7 @@ impl ConnectionConfig {
         outside_sockets: &mut Vec<Option<crate::OutsideSocket>>,
         online_signal_sender: tokio::sync::mpsc::Sender<usize>,
         event_stream_handler: lightway_app_utils::EventStreamCallback,
-        external_event_handler: std::sync::Arc<dyn crate::event_handlers::EventHandlers>,
+        external_event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
     ) -> Result<crate::ClientConnectionConfig, Error> {
         let auth = self.take_auth()?;
         let server = self.skt_addr()?;

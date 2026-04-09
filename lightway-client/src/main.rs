@@ -7,7 +7,7 @@ use futures::future::join_all;
 use tokio::fs::read_to_string;
 
 use lightway_app_utils::{
-    TunConfig, Validate,
+    Validate,
     args::{ConfigFormat, LogFormat},
     validate_configuration_file_path,
 };
@@ -108,24 +108,6 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
-    let mut tun_config = TunConfig::default();
-
-    if let Some(tun_name) = config.tun_name.take() {
-        tun_config.tun_name(tun_name);
-    }
-
-    #[cfg(windows)]
-    if let Some(ref wintun_file) = config.wintun_file {
-        tun_config.wintun_file(wintun_file);
-    }
-
-    // TODO: Fix in future PR
-    tun_config
-        .mtu(1350)
-        .address(config.tun_local_ip.into())
-        .destination(config.tun_peer_ip)
-        .up();
-
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
     ctrlc::set_handler(move || {
@@ -157,45 +139,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let config = ClientConfig {
-        outside_mtu: config.outside_mtu,
-        inside_io,
-        tun_config,
-        tun_local_ip: config.tun_local_ip,
-        tun_peer_ip: config.tun_peer_ip,
-        tun_dns_ip: config.tun_dns_ip,
-        #[cfg(feature = "postquantum")]
-        enable_pqc: config.enable_pqc,
-        enable_expresslane: config.enable_expresslane,
-        keepalive_interval: config.keepalive_interval.into(),
-        keepalive_timeout: config.keepalive_timeout.into(),
-        continuous_keepalive: config.keepalive_continuous,
-        tracer_packet_timeout: config.tracer_packet_timeout.into(),
-        preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
-        sndbuf: config.sndbuf,
-        rcvbuf: config.rcvbuf,
-        #[cfg(batch_receive)]
-        enable_batch_receive: config.enable_batch_receive,
-        #[cfg(desktop)]
-        route_mode: config.route_mode,
-        #[cfg(desktop)]
-        dns_config_mode: config.dns_config_mode,
-        enable_pmtud: config.enable_pmtud,
-        pmtud_base_mtu: config.pmtud_base_mtu,
-        #[cfg(feature = "io-uring")]
-        enable_tun_iouring: config.enable_tun_iouring,
-        #[cfg(feature = "io-uring")]
-        iouring_entry_count: config.iouring_entry_count,
-        #[cfg(feature = "io-uring")]
-        iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        inside_pkt_codec_config: None,
-        network_change_signal: None,
-        best_connection_selected_signal: None,
-        #[cfg(feature = "debug")]
-        tls_debug: config.tls_debug,
-        #[cfg(feature = "debug")]
-        keylog: config.keylog.clone(),
-    };
-
-    client(config, ctrlc_rx, conn_confs).await.map(|_| ())
+    client(config.into_client_config(inside_io), ctrlc_rx, conn_confs)
+        .await
+        .map(|_| ())
 }
