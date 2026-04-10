@@ -34,7 +34,7 @@ impl BatchReceiver {
         let (recv_producer, recv_consumer) = RingBuffer::new(MAX_BUFFER_SIZE);
         let cancellation_token = CancellationToken::new();
         let io_error = Arc::new(Mutex::new(None));
-        tokio::task::spawn(handle_udp_recv(
+        tokio::task::spawn(handle_udp_recv::<PlatformBatchRecv>(
             sock.clone(),
             recv_producer,
             recv_ready.clone(),
@@ -104,7 +104,7 @@ type PlatformBatchRecv = apple::RecvmsgX;
 
 /// Tokio task: receives packets from the socket using the platform-specific
 /// batch syscall and pushes them into the rx ring buffer.
-pub(crate) async fn handle_udp_recv(
+async fn handle_udp_recv<S: BatchRecvSyscall>(
     sock: Arc<UdpSocket>,
     mut rx_queue: rtrb::Producer<BytesMut>,
     rx_ready: Arc<Semaphore>,
@@ -141,7 +141,7 @@ pub(crate) async fn handle_udp_recv(
                 // Retry if we received Interrupted
                 let recv_count = loop {
                     match sock.try_io(tokio::io::Interest::READABLE, || {
-                        PlatformBatchRecv::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
+                        S::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
                     }) {
                         Ok(n) => break n,
                         // try_io may return WouldBlock even if the socket isn't actually
@@ -298,6 +298,7 @@ mod apple {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::net::UdpSocket;
 
@@ -445,7 +446,7 @@ mod tests {
 
     /// Helper: spawn handle_udp_recv with our own ring buffer and semaphore.
     #[allow(clippy::type_complexity)]
-    fn spawn_handle_udp_recv(
+    fn spawn_handle_udp_recv<S: BatchRecvSyscall + 'static>(
         sock: Arc<UdpSocket>,
         buffer_size: usize,
     ) -> (
@@ -459,7 +460,7 @@ mod tests {
         let (producer, consumer) = RingBuffer::new(buffer_size);
         let cancel = CancellationToken::new();
         let io_error = Arc::new(Mutex::new(None));
-        let handle = tokio::task::spawn(handle_udp_recv(
+        let handle = tokio::task::spawn(handle_udp_recv::<S>(
             sock,
             producer,
             rx_ready.clone(),
@@ -472,7 +473,8 @@ mod tests {
     #[tokio::test]
     async fn handle_recv_cancellation_stops_task() {
         let (_sender, receiver) = make_socket_pair().await;
-        let (_, _, cancel, _, handle) = spawn_handle_udp_recv(receiver, MAX_BUFFER_SIZE);
+        let (_, _, cancel, _, handle) =
+            spawn_handle_udp_recv::<PlatformBatchRecv>(receiver, MAX_BUFFER_SIZE);
 
         cancel.cancel();
 
@@ -487,7 +489,7 @@ mod tests {
     async fn handle_recv_pushes_packets_and_adds_permits() {
         let (sender, receiver) = make_socket_pair().await;
         let (mut consumer, rx_ready, cancel, _, _handle) =
-            spawn_handle_udp_recv(receiver, MAX_BUFFER_SIZE);
+            spawn_handle_udp_recv::<PlatformBatchRecv>(receiver, MAX_BUFFER_SIZE);
 
         sender.send(b"pkt1").await.unwrap();
         sender.send(b"pkt2").await.unwrap();
@@ -509,7 +511,89 @@ mod tests {
         cancel.cancel();
     }
 
-    // TODO: Add handle_recv error path test once recv_multiple is behind a trait,
-    // allowing injection of fatal IO errors. Closing the raw fd doesn't wake
-    // tokio's event loop, so the task stays blocked on readable() indefinitely.
+    const INJECTED_ERROR_STRING: &str = "woah totally real io error sad";
+    struct FailingRecv;
+
+    impl BatchRecvSyscall for FailingRecv {
+        fn recv_multiple(
+            _fd: libc::c_int,
+            _recv_bufs: &mut [BytesMut; BATCH_SIZE],
+            _msg_count: usize,
+        ) -> io::Result<usize> {
+            Err(io::Error::other(INJECTED_ERROR_STRING))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_recv_fatal_error_closes_semaphore_and_stores_error() {
+        let (sender, receiver) = make_socket_pair().await;
+        let (_, rx_ready, _, io_error, handle) =
+            spawn_handle_udp_recv::<FailingRecv>(receiver, MAX_BUFFER_SIZE);
+
+        // Send a packet so the socket becomes readable, triggering the failing recv.
+        sender.send(b"trigger").await.unwrap();
+
+        // The task should exit after the fatal error.
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("task did not finish in time")
+            .expect("task panicked");
+
+        assert!(rx_ready.is_closed());
+        let err = io_error
+            .lock()
+            .unwrap()
+            .take()
+            .expect("expected stored IO error");
+        assert_eq!(err.to_string(), INJECTED_ERROR_STRING);
+    }
+
+    static INTERRUPTED_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    struct InterruptedOnceRecv;
+
+    impl BatchRecvSyscall for InterruptedOnceRecv {
+        fn recv_multiple(
+            _fd: libc::c_int,
+            recv_bufs: &mut [BytesMut; BATCH_SIZE],
+            _msg_count: usize,
+        ) -> io::Result<usize> {
+            let call = INTERRUPTED_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                recv_bufs[0].clear();
+                recv_bufs[0].extend_from_slice(b"after_interrupt");
+                Ok(1)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_recv_interrupted_retries_immediately() {
+        INTERRUPTED_CALL_COUNT.store(0, Ordering::SeqCst);
+        let (sender, receiver) = make_socket_pair().await;
+        let (mut consumer, rx_ready, cancel, io_error, _handle) =
+            spawn_handle_udp_recv::<InterruptedOnceRecv>(receiver, MAX_BUFFER_SIZE);
+
+        // Send a packet so the socket becomes readable.
+        sender.send(b"trigger").await.unwrap();
+
+        // First recv_multiple returns Interrupted, which is retried
+        // immediately within the inner loop. Second call succeeds.
+        tokio::time::timeout(Duration::from_secs(2), rx_ready.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+
+        let pkt = consumer.pop().unwrap();
+        assert_eq!(&pkt[..], b"after_interrupt");
+
+        // Interrupted is not fatal — semaphore must still be open.
+        assert!(!rx_ready.is_closed());
+        assert!(io_error.lock().unwrap().is_none());
+
+        cancel.cancel();
+    }
 }
