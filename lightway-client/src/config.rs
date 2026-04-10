@@ -691,6 +691,8 @@ impl ConnectionConfig {
             ca_content: ca_cert
                 .expect("ConnectionConfig should be taken by `take_servers` and normalized"),
             server,
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
             sni_header,
             enable_keepalive,
             enable_expresslane,

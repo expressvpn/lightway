@@ -324,6 +324,8 @@ pub struct ClientConnectionConfig {
     cipher: Cipher,
     server_dn: Option<String>,
     server: SocketAddr,
+    inside_plugins: PluginFactoryList,
+    outside_plugins: PluginFactoryList,
 
     instance_id: usize,
     outside_mtu: usize,
@@ -1092,6 +1094,8 @@ pub(crate) async fn connect(
         auth,
         ca_content,
         server,
+        inside_plugins,
+        mut outside_plugins,
         sni_header,
         socket,
         enable_keepalive,
@@ -1108,10 +1112,6 @@ pub(crate) async fn connect(
 
     // TODO: Should be strong type error
     let socket = socket.ok_or(anyhow!("socket not provided"))?;
-
-    let inside_plugins = PluginFactoryList::new();
-
-    let mut outside_plugins = PluginFactoryList::new();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) = {
         let builder = mobile::lightway::OutsideIOBuilder::new(socket, server);
