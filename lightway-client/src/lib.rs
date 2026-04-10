@@ -16,7 +16,9 @@ pub mod state;
 #[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "mobile")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 #[cfg(desktop)]
 use bytesize::ByteSize;
@@ -330,49 +332,12 @@ pub struct ClientConnectionConfig {
     instance_id: usize,
     outside_mtu: usize,
     sni_header: String,
-    socket: Option<OutsideSocket>,
+    socket: Option<io::outside::OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
     external_event_handler: Arc<dyn event_handlers::EventHandlers>,
-}
-
-#[cfg(feature = "mobile")]
-pub enum OutsideSocket {
-    Tcp(tokio::net::TcpSocket),
-    Udp(tokio::net::UdpSocket),
-}
-
-#[cfg(feature = "mobile")]
-impl OutsideSocket {
-    fn new(
-        use_tcp: bool,
-        event_handler: Option<Arc<dyn event_handlers::EventHandlers>>,
-    ) -> uniffi::Result<Self> {
-        use std::os::fd::AsRawFd;
-
-        if use_tcp {
-            let socket = tokio::net::TcpSocket::new_v4()?;
-            let fd = socket.as_raw_fd();
-
-            tracing::debug!("Created OutsideIO TCP FD: {}", fd);
-            if let Some(e) = event_handler {
-                e.created_outside_fd(fd)
-            }
-            Ok(OutsideSocket::Tcp(socket))
-        } else {
-            let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            let fd = socket.as_raw_fd();
-
-            tracing::debug!("Created OutsideIO UDP FD: {}", fd);
-            if let Some(e) = event_handler {
-                e.created_outside_fd(fd)
-            }
-            socket.set_nonblocking(true)?;
-            Ok(OutsideSocket::Udp(UdpSocket::from_std(socket)?))
-        }
-    }
 }
 
 #[derive(educe::Educe)]
@@ -851,30 +816,7 @@ pub async fn connect<
 ) -> Result<ClientConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
 
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match server_config.mode {
-            ClientConnectionMode::Datagram(maybe_sock) => {
-                #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server_config.server, maybe_sock)
-                    .await
-                    .inspect_err(|e| error!("Failed to create outside IO UDP socket: {e}"))
-                    .context("Outside IO UDP")?;
-
-                #[cfg(batch_receive)]
-                if config.enable_batch_receive {
-                    sock.enable_batch_receive();
-                }
-
-                (ConnectionType::Datagram, Arc::new(sock))
-            }
-            ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
-                    .await
-                    .inspect_err(|e| error!("Failed to create outside IO TCP socket: {e}"))
-                    .context("Outside IO TCP")?;
-                (ConnectionType::Stream, Arc::new(sock))
-            }
-        };
+    let (connection_type, outside_io) = io::outside::build(&mut server_config).await?;
 
     if let Some(size) = config.sndbuf {
         outside_io.set_send_buffer_size(size.as_u64().try_into()?)?;
@@ -1113,12 +1055,13 @@ pub(crate) async fn connect(
     // TODO: Should be strong type error
     let socket = socket.ok_or(anyhow!("socket not provided"))?;
 
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) = {
-        let builder = mobile::lightway::OutsideIOBuilder::new(socket, server);
-        builder
-            .build(config.max_socket_buffer_len, &mut outside_plugins)
-            .await?
-    };
+    let (connection_type, outside_io) = io::outside::build(
+        socket,
+        server,
+        config.max_socket_buffer_len,
+        &mut outside_plugins,
+    )
+    .await?;
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
@@ -1196,13 +1139,11 @@ pub(crate) async fn connect(
 
     let (new_outside_io_sender, new_outside_io_receiver) = tokio::sync::mpsc::channel(1);
     let outside_io_task: JoinHandle<uniffi::Result<()>> = tokio::spawn(
-        mobile::lightway::restartable_outside_io_task(
+        io::outside::restartable_outside_io_task(
             conn.clone(),
-            mobile::lightway::OutsideIOConfig {
-                mtu: outside_mtu,
-                connection_type,
-                outside_io,
-            },
+            outside_mtu,
+            connection_type,
+            outside_io,
             keepalive.clone(),
             notify_keepalive_reply,
             new_outside_io_receiver,
@@ -1547,10 +1488,13 @@ pub(crate) async fn client(
     let mut outside_sockets = conn_confs
         .iter()
         .map(|s| {
-            crate::OutsideSocket::new(s.mode.is_tcp(), Some(config.external_event_handler.clone()))
-                .ok()
+            io::outside::OutsideSocket::new(
+                s.mode.is_tcp(),
+                Some(config.external_event_handler.clone()),
+            )
+            .ok()
         })
-        .collect::<Vec<Option<crate::OutsideSocket>>>();
+        .collect::<Vec<Option<io::outside::OutsideSocket>>>();
 
     // Strore meta data before the server consumed
     let server_len = conn_confs.len();

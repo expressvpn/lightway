@@ -663,7 +663,7 @@ impl ConnectionConfig {
     pub fn into_client_connection_config(
         mut self,
         instance_id: usize,
-        outside_sockets: &mut Vec<Option<crate::OutsideSocket>>,
+        outside_sockets: &mut Vec<Option<crate::io::outside::OutsideSocket>>,
         online_signal_sender: tokio::sync::mpsc::Sender<usize>,
         event_stream_handler: lightway_app_utils::EventStreamCallback,
         external_event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
