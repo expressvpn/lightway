@@ -109,70 +109,126 @@ type ExpresslaneResult<T> = Result<T, ExpresslaneError>;
 ///
 /// Tracks received packet counters to detect and prevent replay attacks
 /// while handling out-of-order packet delivery typical in UDP.
-#[derive(Debug, Clone, Default)]
+/// Uses a 2048-bit bitmap (32 x u64) to tolerate significant packet
+/// reordering under high-throughput conditions.
+#[derive(Debug, Clone)]
 struct ReplayWindow {
     /// Highest wire counter seen so far
     max_counter: u64,
-    /// Bitmap tracking received packets within the window
-    /// Bit N represents counter (max_counter - N)
-    bitmap: u64,
+    /// Bitmap tracking received packets within the window.
+    /// `bitmap[0]` bit 0 = max_counter, `bitmap[0]` bit 63 = max_counter - 63,
+    /// `bitmap[1]` bit 0 = max_counter - 64, etc.
+    bitmap: [u64; Self::NUM_BLOCKS],
     /// Total number of packets successfully received
     packets_received: u64,
+    /// Whether any packet has been received yet
+    initialized: bool,
+}
+
+impl Default for ReplayWindow {
+    fn default() -> Self {
+        Self {
+            max_counter: 0,
+            bitmap: [0; Self::NUM_BLOCKS],
+            packets_received: 0,
+            initialized: false,
+        }
+    }
 }
 
 impl ReplayWindow {
-    /// Window size in packets (must be <= 64 for bitmap)
-    const WINDOW_SIZE: u64 = 64;
+    /// Number of u64 blocks in the bitmap
+    const NUM_BLOCKS: usize = 32;
+    /// Window size in packets (32 * 64 = 2048)
+    const WINDOW_SIZE: u64 = (Self::NUM_BLOCKS as u64) * 64;
+
+    /// Set a bit at the given position in the bitmap
+    fn set_bit(&mut self, position: u64) {
+        let block = (position / 64) as usize;
+        let bit = position % 64;
+        if block < Self::NUM_BLOCKS {
+            self.bitmap[block] |= 1u64 << bit;
+        }
+    }
+
+    /// Test a bit at the given position in the bitmap
+    fn test_bit(&self, position: u64) -> bool {
+        let block = (position / 64) as usize;
+        let bit = position % 64;
+        if block < Self::NUM_BLOCKS {
+            (self.bitmap[block] & (1u64 << bit)) != 0
+        } else {
+            false
+        }
+    }
+
+    /// Shift the entire bitmap left by `count` positions
+    fn shift_left(&mut self, count: u64) {
+        if count >= Self::WINDOW_SIZE {
+            self.bitmap = [0; Self::NUM_BLOCKS];
+            return;
+        }
+
+        let block_shift = (count / 64) as usize;
+        let bit_shift = (count % 64) as u32;
+
+        if bit_shift == 0 {
+            for i in (block_shift..Self::NUM_BLOCKS).rev() {
+                self.bitmap[i] = self.bitmap[i - block_shift];
+            }
+        } else {
+            for i in (0..Self::NUM_BLOCKS).rev() {
+                let lower = if i >= block_shift {
+                    self.bitmap[i - block_shift] << bit_shift
+                } else {
+                    0
+                };
+                let upper = if i > block_shift {
+                    self.bitmap[i - block_shift - 1] >> (64 - bit_shift)
+                } else {
+                    0
+                };
+                self.bitmap[i] = lower | upper;
+            }
+        }
+
+        for i in 0..block_shift.min(Self::NUM_BLOCKS) {
+            self.bitmap[i] = 0;
+        }
+    }
 
     /// Check if a wire counter should be accepted and update window state
     ///
     /// Returns true if the packet is valid and should be processed.
     /// Returns false if it's a replay or too old.
     fn check_and_update(&mut self, wire_counter: u64) -> bool {
-        // First packet ever received
-        if self.max_counter == 0 && self.bitmap == 0 {
+        if !self.initialized {
+            self.initialized = true;
             self.max_counter = wire_counter;
-            self.bitmap = 1; // Mark bit 0 as received
+            self.bitmap[0] = 1;
             self.packets_received += 1;
             return true;
         }
 
-        // Packet is newer than current max - advance window
         if wire_counter > self.max_counter {
             let diff = wire_counter - self.max_counter;
-
-            if diff < Self::WINDOW_SIZE {
-                // Shift bitmap left by diff positions
-                self.bitmap <<= diff;
-            } else {
-                // Packet is way ahead, reset the window
-                self.bitmap = 0;
-            }
-
-            // Mark current position as received
-            self.bitmap |= 1;
+            self.shift_left(diff);
+            self.bitmap[0] |= 1;
             self.max_counter = wire_counter;
             self.packets_received += 1;
             return true;
         }
 
-        // Packet is within current window
-        if wire_counter > self.max_counter.saturating_sub(Self::WINDOW_SIZE) {
-            let bit_position = self.max_counter - wire_counter;
-            let bit_mask = 1u64 << bit_position;
-
-            // Check if we've already seen this counter
-            if (self.bitmap & bit_mask) != 0 {
-                return false; // Replay detected
+        let age = self.max_counter - wire_counter;
+        if age < Self::WINDOW_SIZE {
+            if self.test_bit(age) {
+                return false;
             }
-
-            // Mark as received
-            self.bitmap |= bit_mask;
+            self.set_bit(age);
             self.packets_received += 1;
             return true;
         }
 
-        // Packet is too old (outside window)
         false
     }
 }
@@ -686,12 +742,12 @@ mod tests {
     fn replay_window_rejects_too_old_packets() {
         let mut window = ReplayWindow::default();
         assert!(window.check_and_update(100));
-        assert!(window.check_and_update(200)); // Advance window by 100
-        // Packet 100 is now outside the window (200 - 64 = 136)
+        assert!(window.check_and_update(3000)); // Advance window past 2048
+        // Packet 100 is now outside the window (3000 - 2048 = 952)
         assert!(!window.check_and_update(100));
-        assert!(!window.check_and_update(135));
+        assert!(!window.check_and_update(951));
         // But packets within window should work
-        assert!(window.check_and_update(137));
+        assert!(window.check_and_update(953));
         assert_eq!(window.packets_received, 3);
     }
 
@@ -700,8 +756,8 @@ mod tests {
         let mut window = ReplayWindow::default();
         assert!(window.check_and_update(100));
         // Jump way ahead (> window size)
-        assert!(window.check_and_update(200));
-        assert_eq!(window.max_counter, 200);
+        assert!(window.check_and_update(3000));
+        assert_eq!(window.max_counter, 3000);
         // Old packets should be rejected
         assert!(!window.check_and_update(100));
         assert_eq!(window.packets_received, 2);
