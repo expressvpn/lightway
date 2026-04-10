@@ -186,7 +186,7 @@ pub async fn handle_events<A: 'static + Send + EventCallback>(
     mut stream: EventStream,
     keepalive: Keepalive,
     notify_keepalive_reply: Arc<tokio::sync::Notify>,
-    weak: Weak<Mutex<Connection<ConnectionState<crate::mobile::lightway::TunnelState>>>>,
+    weak: Weak<Mutex<Connection<ConnectionState<crate::io::inside::TunnelState>>>>,
     mut event_handler: A,
     online_signal: tokio::sync::mpsc::Sender<usize>,
     instance_id: usize,

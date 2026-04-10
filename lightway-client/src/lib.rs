@@ -16,9 +16,7 @@ pub mod state;
 #[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
 
-#[cfg(desktop)]
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 #[cfg(desktop)]
 use bytesize::ByteSize;
@@ -26,6 +24,8 @@ use bytesize::ByteSize;
 use futures::stream::FusedStream;
 #[cfg(desktop)]
 use futures::{FutureExt, stream::FuturesUnordered};
+#[cfg(feature = "mobile")]
+pub use io::inside::TunnelState;
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::EventStreamCallback;
@@ -40,7 +40,7 @@ use lightway_core::{
     ConnectionType, IOCallbackResult, InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket,
     ipv4_update_destination, ipv4_update_source,
 };
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -602,7 +602,7 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 async fn handle_network_change(
     keepalive: Keepalive,
     mut network_change_receiver: tokio::sync::mpsc::Receiver<DeviceNetworkState>,
-    weak: Weak<Mutex<Connection<ConnectionState<mobile::lightway::TunnelState>>>>,
+    weak: Weak<Mutex<Connection<ConnectionState<TunnelState>>>>,
     #[cfg_attr(not(apple), allow(unused_variables))] reset_outside_io_tx: tokio::sync::mpsc::Sender<
         (),
     >,
@@ -838,7 +838,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         inside_io,
     )
 )]
-#[cfg(desktop)]
+#[cfg(not(feature = "mobile"))]
 pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
@@ -1078,8 +1078,9 @@ pub async fn connect<
         dns_manager: None,
     })
 }
+
 /// Individual connection to a lightway server
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 pub(crate) async fn connect(
     config: ClientConfig,
     ClientConnectionConfig {
@@ -1100,9 +1101,7 @@ pub(crate) async fn connect(
         external_event_handler,
     }: ClientConnectionConfig,
     inside_io: Arc<
-        dyn lightway_core::InsideIOSendCallback<ConnectionState<mobile::lightway::TunnelState>>
-            + Send
-            + Sync,
+        dyn lightway_core::InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync,
     >,
 ) -> uniffi::Result<mobile::lightway::LightwayConnection> {
     let mut join_set = tokio::task::JoinSet::new();
@@ -1124,7 +1123,7 @@ pub(crate) async fn connect(
     let (event_cb, event_stream) = EventStreamCallback::new();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
-    let state: ConnectionState<mobile::lightway::TunnelState> = ConnectionState {
+    let state: ConnectionState<TunnelState> = ConnectionState {
         ticker,
         ip_config: None,
         extended: None,
@@ -1578,14 +1577,9 @@ pub(crate) async fn client(
         client_connect_configs.push(client_connect_config)
     }
 
-    let inside_io = mobile::lightway::MobileInsideIo {
+    let inside_io = Arc::new(io::inside::MobileInsideIo {
         mtu: config.internal_mtu as usize,
-    };
-    let inside_io: Arc<
-        dyn lightway_core::InsideIOSendCallback<ConnectionState<mobile::lightway::TunnelState>>
-            + Send
-            + Sync,
-    > = Arc::new(inside_io);
+    });
 
     let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
         Vec<_>,
@@ -1767,12 +1761,11 @@ pub(crate) async fn client(
         });
     }
 
-    let tunnel_interface = mobile::lightway::setup_tunnel_interface(
-        config.tun_fd,
-        config.tun_local_ip,
-        config.tun_dns_ip,
-    )
-    .await?;
+    let tunnel_interface = Arc::new(
+        io::inside::Tun::new_with_tun_fd(config.tun_fd, config.tun_local_ip, config.tun_dns_ip)
+            .await
+            .context("Tun creation")?,
+    );
 
     conn.lock().unwrap().app_state_mut().extended = Some(tunnel_interface.clone());
     let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(

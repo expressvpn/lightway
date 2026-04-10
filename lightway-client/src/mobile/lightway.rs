@@ -1,17 +1,14 @@
 use crate::event_handlers::EventHandlers;
+use crate::io::inside::TunnelState;
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
 use crate::state::ExpresslaneState;
 use crate::{ConnectionState, io, keepalive::Config as KeepaliveConfig, outside_io_task};
 use futures::future::{FutureExt, OptionFuture, select_all};
-use lightway_app_utils::TunConfig;
-use lightway_core::{
-    Connection, ConnectionType, IOCallbackResult, InsideIOSendCallback, PluginFactoryList,
-};
+use lightway_core::{Connection, ConnectionType, PluginFactoryList};
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::os::fd::RawFd;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 use tokio::sync::mpsc::Sender as MpscSender;
@@ -19,7 +16,6 @@ use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tracing::{debug, error, info, info_span};
 use uniffi::deps::anyhow::{Context, bail};
-use uniffi::deps::bytes::BytesMut;
 
 /// Builder for creating OutsideIO connections with optional obfuscation and proxy
 ///
@@ -69,71 +65,15 @@ impl<'a> OutsideIOBuilder {
     }
 }
 
-pub type TunnelState = Option<Arc<io::inside::Tun>>;
-
-/// Inside IO which can be cloned by multiple parallel connections
-///
-/// The actual tunnel `InsideIO` is stored inside `ConnectionState::extended`
-/// After a connection becomes active, it updates the connection state with tunnel `InsideIO`
-#[derive(Clone)]
-pub(crate) struct MobileInsideIo {
-    pub(crate) mtu: usize,
-}
-
-impl InsideIOSendCallback<ConnectionState<TunnelState>> for MobileInsideIo {
-    fn send(
-        &self,
-        buf: BytesMut,
-        state: &mut ConnectionState<TunnelState>,
-    ) -> IOCallbackResult<usize> {
-        if let Some(tun) = state.extended.clone() {
-            tun.send(buf, state)
-        } else {
-            // Fake it, but all tunnel traffic is dropped/blocked
-            IOCallbackResult::Ok(buf.len())
-        }
-    }
-
-    fn mtu(&self) -> usize {
-        self.mtu
-    }
-
-    fn if_index(&self) -> uniffi::Result<u32, std::io::Error> {
-        Err(std::io::Error::other("unimplemented!"))
-    }
-
-    fn name(&self) -> uniffi::Result<String, std::io::Error> {
-        Err(std::io::Error::other("unimplemented!"))
-    }
-}
-
-pub(crate) async fn setup_tunnel_interface(
-    tun_fd: RawFd,
-    local_ip: Ipv4Addr,
-    dns_ip: Ipv4Addr,
-) -> uniffi::Result<Arc<io::inside::Tun>> {
-    let mut tun_config = TunConfig::default();
-
-    // Tun device should not be closed on client exit, since the same tunnel will be
-    // used by further connection
-    tun_config.raw_fd(tun_fd).close_fd_on_drop(false);
-
-    Ok(Arc::new(
-        io::inside::Tun::new(&tun_config, local_ip, dns_ip)
-            .await
-            .context("Tun creation")?,
-    ))
-}
-
-pub(crate) struct OutsideIOConfig {
-    pub(crate) mtu: usize,
-    pub(crate) connection_type: ConnectionType,
-    pub(crate) outside_io: Arc<dyn OutsideIO>,
+pub struct OutsideIOConfig {
+    pub mtu: usize,
+    pub connection_type: ConnectionType,
+    pub outside_io: Arc<dyn OutsideIO>,
 }
 
 /// This function is responsible for running `outside_io_task` to handle outside packet.
 /// It can restart the task with an updated ` outside_io ` upon receiving a new outside IO callback.
-pub(crate) async fn restartable_outside_io_task(
+pub async fn restartable_outside_io_task(
     conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
     outside_io_config: OutsideIOConfig,
     keepalive: Keepalive,
@@ -213,7 +153,7 @@ pub(crate) fn first_outside_io_exit(
     )
 }
 
-pub(crate) async fn cleanup_connections(
+pub async fn cleanup_connections(
     in_progress_connections_abort_handle: Vec<AbortHandle>,
     completed_connections: Vec<LightwayConnection>,
 ) {
@@ -236,16 +176,16 @@ pub(crate) async fn cleanup_connections(
     info!("Cleaned up unused connections");
 }
 
-pub(crate) struct LightwayConnection {
-    pub(crate) conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    pub(crate) outside_io_task: JoinHandle<uniffi::Result<()>>,
-    pub(crate) new_outside_io_sender: MpscSender<()>,
-    pub(crate) keepalive: Keepalive,
-    pub(crate) keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
-    pub(crate) keepalive_config: KeepaliveConfig,
-    pub(crate) join_set: JoinSet<()>,
-    pub(crate) instance_id: usize,
-    pub(crate) expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
+pub struct LightwayConnection {
+    pub conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    pub outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub new_outside_io_sender: MpscSender<()>,
+    pub keepalive: Keepalive,
+    pub keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub keepalive_config: KeepaliveConfig,
+    pub join_set: JoinSet<()>,
+    pub instance_id: usize,
+    pub expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
 }
 
 #[cfg(test)]

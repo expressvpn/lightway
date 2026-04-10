@@ -1,7 +1,11 @@
+#[cfg(feature = "mobile")]
+pub mod mobile;
 pub mod tun;
 
 use anyhow::Result;
 use bytes::BytesMut;
+#[cfg(feature = "mobile")]
+pub use mobile::{MobileInsideIo, TunnelState};
 use std::sync::Arc;
 pub use tun::Tun;
 

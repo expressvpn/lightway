@@ -20,7 +20,7 @@ use std::net::IpAddr;
 
 // NOTE
 // These internal parameters are not exposed
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 mod internal {
     pub(crate) const INTERNAL_MTU: u16 = 1350;
     pub(crate) const MAX_SOCKET_BUFFER_LEN: usize = 1024000;
