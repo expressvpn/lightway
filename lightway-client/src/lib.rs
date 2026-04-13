@@ -2,6 +2,7 @@ pub mod config;
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
+pub mod error;
 pub mod event_handlers;
 pub mod io;
 pub mod keepalive;
@@ -138,26 +139,6 @@ pub enum ClientResult {
 
     #[cfg(feature = "mobile")]
     ServerGoodbye,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Error), uniffi(flat_error))]
-pub enum LightwayError {
-    #[error("Connection Error: `{0}`")]
-    ConnectionError(#[from] anyhow::Error),
-    #[error("Received empty endpoints")]
-    EmptyEndpointsError,
-    #[error("User is not authorized / authentication failed")]
-    Unauthorized,
-    #[error("Config Error: `{0}`")]
-    ConfigError(#[from] crate::config::Error),
-
-    #[cfg(feature = "mobile")]
-    #[error("Logging bridge initialization error: `{0}`")]
-    LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
-    #[cfg(feature = "mobile")]
-    #[error("State Error: `{0}`")]
-    StateError(#[from] crate::state::Error),
 }
 
 #[cfg(not(feature = "mobile"))]
