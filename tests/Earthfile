@@ -14,6 +14,7 @@ TEST:
 
     ARG CLIENT_TOKIO_WORKER_THREADS
     ARG SERVER_TOKIO_WORKER_THREADS
+    ARG BATCH_RECEIVE=false
 
     ARG MODE
     ARG SERVER_PORT
@@ -33,7 +34,7 @@ TEST:
         SET CLIENT_ARGS="$CLIENT_ARGS --mode=$MODE"
     END
 
-    ARG CLIENT_IMAGE="(./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian)"
+    ARG CLIENT_IMAGE="(./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --BATCH_RECEIVE=$BATCH_RECEIVE --debian=$debian)"
     ARG SERVER_IMAGE="(./server+build-container --TOKIO_WORKER_THREADS=$SERVER_TOKIO_WORKER_THREADS --debian=$debian)"
     ARG NGINX_IMAGE="./base+build-test-nginx-container"
     ARG IPERF_IMAGE="(./base+build-test-iperf-container --debian=$debian)"
@@ -81,6 +82,10 @@ run-udp-pmtud-test:
 # run-udp-iouring-test runs e2e test using UDP and default cipher with io-uring enabled
 run-udp-iouring-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
+
+# run-udp-batch-receive-test runs e2e test using UDP with batch receive enabled
+run-udp-batch-receive-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --BATCH_RECEIVE=true --CLIENT_EXTRA_ARGS="--enable-batch-receive"
 
 # run-udp-expresslane-test runs e2e test using UDP with expresslane enabled
 run-udp-expresslane-test:
@@ -142,6 +147,7 @@ run-all-tests:
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
+    BUILD +run-udp-batch-receive-test
     BUILD +run-udp-expresslane-test
     BUILD +run-udp-expresslane-compat-test
     BUILD +run-tcp-iouring-test
