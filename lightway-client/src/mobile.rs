@@ -54,14 +54,14 @@ fn get_wolfssl_version() -> String {
 /// A `LoggingBridgeError` error is returned if another global subscriber was installed externally.
 #[uniffi::export]
 fn initialize_rust_logging_bridge(
-    logger_callback: Arc<dyn tracing_utils::RustLogger>,
+    logger_callback: Arc<dyn tracing_utils::Logger>,
 ) -> Result<(), LightwayError> {
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
     tracing_utils::set_global_default_subscriber(logger_callback).map_err(|e| e.into())
 }
 
 #[derive(uniffi::Object)]
-struct RustVpnConnection {
+struct VpnConnection {
     /// Timestamp when this connection object was created
     created_at: u64,
     /// To indicate the index of the connection in the list of connections
@@ -71,9 +71,9 @@ struct RustVpnConnection {
 }
 
 #[uniffi::export]
-impl RustVpnConnection {
+impl VpnConnection {
     #[uniffi::constructor]
-    fn new(logger_callback: Option<Arc<dyn crate::mobile::tracing_utils::RustLogger>>) -> Self {
+    fn new(logger_callback: Option<Arc<dyn crate::mobile::tracing_utils::Logger>>) -> Self {
         let default_guard =
             logger_callback.map(crate::mobile::tracing_utils::set_default_guard_subscriber);
         let created_at = std::time::SystemTime::now()
@@ -81,7 +81,7 @@ impl RustVpnConnection {
             .expect("System time before UNIX epoch")
             .as_secs();
 
-        info!(created_at, "initializing RustVpnConnection");
+        info!(created_at, "initializing VpnConnection");
 
         Self {
             created_at,
@@ -169,8 +169,8 @@ impl RustVpnConnection {
     }
 }
 
-impl Drop for RustVpnConnection {
+impl Drop for VpnConnection {
     fn drop(&mut self) {
-        info!(created_at = self.created_at, "dropping RustVpnConnection");
+        info!(created_at = self.created_at, "dropping VpnConnection");
     }
 }

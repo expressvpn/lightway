@@ -19,7 +19,7 @@ use tracing_core::span::{Attributes, Id};
 use tracing_subscriber::registry::LookupSpan;
 
 #[uniffi::export(with_foreign)]
-pub trait RustLogger: Send + Sync {
+pub trait Logger: Send + Sync {
     fn debug(&self, msg: String);
     fn info(&self, msg: String);
     fn warn(&self, msg: String);
@@ -31,30 +31,30 @@ pub trait RustLogger: Send + Sync {
 /// where the app hands us a fresh logger for every connection instead of spawning a new process.
 /// All method calls delegate to the currently configured logger inside an `Arc`.
 struct SwappableLogger {
-    delegate: RwLock<Arc<dyn RustLogger>>,
+    delegate: RwLock<Arc<dyn Logger>>,
 }
 
 impl SwappableLogger {
-    fn new(logger: Arc<dyn RustLogger>) -> Self {
+    fn new(logger: Arc<dyn Logger>) -> Self {
         Self {
             delegate: RwLock::new(logger),
         }
     }
 
-    fn replace(&self, logger: Arc<dyn RustLogger>) {
+    fn replace(&self, logger: Arc<dyn Logger>) {
         *self.delegate.write().expect("global logger lock poisoned") = logger;
     }
 
     fn with_logger<F>(&self, action: F)
     where
-        F: FnOnce(&dyn RustLogger),
+        F: FnOnce(&dyn Logger),
     {
         let logger = self.delegate.read().expect("global logger lock poisoned");
         action(&**logger);
     }
 }
 
-impl RustLogger for SwappableLogger {
+impl Logger for SwappableLogger {
     fn debug(&self, msg: String) {
         self.with_logger(|logger| logger.debug(msg));
     }
@@ -87,7 +87,7 @@ pub enum LoggingBridgeError {
 /// On Android the library stays in the main process across sessions, so we expect multiple calls and swap the delegate instead.
 /// Returns a `LoggingBridgeError::ConflictingGlobalSubscriber` if another component has already installed its own global subscriber.
 pub(crate) fn set_global_default_subscriber(
-    logger_callback: Arc<dyn RustLogger>,
+    logger_callback: Arc<dyn Logger>,
 ) -> Result<(), LoggingBridgeError> {
     if let Some(logger) = GLOBAL_LOGGER.get() {
         // We already own the global subscriber, so just update the delegate in place.
@@ -110,12 +110,12 @@ pub(crate) fn set_global_default_subscriber(
 }
 
 /// Set the default tracing subscriber until the returned default guard gets dropped
-pub(crate) fn set_default_guard_subscriber(logger_callback: Arc<dyn RustLogger>) -> DefaultGuard {
+pub(crate) fn set_default_guard_subscriber(logger_callback: Arc<dyn Logger>) -> DefaultGuard {
     let subscriber = setup_logging_subscriber(logger_callback);
     tracing::subscriber::set_default(subscriber)
 }
 
-fn setup_logging_subscriber(logger_callback: Arc<dyn RustLogger>) -> impl Subscriber {
+fn setup_logging_subscriber(logger_callback: Arc<dyn Logger>) -> impl Subscriber {
     let diagnostic_layer = DiagnosticLayer::new(logger_callback);
 
     #[cfg(android)]
@@ -128,13 +128,13 @@ fn setup_logging_subscriber(logger_callback: Arc<dyn RustLogger>) -> impl Subscr
 }
 
 pub struct DiagnosticLayer {
-    logger_callback: Arc<dyn RustLogger>,
+    logger_callback: Arc<dyn Logger>,
 }
 
 const IGNORED_SPANS: &[&str] = &["CleanupConnection"];
 
 impl DiagnosticLayer {
-    pub fn new(logger_callback: Arc<dyn RustLogger>) -> Self {
+    pub fn new(logger_callback: Arc<dyn Logger>) -> Self {
         Self { logger_callback }
     }
 }
