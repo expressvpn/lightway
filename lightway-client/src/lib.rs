@@ -22,26 +22,33 @@ use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 #[cfg(desktop)]
 use bytesize::ByteSize;
+use futures::FutureExt;
+#[cfg(not(feature = "mobile"))]
+use futures::stream::FuturesUnordered;
 #[cfg(feature = "mobile")]
-use futures::stream::FusedStream;
-#[cfg(desktop)]
-use futures::{FutureExt, stream::FuturesUnordered};
+use futures::{
+    future::{OptionFuture, select_all},
+    stream::FusedStream,
+};
 #[cfg(feature = "mobile")]
 pub use io::inside::TunnelState;
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
-use lightway_app_utils::EventStreamCallback;
-use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, args::Cipher};
+#[cfg(mobile)]
+use keepalive::KeepaliveResult;
+use lightway_app_utils::{
+    ConnectionTicker, ConnectionTickerState, EventStreamCallback, args::Cipher,
+};
 use lightway_app_utils::{DplpmtudTimer, connection_ticker_cb};
 #[cfg(desktop)]
 use lightway_app_utils::{PacketCodecFactoryType, TunConfig};
-#[cfg(desktop)]
-use lightway_core::EventCallback;
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, IOCallbackResult, InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket,
-    ipv4_update_destination, ipv4_update_source,
+    ConnectionType, IOCallbackResult, InsideIpConfig, OutsidePacket, ipv4_update_destination,
+    ipv4_update_source,
 };
+#[cfg(not(feature = "mobile"))]
+use lightway_core::{EventCallback, InsideIOSendCallbackArg};
 #[cfg(feature = "mobile")]
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -82,13 +89,13 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::task::JoinHandle;
+#[cfg(desktop)]
+use tokio::sync::mpsc;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::{
     net::{TcpStream, UdpSocket},
     sync::oneshot,
 };
-#[cfg(desktop)]
-use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::StreamExt;
 #[cfg(desktop)]
 use tokio_stream::StreamMap;
@@ -720,13 +727,13 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
+#[cfg(desktop)]
 /// Represents a connection to a server. When dropped, the route table will be removed.
 pub struct ClientConnection<T: Send + Sync> {
     #[cfg(desktop)]
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
-    #[cfg(desktop)]
     outside_io: Arc<dyn io::outside::OutsideIO>,
     #[cfg(desktop)]
     connected_signal: Option<oneshot::Receiver<()>>,
@@ -736,14 +743,26 @@ pub struct ClientConnection<T: Send + Sync> {
     network_change_signal: mpsc::Sender<()>,
     #[cfg(desktop)]
     encoding_request_signal: mpsc::Sender<bool>,
-    #[cfg(desktop)]
     route_manager: Option<RouteManager>,
-    #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
 
+#[cfg(mobile)]
+/// Represents a connection to a server
+pub struct ClientConnection {
+    pub conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    pub outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub new_outside_io_sender: tokio::sync::mpsc::Sender<()>,
+    pub keepalive: Keepalive,
+    pub keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub keepalive_config: KeepaliveConfig,
+    pub join_set: JoinSet<()>,
+    pub instance_id: usize,
+    pub expresslane_event_rx: Option<tokio::sync::mpsc::Receiver<state::ExpresslaneState>>,
+}
+
+#[cfg(desktop)]
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
-    #[cfg(desktop)]
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
@@ -770,7 +789,6 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         Ok(())
     }
 
-    #[cfg(desktop)]
     pub fn set_dns(
         &mut self,
         dns_config_mode: DnsConfigMode,
@@ -793,6 +811,49 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         let inside_io: InsideIOSendCallbackArg<ConnectionState<ExtAppState>> =
             self.inside_io.clone().into_io_send_callback();
         self.conn.lock().unwrap().inside_io(inside_io);
+    }
+}
+
+#[cfg(mobile)]
+impl ClientConnection {
+    pub fn first_outside_io_exit(
+        connections: &mut HashMap<usize, ClientConnection>,
+    ) -> impl Future<Output = (usize, Result<uniffi::Result<()>, tokio::task::JoinError>)> + '_
+    {
+        if connections.is_empty() {
+            return futures::future::Either::Left(std::future::pending());
+        }
+        futures::future::Either::Right(
+            select_all(
+                connections.values_mut().map(|c| {
+                    Box::pin(async move { (c.instance_id, (&mut c.outside_io_task).await) })
+                }),
+            )
+            .map(|((id, result), _, _)| (id, result)),
+        )
+    }
+
+    pub async fn cleanup(
+        in_progress_connections_abort_handle: Vec<tokio::task::AbortHandle>,
+        completed_connections: Vec<ClientConnection>,
+    ) {
+        for conn in in_progress_connections_abort_handle {
+            if !conn.is_finished() {
+                conn.abort();
+            }
+        }
+        for mut c in completed_connections.into_iter() {
+            let span = info_span!("CleanupConnection", instance_id = ?c.instance_id);
+            span.in_scope(|| {
+                debug!("Disconnecting completed connection");
+                let _ = c.conn.lock().unwrap().disconnect();
+                c.outside_io_task.abort();
+                c.join_set.abort_all();
+            });
+            drop(c.keepalive);
+            c.keepalive_task.await;
+        }
+        info!("Cleaned up unused connections");
     }
 }
 
@@ -1049,7 +1110,7 @@ pub(crate) async fn connect(
     inside_io: Arc<
         dyn lightway_core::InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync,
     >,
-) -> uniffi::Result<mobile::lightway::LightwayConnection> {
+) -> uniffi::Result<ClientConnection> {
     let mut join_set = tokio::task::JoinSet::new();
 
     // TODO: Should be strong type error
@@ -1153,7 +1214,7 @@ pub(crate) async fn connect(
         .in_current_span(),
     );
 
-    Ok(mobile::lightway::LightwayConnection {
+    Ok(ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,
@@ -1536,7 +1597,7 @@ pub(crate) async fn client(
                 // TODO
                 // check if it is possible to reduce clone in mobile, or make a clear note here
                 connect(config.clone(), c, inside_io.clone())
-                    .instrument(info_span!("LightwayConnection", instance_id)),
+                    .instrument(info_span!("ClientConnection", instance_id)),
             );
             (task.abort_handle(), task)
         })
@@ -1557,9 +1618,8 @@ pub(crate) async fn client(
     // Drop the last sender
     drop(online_signal_sender);
 
-    let mut non_preferred_connections: Vec<(usize, mobile::lightway::LightwayConnection)> =
-        Vec::new();
-    let mut pending_online_connections: HashMap<usize, mobile::lightway::LightwayConnection> =
+    let mut non_preferred_connections: Vec<(usize, ClientConnection)> = Vec::new();
+    let mut pending_online_connections: HashMap<usize, ClientConnection> =
         HashMap::with_capacity(server_len);
     let mut failed_connections = 0usize;
     let mut connection_error_to_return = None;
@@ -1568,7 +1628,7 @@ pub(crate) async fn client(
     let active_connection = loop {
         tokio::select! {
             // Prioritise management commands over other branches, also make sure we add
-            // LightwayConnection to HashMap first to make sure when it goes online,
+            // ClientConnection to HashMap first to make sure when it goes online,
             // we can remove it from the HashMap and break the loop.
             biased;
             _ = futures::future::ready(()), if failed_connections == server_len => {
@@ -1624,11 +1684,11 @@ pub(crate) async fn client(
                     info!("Deferring connection {}", instance_id);
                     non_preferred_connections.push((instance_id, connection));
                 } else {
-                    warn!(?instance_id, "Cannot find LightwayConnection");
+                    warn!(?instance_id, "Cannot find ClientConnection");
                 }
             },
 
-            (instance_id, outside_io_result) = mobile::lightway::first_outside_io_exit(&mut pending_online_connections) => {
+            (instance_id, outside_io_result) = ClientConnection::first_outside_io_exit(&mut pending_online_connections) => {
                 // outside_io_task should not early return here, we're not going to use this connection anyway, removing it for clean-up
                 let connection = pending_online_connections.remove(&instance_id);
                 if let Some(connection) = connection {
@@ -1666,7 +1726,7 @@ pub(crate) async fn client(
     drop(pending_online_connections);
 
     let _ = in_progress_connection_abort_handles.swap_remove(active_connection.instance_id);
-    tokio::spawn(mobile::lightway::cleanup_connections(
+    tokio::spawn(ClientConnection::cleanup(
         in_progress_connection_abort_handles,
         non_preferred_connections
             .into_iter()
@@ -1674,7 +1734,7 @@ pub(crate) async fn client(
             .collect(),
     ));
 
-    let mobile::lightway::LightwayConnection {
+    let ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,

@@ -1,5 +1,4 @@
 use crate::LightwayError;
-pub(crate) mod lightway;
 pub(crate) mod tracing_utils;
 
 use std::sync::{Arc, OnceLock};
