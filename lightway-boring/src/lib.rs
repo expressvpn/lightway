@@ -15,12 +15,16 @@
 //! ```
 
 mod cert;
+mod config;
+mod context;
 mod error;
 mod types;
 
 // Re-export all public types at crate root (drop-in replacement for wolfssl crate)
 pub use boring::version::version as get_version_string;
 pub use cert::{RootCertificate, Secret};
+pub use config::SessionConfig;
+pub use context::{Context, ContextBuilder};
 pub use error::{Error, ErrorKind, NewContextBuilderError, NewSessionError, TlsError};
 pub use types::{
     CurveGroup, IOCallbackResult, IOCallbacks, Method, Poll, PollResult, ProtocolVersion,
