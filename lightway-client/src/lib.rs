@@ -1,11 +1,18 @@
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
+pub(crate) mod endpoint;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
+
+#[cfg(mobile)]
+pub mod mobile;
+
+#[cfg(mobile)]
+uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
@@ -41,11 +48,13 @@ pub use lightway_core::{
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet_packet::ipv4::Ipv4Packet;
+#[cfg(desktop)]
+use std::net::IpAddr;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -75,9 +84,32 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
+#[cfg_attr(mobile, derive(uniffi::Enum))]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
+
+    #[cfg(mobile)]
+    ServerGoodbye,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(mobile, derive(uniffi::Error), uniffi(flat_error))]
+pub enum LightwayError {
+    #[error("Connection Error: `{0}`")]
+    ConnectionError(#[from] anyhow::Error),
+    #[error("Received empty endpoints")]
+    EmptyEndpointsError,
+    #[error("User is not authorized / authentication failed")]
+    Unauthorized,
+
+    // These Endpoint Error is iOS only
+    #[cfg(mobile)]
+    #[error("Endpoint Error: `{0}`")]
+    EndpointError(#[from] crate::endpoint::EndpointError),
+    #[cfg(mobile)]
+    #[error("Logging bridge initialization error: `{0}`")]
+    LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
 }
 
 #[derive(educe::Educe)]
@@ -587,6 +619,7 @@ pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
+    #[cfg(desktop)]
     outside_io: Arc<dyn io::outside::OutsideIO>,
     connected_signal: Option<oneshot::Receiver<()>>,
     stop_signal: Option<oneshot::Sender<()>>,
@@ -888,6 +921,7 @@ pub async fn connect<
         task,
         conn,
         inside_io,
+        #[cfg(desktop)]
         outside_io,
         connected_signal: Some(connected_rx),
         stop_signal: Some(stop_tx),

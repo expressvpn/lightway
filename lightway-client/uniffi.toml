@@ -1,0 +1,8 @@
+[bindings.kotlin]
+package_name = "lightway"
+android = true
+# Keep android_cleaner = false because the library performs I/O operations (network, files, system calls)
+# which not suitable for SystemCleaner as it could take a while to finish cleaning up.
+# Using java.lang.ref.Cleaner is safer as each library gets its own dedicated cleaner thread instead of using shared system cleaner.
+# Ref: https://developer.android.com/reference/android/system/SystemCleaner
+android_cleaner = false

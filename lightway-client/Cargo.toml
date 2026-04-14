@@ -6,10 +6,18 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "lightway-client"
+path = "src/main.rs"
+
+[lib]
+name = "lightway_client"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["postquantum"]
+mobile = ["uniffi", "tracing-core", "tracing-panic"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum"]
@@ -42,12 +50,22 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twelf.workspace = true
 rtrb = { version = "0.3.3", optional = true }
 
+# mobile feature
+uniffi = { workspace = true, optional = true }
+tracing-core = { version = "0.1.33", optional =true }
+tracing-panic = { version = "0.1.2", optional= true }
+
 [dev-dependencies]
 more-asserts.workspace = true
 test-case.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 serial_test = "3.2.0"
 tun-rs.workspace = true
 tempfile = "3.24.0"
+mockall = "0.14.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = "0.2.0"
 
 [build-dependencies]
 cfg_aliases = "0.2.1"
