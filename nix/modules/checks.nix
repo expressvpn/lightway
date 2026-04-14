@@ -17,19 +17,20 @@
       };
 
       # Format check - verifies Rust code formatting
-      fmt = pkgs.runCommand "lightway-fmt-check"
-        {
-          nativeBuildInputs = [
-            rust
-            pkgs.cargo
-          ];
-          inherit src;
-        }
-        ''
-          cd $src
-          cargo fmt --check
-          touch $out
-        '';
+      fmt =
+        pkgs.runCommand "lightway-fmt-check"
+          {
+            nativeBuildInputs = [
+              rust
+              pkgs.cargo
+            ];
+            inherit src;
+          }
+          ''
+            cd $src
+            cargo fmt --check
+            touch $out
+          '';
     in
     {
       checks = {

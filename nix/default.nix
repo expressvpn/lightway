@@ -47,31 +47,37 @@ rustPlatform.buildRustPackage {
   buildFeatures = features;
   cargoBuildFlags = "-p ${package}";
 
-  nativeBuildInputs =
-    [
-      autoconf
-      automake
-      libtool
-    ]
-    ++ lib.optionals (stdenv.hostPlatform.system == stdenv.buildPlatform.system) [
-      # For native builds, use bindgenHook normally
-      rustPlatform.bindgenHook
-    ];
+  nativeBuildInputs = [
+    autoconf
+    automake
+    libtool
+  ]
+  ++ lib.optionals (stdenv.hostPlatform.system == stdenv.buildPlatform.system) [
+    # For native builds, use bindgenHook normally
+    rustPlatform.bindgenHook
+  ];
 
   # For cross-compilation, manually configure bindgen
   # Use build platform's libclang but target platform's headers
-  LIBCLANG_PATH = lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system) "${lib.getLib buildPackages.llvmPackages.libclang}/lib";
+  LIBCLANG_PATH = lib.optionalString (
+    stdenv.hostPlatform.system != stdenv.buildPlatform.system
+  ) "${lib.getLib buildPackages.llvmPackages.libclang}/lib";
 
-  BINDGEN_EXTRA_CLANG_ARGS = lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system) (
-    lib.concatStringsSep " " ([
-      "--target=${stdenv.hostPlatform.config}"
-      "-isystem ${lib.getDev stdenv.cc.libc}/include"
-      "-I${buildPackages.llvmPackages.clang}/resource-root/include"
-    ] ++ lib.optionals (stdenv.cc ? nix-support) [
-      "$(< ${stdenv.cc}/nix-support/libc-cflags)"
-      "$(< ${stdenv.cc}/nix-support/cc-cflags)"
-    ])
-  );
+  BINDGEN_EXTRA_CLANG_ARGS =
+    lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system)
+      (
+        lib.concatStringsSep " " (
+          [
+            "--target=${stdenv.hostPlatform.config}"
+            "-isystem ${lib.getDev stdenv.cc.libc}/include"
+            "-I${buildPackages.llvmPackages.clang}/resource-root/include"
+          ]
+          ++ lib.optionals (stdenv.cc ? nix-support) [
+            "$(< ${stdenv.cc}/nix-support/libc-cflags)"
+            "$(< ${stdenv.cc}/nix-support/cc-cflags)"
+          ]
+        )
+      );
 
   # RUSTFLAGS configuration for different build scenarios:
   #
@@ -99,7 +105,9 @@ rustPlatform.buildRustPackage {
       !isStatic && stdenv.hostPlatform.system != stdenv.buildPlatform.system
     ) " -C linker=${stdenv.cc.targetPrefix}cc"
     + lib.optionalString (
-      !isStatic && stdenv.hostPlatform.system != stdenv.buildPlatform.system && stdenv.hostPlatform.isLinux
+      !isStatic
+      && stdenv.hostPlatform.system != stdenv.buildPlatform.system
+      && stdenv.hostPlatform.isLinux
     ) " -C link-arg=-fuse-ld=bfd";
 
   # Enable ARM crypto extensions
