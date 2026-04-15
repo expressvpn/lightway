@@ -17,7 +17,7 @@ uniffi::setup_scaffolding!();
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::{FutureExt, future::join_all};
+use futures::{FutureExt, future::join_all, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
@@ -934,26 +934,37 @@ pub async fn connect<
     })
 }
 
-/// Returns the index of the best connection
-/// If `config.preferred_connection_wait_interval` is set, it will wait that
-/// duration before returning the highest priority connection (in the specified
-/// array order).
-/// If there is only one connection, or the preferred connection
+/// Returns the index of the best connection.
+///
+/// Receives `(index, connected_signal)` pairs from `connection_setup_rx` as connections
+/// are set up, rather than requiring all connections to be ready upfront.
+/// The channel closing signals that no more connections will arrive.
+///
+/// If `preferred_connection_wait_interval` is non-zero it will wait that
+/// duration before returning the highest priority connection (lowest index).
+/// If there is only one connection, or the preferred connection (index 0)
 /// is the first to connect, it will not wait.
 async fn find_best_connection(
-    connected_signals: Vec<oneshot::Receiver<()>>,
+    mut connection_setup_rx: mpsc::Receiver<(usize, oneshot::Receiver<()>)>,
     preferred_connection_wait_interval: Duration,
 ) -> Result<usize> {
     let mut wait_timer_task = tokio::spawn(tokio::time::sleep(preferred_connection_wait_interval));
 
-    let mut connected_stream = StreamMap::with_capacity(connected_signals.len());
-    for (i, rx) in connected_signals.into_iter().enumerate() {
-        connected_stream.insert(i, rx.into_stream());
-    }
-
+    let mut connected_stream = StreamMap::new();
     let mut best_connection_index: Option<usize> = None;
+    let mut channel_open = true;
+
     loop {
         tokio::select! {
+            biased;
+            // Highest priority to make sure we add connections to the stream as soon as they are ready
+            item = connection_setup_rx.recv(), if channel_open => {
+                if let Some((index, signal)) = item {
+                    connected_stream.insert(index, signal.into_stream());
+                } else {
+                    channel_open = false;
+                }
+            }
             _ = &mut wait_timer_task, if !wait_timer_task.is_finished() => {
                 if let Some(index) = best_connection_index {
                     tracing::debug!("Preferred connection wait finished, using best connection so far: {index}");
@@ -1062,57 +1073,96 @@ pub async fn client<
             peer_ip = %config.tun_peer_ip,
         );
     }
-    let (original_indices, mut connections): (Vec<_>, Vec<_>) = join_all(
-        servers
+
+    let server_count = servers.len();
+    let preferred_connection_wait_interval = config.preferred_connection_wait_interval;
+    let mut connections: Vec<(usize, ClientConnection<_>)> = Vec::new();
+
+    let mut stop_signal = config.stop_signal.take().expect("stop_signal must be set");
+
+    let best_connection_index = {
+        let mut connect_futs: FuturesUnordered<_> = servers
             .into_iter()
-            .map(|server_config| connect(&config, server_config, inside_io.clone())),
-    )
-    .await
-    .into_iter()
-    .map(|result| result.inspect_err(|e| tracing::error!("Creating connection failed: {e}")))
-    .enumerate()
-    .flat_map(|(index, result)| result.map(|result| (index, result)))
-    .unzip();
+            .enumerate()
+            .map(|(index, server_config)| {
+                let config = &config;
+                let inside_io = inside_io.clone();
+                async move { (index, connect(config, server_config, inside_io).await) }
+            })
+            .collect();
 
-    if connections.is_empty() {
-        return Err(anyhow!("No servers available"));
-    }
+        let (connection_setup_tx, connection_setup_rx) = mpsc::channel(server_count);
+        let mut connection_setup_tx = Some(connection_setup_tx);
+        let mut setup_complete = false;
 
-    let best_connection_index = tokio::select! {
-        index = find_best_connection(
-            connections.iter_mut().map(|c| c.connected_signal.take().unwrap()).collect(),
-            config.preferred_connection_wait_interval
-        ) => {
-            index?
-        }
-        results = join_all(connections.iter_mut().map(|c| &mut c.task)) => {
-            for result in results {
-                if let Err(e) = result {
-                    tracing::error!("Connection failed: {e}");
+        let mut find_best = std::pin::pin!(find_best_connection(
+            connection_setup_rx,
+            preferred_connection_wait_interval,
+        ));
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // User disconnect — highest priority
+                _ = &mut stop_signal => {
+                    return Ok(ClientResult::UserDisconnect);
+                }
+
+                // Connection setup — feeds signals to find_best_connection
+                Some((orig_idx, result)) = connect_futs.next(), if !setup_complete => {
+                    match result {
+                        Ok(mut conn) => {
+                            let signal = conn.connected_signal.take().unwrap();
+                            let _ = connection_setup_tx.as_ref().unwrap().try_send((orig_idx, signal));
+                            connections.push((orig_idx, conn));
+                        }
+                        Err(e) => {
+                            tracing::error!("Creating connection failed: {e}");
+                        }
+                    }
+                    if connect_futs.is_empty() {
+                        setup_complete = true;
+                        drop(connection_setup_tx.take()); // close the signal channel
+                        if connections.is_empty() {
+                            return Err(anyhow!("No servers available"));
+                        }
+                    }
+                }
+
+                // Signal selection — picks the best connection
+                index = &mut find_best => {
+                    break index?;
+                }
+
+                // Task monitoring — all connection tasks exited without success
+                results = join_all(connections.iter_mut().map(|(_, c)| &mut c.task)), if setup_complete => {
+                    for result in results {
+                        if let Err(e) = result {
+                            tracing::error!("Connection failed: {e}");
+                        }
+                    }
+                    return Err(anyhow!("All connections failed to connect."));
                 }
             }
-            return Err(anyhow!("All connections failed to connect."));
-        }
-        _ = &mut config.stop_signal => {
-            return Ok(ClientResult::UserDisconnect);
         }
     };
+    // connect_futs dropped here — releases &config borrow
 
-    tracing::trace!(
-        "Best connection selected: {}",
-        original_indices[best_connection_index]
-    );
+    tracing::trace!("Best connection selected: {best_connection_index}");
     if let Some(signal) = config.best_connection_selected_signal.take()
-        && signal
-            .send(original_indices[best_connection_index])
-            .is_err()
+        && signal.send(best_connection_index).is_err()
     {
         tracing::error!("Failed to send best_connection_selected_signal");
     }
 
-    let mut connection = connections.swap_remove(best_connection_index);
+    let pos = connections
+        .iter()
+        .position(|(idx, _)| *idx == best_connection_index)
+        .unwrap();
+    let (_, mut connection) = connections.swap_remove(pos);
 
-    for conn in connections.iter_mut() {
+    for (_, conn) in connections.iter_mut() {
         let _ = conn.stop_signal.take().unwrap().send(());
     }
 
@@ -1140,7 +1190,7 @@ pub async fn client<
 
     let connection_stop_signal = connection.stop_signal.take().unwrap();
     tokio::spawn(async move {
-        let _ = config.stop_signal.await;
+        let _ = stop_signal.await;
         if let Err(()) = connection_stop_signal.send(()) {
             tracing::error!("Failed to send stop signal");
         }
@@ -1195,6 +1245,7 @@ mod tests {
         connected_signal_order: Vec<usize>,
         should_connect_before_wait_finishes: bool,
     ) -> Option<usize> {
+        let (connection_setup_tx, connection_setup_rx) = mpsc::channel(signals_len);
         let (mut connected_txs, connected_rxs): (
             Vec<Option<oneshot::Sender<()>>>,
             Vec<oneshot::Receiver<()>>,
@@ -1205,8 +1256,13 @@ mod tests {
             })
             .unzip();
 
+        for (i, rx) in connected_rxs.into_iter().enumerate() {
+            connection_setup_tx.try_send((i, rx)).unwrap();
+        }
+        drop(connection_setup_tx);
+
         let task = tokio::spawn(find_best_connection(
-            connected_rxs,
+            connection_setup_rx,
             Duration::from_millis(200),
         ));
 
@@ -1235,11 +1291,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_connection_connects_after_wait_finishes() {
+        let (connection_setup_tx, connection_setup_rx) = mpsc::channel(2);
         let (_, rx0) = tokio::sync::oneshot::channel::<()>();
         let (tx1, rx1) = tokio::sync::oneshot::channel::<()>();
 
+        connection_setup_tx.try_send((0, rx0)).unwrap();
+        connection_setup_tx.try_send((1, rx1)).unwrap();
+        drop(connection_setup_tx);
+
         let task = tokio::spawn(find_best_connection(
-            vec![rx0, rx1],
+            connection_setup_rx,
             Duration::from_millis(200),
         ));
 
