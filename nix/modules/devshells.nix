@@ -41,6 +41,9 @@
             buildScript = pkgs.writeShellScriptBin "build" ''
               cargo make build-android
             '';
+            cleanScript = pkgs.writeShellScriptBin "clean" ''
+              cargo make clean-android
+            '';
             pinned-cargo-ndk = pkgs.callPackage ../pkgs/cargo-ndk.nix { };
             pkgsCross =
               with pkgs.pkgsCross;
@@ -73,6 +76,7 @@
               androidenv.androidPkgs.androidsdk
               androidenv.androidPkgs.ndk-bundle
               buildScript
+              cleanScript
               git-lfs
               ktlint
               pinned-cargo-ndk

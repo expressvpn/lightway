@@ -6,6 +6,25 @@ default_to_workspace = false
 FEATURES_MACOS = "default,debug,postquantum"
 FEATURES_LINUX = "default,debug,postquantum,io-uring"
 
+# Avoid the long message in CI jobs, the "Compiling XXX ..." messages are swallowed
+CARGO_TERM_QUIET = "true"
+
+# NOTE
+# We put most android artifacts under "/target/", which follow the rust convention
+# so it will be easy for you to clean up 
+# And also some artifacts will base on gradle, and the envar naming is follow the gradle requirement
+ANDROID_UNIFFI_JNI_LIBS_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs"
+ANDROID_UNIFFI_BINDINGS_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java"
+
+# NOTE
+# The tasks related apple products might not work in a pre-release status, 
+# it is not an official release, but planed in near future
+IOS_MIN_VERSION = "15.0"
+CATALYST_MIN_VERSION = "15.0"
+TVOS_MIN_VERSION = "17.0"
+MACOS_MIN_VERSION = "11.0"
+XC_ARCHIVES_PATH = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/archives"
+
 [tasks.clippy]
 description = "Run Clippy with platform specific features only"
 category = "Development"
@@ -17,3 +36,279 @@ args = ["clippy", "--features", "${FEATURES_MACOS}", "--all-targets", "--", "-D"
 [tasks.clippy.linux]
 command = "cargo"
 args = ["clippy", "--features", "${FEATURES_LINUX}", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.build-apple]
+run_task = { name = [ "build-ios", "build-tvos", "build-catalyst", "build-xcframework" ], fork = true }
+
+[tasks.remove-old-xcframework]
+condition = { files_exist = ["${CARGO_MAKE_WORKING_DIRECTORY}/artifacts/Lightway.xcframework"] }
+script = "rm -rf ${CARGO_MAKE_WORKING_DIRECTORY}/artifacts/Lightway.xcframework"
+
+[tasks.build-ios-archives]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/bindings/ios/Lightway"
+script = '''
+    # Define iOS platforms to build for
+    platforms=("iphoneos:generic/platform=iOS" "iphonesimulator:generic/platform=iOS Simulator")
+    echo "Building and archiving iOS with deployment target ${IOS_MIN_VERSION}"
+
+    # Build and archive for each iOS platform
+    for platform_info in "${platforms[@]}"; do
+        IFS=':' read -r sdk destination <<< "$platform_info"
+        echo "Building and archiving iOS with destination $destination"
+        xcodebuild -xcconfig Lightway.xcconfig clean archive \
+                  -project Lightway.xcodeproj \
+                  -scheme Lightway \
+                  -configuration ${XCFRAMEWORK_CONFIG} \
+                  -destination "$destination" \
+                  -archivePath "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-${sdk}/Lightway.xcarchive" \
+                  IPHONEOS_DEPLOYMENT_TARGET=${IOS_MIN_VERSION} \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  SKIP_INSTALL=NO
+    done
+'''
+
+[tasks.build-catalyst-archives]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/bindings/ios/Lightway"
+script = '''
+    # Define Mac Catalyst platform to build for
+    platforms=("maccatalyst:generic/platform=macOS,variant=Mac Catalyst")
+    echo "Building and archiving Mac Catalyst with deployment target ${CATALYST_MIN_VERSION}"
+
+    # Build and archive for Mac Catalyst platform
+    for platform_info in "${platforms[@]}"; do
+        IFS=':' read -r sdk destination <<< "$platform_info"
+        echo "Building and archiving Mac Catalyst with destination $destination"
+        xcodebuild -xcconfig Lightway.xcconfig clean archive \
+                  -project Lightway.xcodeproj \
+                  -scheme Lightway \
+                  -configuration ${XCFRAMEWORK_CONFIG} \
+                  -destination "$destination" \
+                  -archivePath "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-${sdk}/Lightway.xcarchive" \
+                  IPHONEOS_DEPLOYMENT_TARGET=${CATALYST_MIN_VERSION} \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  SKIP_INSTALL=NO
+    done
+'''
+
+[tasks.build-tvos-archives]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/bindings/ios/Lightway"
+script = '''
+    # Define tvOS platforms to build for
+    platforms=("appletvos:generic/platform=tvOS" "appletvsimulator:generic/platform=tvOS Simulator")
+    echo "Building and archiving tvOS with deployment target ${TVOS_MIN_VERSION}"
+
+    # Build and archive for each tvOS platform
+    for platform_info in "${platforms[@]}"; do
+        IFS=':' read -r sdk destination <<< "$platform_info"
+        echo "Building and archiving tvOS with destination $destination"
+        xcodebuild -xcconfig Lightway.xcconfig clean archive \
+                  -project Lightway.xcodeproj \
+                  -scheme Lightway \
+                  -configuration ${XCFRAMEWORK_CONFIG} \
+                  -destination "$destination" \
+                  -archivePath "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-${sdk}/Lightway.xcarchive" \
+                  TVOS_DEPLOYMENT_TARGET=${TVOS_MIN_VERSION} \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  SKIP_INSTALL=NO
+    done
+'''
+
+[tasks.build-xcframework]
+dependencies = ["remove-old-xcframework", "build-ios-archives", "build-catalyst-archives", "build-tvos-archives"]
+script = '''
+    # Create xcframework from archives
+    xcodebuild -create-xcframework \
+              -archive "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-iphoneos/Lightway.xcarchive" -framework Lightway.framework \
+              -archive "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-iphonesimulator/Lightway.xcarchive" -framework Lightway.framework \
+              -archive "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-maccatalyst/Lightway.xcarchive" -framework Lightway.framework \
+              -archive "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-appletvos/Lightway.xcarchive" -framework Lightway.framework \
+              -archive "${XC_ARCHIVES_PATH}/${XCFRAMEWORK_CONFIG}-appletvsimulator/Lightway.xcarchive" -framework Lightway.framework \
+              -output "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/artifacts/Lightway.xcframework"
+'''
+
+[tasks.modify-podspec.linux]
+condition = { env_true = ["LIGHTWAY_VERSION"] }
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/bindings/ios"
+script = '''
+    sed -i "s/^[[:space:]]*s.version[[:space:]]*=[[:space:]]*'[^']*'/  s.version = '${LIGHTWAY_VERSION}'/" Lightway.podspec
+
+    sed -i "s/^[[:space:]]*s.ios.deployment_target[[:space:]]*=[[:space:]]*'[^']*'/  s.ios.deployment_target = '${IOS_MIN_VERSION}'/" Lightway.podspec
+
+    sed -i "s/^[[:space:]]*s.tvos.deployment_target[[:space:]]*=[[:space:]]*'[^']*'/  s.tvos.deployment_target = '${TVOS_MIN_VERSION}'/" Lightway.podspec
+'''
+
+[tasks.modify-podspec.mac]
+condition = { env_true = ["LIGHTWAY_VERSION"] }
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/bindings/ios"
+script = '''
+    sed -i '' "s/^[[:space:]]*s.version[[:space:]]*=[[:space:]]*'[^']*'/  s.version = '${LIGHTWAY_VERSION}'/" Lightway.podspec
+
+    sed -i '' "s/^[[:space:]]*s.ios.deployment_target[[:space:]]*=[[:space:]]*'[^']*'/  s.ios.deployment_target = '${IOS_MIN_VERSION}'/" Lightway.podspec
+
+    sed -i '' "s/^[[:space:]]*s.tvos.deployment_target[[:space:]]*=[[:space:]]*'[^']*'/  s.tvos.deployment_target = '${TVOS_MIN_VERSION}'/" Lightway.podspec
+'''
+
+
+[tasks.build-cocoapods]
+condition = { env_true = ["LIGHTWAY_VERSION"], fail_message = "Missing LIGHTWAY_VERSION environment variable" }
+dependencies = [ "modify-podspec" ]
+script = '''
+    if [ ! -d "./artifacts/apple/Lightway.xcframework" ]; then
+        echo "Lightway xcframework doesn't exist in /artifacts/apple"
+        exit 1
+    fi
+    cp ./lightway-client/bindings/ios/Lightway.podspec artifacts/apple/
+    cd artifacts && zip -r -y apple_${LIGHTWAY_VERSION}.zip apple
+    rm -rf apple
+'''
+
+[tasks.build-ios]
+description = "Build iOS libraries and bindings"
+env = { "IPHONEOS_DEPLOYMENT_TARGET" = "${IOS_MIN_VERSION}", "TVOS_DEPLOYMENT_TARGET" = { unset = true } }
+run_task = { name = ["build-ios-library", "lipo-ios-sim-library", "bindgen-ios"] }
+
+[tasks.build-ios-library]
+condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "aarch64-apple-ios", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.build-ios-arm-sim-library]
+condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "aarch64-apple-ios-sim", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.build-ios-x86-sim-library]
+condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "x86_64-apple-ios", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.lipo-ios-sim-library]
+dependencies = ["build-ios-arm-sim-library", "build-ios-x86-sim-library"]
+script = '''
+    mkdir -p ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/iOSUniversal/release
+    lipo -create \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/aarch64-apple-ios-sim/release/liblightway_client.a \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/x86_64-apple-ios/release/liblightway_client.a \
+              -output ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/iOSUniversal/release/liblightway_client.a
+    lipo -info ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/iOSUniversal/release/liblightway_client.a
+'''
+
+[tasks.bindgen-ios]
+script = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/scripts/ios-bindgen.sh -p ios"
+
+[tasks.build-catalyst]
+description = "Build Mac Catalyst libraries and bindings"
+env = { "IPHONEOS_DEPLOYMENT_TARGET" = "${CATALYST_MIN_VERSION}", "TVOS_DEPLOYMENT_TARGET" = { unset = true } }
+run_task = { name = ["lipo-catalyst-library", "bindgen-catalyst"] }
+
+[tasks.build-catalyst-arm-library]
+condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "aarch64-apple-ios-macabi", "--no-default-features", "--features", "postquantum", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.build-catalyst-x86-library]
+condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "x86_64-apple-ios-macabi", "--no-default-features", "--features", "postquantum", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.lipo-catalyst-library]
+dependencies = ["build-catalyst-arm-library", "build-catalyst-x86-library"]
+script = '''
+    mkdir -p ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/CatalystUniversal/release
+    lipo -create \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/aarch64-apple-ios-macabi/release/liblightway_client.a \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/x86_64-apple-ios-macabi/release/liblightway_client.a \
+              -output ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/CatalystUniversal/release/liblightway_client.a
+    lipo -info ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/CatalystUniversal/release/liblightway_client.a
+'''
+
+[tasks.bindgen-catalyst]
+script = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/scripts/ios-bindgen.sh -p catalyst"
+
+[tasks.build-tvos]
+description = "Build tvOS libraries and bindings"
+env = { "TVOS_DEPLOYMENT_TARGET" = "${TVOS_MIN_VERSION}", "IPHONEOS_DEPLOYMENT_TARGET" = { unset = true } }
+toolchain = "${TVOS_RUST_NIGHTLY_VERSION}"
+install_crate = { rustup_component_name = "rust-src" }
+run_task = { name = ["build-tvos-library", "lipo-tvos-sim-library", "bindgen-tvos"] }
+
+[tasks.build-tvos-library]
+condition = { env_set = [ "TVOS_DEPLOYMENT_TARGET" ] }
+toolchain = "${TVOS_RUST_NIGHTLY_VERSION}"
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "-Zbuild-std", "--release", "-p", "lightway-client", "--target", "aarch64-apple-tvos", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.build-tvos-arm-sim-library]
+condition = { env_set = [ "TVOS_DEPLOYMENT_TARGET" ] }
+toolchain = "${TVOS_RUST_NIGHTLY_VERSION}"
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "-Zbuild-std", "--release", "-p", "lightway-client", "--target", "aarch64-apple-tvos-sim", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.build-tvos-x86-sim-library]
+condition = { env_set = [ "TVOS_DEPLOYMENT_TARGET" ] }
+toolchain = "${TVOS_RUST_NIGHTLY_VERSION}"
+command = "cargo"
+args = ["rustc", "--crate-type", "staticlib", "--lib", "-Zbuild-std", "--release", "-p", "lightway-client", "--target", "x86_64-apple-tvos", "--features", "${FEATURES_MOBILE}"]
+
+[tasks.lipo-tvos-sim-library]
+dependencies = ["build-tvos-arm-sim-library", "build-tvos-x86-sim-library"]
+script = '''
+    mkdir -p ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/tvOSUniversal/release
+    lipo -create \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/aarch64-apple-tvos-sim/release/liblightway_client.a \
+              ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/x86_64-apple-tvos/release/liblightway_client.a \
+              -output ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/tvOSUniversal/release/liblightway_client.a
+    lipo -info ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/tvOSUniversal/release/liblightway_client.a
+'''
+
+[tasks.bindgen-tvos]
+script = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/scripts/ios-bindgen.sh -p tvos"
+
+[tasks.build-android]
+description = "Build android library (.aar)"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+run_task = { name = [ "build-android-uniffi-library", "bindgen-android", "bundle-aar" ] }
+
+[tasks.build-android-uniffi-library]
+description = "Build native libraries for all Android architectures (x86_64, x86, armeabi-v7a, arm64-v8a)"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+command = "cargo"
+args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}", "build", "--features", "mobile", "--release", "-p", "lightway-client", "--lib" ]
+
+[tasks.bindgen-android]
+description = "Generate bindgen kotlin classes"
+script = '''
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt" ] \
+    && mv "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt" "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt"
+
+cargo run --bin uniffi-bindgen generate --config lightway-client/uniffi.toml --library target/aarch64-linux-android/release/liblightway_client.so --language kotlin --out-dir $ANDROID_UNIFFI_BINDINGS_DIR
+
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt" ] || { echo "Generated Kotlin file not found"; exit 1; }
+
+# Rename and follow the java convention
+mv "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt" "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt"
+'''
+
+[tasks.bundle-aar]
+description = "Bundle and create AAR"
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
+command = "./gradlew"
+args = [ "build" ]
+
+[tasks.clean-android]
+description = "clean artifacts for android"
+run_task = { name = [ "cargo-clean", "gradle-clean" ] }
+
+[tasks.cargo-clean]
+description = "clean rust artifacts"
+command = "cargo"
+args = [ "clean" ]
+
+[tasks.gradle-clean]
+description = "clean gradle artifacts"
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
+command = "./gradlew"
+args = [ "clean" ]
