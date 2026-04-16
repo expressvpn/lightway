@@ -35,6 +35,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::debug::WiresharkKeyLogger;
 #[cfg(desktop)]
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
+#[cfg(batch_receive)]
+use crate::io::outside::BATCH_RECV_SIZE;
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
 use crate::route_manager::{RouteManager, RouteMode};
@@ -384,35 +386,53 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
-    let mut buf = BytesMut::with_capacity(mtu);
-    loop {
-        // Recover full capacity
-        buf.clear();
-        buf.reserve(mtu);
+    #[cfg(batch_receive)]
+    const BUF_COUNT: usize = BATCH_RECV_SIZE;
+    #[cfg(not(batch_receive))]
+    const BUF_COUNT: usize = 1;
 
+    let mut bufs: [BytesMut; BUF_COUNT] = std::array::from_fn(|_| BytesMut::with_capacity(mtu));
+
+    loop {
         // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
-        outside_io.readable().await?;
+        outside_io.poll(tokio::io::Interest::READABLE).await?;
 
         // Send ready signal after first successful poll
         if let Some(tx) = ready_signal.take() {
             let _ = tx.send(());
         }
 
-        match outside_io.recv_buf(&mut buf) {
-            IOCallbackResult::Ok(_nr) => {}
-            IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
-            IOCallbackResult::Err(err) => {
-                // Fatal error
-                return Err(err.into());
-            }
+        #[cfg(batch_receive)]
+        let count = match outside_io.recv_bufs(&mut bufs) {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
         };
 
-        let pkt = OutsidePacket::Wire(&mut buf, connection_type);
-        if let Err(err) = conn.lock().unwrap().outside_data_received(pkt) {
-            if err.is_fatal(connection_type) {
-                return Err(err.into());
+        #[cfg(not(batch_receive))]
+        let count = match outside_io.recv_buf(&mut bufs[0]) {
+            IOCallbackResult::Ok(_) => 1,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
+        };
+
+        // TODO: Batch send the packets into the tun device at once
+        {
+            let mut conn = conn.lock().unwrap();
+            for b in &mut bufs[..count] {
+                let pkt = OutsidePacket::Wire(b, connection_type);
+                if let Err(err) = conn.outside_data_received(pkt) {
+                    if err.is_fatal(connection_type) {
+                        return Err(err.into());
+                    }
+                    tracing::error!("Failed to process outside data: {err}");
+                }
             }
-            tracing::error!("Failed to process outside data: {err}");
+        }
+
+        for b in &mut bufs[..count] {
+            b.clear();
+            b.reserve(mtu);
         }
 
         keepalive.outside_activity().await
