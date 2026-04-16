@@ -2,7 +2,6 @@
 
 use super::BATCH_RECV_SIZE;
 use bytes::BytesMut;
-use lightway_core::MAX_OUTSIDE_MTU;
 use std::io;
 
 /// Platform-specific batch receive syscall.
@@ -23,7 +22,15 @@ pub(crate) fn is_batch_receive_available() -> bool {
 }
 
 #[cfg(apple)]
-pub(crate) type PlatformBatchRecv = apple::RecvmsgX;
+type PlatformBatchRecv = apple::RecvmsgX;
+
+pub(crate) fn recv_multiple(
+    fd: libc::c_int,
+    recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+    max_batch_size: usize,
+) -> io::Result<usize> {
+    PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
+}
 
 #[cfg(apple)]
 mod apple {
