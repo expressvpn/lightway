@@ -1,82 +1,19 @@
 #![cfg(batch_receive)]
 
-use anyhow::Result;
+use super::BATCH_RECV_SIZE;
 use bytes::BytesMut;
 use lightway_core::MAX_OUTSIDE_MTU;
-use rtrb::{PopError, RingBuffer};
 use std::io;
-use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex};
-use tokio::net::UdpSocket;
-use tokio::sync::Semaphore;
-use tokio_util::sync::{CancellationToken, DropGuard};
-use tracing::{error, info};
 
-pub(crate) struct BatchReceiver {
-    recv_ready: Arc<Semaphore>,
-    recv_consumer: Mutex<rtrb::Consumer<BytesMut>>,
-    io_error: Arc<Mutex<Option<io::Error>>>,
-    _drop_guard: DropGuard,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BatchReceiverConsumerError {
-    #[error("Empty ring buffer: {0}")]
-    EmptyBuffer(#[from] PopError),
-    #[error("Semaphore is closed by the task: {0}")]
-    SemaphoreClosed(#[from] io::Error),
-}
-
-const MAX_BUFFER_SIZE: usize = 1024;
-impl BatchReceiver {
-    pub fn new(sock: Arc<UdpSocket>) -> Self {
-        let recv_ready = Arc::new(Semaphore::new(0));
-        let (recv_producer, recv_consumer) = RingBuffer::new(MAX_BUFFER_SIZE);
-        let cancellation_token = CancellationToken::new();
-        let io_error = Arc::new(Mutex::new(None));
-        tokio::task::spawn(handle_udp_recv::<PlatformBatchRecv>(
-            sock.clone(),
-            recv_producer,
-            recv_ready.clone(),
-            cancellation_token.clone(),
-            io_error.clone(),
-        ));
-        Self {
-            recv_ready,
-            recv_consumer: Mutex::new(recv_consumer),
-            io_error,
-            _drop_guard: cancellation_token.drop_guard(),
-        }
-    }
-
-    pub async fn recv_queue_ready(&self) -> Result<()> {
-        // Using a semaphore so bursts are counted correctly: each
-        // received packet adds exactly one permit, and each readable() consumes one.
-        self.recv_ready
-            .acquire()
-            .await
-            .map_err(|e| anyhow::anyhow!("recv_ready semaphore closed: {e}"))?
-            .forget(); // consume the permit without dropping it back
-        Ok(())
-    }
-
-    pub fn pop_recv_consumer(&self) -> std::result::Result<BytesMut, BatchReceiverConsumerError> {
-        if !self.recv_ready.is_closed() {
-            self.recv_consumer
-                .lock()
-                .unwrap()
-                .pop()
-                .map_err(|e| e.into())
-        } else {
-            let io_err = self
-                .io_error
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| io::Error::other("batch receiver task closed unexpectedly"));
-            Err(io_err.into())
-        }
-    }
+/// Platform-specific batch receive syscall.
+trait BatchRecvSyscall {
+    /// Receive up to `msg_count` packets from `fd` into `recv_bufs`.
+    /// Returns the number of packets actually received.
+    fn recv_multiple(
+        fd: libc::c_int,
+        recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+        msg_count: usize,
+    ) -> io::Result<usize>;
 }
 
 /// Check whether the platform supports batch receiving via `recvmsg_x`.
@@ -85,97 +22,12 @@ pub(crate) fn is_batch_receive_available() -> bool {
     apple::is_batch_receive_available()
 }
 
-/// Maximum number of messages to send/receive in a single syscall.
-const BATCH_SIZE: usize = 32;
-
-/// Platform-specific batch receive syscall.
-trait BatchRecvSyscall {
-    /// Receive up to `msg_count` packets from `fd` into `recv_bufs`.
-    /// Returns the number of packets actually received.
-    fn recv_multiple(
-        fd: libc::c_int,
-        recv_bufs: &mut [BytesMut; BATCH_SIZE],
-        msg_count: usize,
-    ) -> io::Result<usize>;
-}
-
 #[cfg(apple)]
-type PlatformBatchRecv = apple::RecvmsgX;
-
-/// Tokio task: receives packets from the socket using the platform-specific
-/// batch syscall and pushes them into the rx ring buffer.
-async fn handle_udp_recv<S: BatchRecvSyscall>(
-    sock: Arc<UdpSocket>,
-    mut rx_queue: rtrb::Producer<BytesMut>,
-    rx_ready: Arc<Semaphore>,
-    cancel: CancellationToken,
-    io_error: Arc<Mutex<Option<io::Error>>>,
-) {
-    let mut recv_bufs: [BytesMut; BATCH_SIZE] =
-        std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("Batch receiver shutting down");
-                return;
-            }
-            ready = sock.readable() => {
-                if let Err(e) = ready {
-                    error!("Batch receive task failed on readable: {e}");
-                    rx_ready.close();
-                    io_error.lock().unwrap().replace(e);
-                    return;
-                }
-                let msg_count = rx_queue.slots().min(BATCH_SIZE);
-                if msg_count == 0 {
-                    // The ring buffer is full. We must yield here because
-                    // the socket is still readable (data in the kernel buffer),
-                    // so `readable()` would return immediately on the next
-                    // iteration — creating a busy spin that starves the
-                    // consumer task and prevents it from draining the buffer.
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-
-                // Retry if we received Interrupted
-                let recv_count = loop {
-                    match sock.try_io(tokio::io::Interest::READABLE, || {
-                        S::recv_multiple(sock.as_raw_fd(), &mut recv_bufs, msg_count)
-                    }) {
-                        Ok(n) => break n,
-                        // try_io may return WouldBlock even if the socket isn't actually
-                        // readable. Break with 0 to wait for another readable event emitted.
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break 0,
-                        // Interrupted means the syscall was interrupted by a signal and can be
-                        // retried immediately without waiting for another readable event.
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            error!("Batch receive task failed: {e}");
-                            rx_ready.close();
-                            io_error.lock().unwrap().replace(e);
-                            return;
-                        }
-                    }
-                };
-
-                if recv_count > 0 {
-                    let chunk = rx_queue
-                        .write_chunk_uninit(recv_count)
-                        .expect("slots() guaranteed enough space");
-                    let pushed = chunk.fill_from_iter((0..recv_count).map(|i| {
-                        std::mem::replace(&mut recv_bufs[i], BytesMut::with_capacity(MAX_OUTSIDE_MTU))
-                    }));
-                    rx_ready.add_permits(pushed);
-                }
-            }
-        }
-    }
-}
+pub(crate) type PlatformBatchRecv = apple::RecvmsgX;
 
 #[cfg(apple)]
 mod apple {
-    use crate::io::outside::udp_batch_receiver::BATCH_SIZE;
+    use super::BATCH_RECV_SIZE;
     use bytes::BytesMut;
     use lightway_core::MAX_OUTSIDE_MTU;
     use std::sync::LazyLock;
@@ -235,13 +87,13 @@ mod apple {
         #[allow(unsafe_code)]
         fn recv_multiple(
             fd: libc::c_int,
-            recv_bufs: &mut [BytesMut; BATCH_SIZE],
+            recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
             msg_count: usize,
         ) -> io::Result<usize> {
             // SAFETY: zeroed iovec is valid (null pointer + zero length).
-            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_SIZE]>() };
+            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_RECV_SIZE]>() };
             // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
-            let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
+            let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_RECV_SIZE]>() };
             for i in 0..msg_count {
                 iovecs[i].iov_base =
                     recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
@@ -297,303 +149,65 @@ mod apple {
 #[serial_test::serial]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use lightway_core::MAX_OUTSIDE_MTU;
     use std::time::Duration;
     use tokio::net::UdpSocket;
 
-    async fn make_socket_pair() -> (UdpSocket, Arc<UdpSocket>) {
+    async fn make_socket_pair() -> (UdpSocket, UdpSocket) {
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         sender
             .connect(receiver.local_addr().unwrap())
             .await
             .unwrap();
-        (sender, Arc::new(receiver))
+        (sender, receiver)
     }
 
     #[tokio::test]
-    async fn single_packet_received() {
+    async fn recv_multiple_single_packet() {
         let (sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
 
         sender.send(b"hello").await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+        let mut bufs: [BytesMut; BATCH_RECV_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
+
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
             .await
             .unwrap()
             .unwrap();
-        let pkt = batch.pop_recv_consumer().unwrap();
-        assert_eq!(&pkt[..], b"hello");
+
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, BATCH_RECV_SIZE).unwrap();
+        assert!(count >= 1);
+        assert_eq!(&bufs[0][..], b"hello");
     }
 
     #[tokio::test]
-    async fn multiple_packets_received_in_order() {
+    async fn recv_multiple_multiple_packets() {
         let (sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
 
         for i in 0..10u8 {
             sender.send(&[i]).await.unwrap();
         }
 
-        for i in 0..10u8 {
-            tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
-                .await
-                .unwrap()
-                .unwrap();
-            let pkt = batch.pop_recv_consumer().unwrap();
-            assert_eq!(pkt[0], i);
-        }
-    }
+        // Give packets time to arrive in kernel buffer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-    #[tokio::test]
-    async fn pop_on_empty_returns_error() {
-        let (_sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
-        assert!(matches!(
-            batch.pop_recv_consumer(),
-            Err(BatchReceiverConsumerError::EmptyBuffer(_))
-        ));
-    }
+        let mut bufs: [BytesMut; BATCH_RECV_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
 
-    #[tokio::test]
-    async fn ring_buffer_full_no_data_loss() {
-        let (sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
-
-        // Fill the ring buffer to capacity.
-        for i in 0..MAX_BUFFER_SIZE as u32 {
-            sender.send(&i.to_le_bytes()).await.unwrap();
-        }
-
-        // Drain and verify every packet arrived in order.
-        for i in 0..MAX_BUFFER_SIZE as u32 {
-            tokio::time::timeout(Duration::from_secs(5), batch.recv_queue_ready())
-                .await
-                .unwrap()
-                .unwrap();
-            let pkt = batch.pop_recv_consumer().unwrap();
-            assert_eq!(
-                u32::from_le_bytes(pkt[..4].try_into().unwrap()),
-                i,
-                "packet {i} out of order"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn packets_after_drain() {
-        let (sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
-
-        // First burst.
-        sender.send(b"first").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
             .await
             .unwrap()
             .unwrap();
-        let pkt = batch.pop_recv_consumer().unwrap();
-        assert_eq!(&pkt[..], b"first");
 
-        // Second burst after draining.
-        sender.send(b"second").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
-            .await
-            .unwrap()
-            .unwrap();
-        let pkt = batch.pop_recv_consumer().unwrap();
-        assert_eq!(&pkt[..], b"second");
-    }
-
-    #[tokio::test]
-    async fn closed_sender_socket_propagates_error() {
-        let (sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
-
-        // Send one packet, then drop the sender.
-        sender.send(b"bye").await.unwrap();
-        drop(sender);
-
-        // The already-queued packet should still be readable.
-        tokio::time::timeout(Duration::from_secs(2), batch.recv_queue_ready())
-            .await
-            .unwrap()
-            .unwrap();
-        let pkt = batch.pop_recv_consumer().unwrap();
-        assert_eq!(&pkt[..], b"bye");
-    }
-
-    #[tokio::test]
-    async fn pop_after_semaphore_closed_returns_semaphore_closed() {
-        let (_sender, receiver) = make_socket_pair().await;
-        let batch = BatchReceiver::new(receiver);
-
-        // Manually close the semaphore to simulate the recv task dying with an IO error.
-        batch.recv_ready.close();
-        batch
-            .io_error
-            .lock()
-            .unwrap()
-            .replace(io::Error::other("simulated IO failure"));
-
-        assert!(matches!(
-            batch.pop_recv_consumer(),
-            Err(BatchReceiverConsumerError::SemaphoreClosed(_))
-        ));
-    }
-
-    // ---- Direct handle_udp_recv tests ----
-
-    /// Helper: spawn handle_udp_recv with our own ring buffer and semaphore.
-    #[allow(clippy::type_complexity)]
-    fn spawn_handle_udp_recv<S: BatchRecvSyscall + 'static>(
-        sock: Arc<UdpSocket>,
-        buffer_size: usize,
-    ) -> (
-        rtrb::Consumer<BytesMut>,
-        Arc<Semaphore>,
-        CancellationToken,
-        Arc<Mutex<Option<io::Error>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let rx_ready = Arc::new(Semaphore::new(0));
-        let (producer, consumer) = RingBuffer::new(buffer_size);
-        let cancel = CancellationToken::new();
-        let io_error = Arc::new(Mutex::new(None));
-        let handle = tokio::task::spawn(handle_udp_recv::<S>(
-            sock,
-            producer,
-            rx_ready.clone(),
-            cancel.clone(),
-            io_error.clone(),
-        ));
-        (consumer, rx_ready, cancel, io_error, handle)
-    }
-
-    #[tokio::test]
-    async fn handle_recv_cancellation_stops_task() {
-        let (_sender, receiver) = make_socket_pair().await;
-        let (_, _, cancel, _, handle) =
-            spawn_handle_udp_recv::<PlatformBatchRecv>(receiver, MAX_BUFFER_SIZE);
-
-        cancel.cancel();
-
-        // Task should exit promptly.
-        tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("task did not finish in time")
-            .expect("task panicked");
-    }
-
-    #[tokio::test]
-    async fn handle_recv_pushes_packets_and_adds_permits() {
-        let (sender, receiver) = make_socket_pair().await;
-        let (mut consumer, rx_ready, cancel, _, _handle) =
-            spawn_handle_udp_recv::<PlatformBatchRecv>(receiver, MAX_BUFFER_SIZE);
-
-        sender.send(b"pkt1").await.unwrap();
-        sender.send(b"pkt2").await.unwrap();
-
-        // Wait for both permits.
-        for _ in 0..2 {
-            tokio::time::timeout(Duration::from_secs(2), rx_ready.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, BATCH_RECV_SIZE).unwrap();
+        assert!(count >= 1);
+        // Verify received packets are in order.
+        for i in 0..count {
+            assert_eq!(bufs[i][0], i as u8);
         }
-
-        let p1 = consumer.pop().unwrap();
-        let p2 = consumer.pop().unwrap();
-        assert_eq!(&p1[..], b"pkt1");
-        assert_eq!(&p2[..], b"pkt2");
-
-        cancel.cancel();
-    }
-
-    const INJECTED_ERROR_STRING: &str = "woah totally real io error sad";
-    struct FailingRecv;
-
-    impl BatchRecvSyscall for FailingRecv {
-        fn recv_multiple(
-            _fd: libc::c_int,
-            _recv_bufs: &mut [BytesMut; BATCH_SIZE],
-            _msg_count: usize,
-        ) -> io::Result<usize> {
-            Err(io::Error::other(INJECTED_ERROR_STRING))
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_recv_fatal_error_closes_semaphore_and_stores_error() {
-        let (sender, receiver) = make_socket_pair().await;
-        let (_, rx_ready, _, io_error, handle) =
-            spawn_handle_udp_recv::<FailingRecv>(receiver, MAX_BUFFER_SIZE);
-
-        // Send a packet so the socket becomes readable, triggering the failing recv.
-        sender.send(b"trigger").await.unwrap();
-
-        // The task should exit after the fatal error.
-        tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("task did not finish in time")
-            .expect("task panicked");
-
-        assert!(rx_ready.is_closed());
-        let err = io_error
-            .lock()
-            .unwrap()
-            .take()
-            .expect("expected stored IO error");
-        assert_eq!(err.to_string(), INJECTED_ERROR_STRING);
-    }
-
-    static INTERRUPTED_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-    struct InterruptedOnceRecv;
-
-    impl BatchRecvSyscall for InterruptedOnceRecv {
-        fn recv_multiple(
-            _fd: libc::c_int,
-            recv_bufs: &mut [BytesMut; BATCH_SIZE],
-            _msg_count: usize,
-        ) -> io::Result<usize> {
-            let call = INTERRUPTED_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                recv_bufs[0].clear();
-                recv_bufs[0].extend_from_slice(b"after_interrupt");
-                Ok(1)
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_recv_interrupted_retries_immediately() {
-        INTERRUPTED_CALL_COUNT.store(0, Ordering::SeqCst);
-        let (sender, receiver) = make_socket_pair().await;
-        let (mut consumer, rx_ready, cancel, io_error, _handle) =
-            spawn_handle_udp_recv::<InterruptedOnceRecv>(receiver, MAX_BUFFER_SIZE);
-
-        // Send a packet so the socket becomes readable.
-        sender.send(b"trigger").await.unwrap();
-
-        // First recv_multiple returns Interrupted, which is retried
-        // immediately within the inner loop. Second call succeeds.
-        tokio::time::timeout(Duration::from_secs(2), rx_ready.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-
-        let pkt = consumer.pop().unwrap();
-        assert_eq!(&pkt[..], b"after_interrupt");
-
-        // Interrupted is not fatal — semaphore must still be open.
-        assert!(!rx_ready.is_closed());
-        assert!(io_error.lock().unwrap().is_none());
-
-        cancel.cancel();
     }
 }

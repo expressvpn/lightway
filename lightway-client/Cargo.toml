@@ -21,7 +21,7 @@ mobile = ["uniffi", "tracing-core", "tracing-panic"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum"]
-batch_receive = ["rtrb"]
+batch_receive = []
 
 [lints]
 workspace = true
@@ -48,7 +48,6 @@ tokio-util.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twelf.workspace = true
-rtrb = { version = "0.3.3", optional = true }
 
 # mobile feature
 uniffi = { workspace = true, optional = true }

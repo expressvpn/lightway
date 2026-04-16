@@ -18,7 +18,7 @@ pub struct Udp {
     peer_addr: SocketAddr,
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
-    batch_receiver: Option<BatchReceiver>,
+    batch_receive_enabled: bool,
 }
 
 impl Udp {
@@ -48,7 +48,7 @@ impl Udp {
             peer_addr,
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
-            batch_receiver: None,
+            batch_receive_enabled: false,
         })
     }
 
@@ -62,7 +62,7 @@ impl Udp {
             return;
         }
         tracing::info!("Using batch receiver");
-        self.batch_receiver = Some(BatchReceiver::new(self.sock.clone()));
+        self.batch_receive_enabled = true;
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -102,18 +102,6 @@ impl OutsideIO for Udp {
     }
 
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize> {
-        #[cfg(batch_receive)]
-        if let Some(receiver) = self.batch_receiver.as_ref() {
-            return match receiver.pop_recv_consumer() {
-                Ok(b) => {
-                    let len = b.len();
-                    *buf = b;
-                    IOCallbackResult::Ok(len)
-                }
-                Err(BatchReceiverConsumerError::EmptyBuffer(_)) => IOCallbackResult::WouldBlock,
-                Err(BatchReceiverConsumerError::SemaphoreClosed(e)) => IOCallbackResult::Err(e),
-            };
-        }
         match self.sock.try_recv_buf(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
