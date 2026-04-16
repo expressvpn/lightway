@@ -17,7 +17,7 @@ uniffi::setup_scaffolding!();
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::{FutureExt, future::join_all, stream::FuturesUnordered};
+use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
@@ -54,6 +54,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{
+    future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -998,6 +999,67 @@ async fn find_best_connection(
     }
 }
 
+/// Runs connection futures concurrently, feeds their connected signals to
+/// [`find_best_connection`], and returns the best connection index along with
+/// all successful connections.
+///
+/// Each connect future must yield `(index, Result<(connected_signal, connection)>)`.
+/// The `connected_signal` is forwarded to the selection logic; the `connection` is
+/// stored and returned alongside the winning index.
+async fn select_best_from_futures<C, Fut>(
+    mut connect_futs: FuturesUnordered<Fut>,
+    preferred_connection_wait_interval: Duration,
+) -> Result<(usize, Vec<(usize, C)>)>
+where
+    Fut: Future<Output = (usize, Result<(oneshot::Receiver<()>, C)>)>,
+{
+    if connect_futs.is_empty() {
+        return Err(anyhow!("No servers available"));
+    }
+
+    let server_count = connect_futs.len();
+    let mut connections: Vec<(usize, C)> = Vec::new();
+
+    let (connection_setup_tx, connection_setup_rx) = mpsc::channel(server_count);
+    let mut connection_setup_tx = Some(connection_setup_tx);
+    let mut setup_complete = false;
+
+    let mut find_best = std::pin::pin!(find_best_connection(
+        connection_setup_rx,
+        preferred_connection_wait_interval,
+    ));
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Higher priority to ensure we add the connection to find_best_connection asap
+            Some((orig_idx, result)) = connect_futs.next(), if !setup_complete => {
+                match result {
+                    Ok((signal, conn)) => {
+                        let _ = connection_setup_tx.as_ref().unwrap().send((orig_idx, signal)).await.inspect_err(|e| tracing::warn!("Failed to send connection signal: {e}"));
+                        connections.push((orig_idx, conn));
+                    }
+                    Err(e) => {
+                        tracing::error!("Creating connection failed: {e}");
+                    }
+                }
+                if connect_futs.is_empty() {
+                    setup_complete = true;
+                    drop(connection_setup_tx.take()); // close the signal channel
+                    if connections.is_empty() {
+                        return Err(anyhow!("No servers are able to connect"));
+                    }
+                }
+            }
+
+            index = &mut find_best => {
+                return Ok((index?, connections));
+            }
+        }
+    }
+}
+
 fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
@@ -1074,76 +1136,32 @@ pub async fn client<
         );
     }
 
-    let server_count = servers.len();
     let preferred_connection_wait_interval = config.preferred_connection_wait_interval;
-    let mut connections: Vec<(usize, ClientConnection<_>)> = Vec::new();
 
-    let mut stop_signal = config.stop_signal.take().expect("stop_signal must be set");
-
-    let best_connection_index = {
-        let mut connect_futs: FuturesUnordered<_> = servers
+    let (best_connection_index, mut connections) = {
+        let connect_futs: FuturesUnordered<_> = servers
             .into_iter()
             .enumerate()
             .map(|(index, server_config)| {
                 let config = &config;
                 let inside_io = inside_io.clone();
-                async move { (index, connect(config, server_config, inside_io).await) }
+                async move {
+                    let result = connect(config, server_config, inside_io)
+                        .await
+                        .map(|mut conn| (conn.connected_signal.take().unwrap(), conn));
+                    (index, result)
+                }
             })
             .collect();
 
-        let (connection_setup_tx, connection_setup_rx) = mpsc::channel(server_count);
-        let mut connection_setup_tx = Some(connection_setup_tx);
-        let mut setup_complete = false;
+        tokio::select! {
+            result = select_best_from_futures(
+                connect_futs,
+                preferred_connection_wait_interval,
+            ) => result?,
 
-        let mut find_best = std::pin::pin!(find_best_connection(
-            connection_setup_rx,
-            preferred_connection_wait_interval,
-        ));
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // User disconnect — highest priority
-                _ = &mut stop_signal => {
-                    return Ok(ClientResult::UserDisconnect);
-                }
-
-                // Connection setup — feeds signals to find_best_connection
-                Some((orig_idx, result)) = connect_futs.next(), if !setup_complete => {
-                    match result {
-                        Ok(mut conn) => {
-                            let signal = conn.connected_signal.take().unwrap();
-                            let _ = connection_setup_tx.as_ref().unwrap().try_send((orig_idx, signal));
-                            connections.push((orig_idx, conn));
-                        }
-                        Err(e) => {
-                            tracing::error!("Creating connection failed: {e}");
-                        }
-                    }
-                    if connect_futs.is_empty() {
-                        setup_complete = true;
-                        drop(connection_setup_tx.take()); // close the signal channel
-                        if connections.is_empty() {
-                            return Err(anyhow!("No servers available"));
-                        }
-                    }
-                }
-
-                // Signal selection — picks the best connection
-                index = &mut find_best => {
-                    break index?;
-                }
-
-                // Task monitoring — all connection tasks exited without success
-                results = join_all(connections.iter_mut().map(|(_, c)| &mut c.task)), if setup_complete => {
-                    for result in results {
-                        if let Err(e) = result {
-                            tracing::error!("Connection failed: {e}");
-                        }
-                    }
-                    return Err(anyhow!("All connections failed to connect."));
-                }
+            _ = &mut stop_signal => {
+                return Ok(ClientResult::UserDisconnect);
             }
         }
     };
@@ -1318,5 +1336,232 @@ mod tests {
         };
 
         assert_eq!(best_connection_index, Some(1));
+    }
+
+    // select_best_from_futures tests
+
+    // Helper type alias for boxed connect futures used in select_best_from_futures tests
+    type BoxedConnectFut =
+        std::pin::Pin<Box<dyn Future<Output = (usize, Result<(oneshot::Receiver<()>, ())>)>>>;
+
+    #[tokio::test]
+    async fn test_select_best_one_connect_fails_other_succeeds() {
+        let (tx1, rx1) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async {
+            (
+                0usize,
+                Err::<(oneshot::Receiver<()>, ()), _>(anyhow!("timeout")),
+            )
+        }) as BoxedConnectFut);
+        futs.push(Box::pin(async move { (1usize, Ok((rx1, ()))) }));
+
+        // Signal connection 1 as online shortly after setup
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx1.send(());
+        });
+
+        let (best_index, connections) = select_best_from_futures(futs, Duration::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(best_index, 1);
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].0, 1);
+    }
+
+    #[test_case(0, "No servers available" ; "empty futures")]
+    #[test_case(1, "No servers are able to connect" ; "single future fails")]
+    #[test_case(2, "No servers are able to connect" ; "all futures fail")]
+    #[tokio::test]
+    async fn test_select_best_all_futures_fail(num_futures: usize, expected_error: &str) {
+        let futs: FuturesUnordered<BoxedConnectFut> = FuturesUnordered::new();
+        for i in 0..num_futures {
+            futs.push(Box::pin(async move {
+                (i, Err::<(oneshot::Receiver<()>, ()), _>(anyhow!("fail")))
+            }));
+        }
+
+        let result = select_best_from_futures(futs, Duration::ZERO).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), expected_error);
+    }
+
+    #[tokio::test]
+    async fn test_select_best_preferred_connection_wins() {
+        let (tx0, rx0) = oneshot::channel::<()>();
+        let (tx1, rx1) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async move { (0usize, Ok((rx0, ()))) }) as BoxedConnectFut);
+        futs.push(Box::pin(async move { (1usize, Ok((rx1, ()))) }));
+
+        // Both connect, but server 1 signals first, then server 0 signals
+        // within the preferred wait interval
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx1.send(());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx0.send(());
+        });
+
+        let (best_index, connections) = select_best_from_futures(futs, Duration::from_millis(200))
+            .await
+            .unwrap();
+
+        // Server 0 is preferred (lowest index) and connected within wait interval
+        assert_eq!(best_index, 0);
+        assert_eq!(connections.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_select_best_returns_all_successful_connections() {
+        let (tx0, rx0) = oneshot::channel::<()>();
+        let (tx1, _rx1) = oneshot::channel::<()>();
+        let (tx2, rx2) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async move { (0usize, Ok((rx0, ()))) }) as BoxedConnectFut);
+        futs.push(Box::pin(async {
+            (
+                1usize,
+                Err::<(oneshot::Receiver<()>, ()), _>(anyhow!("fail")),
+            )
+        }));
+        futs.push(Box::pin(async move { (2usize, Ok((rx2, ()))) }));
+
+        // Signal connections 2 then 0
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx2.send(());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx0.send(());
+        });
+        // tx1 intentionally dropped (connection 1 failed to connect)
+        drop(tx1);
+
+        let (best_index, connections) = select_best_from_futures(futs, Duration::from_millis(200))
+            .await
+            .unwrap();
+
+        // Server 0 is preferred and connected within wait
+        assert_eq!(best_index, 0);
+        // Only 2 successful connections (server 1 failed)
+        assert_eq!(connections.len(), 2);
+        let indices: Vec<usize> = connections.iter().map(|(idx, _)| *idx).collect();
+        assert!(indices.contains(&0));
+        assert!(indices.contains(&2));
+    }
+
+    #[test_case(Duration::ZERO ; "immediate futures")]
+    #[test_case(Duration::from_millis(50) ; "slow futures")]
+    #[tokio::test]
+    async fn test_select_best_all_succeed(future_delay: Duration) {
+        let (tx0, rx0) = oneshot::channel::<()>();
+        let (tx1, rx1) = oneshot::channel::<()>();
+        let (tx2, rx2) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async move {
+            tokio::time::sleep(future_delay).await;
+            (0usize, Ok((rx0, ())))
+        }) as BoxedConnectFut);
+        futs.push(Box::pin(async move {
+            tokio::time::sleep(future_delay).await;
+            (1usize, Ok((rx1, ())))
+        }));
+        futs.push(Box::pin(async move {
+            tokio::time::sleep(future_delay).await;
+            (2usize, Ok((rx2, ())))
+        }));
+
+        tokio::spawn(async move {
+            tokio::time::sleep(future_delay + Duration::from_millis(10)).await;
+            let _ = tx2.send(());
+            let _ = tx1.send(());
+            let _ = tx0.send(());
+        });
+
+        let (best_index, connections) = select_best_from_futures(futs, Duration::from_millis(200))
+            .await
+            .unwrap();
+
+        assert_eq!(best_index, 0);
+        assert_eq!(connections.len(), 3);
+    }
+
+    #[test_case(
+        vec![1],
+        1 ;
+        "single non preferred when preferred never signals"
+    )]
+    #[test_case(
+        vec![3, 2],
+        2 ;
+        "lowest non preferred selected from multiple"
+    )]
+    #[tokio::test]
+    async fn test_select_best_non_preferred_wins_after_wait(
+        signal_order: Vec<usize>,
+        expected_best: usize,
+    ) {
+        let max_idx = *signal_order.iter().max().unwrap();
+        let mut signal_txs = Vec::new();
+        let futs = FuturesUnordered::new();
+
+        for i in 0..=max_idx {
+            let (tx, rx) = oneshot::channel::<()>();
+            if signal_order.contains(&i) {
+                signal_txs.push((i, tx));
+            }
+            // Non-signaling senders dropped here, receiver sees RecvError
+            futs.push(Box::pin(async move { (i, Ok((rx, ()))) }) as BoxedConnectFut);
+        }
+
+        // Order senders to match signal_order
+        let ordered_txs: Vec<_> = signal_order
+            .iter()
+            .map(|&idx| {
+                let pos = signal_txs.iter().position(|(i, _)| *i == idx).unwrap();
+                signal_txs.remove(pos)
+            })
+            .collect();
+
+        tokio::spawn(async move {
+            for (_, tx) in ordered_txs {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = tx.send(());
+            }
+        });
+
+        let (best_index, connections) = select_best_from_futures(futs, Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        assert_eq!(best_index, expected_best);
+        assert_eq!(connections.len(), max_idx + 1);
+    }
+
+    #[tokio::test]
+    async fn test_select_best_connections_never_signal() {
+        // Connections set up successfully but never signal as "online".
+        // Senders must be dropped so receivers see RecvError
+        let (tx0, rx0) = oneshot::channel::<()>();
+        let (tx1, rx1) = oneshot::channel::<()>();
+        drop(tx0);
+        drop(tx1);
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async move { (0usize, Ok((rx0, ()))) }) as BoxedConnectFut);
+        futs.push(Box::pin(async move { (1usize, Ok((rx1, ()))) }));
+
+        let result = select_best_from_futures(futs, Duration::from_millis(50)).await;
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "All connections disconnected"
+        );
     }
 }
