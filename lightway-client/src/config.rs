@@ -15,9 +15,6 @@ use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::Patch;
 
-#[cfg(feature = "mobile")]
-use std::net::IpAddr;
-
 // NOTE
 // These internal parameters are not exposed
 #[cfg(feature = "mobile")]
@@ -759,7 +756,7 @@ pub struct MobileConfig {
 #[cfg(feature = "mobile")]
 #[derive(Clone, uniffi::Record)]
 pub struct MobileConnectionConfig {
-    pub server_ip: IpAddress,
+    pub server_ip: String,
     pub port: u16,
     pub server_dn: String,
     pub username: Option<String>,
@@ -788,7 +785,7 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
         }: MobileConnectionConfig,
     ) -> ConnectionConfig {
         ConnectionConfig {
-            server: format!("{}:{}", server_ip.ip.to_string(), port),
+            server: format!("{}:{}", server_ip, port),
             mode: if use_tcp {
                 ConnectionType::Tcp
             } else {
@@ -815,47 +812,6 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
             },
             ..Default::default()
         }
-    }
-}
-
-// Ref: https://mozilla.github.io/uniffi-rs/0.27/proc_macro/index.html#the-unifficustom_type-and-unifficustom_newtype-macros
-#[cfg(feature = "mobile")]
-uniffi::custom_type!(IpAddress, String);
-
-#[cfg(feature = "mobile")]
-#[derive(Debug, Eq, PartialEq, Clone)]
-/// Custom type  with `String` as the `Builtin` bridge
-pub struct IpAddress {
-    pub ip: IpAddr,
-}
-
-#[cfg(feature = "mobile")]
-impl std::fmt::Display for IpAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.ip)
-    }
-}
-
-#[cfg(feature = "mobile")]
-impl crate::UniffiCustomTypeConverter for IpAddress {
-    type Builtin = String;
-
-    fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
-        use std::str::FromStr;
-        Ok(IpAddress {
-            ip: IpAddr::from_str(val.as_str())?,
-        })
-    }
-
-    fn from_custom(obj: Self) -> Self::Builtin {
-        obj.ip.to_string()
-    }
-}
-
-#[cfg(feature = "mobile")]
-impl From<IpAddress> for IpAddr {
-    fn from(val: IpAddress) -> Self {
-        val.ip
     }
 }
 
