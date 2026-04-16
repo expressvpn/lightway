@@ -210,10 +210,6 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Inside packet codec's config
     pub inside_pkt_codec_config: Option<ClientInsidePacketCodecConfig>,
 
-    /// Specifies if the program responds to INT/TERM signals
-    #[educe(Debug(ignore))]
-    pub stop_signal: oneshot::Receiver<()>,
-
     /// Signal for notifying a network change event
     /// network change being defined as a change in
     /// wifi networks or a change of network interfaces
@@ -1093,11 +1089,14 @@ fn validate_client_config<
 /// If `config.preferred_connection_wait_interval` is set, it will wait that
 /// duration after the first connection completes before returning the highest
 /// priority connection (in the specified array order).
+///
+/// stop_signal sends a signal if the program received INT/TERM signals
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
     mut config: ClientConfig<'_, ExtAppState>,
+    mut stop_signal: oneshot::Receiver<()>,
     servers: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
     tracing::info!(
