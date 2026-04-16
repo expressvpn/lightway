@@ -1,7 +1,7 @@
 use crate::config::{Config, ConnectionConfig};
+use crate::event_handlers::EventHandlers;
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
-use crate::mobile::RustEventHandlers;
 use crate::state::{DeviceNetworkState, ExpresslaneState};
 use crate::{
     ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
@@ -11,12 +11,11 @@ use futures::StreamExt;
 use futures::future::{FutureExt, OptionFuture, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
 use lightway_app_utils::{
-    ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
-    connection_ticker_cb,
+    ConnectionTicker, DplpmtudTimer, EventStreamCallback, TunConfig, connection_ticker_cb,
 };
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType, Event,
-    EventCallback, IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
+    BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType,
+    IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,10 +44,7 @@ enum OutsideSocket {
 }
 
 impl OutsideSocket {
-    fn new(
-        use_tcp: bool,
-        event_handler: Option<Arc<dyn RustEventHandlers>>,
-    ) -> uniffi::Result<Self> {
+    fn new(use_tcp: bool, event_handler: Option<Arc<dyn EventHandlers>>) -> uniffi::Result<Self> {
         if use_tcp {
             let socket = TcpSocket::new_v4()?;
             let fd = socket.as_raw_fd();
@@ -119,7 +115,7 @@ impl<'a> OutsideIOBuilder {
     }
 }
 
-type TunnelState = Option<Arc<io::inside::Tun>>;
+pub type TunnelState = Option<Arc<io::inside::Tun>>;
 
 /// Inside IO which can be cloned by multiple parallel connections
 ///
@@ -177,7 +173,7 @@ async fn setup_tunnel_interface(
 
 pub(crate) async fn async_lightway_start(
     tun_fd: RawFd,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
     config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
@@ -198,7 +194,7 @@ pub(crate) async fn async_lightway_start(
     let (online_signal_sender, mut online_signal) = tokio::sync::mpsc::channel(server_len);
     let (event_handler, stream) = EventStreamCallback::new();
     let connection_start = Instant::now();
-    tokio::spawn(handle_global_events(
+    tokio::spawn(crate::event_handlers::handle_global_events(
         stream,
         connection_start,
         external_event_handler.clone(),
@@ -442,7 +438,7 @@ async fn restartable_outside_io_task(
     keepalive: Keepalive,
     notify_keepalive_reply: Arc<Notify>,
     mut new_outside_io_receiver: MpscReceiver<()>,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
 ) -> uniffi::Result<()> {
     let mut current_outside_io = outside_io_config.outside_io;
     let mut first_run = true;
@@ -559,7 +555,7 @@ struct LightwayClientConnectArgs {
     enable_expresslane: bool,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
 }
 
 /// Individual connection to a lightway server
@@ -667,7 +663,7 @@ async fn lightway_client_connect(
         }
         .unzip();
 
-    join_set.spawn(handle_events(
+    join_set.spawn(crate::event_handlers::handle_events(
         event_stream,
         keepalive.clone(),
         notify_keepalive_reply.clone(),
@@ -709,112 +705,6 @@ async fn lightway_client_connect(
         instance_id,
         expresslane_event_rx,
     })
-}
-
-/// This event handler is used to advertise State changes and First Packet Received event to mobile application
-///
-/// Only `Connecting`, `LinkUp`, and `Authenticating` are advertised from this handler. The mobile
-/// app can ignore the status if it wasn't supported. Plus, we will return the disconnection result to the client now
-/// so once the client has disconnected from the server, the mobile app would instantly know it has disconnected.
-/// `Online` state is advertised from `async_lightway_start` since we are waiting for parallel connect to finish.
-/// Only the first FirstPacketReceived event is advertised to mobile application
-/// since only the first one makes sense.
-async fn handle_global_events(
-    mut stream: EventStream,
-    connection_start_time: Instant,
-    event_handler: Arc<dyn RustEventHandlers>,
-) {
-    let mut current_state = State::Connecting;
-    let mut is_first_packet_received = false;
-
-    while let Some(event) = stream.next().await {
-        match event {
-            Event::StateChanged(state) => {
-                let allowed_states: &[State] = match current_state {
-                    State::Connecting => &[State::LinkUp, State::Authenticating, State::Online],
-                    State::LinkUp => &[State::Authenticating, State::Online],
-                    State::Authenticating => &[],
-                    State::Online => &[],
-                    State::Disconnecting => &[],
-                    State::Disconnected => &[],
-                };
-
-                if allowed_states.contains(&state) {
-                    if !matches!(state, State::Online) {
-                        event_handler.handle_status_change(state as u8);
-                    }
-                    current_state = state;
-                }
-            }
-            Event::FirstPacketReceived if !is_first_packet_received => {
-                info!("First packet received");
-                let elapsed_ms = connection_start_time.elapsed().as_millis();
-                // UniFFI does not support u128 types in its interface bindings.
-                // In the unlikely event that connection time exceeds u64::MAX ms,
-                // we clamp to u64::MAX rather than panic.
-                let time_to_receive_first_packet_in_ms =
-                    u64::try_from(elapsed_ms).unwrap_or(u64::MAX);
-                event_handler.received_first_packet(time_to_receive_first_packet_in_ms);
-                is_first_packet_received = true;
-            }
-            Event::EncodingStateChanged { enabled } => {
-                info!("Encoding state changed to {enabled}");
-                event_handler.handle_inside_pkt_codec_status_change(enabled);
-            }
-            _ => (),
-        }
-    }
-}
-
-/// Event handler for individual parallel connections
-#[allow(clippy::too_many_arguments)]
-async fn handle_events<A: 'static + Send + EventCallback>(
-    mut stream: EventStream,
-    keepalive: Keepalive,
-    notify_keepalive_reply: Arc<Notify>,
-    weak: Weak<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    mut event_handler: A,
-    online_signal: tokio::sync::mpsc::Sender<usize>,
-    instance_id: usize,
-    expresslane_event_tx: Option<MpscSender<ExpresslaneState>>,
-) {
-    while let Some(event) = stream.next().await {
-        match &event {
-            Event::StateChanged(state) => {
-                if matches!(state, State::Online) {
-                    let _ = online_signal.send(instance_id).await;
-                    keepalive.online().await;
-
-                    let Some(_conn) = weak.upgrade() else {
-                        break; // Connection disconnected.
-                    };
-                }
-            }
-            Event::KeepaliveReply => {
-                notify_keepalive_reply.notify_waiters();
-                keepalive.reply_received().await
-            }
-            Event::ExpresslaneStateChanged(state) => {
-                if let Some(tx) = expresslane_event_tx.as_ref()
-                    && let Ok(state) = (*state).try_into()
-                {
-                    if let Err(e) = tx.try_send(state) {
-                        warn!("Unable to send Expresslane state change event: {:?}", e);
-                    }
-                }
-                continue;
-            }
-            Event::FirstPacketReceived | Event::EncodingStateChanged { .. } => (), // will be handled by handle_global_events
-
-            // Server-only events
-            Event::SessionIdRotationAcknowledged { .. }
-            | Event::TlsKeysUpdateStart
-            | Event::TlsKeysUpdateCompleted => {
-                unreachable!("server only event received");
-            }
-        }
-        event_handler.event(event);
-    }
 }
 
 /// Handle all the network changes on the device.
@@ -884,90 +774,14 @@ async fn handle_network_change(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::mobile::MockRustEventHandlers;
+    use crate::event_handlers::MockEventHandlers;
     use mockall::Sequence;
     use mockall::predicate::eq;
 
     #[tokio::test]
-    async fn test_handle_global_events() {
-        let (mut sender, receiver) = EventStreamCallback::new();
-        let instant = Instant::now();
-        tokio::spawn(async move {
-            sender.event(Event::StateChanged(State::Connecting));
-            sender.event(Event::StateChanged(State::LinkUp));
-            sender.event(Event::StateChanged(State::Authenticating));
-            sender.event(Event::StateChanged(State::Online));
-        });
-
-        // Make sure we don't advertise Online state in this function
-        let mut seq = Sequence::new();
-        let mut mock_event_handler = MockRustEventHandlers::new();
-        mock_event_handler
-            .expect_handle_status_change()
-            .times(1)
-            .in_sequence(&mut seq)
-            .with(eq(State::LinkUp as u8))
-            .return_const(());
-        mock_event_handler
-            .expect_handle_status_change()
-            .times(1)
-            .in_sequence(&mut seq)
-            .with(eq(State::Authenticating as u8))
-            .return_const(());
-        mock_event_handler
-            .expect_handle_status_change()
-            .times(0)
-            .with(eq(State::Online as u8))
-            .return_const(());
-        handle_global_events(receiver, instant, Arc::new(mock_event_handler)).await;
-    }
-
-    #[tokio::test]
-    async fn test_handle_global_events_invalid_state_sequence() {
-        let (mut sender, receiver) = EventStreamCallback::new();
-        let instant = Instant::now();
-
-        tokio::spawn(async move {
-            sender.event(Event::StateChanged(State::Online));
-            sender.event(Event::StateChanged(State::LinkUp));
-            sender.event(Event::StateChanged(State::Authenticating));
-            sender.event(Event::StateChanged(State::Disconnecting));
-            sender.event(Event::StateChanged(State::Disconnected));
-        });
-
-        let mut mock_event_handler = MockRustEventHandlers::new();
-        mock_event_handler
-            .expect_handle_status_change()
-            .times(0)
-            .return_const(());
-        handle_global_events(receiver, instant, Arc::new(mock_event_handler)).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_handle_global_events_first_packet_received_only_send_once() {
-        let (mut sender, receiver) = EventStreamCallback::new();
-        let instant = Instant::now();
-
-        tokio::spawn(async move {
-            tokio::time::advance(Duration::from_millis(174)).await;
-            sender.event(Event::FirstPacketReceived);
-            sender.event(Event::FirstPacketReceived);
-            sender.event(Event::FirstPacketReceived);
-        });
-
-        let mut mock_event_handler = MockRustEventHandlers::new();
-        mock_event_handler
-            .expect_received_first_packet()
-            .with(eq(174u64))
-            .times(1)
-            .return_const(());
-        handle_global_events(receiver, instant, Arc::new(mock_event_handler)).await;
-    }
-
-    #[tokio::test]
     async fn test_outside_socket_new_calls_created_outside_fd() {
         // Test TCP socket creation
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
 
         mock_event_handler
             .expect_created_outside_fd()
@@ -978,7 +792,7 @@ mod test {
         assert!(tcp_result.is_ok());
 
         // Test UDP socket creation
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
 
         mock_event_handler
             .expect_created_outside_fd()

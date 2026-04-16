@@ -2,6 +2,7 @@ pub mod config;
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
+pub mod event_handlers;
 pub mod io;
 pub mod keepalive;
 #[cfg(feature = "mobile")]
@@ -15,20 +16,26 @@ pub mod state;
 #[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
+#[cfg(desktop)]
+use anyhow::{Context, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
+#[cfg(desktop)]
 use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
-    ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    ConnectionTicker, ConnectionTickerState, PacketCodecFactoryType, TunConfig, args::Cipher,
 };
+#[cfg(desktop)]
+use lightway_app_utils::{DplpmtudTimer, EventStreamCallback, connection_ticker_cb};
+#[cfg(desktop)]
+use lightway_core::{BuilderPredicates, ClientContextBuilder};
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
+    ClientIpConfig, Connection, ConnectionError, ConnectionType, EventCallback, IOCallbackResult,
+    InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, ipv4_update_destination,
+    ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -52,22 +59,26 @@ pub use lightway_core::{
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet_packet::ipv4::Ipv4Packet;
 #[cfg(desktop)]
+use std::future::Future;
+#[cfg(desktop)]
 use std::net::IpAddr;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{
-    future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
+#[cfg(desktop)]
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::{
     net::{TcpStream, UdpSocket},
     sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
 };
+#[cfg(desktop)]
 use tokio_stream::{StreamExt, StreamMap};
+#[cfg(desktop)]
 use tracing::info;
 
 /// Connection type
@@ -317,64 +328,6 @@ impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppS
     }
 }
 
-async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sync>(
-    mut stream: EventStream,
-    keepalive: Keepalive,
-    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
-    enable_encoding_when_online: bool,
-    mut event_handler: Option<A>,
-    connected_signal: oneshot::Sender<()>,
-    disconnected_signal: oneshot::Sender<()>,
-) {
-    let mut connected_signal = Some(connected_signal);
-    let mut disconnected_signal = Some(disconnected_signal);
-    while let Some(event) = stream.next().await {
-        match &event {
-            Event::StateChanged(state) => {
-                if matches!(state, State::Online) {
-                    if let Some(connected_signal) = connected_signal.take() {
-                        let _ = connected_signal.send(());
-                    }
-                    keepalive.online().await;
-                    let Some(conn) = weak.upgrade() else {
-                        break; // Connection disconnected.
-                    };
-
-                    if enable_encoding_when_online
-                        && let Err(e) = conn.lock().unwrap().set_encoding(true)
-                    {
-                        tracing::error!("Error encoutered when trying to toggle encoding. {}", e);
-                    }
-                } else if matches!(state, State::Disconnected)
-                    && let Some(disconnected_tx) = disconnected_signal.take()
-                {
-                    let _ = disconnected_tx.send(());
-                }
-            }
-            Event::KeepaliveReply => keepalive.reply_received().await,
-            Event::FirstPacketReceived => {
-                info!("First outside packet received");
-            }
-            Event::ExpresslaneStateChanged(state) => {
-                info!(?state, "Expresslane State Change");
-            }
-            Event::EncodingStateChanged { enabled } => {
-                info!("Encoding state changed to {enabled}");
-            }
-
-            // Server only events
-            Event::SessionIdRotationAcknowledged { .. }
-            | Event::TlsKeysUpdateStart
-            | Event::TlsKeysUpdateCompleted => {
-                unreachable!("server only event received");
-            }
-        }
-        if let Some(ref mut handler) = event_handler {
-            handler.event(event);
-        }
-    }
-}
-
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
@@ -519,6 +472,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+#[cfg(desktop)]
 async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
@@ -635,14 +589,19 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
 
 /// Represents a connection to a server. When dropped, the route table will be removed.
 pub struct ClientConnection<T: Send + Sync> {
+    #[cfg(desktop)]
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
     #[cfg(desktop)]
     outside_io: Arc<dyn io::outside::OutsideIO>,
+    #[cfg(desktop)]
     connected_signal: Option<oneshot::Receiver<()>>,
+    #[cfg(desktop)]
     stop_signal: Option<oneshot::Sender<()>>,
+    #[cfg(desktop)]
     network_change_signal: mpsc::Sender<()>,
+    #[cfg(desktop)]
     encoding_request_signal: mpsc::Sender<bool>,
     #[cfg(desktop)]
     route_manager: Option<RouteManager>,
@@ -713,6 +672,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         inside_io,
     )
 )]
+#[cfg(desktop)]
 pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
@@ -834,7 +794,7 @@ pub async fn connect<
     let (disconnected_tx, disconnected_rx) = oneshot::channel();
 
     let event_handler = server_config.event_handler.take();
-    join_set.spawn(handle_events(
+    join_set.spawn(event_handlers::handle_events(
         event_stream,
         keepalive.clone(),
         Arc::downgrade(&conn),
@@ -963,6 +923,7 @@ pub async fn connect<
 /// duration before returning the highest priority connection (lowest index).
 /// If there is only one connection, or the preferred connection (index 0)
 /// is the first to connect, it will not wait.
+#[cfg(desktop)]
 async fn find_best_connection(
     mut connection_setup_rx: mpsc::Receiver<(usize, oneshot::Receiver<()>)>,
     preferred_connection_wait_interval: Duration,
@@ -1024,6 +985,7 @@ async fn find_best_connection(
 /// Each connect future must yield `(index, Result<(connected_signal, connection)>)`.
 /// The `connected_signal` is forwarded to the selection logic; the `connection` is
 /// stored and returned alongside the winning index.
+#[cfg(desktop)]
 async fn select_best_from_futures<C, Fut>(
     mut connect_futs: FuturesUnordered<Fut>,
     preferred_connection_wait_interval: Duration,
@@ -1078,6 +1040,7 @@ where
     }
 }
 
+#[cfg(desktop)]
 fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
@@ -1113,6 +1076,7 @@ fn validate_client_config<
 /// priority connection (in the specified array order).
 ///
 /// stop_signal sends a signal if the program received INT/TERM signals
+#[cfg(desktop)]
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,

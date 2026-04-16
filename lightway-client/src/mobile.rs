@@ -5,38 +5,6 @@ pub(crate) mod tracing_utils;
 use std::sync::{Arc, OnceLock};
 use tracing::info;
 
-#[uniffi::export(with_foreign)]
-#[cfg_attr(test, mockall::automock)]
-pub trait RustEventHandlers: Send + Sync {
-    /// Handles VPN connection status changes from the native Lightway client.
-    /// State values: 2=Connecting, 6=LinkUp, 5=Authenticating, 7=Online, 4=Disconnecting, 1=Disconnected (from lightway-core)
-    ///
-    /// `Online` state is advertised when we have selected the best connection in parallel connect
-    fn handle_status_change(&self, state: u8);
-
-    /// Handles Expresslane state change. This will be called whenever there's a new update on
-    /// the Expresslane state change, see `ExpresslaneState` enum for details.
-    fn handle_expresslane_state_change(&self, state: crate::state::ExpresslaneState);
-
-    /// Called when the first packet is received from the server.
-    ///
-    /// It returns time in milliseconds from the connection start until the first packet is received
-    fn received_first_packet(&self, time_in_ms: u64);
-
-    /// Notify the mobile app that an outside socket has been created and pass the FD (by reference, not owned)
-    fn created_outside_fd(&self, fd: i32);
-
-    /// Notify the mobile app that connection has floated and do not need a reconnect after outside
-    /// IO has been changed, which could happen when the device is online again or the device is
-    /// using a different network interface (Cellular <-> WiFi). (iOS-only)
-    fn connection_has_floated(&self);
-
-    /// Handles inside pkt codec status changes from the native Lightway client. When the server
-    /// agrees to enable or disable the inside packet codec (after the client requests), this
-    /// handler will be called with the resulting state.
-    fn handle_inside_pkt_codec_status_change(&self, enabled: bool);
-}
-
 #[uniffi::export]
 fn get_lightway_client_hash() -> String {
     env!("GIT_HASH").to_string()
@@ -100,7 +68,7 @@ impl VpnConnection {
     fn parallel_connect(
         &self,
         endpoints: Vec<crate::config::MobileConnectionConfig>,
-        event_handler: Arc<dyn RustEventHandlers>,
+        event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
         raw_tun_fd: i32,
         mobile_config: crate::config::MobileConfig,
     ) -> Result<crate::ClientResult, LightwayError> {
