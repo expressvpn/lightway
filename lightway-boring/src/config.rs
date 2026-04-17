@@ -151,7 +151,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "postquantum")]
     fn test_session_config_keyshare_group() {
         let mock_io = MockIOAdapter::new();
 

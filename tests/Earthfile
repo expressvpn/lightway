@@ -1,5 +1,7 @@
 VERSION 0.8
 ARG --global debian = bookworm
+ARG --global BACKEND
+ARG --global EXTRA_FEATURES
 
 # save-all-test-containers saves all Docker container test images
 save-all-test-containers:
@@ -33,8 +35,8 @@ TEST:
         SET CLIENT_ARGS="$CLIENT_ARGS --mode=$MODE"
     END
 
-    ARG CLIENT_IMAGE="(./client+build-container --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian)"
-    ARG SERVER_IMAGE="(./server+build-container --TOKIO_WORKER_THREADS=$SERVER_TOKIO_WORKER_THREADS --debian=$debian)"
+    ARG CLIENT_IMAGE="(./client+build-container --BACKEND=$BACKEND --EXTRA_FEATURES=$EXTRA_FEATURES --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian)"
+    ARG SERVER_IMAGE="(./server+build-container --BACKEND=$BACKEND --EXTRA_FEATURES=$EXTRA_FEATURES --TOKIO_WORKER_THREADS=$SERVER_TOKIO_WORKER_THREADS --debian=$debian)"
     ARG NGINX_IMAGE="./base+build-test-nginx-container"
     ARG IPERF_IMAGE="(./base+build-test-iperf-container --debian=$debian)"
 
@@ -167,8 +169,88 @@ run-udp-then-tcp-parallel-connect-test:
 run-token-auth-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQ4ODMxMTM0MTZ9.gb0U7xTwxl7GDeKftKSZvnkkIDnoz8NmzJ4etukCjtZWzA4kSNbt84iTKOE14paRZdfE67tLGfcLsqA9uh-zuA_-ecZbiC4znz2CVVjhD2CIrW_0LQbHRbzYlOozjc108pct-VivtiPr7SqcIgRTjH59HTCDXtgp0kELhhr3NNfYP0-6DtadXQ_Twn2tcC3A-rTpfjwo7HDqnc43niCALXFhqR0F4DkEC3amKuOiP9afQ6dFmWVAzWXWEpQ_kK-EsCeBZ6K89GaF5quIErrV3U_FSwbX8biFB7S8VhkLqCoyabRKKprwp_mi24e91URgGqNvbCrXs2zrJMat-1zUvw" --SERVER_EXTRA_ARGS="--token-rsa-pub-key-pem /token.pub"
 
-# run-all-tests runs all tests
-run-all-tests:
+# CROSS_COMPAT_TEST runs the full cross-compat matrix for a given backend pair:
+# classical TCP/UDP/UDP+expresslane, plus TCP+PQC and UDP+PQC handshakes.
+#
+# PQC uses X25519MLKEM768. It's the only PQ key share group BoringSSL
+# supports, and the only one selectable through the BoringSSL client's
+# --keyshare CLI (the wolfSSL-only variants are cfg-gated out of the type
+# at build time). wolfSSL supports it too, so this value is the safe
+# cross-backend choice.
+CROSS_COMPAT_TEST:
+    FUNCTION
+    ARG SERVER_BACKEND
+    ARG CLIENT_BACKEND
+
+    # Classical TCP
+    DO +TEST --MODE=tcp --SERVER_PORT=443 \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
+
+    # Classical UDP
+    DO +TEST --MODE=udp --SERVER_PORT=27690 \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
+
+    # Classical UDP + Expresslane
+    DO +TEST --MODE=udp --SERVER_PORT=27690 \
+        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane" \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
+
+    # PQC TCP (X25519MLKEM768)
+    DO +TEST --MODE=tcp --SERVER_PORT=443 \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --ENABLE_POSTQUANTUM=true --debian=$debian)"
+
+    # PQC UDP (X25519MLKEM768)
+    DO +TEST --MODE=udp --SERVER_PORT=27690 \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --ENABLE_POSTQUANTUM=true --debian=$debian)"
+
+run-cross-compat-wolfssl-boringssl:
+    # Classical TCP
+    DO +TEST --MODE=tcp --SERVER_PORT=443 \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --debian=$debian)"
+
+    # PQC TCP (X25519MLKEM768) — the only PQ group both backends speak.
+    DO +TEST --MODE=tcp --SERVER_PORT=443 \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --ENABLE_POSTQUANTUM=true --debian=$debian)"
+
+    DO +TEST --MODE=udp --SERVER_PORT=27690 \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --ENABLE_POSTQUANTUM=true --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --ENABLE_POSTQUANTUM=true --debian=$debian)"
+    
+    DO +TEST --MODE=udp --SERVER_PORT=27690 \
+        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane" \
+        --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --ENABLE_POSTQUANTUM=true  --debian=$debian)" \
+        --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --ENABLE_POSTQUANTUM=true  --debian=$debian)"
+
+# boringssl server + wolfssl client: full TCP + UDP cross-compat.
+run-cross-compat-boringssl-wolfssl:
+    DO +CROSS_COMPAT_TEST --SERVER_BACKEND=boringssl --CLIENT_BACKEND=wolfssl
+
+# boringssl server + boringssl client: full TCP + UDP. Same-backend pair, kept
+# for ad-hoc local invocation (not in +run-cross-compat-tests).
+run-cross-compat-boringssl-boringssl:
+    DO +CROSS_COMPAT_TEST --SERVER_BACKEND=boringssl --CLIENT_BACKEND=boringssl
+
+# run-cross-compat-tests runs cross-compatibility tests (mixed-backend pairings only).
+# boringssl-boringssl is intentionally NOT included: same-backend pairings are
+# already covered by +e2e-wolfssl and +e2e-boringssl, so they add no cross-compat
+# coverage. The +run-cross-compat-boringssl-boringssl target is kept for
+# ad-hoc local invocation if needed.
+run-cross-compat-tests:
+    BUILD +run-cross-compat-wolfssl-boringssl
+    BUILD +run-cross-compat-boringssl-wolfssl
+
+# run-all-tests-wolfssl runs all e2e tests with the wolfssl backend.
+run-all-tests-wolfssl:
     BUILD +run-tcp-aes256-test
     BUILD +run-tcp-chacha20-test
     BUILD +run-tcp-pqc-test
@@ -198,3 +280,13 @@ run-all-tests:
     BUILD +run-udp-parallel-connect-test
     BUILD +run-tcp-then-udp-parallel-connect-test
     BUILD +run-udp-then-tcp-parallel-connect-test
+
+# run-all-tests-boringssl runs core e2e tests with the boringssl backend.
+run-all-tests-boringssl:
+    BUILD +run-tcp-aes256-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-tcp-chacha20-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-tcp-pqc-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-udp-aes256-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-udp-chacha20-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-udp-pqc-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true
+    BUILD +run-udp-expresslane-test --BACKEND=boringssl --ENABLE_POSTQUANTUM=true

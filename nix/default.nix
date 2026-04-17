@@ -6,8 +6,12 @@
   automake,
   libtool,
   buildPackages,
+  cmake,
+  git,
+  perl,
   package ? "lightway-client",
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
+  noDefaultFeatures ? false,
   isStatic ? false,
   platformSuffix ? null,
 }:
@@ -42,6 +46,12 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
+    # boring is a git dependency, not a registry crate, so Cargo.lock has no
+    # checksum for it. Nix's importCargoLock needs an explicit hash here.
+    # One entry covers both `boring` and `boring-sys` since they share a git source.
+    outputHashes = {
+      "boring-5.1.0" = "sha256-4yrvuS2wk9R2IMztzSCaNOVJypXRRkcfwINbFrMZwXA=";
+    };
   };
 
   # The boring submodule declares its own workspace including hyper-boring and
@@ -51,12 +61,18 @@ rustPlatform.buildRustPackage {
   auditable = false;
 
   buildFeatures = features;
+  buildNoDefaultFeatures = noDefaultFeatures;
   cargoBuildFlags = "-p ${package}";
 
   nativeBuildInputs = [
     autoconf
     automake
     libtool
+    # boring-sys's build script invokes `git init` and `cmake` to compile
+    # BoringSSL from source. perl is required by some BoringSSL build steps.
+    cmake
+    git
+    perl
   ]
   ++ lib.optionals (stdenv.hostPlatform.system == stdenv.buildPlatform.system) [
     # For native builds, use bindgenHook normally

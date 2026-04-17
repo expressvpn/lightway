@@ -46,9 +46,9 @@ source:
     COPY --keep-ts deny.toml ./
     COPY --keep-ts --dir lightway-core lightway-boring lightway-app-utils lightway-client uniffi-bindgen lightway-server tests ./
 
-# build runs cargo to build native binaries for the host platform.
+# build-wolfssl runs cargo to build native binaries for the host platform with the wolfssl backend.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.
-build:
+build-wolfssl:
     FROM +source
 
     DO lib-rust+CARGO --args="build --release --features io-uring" --output="release/lightway-(client|server)$"
@@ -56,8 +56,39 @@ build:
     SAVE ARTIFACT ./target/release/lightway-client AS LOCAL ./target/release/
     SAVE ARTIFACT ./target/release/lightway-server AS LOCAL ./target/release/
 
-# build-cross-arm64 cross-compiles to arm64 from an amd64 host.
-build-cross-arm64:
+build-boringssl:
+    FROM +source
+
+    DO lib-rust+CARGO --args="build --release --no-default-features --features io-uring,boringssl,postquantum" --output="release/lightway-(client|server)$"
+
+    SAVE ARTIFACT ./target/release/lightway-client AS LOCAL ./target/release/
+    SAVE ARTIFACT ./target/release/lightway-server AS LOCAL ./target/release/
+
+# build-backend builds client/server with a specified TLS backend, used by the e2e test containers.
+build-backend:
+    FROM +source
+    ARG --required BACKEND
+    ARG EXTRA_FEATURES=""
+    ARG ENABLE_POSTQUANTUM=false
+    LET client_features = "$BACKEND"
+    LET server_features = "$BACKEND"
+    IF [ "$ENABLE_POSTQUANTUM" = "true" ]
+        SET client_features = "$client_features,postquantum"
+    END
+    IF [ -n "$EXTRA_FEATURES" ]
+        SET client_features = "$client_features,$EXTRA_FEATURES"
+        SET server_features = "$server_features,$EXTRA_FEATURES"
+    END
+    DO lib-rust+CARGO \
+        --args="build --release -p lightway-client --no-default-features --features $client_features" \
+        --output="release/lightway-client$"
+    DO lib-rust+CARGO \
+        --args="build --release -p lightway-server --no-default-features --features $server_features" \
+        --output="release/lightway-server$"
+    SAVE ARTIFACT ./target/release/lightway-client
+    SAVE ARTIFACT ./target/release/lightway-server
+
+build-cross-arm64-wolfssl:
     FROM +source
     LET target = "aarch64-unknown-linux-gnu"
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
@@ -67,8 +98,39 @@ build-cross-arm64:
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
 
-# build-cross-riscv64 cross-compiles to riscv64 from an amd64 or arm64 host.
-build-cross-riscv64:
+build-cross-arm64-boringssl:
+    FROM +source
+    ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
+    ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64-static"
+
+    LET target = "aarch64-unknown-linux-gnu"
+    # boring-sys compiles BoringSSL's C/C++ via CMake without target-specific CC/CXX/AR,
+    # CMake falls back to the host (x86_64) toolchain.
+    ENV CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+    ENV CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"
+    ENV AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
+
+    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl,postquantum" --output="$target/release/lightway-(client|server)$"
+
+    SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
+    SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
+
+build-cross-riscv64-boringssl:
+    FROM +source
+    ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="riscv64-linux-gnu-gcc"
+    ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64"
+
+    LET target = "riscv64gc-unknown-linux-gnu"
+    ENV CC_riscv64gc_unknown_linux_gnu="riscv64-linux-gnu-gcc"
+    ENV CXX_riscv64gc_unknown_linux_gnu="riscv64-linux-gnu-g++"
+    ENV AR_riscv64gc_unknown_linux_gnu="riscv64-linux-gnu-ar"
+
+    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl,postquantum" --output="$target/release/lightway-(client|server)$"
+
+    SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
+    SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
+
+build-cross-riscv64-wolfssl:
     FROM +source
     LET target = "riscv64gc-unknown-linux-gnu"
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="riscv64-linux-gnu-gcc"
@@ -78,9 +140,10 @@ build-cross-riscv64:
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
 
-# test runs cargo to compile all unit and integration tests, natively for the host platform.
+# test-wolfssl runs the unit/integration test suite with the wolfssl backend
+# (the workspace default), natively for the host platform.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.
-test:
+test-wolfssl:
     FROM +source
 
     # Run all tests except privileged tests
@@ -89,44 +152,71 @@ test:
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client test_privileged -- --ignored
 
+# test-boringssl runs the unit/integration test suite with the boringssl backend.
+# We test each backend-aware crate explicitly (workspace-level `cargo test` cannot
+# both disable wolfssl defaults and enable boringssl in one invocation).
+test-boringssl:
+    FROM +source
+
+    DO lib-rust+CARGO --args="test -p lightway-boring"
+    DO lib-rust+CARGO --args="test -p lightway-app-utils --no-default-features --features tokio,boringssl"
+    DO lib-rust+CARGO --args="test -p lightway-core --no-default-features --features boringssl,postquantum"
+    DO lib-rust+CARGO --args="test -p lightway-client --no-default-features --features boringssl,postquantum"
+    DO lib-rust+CARGO --args="test -p lightway-server --no-default-features --features boringssl"
+
+    # Run only privileged tests with sudo permissions
+    RUN --privileged cargo test --package lightway-client --no-default-features --features boringssl,postquantum test_privileged -- --ignored
+
 # test-miri runs tests for modules which make use of `unsafe` under Miri.
 test-miri:
     FROM +source
     # The libc crate uses integer-to-pointer casts which are not compatible with "strict provenance"
     # (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance).
     ENV MIRIFLAGS=-Zmiri-permissive-provenance
-    DO lib-rust+CARGO --args="+nightly miri test -p lightway-app-utils -- iouring sockopt"
-    DO lib-rust+CARGO --args="+nightly miri test -p lightway-server -- io::outside::udp"
+    # `lightway-app-utils`'s default features do not include a TLS backend
+    # (its default is just `tokio`), so we must select one explicitly,
+    # otherwise lightway-core's compile_error fires.
+    DO lib-rust+CARGO --args="+nightly miri test -p lightway-app-utils --features wolfssl -- iouring sockopt"
+    DO lib-rust+CARGO --args="+nightly miri test -p lightway-server --features wolfssl -- io::outside::udp"
 
-# test-cross-arm64 cross-compiles to arm64 from an amd64 host. It then runs tests via QEMU.
-test-cross-arm64:
+# test-cross-arm64-wolfssl cross-compiles to arm64 from an amd64 host with the
+# wolfssl backend. It then runs tests via QEMU.
+test-cross-arm64-wolfssl:
     FROM +source
-    LET target = "aarch64-unknown-linux-gnu"
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64-static"
 
-    # Run all tests except privileged tests
-    DO lib-rust+CARGO --args="test --target=$target"
+    LET target = "aarch64-unknown-linux-gnu"
+
+    DO lib-rust+CARGO --args="test --target=$target -p lightway-core -p lightway-client -p lightway-server -p lightway-app-utils"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored
 
-# test-cross-riscv64 cross-compiles to riscv64 from an amd64 or arm64 host. It then runs tests via QEMU.
-test-cross-riscv64:
+# test-cross-riscv64-wolfssl cross-compiles to riscv64 with the wolfssl backend.
+test-cross-riscv64-wolfssl:
     FROM +source
-    LET target = "riscv64gc-unknown-linux-gnu"
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="riscv64-linux-gnu-gcc"
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64"
 
-    # Run all tests except privileged tests
-    DO lib-rust+CARGO --args="test --target=$target"
+    LET target = "riscv64gc-unknown-linux-gnu"
+
+    DO lib-rust+CARGO --args="test --target=$target -p lightway-core -p lightway-client -p lightway-server -p lightway-app-utils"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored
 
-# e2e runs all end-to-end tests, must be run with `--allow-privileged`
-e2e:
-    BUILD ./tests+run-all-tests --debian=$debian
+# e2e-wolfssl runs all end-to-end tests with the wolfSSL backend, must be run with `--allow-privileged`
+e2e-wolfssl:
+    BUILD ./tests+run-all-tests-wolfssl --debian=$debian
+
+# e2e-boringssl runs all end-to-end tests with the boringssl backend, must be run with `--allow-privileged`
+e2e-boringssl:
+    BUILD ./tests+run-all-tests-boringssl --debian=$debian
+
+# cross-compat runs cross-compatibility tests between TLS backends, must be run with `--allow-privileged`
+cross-compat:
+    BUILD ./tests+run-cross-compat-tests --debian=$debian
 
 # coverage generates a report of code coverage by unit and integration tests via `cargo llvm-cov`
 coverage:
@@ -159,13 +249,8 @@ lint:
     # Lint each TLS backend separately. The crate::tls abstraction requires
     # exactly one of `wolfssl` or `boringssl` to be enabled, so we cannot
     # rely on a single --no-default-features pass.
-    #
-    # `-A unnecessary_transmutes` is needed for the boringssl backend because
-    # boring-sys's auto-generated bindgen output contains transmute patterns
-    # that newer rustc flags as warnings. The submodule is upstream code we
-    # do not modify; the allow scopes the suppression to lint only.
     DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --features wolfssl --all-targets -- -D warnings"
-    DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --features boringssl --all-targets -- -D warnings -A unnecessary_transmutes"
+    DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --features boringssl --all-targets -- -D warnings"
     ENV RUSTDOCFLAGS="-D warnings"
     DO lib-rust+CARGO --args="doc --document-private-items"
     # Run lint for shell scripts inside tests/ directory

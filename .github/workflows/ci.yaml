@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-mobile-build, nix-build, nix-tests, windows-build]
+    needs: [earthly, e2e-wolfssl, e2e-boringssl, cross-compat, coverage, nix-mobile-build, nix-build, nix-tests, windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -24,19 +24,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: test
-            privileged: true
           - target: test-miri
             privileged: false
-          - target: test-cross-arm64
+          - target: test-wolfssl
             privileged: true
-          - target: test-cross-riscv64
+          - target: test-boringssl
             privileged: true
-          - target: build
+          - target: test-cross-arm64-wolfssl
+            privileged: true
+          - target: test-cross-riscv64-wolfssl
+            privileged: true
+          - target: build-wolfssl
             privileged: false
-          - target: build-cross-arm64
+          - target: build-boringssl
             privileged: false
-          - target: build-cross-riscv64
+          - target: build-cross-arm64-wolfssl
+            privileged: false
+          - target: build-cross-riscv64-wolfssl
+            privileged: false
+          - target: build-cross-arm64-boringssl
+            privileged: false
+          - target: build-cross-riscv64-boringssl
             privileged: false
           - target: fmt
             privileged: false
@@ -58,49 +66,108 @@ jobs:
       - name: Run +${{ matrix.target }} on Earthly
         run: earthly --ci --output ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
 
-      - name: Upload lightway-client artifact (x86_64)
-        if: matrix.target == 'build'
+      - name: Upload lightway-client artifact (x86_64, wolfssl)
+        if: matrix.target == 'build-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-client-x86_64-unknown-linux-gnu
+          name: lightway-client-x86_64-unknown-linux-gnu-wolfssl
           path: target/release/lightway-client
 
-      - name: Upload lightway-server artifact (x86_64)
-        if: matrix.target == 'build'
+      - name: Upload lightway-server artifact (x86_64, wolfssl)
+        if: matrix.target == 'build-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-server-x86_64-unknown-linux-gnu
+          name: lightway-server-x86_64-unknown-linux-gnu-wolfssl
           path: target/release/lightway-server
 
-      - name: Upload lightway-client artifact (arm64)
-        if: matrix.target == 'build-cross-arm64'
+      - name: Upload lightway-client artifact (arm64, wolfssl)
+        if: matrix.target == 'build-cross-arm64-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-client-aarch64-unknown-linux-gnu
+          name: lightway-client-aarch64-unknown-linux-gnu-wolfssl
           path: target/aarch64-unknown-linux-gnu/release/lightway-client
 
-      - name: Upload lightway-server artifact (arm64)
-        if: matrix.target == 'build-cross-arm64'
+      - name: Upload lightway-server artifact (arm64, wolfssl)
+        if: matrix.target == 'build-cross-arm64-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-server-aarch64-unknown-linux-gnu
+          name: lightway-server-aarch64-unknown-linux-gnu-wolfssl
           path: target/aarch64-unknown-linux-gnu/release/lightway-server
 
-      - name: Upload lightway-client artifact (riscv64)
-        if: matrix.target == 'build-cross-riscv64'
+      - name: Upload lightway-client artifact (riscv64, wolfssl)
+        if: matrix.target == 'build-cross-riscv64-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-client-riscv64gc-unknown-linux-gnu
+          name: lightway-client-riscv64gc-unknown-linux-gnu-wolfssl
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
 
-      - name: Upload lightway-server artifact (riscv64)
-        if: matrix.target == 'build-cross-riscv64'
+      - name: Upload lightway-server artifact (riscv64, wolfssl)
+        if: matrix.target == 'build-cross-riscv64-wolfssl'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-server-riscv64gc-unknown-linux-gnu
+          name: lightway-server-riscv64gc-unknown-linux-gnu-wolfssl
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
 
-  e2e:
+      - name: Upload lightway-client artifact (x86_64, boringssl)
+        if: matrix.target == 'build-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-client-x86_64-unknown-linux-gnu-boringssl-beta
+          path: target/release/lightway-client
+
+      - name: Upload lightway-server artifact (x86_64, boringssl)
+        if: matrix.target == 'build-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-server-x86_64-unknown-linux-gnu-boringssl-beta
+          path: target/release/lightway-server
+
+      - name: Upload lightway-client artifact (arm64, boringssl)
+        if: matrix.target == 'build-cross-arm64-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-client-aarch64-unknown-linux-gnu-boringssl-beta
+          path: target/aarch64-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (arm64, boringssl)
+        if: matrix.target == 'build-cross-arm64-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-server-aarch64-unknown-linux-gnu-boringssl-beta
+          path: target/aarch64-unknown-linux-gnu/release/lightway-server
+
+      - name: Upload lightway-client artifact (riscv64, boringssl)
+        if: matrix.target == 'build-cross-riscv64-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-client-riscv64gc-unknown-linux-gnu-boringssl-beta
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (riscv64, boringssl)
+        if: matrix.target == 'build-cross-riscv64-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-server-riscv64gc-unknown-linux-gnu-boringssl-beta
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
+
+  cross-compat:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm]
+    steps:
+      - uses: earthly/actions-setup@v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      - name: Run +cross-compat on Earthly
+        run: earthly --ci --allow-privileged +cross-compat --debian ${{ matrix.distro }}
+
+  e2e-wolfssl:
     runs-on: ubuntu-latest
     env:
       FORCE_COLOR: 1
@@ -116,8 +183,26 @@ jobs:
       - uses: actions/checkout@v4.3.1
         with:
           submodules: recursive
-      - name: Run +e2e on Earthly
-        run: earthly --ci --allow-privileged +e2e --debian ${{ matrix.distro }}
+      - name: Run +e2e-wolfssl on Earthly
+        run: earthly --ci --allow-privileged +e2e-wolfssl --debian ${{ matrix.distro }}
+
+  e2e-boringssl:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm]
+    steps:
+      - uses: earthly/actions-setup@v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      - name: Run +e2e-boringssl on Earthly
+        run: earthly --ci --allow-privileged +e2e-boringssl --debian ${{ matrix.distro }}
+
   coverage:
     runs-on: ubuntu-latest
     env:
@@ -257,7 +342,7 @@ jobs:
           path: ${{ steps.build-android-aar.outputs.path }}
           if-no-files-found: error
       - name: Build JsonSchema
-        run: nix develop -c cargo run --all-features -p lightway-client -- -c client.schema.json -g jsonschema
+        run: nix develop -c cargo run --features=mobile,wolfssl,postquantum -p lightway-client -- -c client.schema.json -g jsonschema
       - name: Upload JsonSchema artifact
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -288,6 +373,24 @@ jobs:
             package_client: lightway-client-x86_64-darwin
             package_server: lightway-server-x86_64-darwin
             build_msrv: false
+          # BoringSSL backend builds (no MSRV). Validates boring-sys's CMake
+          # invocation under the nix toolchain on the platforms we ship to most.
+          - target: x86_64-unknown-linux-gnu-boringssl
+            os: ubuntu-latest
+            package_client: lightway-client-boringssl
+            package_server: lightway-server-boringssl
+            build_msrv: false
+          - target: aarch64-apple-darwin-boringssl
+            os: macos-26
+            package_client: lightway-client-boringssl
+            package_server: lightway-server-boringssl
+            build_msrv: false
+          # Cross-compile x86_64 Darwin from Apple Silicon, as for wolfssl above
+          - target: x86_64-apple-darwin-boringssl
+            os: macos-26
+            package_client: lightway-client-x86_64-darwin-boringssl
+            package_server: lightway-server-x86_64-darwin-boringssl
+            build_msrv: false
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -317,18 +420,32 @@ jobs:
       - name: Build lightway server
         run: nix build .#${{ matrix.package_server }} -o result-server
 
-      - name: Upload lightway-client artifact
+      - name: Upload lightway-client artifact (WolfSSL)
         if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-client-${{ matrix.target }}
+          name: lightway-client-${{ matrix.target }}-wolfssl
           path: result-client/bin/lightway-client
 
-      - name: Upload lightway-server artifact
+      - name: Upload lightway-server artifact (WolfSSL)
         if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-server-${{ matrix.target }}
+          name: lightway-server-${{ matrix.target }}-wolfssl
+          path: result-server/bin/lightway-server
+
+      - name: Upload lightway-client artifact (BoringSSL beta)
+        if: matrix.target == 'aarch64-apple-darwin-boringssl' || matrix.target == 'x86_64-apple-darwin-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-client-${{ matrix.target }}-beta
+          path: result-client/bin/lightway-client
+
+      - name: Upload lightway-server artifact (BoringSSL beta)
+        if: matrix.target == 'aarch64-apple-darwin-boringssl' || matrix.target == 'x86_64-apple-darwin-boringssl'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: lightway-server-${{ matrix.target }}-beta
           path: result-server/bin/lightway-server
 
   nix-tests:
@@ -361,7 +478,7 @@ jobs:
         run: sudo nix develop --command cargo test test_privileged -- --ignored
 
   windows-build:
-    name: Windows Build
+    name: Windows Build (${{ matrix.target }}, ${{ matrix.backend }})
     runs-on: ${{ matrix.os }}
     env:
       FORCE_COLOR: 1
@@ -372,9 +489,22 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             arch: x64
+            backend: wolfssl
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
             arch: arm64
+            backend: wolfssl
+          # BoringSSL backend. x64 runners ship MASM (via VS Build Tools),
+          # Perl, and CMake, which is everything boring-sys's CMake build
+          # needs. ARM64 additionally needs clang-cl + Ninja (see below).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: x64
+            backend: boringssl
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            arch: arm64
+            backend: boringssl
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -399,26 +529,48 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.backend }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check code formatting
+        if: matrix.backend == 'wolfssl'
         run: cargo fmt --check
+
+      - name: Set backend-specific cargo flags
+        id: cargo-flags
+        shell: bash
+        run: |
+          if [ "${{ matrix.backend }}" = "boringssl" ]; then
+            echo "features=--no-default-features --features boringssl,postquantum" >> "$GITHUB_OUTPUT"
+          else
+            echo "features=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure BoringSSL ARM64 build (clang-cl + Ninja)
+        if: matrix.backend == 'boringssl' && matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          # BoringSSL's CMake cannot assemble its ARM64 sources under the
+          # Visual Studio generator; upstream builds Windows ARM64 with
+          # clang-cl + Ninja, both preinstalled on the windows-11-arm image.
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
 
       - name: Run clippy
         run: >-
-          cargo clippy --package lightway-client --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --package lightway-client --target ${{ matrix.target }} ${{ steps.cargo-flags.outputs.features }} -- -D warnings
 
       - name: Build lightway client
         run: >-
-          cargo build --release --bin lightway-client --target ${{ matrix.target }}
+          cargo build --release --bin lightway-client --target ${{ matrix.target }} ${{ steps.cargo-flags.outputs.features }}
 
-      - name: Run tests (${{ matrix.arch }})
-        run: cargo test --target ${{ matrix.target }} -p lightway-client
+      - name: Run tests (${{ matrix.arch }}, ${{ matrix.backend }})
+        run: cargo test --target ${{ matrix.target }} -p lightway-client ${{ steps.cargo-flags.outputs.features }}
 
       - name: Upload lightway-client artifact
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: lightway-client-${{ matrix.target }}
+          name: lightway-client-${{ matrix.target }}-${{ matrix.backend == 'boringssl' && 'boringssl-beta' || 'wolfssl' }}
           path: target/${{ matrix.target }}/release/lightway-client.exe
 
   nightly-release:
@@ -448,18 +600,34 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          cp artifacts/lightway-client-x86_64-unknown-linux-gnu/lightway-client release-assets/lightway-client-x86_64-unknown-linux-gnu
-          cp artifacts/lightway-server-x86_64-unknown-linux-gnu/lightway-server release-assets/lightway-server-x86_64-unknown-linux-gnu
-          cp artifacts/lightway-client-aarch64-unknown-linux-gnu/lightway-client release-assets/lightway-client-aarch64-unknown-linux-gnu
-          cp artifacts/lightway-server-aarch64-unknown-linux-gnu/lightway-server release-assets/lightway-server-aarch64-unknown-linux-gnu
-          cp artifacts/lightway-client-riscv64gc-unknown-linux-gnu/lightway-client release-assets/lightway-client-riscv64gc-unknown-linux-gnu
-          cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu
-          cp artifacts/lightway-client-aarch64-apple-darwin/lightway-client release-assets/lightway-client-aarch64-apple-darwin
-          cp artifacts/lightway-server-aarch64-apple-darwin/lightway-server release-assets/lightway-server-aarch64-apple-darwin
-          cp artifacts/lightway-client-x86_64-apple-darwin/lightway-client release-assets/lightway-client-x86_64-apple-darwin
-          cp artifacts/lightway-server-x86_64-apple-darwin/lightway-server release-assets/lightway-server-x86_64-apple-darwin
-          cp artifacts/lightway-client-x86_64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc.exe
-          cp artifacts/lightway-client-aarch64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc.exe
+          cp artifacts/lightway-client-x86_64-unknown-linux-gnu-wolfssl/lightway-client release-assets/lightway-client-x86_64-unknown-linux-gnu-wolfssl
+          cp artifacts/lightway-server-x86_64-unknown-linux-gnu-wolfssl/lightway-server release-assets/lightway-server-x86_64-unknown-linux-gnu-wolfssl
+          cp artifacts/lightway-client-aarch64-unknown-linux-gnu-wolfssl/lightway-client release-assets/lightway-client-aarch64-unknown-linux-gnu-wolfssl
+          cp artifacts/lightway-server-aarch64-unknown-linux-gnu-wolfssl/lightway-server release-assets/lightway-server-aarch64-unknown-linux-gnu-wolfssl
+          cp artifacts/lightway-client-riscv64gc-unknown-linux-gnu-wolfssl/lightway-client release-assets/lightway-client-riscv64gc-unknown-linux-gnu-wolfssl
+          cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu-wolfssl/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu-wolfssl
+          
+          cp artifacts/lightway-client-x86_64-unknown-linux-gnu-boringssl-beta/lightway-client release-assets/lightway-client-x86_64-unknown-linux-gnu-boringssl-beta
+          cp artifacts/lightway-server-x86_64-unknown-linux-gnu-boringssl-beta/lightway-server release-assets/lightway-server-x86_64-unknown-linux-gnu-boringssl-beta
+          cp artifacts/lightway-client-aarch64-unknown-linux-gnu-boringssl-beta/lightway-client release-assets/lightway-client-aarch64-unknown-linux-gnu-boringssl-beta
+          cp artifacts/lightway-server-aarch64-unknown-linux-gnu-boringssl-beta/lightway-server release-assets/lightway-server-aarch64-unknown-linux-gnu-boringssl-beta
+          cp artifacts/lightway-client-riscv64gc-unknown-linux-gnu-boringssl-beta/lightway-client release-assets/lightway-client-riscv64gc-unknown-linux-gnu-boringssl-beta
+          cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu-boringssl-beta/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu-boringssl-beta
+
+          cp artifacts/lightway-client-aarch64-apple-darwin-wolfssl/lightway-client release-assets/lightway-client-aarch64-apple-darwin-wolfssl
+          cp artifacts/lightway-server-aarch64-apple-darwin-wolfssl/lightway-server release-assets/lightway-server-aarch64-apple-darwin-wolfssl
+          cp artifacts/lightway-client-x86_64-apple-darwin-wolfssl/lightway-client release-assets/lightway-client-x86_64-apple-darwin-wolfssl
+          cp artifacts/lightway-server-x86_64-apple-darwin-wolfssl/lightway-server release-assets/lightway-server-x86_64-apple-darwin-wolfssl
+
+          cp artifacts/lightway-client-aarch64-apple-darwin-boringssl-beta/lightway-client release-assets/lightway-client-aarch64-apple-darwin-boringssl-beta
+          cp artifacts/lightway-server-aarch64-apple-darwin-boringssl-beta/lightway-server release-assets/lightway-server-aarch64-apple-darwin-boringssl-beta
+          cp artifacts/lightway-client-x86_64-apple-darwin-boringssl-beta/lightway-client release-assets/lightway-client-x86_64-apple-darwin-boringssl-beta
+          cp artifacts/lightway-server-x86_64-apple-darwin-boringssl-beta/lightway-server release-assets/lightway-server-x86_64-apple-darwin-boringssl-beta
+
+          cp artifacts/lightway-client-x86_64-pc-windows-msvc-wolfssl/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc-wolfssl.exe
+          cp artifacts/lightway-client-aarch64-pc-windows-msvc-wolfssl/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc-wolfssl.exe
+          cp artifacts/lightway-client-x86_64-pc-windows-msvc-boringssl-beta/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc-boringssl-beta.exe
+          cp artifacts/lightway-client-aarch64-pc-windows-msvc-boringssl-beta/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc-boringssl-beta.exe
           cp artifacts/lightway-android-aar/lightway-release.aar release-assets/lightway-release.aar
           cp artifacts/lightway-client-jsonschema/client.schema.json release-assets/client.schema.json
 
