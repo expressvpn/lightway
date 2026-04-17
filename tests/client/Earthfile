@@ -4,8 +4,15 @@ ARG --global debian
 build-container:
     ARG SERVER_ADDR
     ARG TOKIO_WORKER_THREADS
+    ARG BACKEND
+    ARG EXTRA_FEATURES
+    ARG ENABLE_POSTQUANTUM
     FROM ../base+container --debian=$debian
-    COPY (../..+build/lightway-client --debian=$debian) .
+    IF [ -n "$BACKEND" ]
+        COPY (../..+build-backend/lightway-client --BACKEND=$BACKEND --EXTRA_FEATURES=$EXTRA_FEATURES --ENABLE_POSTQUANTUM=$ENABLE_POSTQUANTUM) .
+    ELSE
+        COPY (../..+build-wolfssl/lightway-client --debian=$debian) .
+    END
     COPY --dir ../certs+client/* tests/certs/
     COPY --dir --chmod 0600 client_config.yaml parallel_connect/ .
     COPY --dir docker-entrypoint.sh run-test-inside.sh check-server.sh .

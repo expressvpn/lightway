@@ -193,7 +193,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "postquantum")]
     fn test_post_quantum_curves() {
         // Verify all PQ curves are available
         let curves = vec![CurveGroup::X25519MLKEM768];

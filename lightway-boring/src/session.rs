@@ -768,7 +768,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "postquantum")]
     fn test_session_with_keyshare_group_pq() {
         let ctx = ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
@@ -791,7 +790,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("Session creation failed for {:?}: {}", group, e));
         }
 
-        #[cfg(feature = "postquantum")]
         {
             let pq_groups = [CurveGroup::X25519MLKEM768];
 
