@@ -1,4 +1,6 @@
+#[cfg(desktop)]
 use super::dns_manager::DnsConfigMode;
+#[cfg(desktop)]
 use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
@@ -22,7 +24,7 @@ pub struct Config {
     #[serde(default)]
     pub servers: Vec<ConnectionConfig>,
 
-    /// Server to connect to in <hostname>:<port> format
+    /// Server to connect to in `<hostname>:<port>` format
     /// Only used if `servers` is empty
     #[clap(short, long, default_value_t)]
     pub server: String,
@@ -212,7 +214,7 @@ impl Config {
 #[config]
 #[derive(Parser, Debug)]
 pub struct ConnectionConfig {
-    /// Server to connect to in <hostname>:<port> format
+    /// Server to connect to in `<hostname>:<port>` format
     pub server: String,
 
     /// Connection mode

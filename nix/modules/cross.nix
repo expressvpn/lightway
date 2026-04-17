@@ -23,52 +23,51 @@
 
       # Cross-compilation target configurations
       # Includes both true cross-compilation and musl static builds
-      allTargets =
-        {
-          x86_64-linux-gnu = {
-            pkgsCross = pkgs.pkgsCross.gnu64;
-            rustTarget = "x86_64-unknown-linux-gnu";
-            isStatic = false;
-            arch = "x86_64";
-            libc = "gnu";
-            os = "linux";
-          };
-          x86_64-linux-musl = {
-            pkgsCross = pkgs.pkgsCross.musl64;
-            rustTarget = "x86_64-unknown-linux-musl";
-            isStatic = true;
-            arch = "x86_64";
-            libc = "musl";
-            os = "linux";
-          };
-          aarch64-linux-musl = {
-            pkgsCross = pkgs.pkgsCross.aarch64-multiplatform-musl;
-            rustTarget = "aarch64-unknown-linux-musl";
-            isStatic = true;
-            arch = "aarch64";
-            libc = "musl";
-            os = "linux";
-          };
-          aarch64-linux-gnu = {
-            pkgsCross = pkgs.pkgsCross.aarch64-multiplatform;
-            rustTarget = "aarch64-unknown-linux-gnu";
-            isStatic = false;
-            arch = "aarch64";
-            libc = "gnu";
-            os = "linux";
-          };
-        }
-        // lib.optionalAttrs (system == "aarch64-darwin") {
-          # Cross-compile from Apple Silicon to Intel Mac
-          x86_64-darwin = {
-            pkgsCross = pkgs.pkgsCross.x86_64-darwin;
-            rustTarget = "x86_64-apple-darwin";
-            isStatic = false;
-            arch = "x86_64";
-            libc = "darwin";
-            os = "darwin";
-          };
+      allTargets = {
+        x86_64-linux-gnu = {
+          pkgsCross = pkgs.pkgsCross.gnu64;
+          rustTarget = "x86_64-unknown-linux-gnu";
+          isStatic = false;
+          arch = "x86_64";
+          libc = "gnu";
+          os = "linux";
         };
+        x86_64-linux-musl = {
+          pkgsCross = pkgs.pkgsCross.musl64;
+          rustTarget = "x86_64-unknown-linux-musl";
+          isStatic = true;
+          arch = "x86_64";
+          libc = "musl";
+          os = "linux";
+        };
+        aarch64-linux-musl = {
+          pkgsCross = pkgs.pkgsCross.aarch64-multiplatform-musl;
+          rustTarget = "aarch64-unknown-linux-musl";
+          isStatic = true;
+          arch = "aarch64";
+          libc = "musl";
+          os = "linux";
+        };
+        aarch64-linux-gnu = {
+          pkgsCross = pkgs.pkgsCross.aarch64-multiplatform;
+          rustTarget = "aarch64-unknown-linux-gnu";
+          isStatic = false;
+          arch = "aarch64";
+          libc = "gnu";
+          os = "linux";
+        };
+      }
+      // lib.optionalAttrs (system == "aarch64-darwin") {
+        # Cross-compile from Apple Silicon to Intel Mac
+        x86_64-darwin = {
+          pkgsCross = pkgs.pkgsCross.x86_64-darwin;
+          rustTarget = "x86_64-apple-darwin";
+          isStatic = false;
+          arch = "x86_64";
+          libc = "darwin";
+          os = "darwin";
+        };
+      };
 
       # Filter out gnu targets for native architecture (already built in native.nix)
       # Keep all musl targets (including native arch) since they're static builds
@@ -108,12 +107,10 @@
         };
 
       # Helper: Create both client and server for a target
-      mkTargetPackages =
-        targetName: config: toolchain:
-        {
-          "lightway-client-${targetName}" = mkPackage "lightway-client" toolchain;
-          "lightway-server-${targetName}" = mkPackage "lightway-server" toolchain;
-        };
+      mkTargetPackages = targetName: config: toolchain: {
+        "lightway-client-${targetName}" = mkPackage "lightway-client" toolchain;
+        "lightway-server-${targetName}" = mkPackage "lightway-server" toolchain;
+      };
 
       # All cross-compilation toolchains
       crossToolchains = lib.mapAttrs mkCrossToolchain crossTargets;
@@ -138,9 +135,7 @@
 
       nativeMuslToolchain =
         if nativeMuslConfig != null then
-          crossToolchains.${
-            if nativeArch == "x86_64" then "x86_64-linux-musl" else "aarch64-linux-musl"
-          }
+          crossToolchains.${if nativeArch == "x86_64" then "x86_64-linux-musl" else "aarch64-linux-musl"}
         else
           null;
     in

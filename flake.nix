@@ -5,6 +5,8 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -18,6 +20,7 @@
       ];
 
       imports = [
+        inputs.treefmt-nix.flakeModule
         ./nix/modules/common.nix
         ./nix/modules/native.nix
         ./nix/modules/cross.nix
@@ -37,6 +40,8 @@
           _module.args.pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
+            config.allowUnfree = true;
+            config.android_sdk.accept_license = true;
           };
 
           # Convenience aliases for native packages
@@ -46,6 +51,12 @@
             lightway-server = config.packages."lightway-server-${nativeSuffix}";
             lightway-client-msrv = config.packages."lightway-client-${nativeSuffix}-msrv";
             lightway-server-msrv = config.packages."lightway-server-${nativeSuffix}-msrv";
+          };
+
+          treefmt = {
+            projectRootFile = "flake.nix";
+            programs.nixfmt.enable = pkgs.lib.meta.availableOn pkgs.stdenv.buildPlatform pkgs.nixfmt.compiler;
+            programs.nixfmt.package = pkgs.nixfmt;
           };
         };
     };

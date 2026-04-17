@@ -14,38 +14,46 @@
   rustc,
   isStatic ? false,
   defaultTarget ? null,
+  shellEnvVar ? { },
+  extraBuildPkgs ? [ ],
+  extraShellHook ? "",
 }:
 
-mkShell {
-  shellHook = ''
-    export RUST_SRC_PATH=${rustPlatform.rustLibSrc}
-    ${lib.optionalString (defaultTarget != null) ''
-      export CARGO_BUILD_TARGET="${defaultTarget}"
-      echo "Default cargo target set to: ${defaultTarget}"
-    ''}
-    ${lib.optionalString isStatic ''
-      export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
-      echo "Musl static build environment activated"
-      echo "RUSTFLAGS: $RUSTFLAGS"
-    ''}
-  '';
+mkShell (
+  {
+    shellHook = ''
+      export RUST_SRC_PATH=${rustPlatform.rustLibSrc}
+      ${lib.optionalString (defaultTarget != null) ''
+        export CARGO_BUILD_TARGET="${defaultTarget}"
+        echo "Default cargo target set to: ${defaultTarget}"
+      ''}
+      ${lib.optionalString isStatic ''
+        export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
+        echo "Musl static build environment activated"
+        echo "RUSTFLAGS: $RUSTFLAGS"
+      ''}
+      ${extraShellHook}
+    '';
 
-  nativeBuildInputs = [
-    # Build dependencies
-    autoconf
-    automake
-    libtool
-    rustPlatform.bindgenHook
+    nativeBuildInputs = [
+      # Build dependencies
+      autoconf
+      automake
+      libtool
+      rustPlatform.bindgenHook
 
-    # Development tools
-    cargo-deny
-    cargo-make
-    cargo-nextest
-    cargo-outdated
-    cargo-fuzz
-    rust-analyzer
+      # Development tools
+      cargo-deny
+      cargo-make
+      cargo-nextest
+      cargo-outdated
+      cargo-fuzz
+      rust-analyzer
 
-    # Rust toolchain
-    rustc
-  ];
-}
+      # Rust toolchain
+      rustc
+    ]
+    ++ extraBuildPkgs;
+  }
+  // shellEnvVar
+)

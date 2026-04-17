@@ -1,10 +1,10 @@
 [workspace]
-
 members = [
     "lightway-core",
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",
+    "uniffi-bindgen",
 ]
 
 exclude = [
@@ -66,3 +66,4 @@ tracing-subscriber = "0.3.17"
 tun-rs = { version = "2.5.1", features = ["async"] }
 twelf = { version = "0.15.0", default-features = false, features = ["env", "clap", "yaml", "custom_fn"]}
 windows-sys = "0.61.0"
+uniffi = "0.26.1"
