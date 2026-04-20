@@ -1129,6 +1129,7 @@ pub async fn client<
         tracing::info!(
             message = "Interface Details",
             %device_name,
+            if_index = inside_io.if_index().ok(),
             dns_ip = %config.tun_dns_ip,
             local_ip = %config.tun_local_ip,
             peer_ip = %config.tun_peer_ip,
