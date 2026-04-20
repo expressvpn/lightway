@@ -652,7 +652,7 @@ impl PQCrypto {
         match self {
             PQCrypto::Enabled => "SecP521r1MLKEM1024",
             PQCrypto::Disabled => "SECP256R1",
-            PQCrypto::ServerOnly => "SECP256R1",
+            PQCrypto::ServerOnly => "X25519MLKEM768",
             PQCrypto::ClientOnly => "SECP256R1",
         }
     }
