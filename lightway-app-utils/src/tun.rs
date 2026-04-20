@@ -56,6 +56,11 @@ pub struct TunConfig {
     /// Wintun ring buffer capacity in bytes. Larger values improve throughput.
     /// Must be a power of two between 128KiB and 64MiB.
     pub ring_capacity: Option<u32>,
+    #[cfg(windows)]
+    /// Optional fixed GUID for the Wintun adapter. Using a stable GUID ensures
+    /// that adapter creation retries reuse the same device node rather than
+    /// leaking duplicates.
+    pub device_guid: Option<u128>,
 }
 
 impl Debug for TunConfig {
@@ -165,6 +170,13 @@ impl TunConfig {
         Ok(self)
     }
 
+    /// Set a fixed GUID for the Wintun adapter (Windows only).
+    #[cfg(windows)]
+    pub fn device_guid(&mut self, guid: u128) -> &mut Self {
+        self.device_guid = Some(guid);
+        self
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -182,6 +194,10 @@ impl TunConfig {
                     opt.ring_capacity(ring_capacity);
                 });
             }
+        }
+        #[cfg(windows)]
+        if let Some(guid) = self.device_guid {
+            builder = builder.device_guid(guid);
         }
         #[cfg(macos)]
         {

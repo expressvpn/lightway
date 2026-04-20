@@ -153,6 +153,14 @@ async fn main() -> Result<()> {
         tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
     }
 
+    #[cfg(windows)]
+    if let Some(ref device_guid) = config.device_guid {
+        let parsed = uuid::Uuid::parse_str(device_guid)
+            .with_context(|| format!("invalid device GUID: {device_guid}"))?;
+        tracing::info!(device_guid = %parsed, "Setting device GUID");
+        tun_config.device_guid(parsed.as_u128());
+    }
+
     // TODO: Fix in future PR
     tun_config
         .mtu(1350)
