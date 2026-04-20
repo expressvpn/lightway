@@ -29,6 +29,11 @@ mod internal {
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
+//
+// NOTE
+// Use feature gate not cfg, such that cli client can generate schema based on
+// features for other target, and the `x-cfg` is to flag a field in JsonSchema
+// Also, the doc string will be description of JsonSchema
 #[derive(Debug, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
@@ -38,11 +43,13 @@ pub struct Config {
         doc = "Generate configure for single server in the format to path from `-c, --config-file`"
     ))]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub generate: ConfigFormat,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = "Config File to load"))]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub config_file: PathBuf,
 
     /// Servers to attempt to connect to. Configuration is only supported in
@@ -52,11 +59,13 @@ pub struct Config {
     #[patch(attribute(clap(skip)))]
     #[serde(default)]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     servers: Vec<ConnectionConfig>,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
     Only used if `servers` is empty"#))]
+    /// socket address, ex: 127.0.0.1:27690
     pub server: String,
 
     #[patch(attribute(clap(short, long)))]
@@ -78,6 +87,7 @@ pub struct Config {
     #[patch(attribute(doc = r#"Auth token
     If both token and user/pass are provided, token auth will
     be used. user/pass will be ignored in this case"#))]
+    #[schemars(extend("format" = "password"))]
     pub token: Option<String>,
 
     #[patch(attribute(clap(short, long, hide = true)))]
@@ -86,12 +96,14 @@ pub struct Config {
 
     #[patch(attribute(clap(short, long, hide = true)))]
     #[patch(attribute(doc = "Password for auth"))]
+    #[schemars(extend("format" = "password"))]
     pub password: Option<String>,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"CA certificate
     This can either be a path to the file, or a string starting with
     "-----BEGIN CERTIFICATE-----""#))]
+    #[schemars(extend("format" = "textarea"))]
     pub ca_cert: String,
 
     #[patch(attribute(clap(long)))]
@@ -105,6 +117,7 @@ pub struct Config {
     #[cfg(windows)]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
+    #[schemars(extend("x-cfg" = "windows"))]
     pub wintun_file: Option<String>,
 
     #[patch(attribute(clap(long)))]
@@ -113,6 +126,7 @@ pub struct Config {
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Peer IP to use in Tun device"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub tun_peer_ip: Ipv4Addr,
 
     #[patch(attribute(clap(long)))]
@@ -124,16 +138,19 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub enable_pqc: bool,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Interval between keepalives"))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 10s
     pub keepalive_interval: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Keepalive timeout"))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 60s
     pub keepalive_timeout: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
@@ -145,7 +162,9 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
     when we haven't received an outside packet"#))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 10s
     pub tracer_packet_timeout: NonZeroDuration,
 
     // NOTE: also "Defer timeout" in mobile device
@@ -155,16 +174,21 @@ pub struct Config {
     If the preferred connection connects before the timeout, it will be used immediately."#)
     )]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 2000ms
     pub preferred_connection_wait_interval: Duration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket send buffer size"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
     pub sndbuf: Option<ByteSize>,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket receive buffer size"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
     pub rcvbuf: Option<ByteSize>,
 
     #[cfg(batch_receive)]
@@ -172,6 +196,7 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable batch receive (`recvmsg_x` on macOS)"))]
+    #[schemars(extend("x-cfg" = "batch_receive"))]
     pub enable_batch_receive: bool,
 
     #[cfg(desktop)]
@@ -181,6 +206,7 @@ pub struct Config {
         default: Sets up routes as specified in server, tun_local_ip, tun_peer_ip, tun_dns_ip
         noexec : Does not setup any routes
         lan    : Sets up default + additional lan routes"#))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub route_mode: RouteMode,
 
     #[cfg(desktop)]
@@ -189,6 +215,7 @@ pub struct Config {
     Modes:
         default: Sets up DNS Configuration based on target platform
         noexec : Skips DNS Configuration setup"#))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub dns_config_mode: DnsConfigMode,
 
     #[patch(attribute(clap(long, value_enum)))]
@@ -205,29 +232,35 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub enable_pmtud: bool,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub pmtud_base_mtu: Option<u16>,
 
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
+    #[schemars(extend("x-cfg" = "linux"))]
     pub enable_tun_iouring: bool,
 
     // Any value more than 1024 negatively impact the throughput
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"IO-uring submission queue count.
     Only applicable when `enable_tun_iouring` is `true`"#))]
+    #[schemars(extend("x-cfg" = "linux"))]
     pub iouring_entry_count: usize,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
     If non-zero use a kernel thread to perform submission queue polling.
     After the given idle time the thread will go to sleep."#))]
+    #[schemars(extend("x-cfg" = "linux"))]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 100ms
     pub iouring_sqpoll_idle_time: Duration,
 
     #[patch(attribute(clap(short, long)))]
@@ -237,11 +270,13 @@ pub struct Config {
         attribute(doc = r#"Enable inside packet encoding once lightway connects
     Only used if a codec is set"#)
     )]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub enable_inside_pkt_encoding_at_connect: bool,
 
     #[cfg(feature = "debug")]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "File path to save wireshark keylog"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub keylog: Option<PathBuf>,
 
     #[cfg(feature = "debug")]
@@ -249,6 +284,7 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable WolfSSL debug logging"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
     pub tls_debug: bool,
 
     #[cfg(windows)]
@@ -257,11 +293,13 @@ pub struct Config {
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = r#"Enable DPAPI encryption/decryption for config file
     Only for Windows platform"#))]
+    #[schemars(extend("x-cfg" = "windows"))]
     pub enable_dpapi: bool,
 
     /// SNI header for TLS connections
     #[cfg(feature = "mobile")]
     #[patch(attribute(clap(skip)))]
+    #[schemars(extend("x-cfg" = "mobile"))]
     pub sni_header: String,
 }
 
