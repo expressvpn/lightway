@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpStream;
 
-use super::OutsideIO;
+use super::{OutsideIO, OutsideSocket};
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 
 pub struct Tcp(tokio::net::TcpStream, SocketAddr);
@@ -62,6 +62,18 @@ impl OutsideIO for Tcp {
 
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr()
+    }
+
+    fn socket(&self) -> OutsideSocket {
+        #[cfg(unix)]
+        use std::os::fd::AsRawFd;
+        #[cfg(windows)]
+        use std::os::windows::io::AsRawSocket;
+        #[cfg(unix)]
+        let handle = self.0.as_raw_fd();
+        #[cfg(windows)]
+        let handle = self.0.as_raw_socket();
+        OutsideSocket::Tcp(handle)
     }
 }
 

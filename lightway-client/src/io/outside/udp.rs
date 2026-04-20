@@ -1,4 +1,4 @@
-use super::OutsideIO;
+use super::{OutsideIO, OutsideSocket};
 #[cfg(batch_receive)]
 use crate::io::outside::udp_batch_receiver;
 use anyhow::{Result, anyhow};
@@ -137,6 +137,18 @@ impl OutsideIO for Udp {
 
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr()
+    }
+
+    fn socket(&self) -> OutsideSocket {
+        #[cfg(unix)]
+        use std::os::fd::AsRawFd;
+        #[cfg(windows)]
+        use std::os::windows::io::AsRawSocket;
+        #[cfg(unix)]
+        let handle = self.sock.as_raw_fd();
+        #[cfg(windows)]
+        let handle = self.sock.as_raw_socket();
+        OutsideSocket::Udp(handle)
     }
 }
 
