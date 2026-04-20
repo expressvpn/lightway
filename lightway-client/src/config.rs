@@ -29,6 +29,11 @@ mod internal {
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
+//
+// NOTE
+// Use feature gate not cfg, such that cli client can generate schema based on
+// features for other target, and the `x-cfg` is to flag a field in JsonSchema
+// Also, the doc string will be description of JsonSchema
 #[derive(Debug, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
@@ -38,11 +43,13 @@ pub struct Config {
         doc = "Generate configure for single server in the format to path from `-c, --config-file`"
     ))]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub generate: ConfigFormat,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = "Config File to load"))]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub config_file: PathBuf,
 
     /// Servers to attempt to connect to. Configuration is only supported in
@@ -52,11 +59,13 @@ pub struct Config {
     #[patch(attribute(clap(skip)))]
     #[serde(default)]
     #[serde(skip_serializing)]
+    #[schemars(skip)]
     servers: Vec<ConnectionConfig>,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
     Only used if `servers` is empty"#))]
+    /// socket address, ex: 127.0.0.1:27690
     pub server: String,
 
     #[patch(attribute(clap(short, long)))]
@@ -88,6 +97,7 @@ pub struct Config {
     #[patch(attribute(doc = "Password for auth"))]
     pub password: Option<String>,
 
+    #[schemars(extend("format" = "textarea"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"CA certificate
     This can either be a path to the file, or a string starting with
@@ -103,6 +113,7 @@ pub struct Config {
     pub tun_name: Option<String>,
 
     #[cfg(windows)]
+    #[schemars(extend("x-cfg" = "windows"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
     pub wintun_file: Option<String>,
@@ -111,6 +122,7 @@ pub struct Config {
     #[patch(attribute(doc = "Local IP to use in Tun device"))]
     pub tun_local_ip: Ipv4Addr,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Peer IP to use in Tun device"))]
     pub tun_peer_ip: Ipv4Addr,
@@ -120,6 +132,7 @@ pub struct Config {
     pub tun_dns_ip: Ipv4Addr,
 
     #[cfg(feature = "postquantum")]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -129,11 +142,13 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Interval between keepalives"))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 10s
     pub keepalive_interval: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Keepalive timeout"))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 60s
     pub keepalive_timeout: NonZeroDuration,
 
     #[patch(attribute(clap(long)))]
@@ -142,10 +157,12 @@ pub struct Config {
     #[patch(attribute(doc = "Enable continuous Keepalive"))]
     pub keepalive_continuous: bool,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
     when we haven't received an outside packet"#))]
     #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    /// ex: 10s
     pub tracer_packet_timeout: NonZeroDuration,
 
     // NOTE: also "Defer timeout" in mobile device
@@ -155,19 +172,25 @@ pub struct Config {
     If the preferred connection connects before the timeout, it will be used immediately."#)
     )]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 2000ms
     pub preferred_connection_wait_interval: Duration,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket send buffer size"))]
     #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
     pub sndbuf: Option<ByteSize>,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Socket receive buffer size"))]
     #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
     pub rcvbuf: Option<ByteSize>,
 
     #[cfg(batch_receive)]
+    #[schemars(extend("x-cfg" = "batch_receive"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -175,6 +198,7 @@ pub struct Config {
     pub enable_batch_receive: bool,
 
     #[cfg(desktop)]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"Setup of route table
     Modes:
@@ -184,6 +208,7 @@ pub struct Config {
     pub route_mode: RouteMode,
 
     #[cfg(desktop)]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"DNS configuration mode
     Modes:
@@ -201,16 +226,19 @@ pub struct Config {
     #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
     pub enable_expresslane: bool,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
     pub enable_pmtud: bool,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
     pub pmtud_base_mtu: Option<u16>,
 
+    #[schemars(extend("x-cfg" = "linux"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -218,18 +246,22 @@ pub struct Config {
     pub enable_tun_iouring: bool,
 
     // Any value more than 1024 negatively impact the throughput
+    #[schemars(extend("x-cfg" = "linux"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"IO-uring submission queue count.
     Only applicable when `enable_tun_iouring` is `true`"#))]
     pub iouring_entry_count: usize,
 
+    #[schemars(extend("x-cfg" = "linux"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
     If non-zero use a kernel thread to perform submission queue polling.
     After the given idle time the thread will go to sleep."#))]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 100ms
     pub iouring_sqpoll_idle_time: Duration,
 
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(short, long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -240,11 +272,13 @@ pub struct Config {
     pub enable_inside_pkt_encoding_at_connect: bool,
 
     #[cfg(feature = "debug")]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "File path to save wireshark keylog"))]
     pub keylog: Option<PathBuf>,
 
     #[cfg(feature = "debug")]
+    #[schemars(extend("x-cfg" = "desktop"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -252,6 +286,7 @@ pub struct Config {
     pub tls_debug: bool,
 
     #[cfg(windows)]
+    #[schemars(extend("x-cfg" = "windows"))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -261,6 +296,7 @@ pub struct Config {
 
     /// SNI header for TLS connections
     #[cfg(feature = "mobile")]
+    #[schemars(extend("x-cfg" = "mobile"))]
     #[patch(attribute(clap(skip)))]
     pub sni_header: String,
 }
