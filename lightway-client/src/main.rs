@@ -228,7 +228,6 @@ async fn main() -> Result<()> {
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
         inside_pkt_codec_config: None,
-        stop_signal: ctrlc_rx,
         network_change_signal: None,
         best_connection_selected_signal: None,
         #[cfg(feature = "debug")]
@@ -237,5 +236,5 @@ async fn main() -> Result<()> {
         keylog: config.keylog,
     };
 
-    client(config, servers).await.map(|_| ())
+    client(config, ctrlc_rx, servers).await.map(|_| ())
 }
