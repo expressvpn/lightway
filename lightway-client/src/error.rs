@@ -17,6 +17,8 @@ pub enum LightwayError {
     Unauthorized,
     #[error("Config Error: `{0}`")]
     ConfigError(#[from] crate::config::Error),
+    #[error("Config Format Error: `{0}`")]
+    ConfigFormatError(#[from] serde_saphyr::Error),
 
     #[cfg(feature = "mobile")]
     #[error("Logging bridge initialization error: `{0}`")]

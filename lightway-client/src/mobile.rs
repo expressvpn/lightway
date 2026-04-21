@@ -57,7 +57,8 @@ impl VpnConnection {
         }
     }
 
-    /// Establishes parallel connections to multiple Lightway endpoints.
+    /// Establishes parallel connections to multiple Lightway endpoints and also allow a yaml
+    /// input which is the same as the inputs of cli clients
     ///
     /// This function coordinates the connection setup to multiple endpoints in parallel
     /// using Tokio's asynchronous runtime. It prepares the necessary configurations,
@@ -69,17 +70,18 @@ impl VpnConnection {
         endpoints: Vec<crate::config::MobileConnectionConfig>,
         event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
         raw_tun_fd: i32,
-        mobile_config: crate::config::MobileConfig,
+        mobile_config: Option<crate::config::MobileConfig>,
+        config_content: String,
     ) -> Result<crate::ClientResult, LightwayError> {
         info!("start parallel Lightway connections");
         let mut config = crate::config::Config::default();
-        config.apply_mobile_config(mobile_config);
-
+        if let Some(mobile_config) = mobile_config {
+            config.apply_mobile_config(mobile_config);
+        }
         info!("Received {} endpoints", endpoints.len());
-        if endpoints.is_empty() {
+        if endpoints.is_empty() && config_content.is_empty() {
             return Err(LightwayError::EmptyEndpointsError);
         }
-
         for endpoint in &endpoints {
             info!(
                 "Endpoint {}:{} with {}",
@@ -93,6 +95,11 @@ impl VpnConnection {
             );
         }
         config.apply_mobile_connect_configs(endpoints);
+        if !config_content.is_empty() {
+            use struct_patch::Patch;
+            config.apply(serde_saphyr::from_str(&config_content)?);
+        }
+        tracing::debug!("Config:\n{config:#?}");
         let servers = config.take_servers()?;
         let config =
             config.into_client_config(raw_tun_fd, event_handler, self.connected_index.clone());
