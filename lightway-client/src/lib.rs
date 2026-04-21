@@ -1166,7 +1166,10 @@ pub async fn client<
     };
     // connect_futs dropped here — releases &config borrow
 
-    tracing::trace!("Best connection selected: {best_connection_index}");
+    tracing::info!(
+        message = "Best connection selected",
+        connection_id = best_connection_index,
+    );
     if let Some(signal) = config.best_connection_selected_signal.take()
         && signal.send(best_connection_index).is_err()
     {
