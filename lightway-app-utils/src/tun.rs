@@ -12,13 +12,11 @@ use std::{
     net::{IpAddr, Ipv4Addr},
 };
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 use std::os::fd::FromRawFd;
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
 use tun_rs::AsyncDevice;
-#[cfg(desktop)]
-use tun_rs::DeviceBuilder;
 
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
@@ -148,9 +146,9 @@ impl TunConfig {
     }
 
     /// Creates an async device based on TunConfig
-    #[cfg(desktop)]
+    #[cfg(not(feature = "mobile"))]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
-        let mut builder = DeviceBuilder::new();
+        let mut builder = tun_rs::DeviceBuilder::new();
         if let Some(name) = self.tun_name.as_ref() {
             builder = builder.name(name);
         }
@@ -201,7 +199,7 @@ impl TunConfig {
 
     /// Creates an async device based on TunConfig
     #[allow(unsafe_code)]
-    #[cfg(mobile)]
+    #[cfg(feature = "mobile")]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
         let device = match self.fd {
             Some(fd) => {
@@ -319,10 +317,10 @@ impl TunDirect {
         let tun_device = config.create_as_async()?;
         #[cfg(unix)]
         let fd = tun_device.as_raw_fd();
-        #[cfg(desktop)]
+        #[cfg(not(feature = "mobile"))]
         let mtu = tun_device.mtu()?;
         // This currently is not supported for Android and IOS
-        #[cfg(mobile)]
+        #[cfg(feature = "mobile")]
         let mtu = 1350;
         let tun = Some(tun_device);
 
@@ -374,24 +372,24 @@ impl TunDirect {
 
     /// Interface index of Tun
     pub fn if_index(&self) -> std::io::Result<u32> {
-        #[cfg(desktop)]
-        {
+        // TODO why not compiling time panic
+        if cfg!(feature = "mobile") {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        } else {
             let tun = self.tun.as_ref().unwrap();
             tun.if_index()
         }
-        #[cfg(mobile)]
-        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     /// Name of 'Tun' interface
     pub fn name(&self) -> std::io::Result<String> {
-        #[cfg(desktop)]
-        {
+        // TODO why not compiling time panic
+        if cfg!(feature = "mobile") {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        } else {
             let tun = self.tun.as_ref().unwrap();
             tun.name()
         }
-        #[cfg(mobile)]
-        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
