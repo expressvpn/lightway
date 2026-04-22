@@ -4,11 +4,11 @@ use std::net::IpAddr;
 #[allow(dead_code)]
 /// Lightway endpoint details
 #[derive(Clone)]
-#[cfg_attr(mobile, derive(uniffi::Record))]
+#[cfg_attr(feature = "mobile", derive(uniffi::Record))]
 pub struct RustEndpointConfig {
-    #[cfg(mobile)]
+    #[cfg(feature = "mobile")]
     pub server_ip: IpAddress,
-    #[cfg(desktop)]
+    #[cfg(not(feature = "mobile"))]
     pub server_ip: IpAddr,
 
     pub port: u16,
@@ -22,7 +22,7 @@ pub struct RustEndpointConfig {
     pub outside_mtu: u32,
 }
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 // Some of the errors here are used in the iOS app only, so we are explicitly tagging them with dead code allowed
 pub enum EndpointError {
@@ -38,24 +38,24 @@ pub enum EndpointError {
 }
 
 // Ref: https://mozilla.github.io/uniffi-rs/0.27/proc_macro/index.html#the-unifficustom_type-and-unifficustom_newtype-macros
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 uniffi::custom_type!(IpAddress, String);
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 #[derive(Debug, Eq, PartialEq, Clone)]
 /// Custom type  with `String` as the `Builtin` bridge
 pub struct IpAddress {
     ip: IpAddr,
 }
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 impl std::fmt::Display for IpAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.ip)
     }
 }
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 impl crate::UniffiCustomTypeConverter for IpAddress {
     type Builtin = String;
 
@@ -71,7 +71,7 @@ impl crate::UniffiCustomTypeConverter for IpAddress {
     }
 }
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 impl From<IpAddress> for IpAddr {
     fn from(val: IpAddress) -> Self {
         val.ip

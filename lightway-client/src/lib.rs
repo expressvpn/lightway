@@ -8,10 +8,10 @@ pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 pub mod mobile;
 
-#[cfg(mobile)]
+#[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
@@ -85,17 +85,17 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(mobile, derive(uniffi::Enum))]
+#[cfg_attr(feature = "mobile", derive(uniffi::Enum))]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
 
-    #[cfg(mobile)]
+    #[cfg(feature = "mobile")]
     ServerGoodbye,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(mobile, derive(uniffi::Error), uniffi(flat_error))]
+#[cfg_attr(feature = "mobile", derive(uniffi::Error), uniffi(flat_error))]
 pub enum LightwayError {
     #[error("Connection Error: `{0}`")]
     ConnectionError(#[from] anyhow::Error),
@@ -105,10 +105,10 @@ pub enum LightwayError {
     Unauthorized,
 
     // These Endpoint Error is iOS only
-    #[cfg(mobile)]
+    #[cfg(feature = "mobile")]
     #[error("Endpoint Error: `{0}`")]
     EndpointError(#[from] crate::endpoint::EndpointError),
-    #[cfg(mobile)]
+    #[cfg(feature = "mobile")]
     #[error("Logging bridge initialization error: `{0}`")]
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
 }
