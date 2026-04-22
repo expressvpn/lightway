@@ -274,7 +274,10 @@ impl Default for Config {
             password: None,
             ca_cert: "./ca_cert.crt".to_string(),
             outside_mtu: MAX_OUTSIDE_MTU,
+            #[cfg(macos)]
             tun_name: None,
+            #[cfg(not(macos))]
+            tun_name: Some("lightway".to_string()),
             #[cfg(windows)]
             wintun_file: None,
             #[cfg(windows)]
