@@ -146,8 +146,11 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(windows)]
-    if let Some(wintun_file) = config.wintun_file {
-        tun_config.wintun_file(wintun_file);
+    {
+        if let Some(wintun_file) = config.wintun_file {
+            tun_config.wintun_file(wintun_file);
+        }
+        tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
     }
 
     // TODO: Fix in future PR

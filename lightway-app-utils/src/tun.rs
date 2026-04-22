@@ -52,6 +52,10 @@ pub struct TunConfig {
     #[cfg(windows)]
     /// Optional wintun file path for Windows TUN interfaces
     pub wintun_file: Option<String>,
+    #[cfg(windows)]
+    /// Wintun ring buffer capacity in bytes. Larger values improve throughput.
+    /// Must be a power of two between 128KiB and 64MiB.
+    pub ring_capacity: Option<u32>,
 }
 
 impl Debug for TunConfig {
@@ -147,6 +151,20 @@ impl TunConfig {
         self
     }
 
+    /// Set the wintun ring buffer capacity in bytes (Windows only).
+    /// Must be a power of two between 128KiB and 64MiB.
+    #[cfg(windows)]
+    pub fn ring_capacity(&mut self, capacity: u32) -> Result<&mut Self> {
+        const MIN: u32 = 128 * 1024;
+        const MAX: u32 = 64 * 1024 * 1024;
+        anyhow::ensure!(
+            capacity.is_power_of_two() && (MIN..=MAX).contains(&capacity),
+            "ring capacity must be a power of two between 128KiB and 64MiB, got {capacity}"
+        );
+        self.ring_capacity = Some(capacity);
+        Ok(self)
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -155,8 +173,15 @@ impl TunConfig {
             builder = builder.name(name);
         }
         #[cfg(windows)]
-        if let Some(wintun_file) = self.wintun_file.as_ref() {
-            builder = builder.wintun_file(wintun_file.clone());
+        {
+            if let Some(wintun_file) = self.wintun_file.as_ref() {
+                builder = builder.wintun_file(wintun_file.clone());
+            }
+            if let Some(ring_capacity) = self.ring_capacity {
+                builder = builder.with(|opt| {
+                    opt.ring_capacity(ring_capacity);
+                });
+            }
         }
         #[cfg(macos)]
         {

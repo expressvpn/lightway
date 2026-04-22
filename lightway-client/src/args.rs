@@ -192,6 +192,13 @@ pub struct Config {
     #[clap(long)]
     pub tls_debug: bool,
 
+    /// Wintun ring buffer capacity in bytes (Windows only).
+    /// Must be a power of two between 128KiB and 64MiB.
+    /// Larger values improve throughput.
+    #[cfg(windows)]
+    #[clap(long, default_value = "8MiB")]
+    pub wintun_ring_capacity: ByteSize,
+
     /// Enable DPAPI encryption/decryption for config file
     /// Only for Windows platform
     #[cfg(windows)]
