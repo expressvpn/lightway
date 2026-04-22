@@ -1,8 +1,6 @@
 use super::OutsideIO;
 #[cfg(batch_receive)]
-use crate::io::outside::udp_batch_receiver::BatchReceiver;
-#[cfg(batch_receive)]
-use crate::io::outside::udp_batch_receiver::BatchReceiverConsumerError;
+use crate::io::outside::udp_batch_receiver;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use lightway_app_utils::sockopt;
@@ -18,7 +16,7 @@ pub struct Udp {
     peer_addr: SocketAddr,
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
-    batch_receiver: Option<BatchReceiver>,
+    batch_receive_enabled: bool,
 }
 
 impl Udp {
@@ -48,7 +46,7 @@ impl Udp {
             peer_addr,
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
-            batch_receiver: None,
+            batch_receive_enabled: false,
         })
     }
 
@@ -62,7 +60,7 @@ impl Udp {
             return;
         }
         tracing::info!("Using batch receiver");
-        self.batch_receiver = Some(BatchReceiver::new(self.sock.clone()));
+        self.batch_receive_enabled = true;
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -88,38 +86,48 @@ impl OutsideIO for Udp {
         Ok(r)
     }
 
-    #[cfg(batch_receive)]
-    /// If `batch_receiver` is on, it will try to acquire a permit
-    /// of a Semaphore to see if the ring buffer has any packets in it.
-    async fn readable(&self) -> Result<()> {
-        if let Some(receiver) = self.batch_receiver.as_ref() {
-            // Wait until the recv task has pushed at least one packet into recv_queue.
-            receiver.recv_queue_ready().await?;
-        } else {
-            self.poll(tokio::io::Interest::READABLE).await?;
-        }
-        Ok(())
-    }
-
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize> {
-        #[cfg(batch_receive)]
-        if let Some(receiver) = self.batch_receiver.as_ref() {
-            return match receiver.pop_recv_consumer() {
-                Ok(b) => {
-                    let len = b.len();
-                    *buf = b;
-                    IOCallbackResult::Ok(len)
-                }
-                Err(BatchReceiverConsumerError::EmptyBuffer(_)) => IOCallbackResult::WouldBlock,
-                Err(BatchReceiverConsumerError::SemaphoreClosed(e)) => IOCallbackResult::Err(e),
-            };
-        }
         match self.sock.try_recv_buf(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
             Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
+    #[cfg(batch_receive)]
+    /// If the config explicitly turned off batch receive, it will just run regular `recv_from` function.
+    fn recv_bufs(
+        &self,
+        bufs: &mut [bytes::BytesMut; super::BATCH_RECV_SIZE],
+    ) -> IOCallbackResult<usize> {
+        if !self.batch_receive_enabled {
+            return match self.recv_buf(&mut bufs[0]) {
+                IOCallbackResult::Ok(_size) => IOCallbackResult::Ok(1),
+                others => others,
+            };
+        }
+
+        use std::os::fd::AsRawFd;
+
+        let fd = self.sock.as_raw_fd();
+
+        loop {
+            match self.sock.try_io(tokio::io::Interest::READABLE, || {
+                udp_batch_receiver::recv_multiple(fd, bufs, super::BATCH_RECV_SIZE)
+            }) {
+                Ok(n) => return IOCallbackResult::Ok(n),
+                // try_io may return WouldBlock even if the socket isn't actually
+                // readable. Break with 0 to wait for another readable event emitted.
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return IOCallbackResult::WouldBlock;
+                }
+                // Interrupted means the syscall was interrupted by a signal and can be
+                // retried immediately without waiting for another readable event.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return IOCallbackResult::Err(e),
+            }
         }
     }
 
