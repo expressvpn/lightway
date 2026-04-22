@@ -28,6 +28,8 @@ pub trait OutsideIO: Sync + Send {
     /// Receive packets into `bufs`, filling up to `bufs.len()` entries.
     /// Returns how many buffers were actually written (always `>= 1` on `Ok`).
     ///
+    /// Caller must reserve spare capacity ≥ `mtu` on every given buffer.
+    ///
     /// The default implementation reads a single packet into `bufs[0]` and is
     /// appropriate for stream transports (e.g. TCP) or UDP without batch support.
     /// Transports with a native batch-receive syscall should override this.

@@ -32,6 +32,7 @@ pub(crate) fn recv_multiple(
     recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
     max_batch_size: usize,
 ) -> io::Result<usize> {
+    let max_batch_size = max_batch_size.min(BATCH_RECV_SIZE);
     PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
 }
 
@@ -120,6 +121,12 @@ mod apple {
             }
 
             let count = n as usize;
+            // Should not happen, but just to play it safe
+            if count > msg_count {
+                return Err(io::Error::other(
+                    "recvmsg_x returned more packets than requested",
+                ));
+            }
             for i in 0..count {
                 let len = hdrs[i].msg_datalen;
                 // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
@@ -201,6 +208,12 @@ mod linux {
             }
 
             let count = n as usize;
+            // Should not happen, but just to play it safe
+            if count > msg_count {
+                return Err(io::Error::other(
+                    "recvmmsg returned more packets than requested",
+                ));
+            }
             for i in 0..count {
                 let len = hdrs[i].msg_len as usize;
                 // SAFETY: recvmmsg sets msg_len to the number of bytes received per message,
