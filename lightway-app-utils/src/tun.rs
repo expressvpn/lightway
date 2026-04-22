@@ -86,10 +86,13 @@ impl Debug for TunConfig {
 
 impl TunConfig {
     /// Set the tun name.
-    /// # Note:
-    /// On macOS, the tun name must be the form `utunx` where `x` is a number, such as `utun3`
-    pub fn tun_name<T: Into<String>>(&mut self, tun_name: T) -> &mut Self {
-        self.tun_name = Some(tun_name.into());
+    pub fn tun_name(&mut self, tun_name: String) -> &mut Self {
+        #[cfg(macos)]
+        assert!(
+            tun_name.starts_with("utun"),
+            "On macOS, the tun name must be the form `utunx` where `x` is a number, such as `utun3`"
+        );
+        self.tun_name = Some(tun_name);
         self
     }
 

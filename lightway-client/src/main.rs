@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
 
     let mut tun_config = TunConfig::default();
 
-    if let Some(tun_name) = config.tun_name {
+    if let Some(tun_name) = config.tun_name.take() {
         tun_config.tun_name(tun_name);
     }
 
