@@ -117,11 +117,11 @@ pub struct Config {
     pub preferred_connection_wait_interval: Duration,
 
     /// Socket send buffer size
-    #[clap(long)]
-    pub sndbuf: Option<ByteSize>,
+    #[clap(long, default_value = "8MiB")]
+    pub sndbuf: ByteSize,
     /// Socket receive buffer size
-    #[clap(long)]
-    pub rcvbuf: Option<ByteSize>,
+    #[clap(long, default_value = "8MiB")]
+    pub rcvbuf: ByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS)
     #[cfg(batch_receive)]
