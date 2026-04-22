@@ -1,10 +1,8 @@
 mod args;
 mod auth;
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result, anyhow};
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use struct_patch::Patch;
 
 use metrics_util::debugging::DebuggingRecorder;
@@ -12,7 +10,7 @@ use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 
-use args::Config;
+use args::{Config, ConfigPatch};
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
 use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
@@ -77,14 +75,14 @@ async fn metrics_debug() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let matches = Config::command().get_matches();
+    let mut options = ConfigPatch::parse();
 
     // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = matches.get_one::<PathBuf>("config_file") else {
+    let Some(config_file) = options.config_file.take() else {
         return Err(anyhow!("Config file not present"));
     };
 
-    validate_configuration_file_path(config_file, Validate::AllowWorldRead)
+    validate_configuration_file_path(&config_file, Validate::AllowWorldRead)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
     let mut config = Config::default();
@@ -94,7 +92,6 @@ async fn main() -> Result<()> {
             .with_prefix("LW_SERVER_")
             .build_from_env()?,
     );
-    let options = Config::parse().into_patch_by_diff(Config::default());
     config.apply(options);
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)

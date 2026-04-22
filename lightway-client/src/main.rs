@@ -3,9 +3,6 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(windows)]
-use clap::ArgMatches;
-use clap::CommandFactory;
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
 use tokio::fs::read_to_string;
@@ -65,15 +62,12 @@ async fn make_client_connection_config(
 }
 
 #[cfg(windows)]
-async fn load_patch(matches: &ArgMatches, config_file: &PathBuf) -> Result<ConfigPatch> {
+async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<ConfigPatch> {
     use crate::platform::windows::crypto::decrypt_dpapi_config_file;
     use windows_dpapi::Scope::User;
 
     // Fetch whether DPAPI is enabled from CLI args
-    let enable_dpapi = matches
-        .get_one::<bool>("enable_dpapi")
-        .copied()
-        .unwrap_or(false);
+    let enable_dpapi = options.enable_dpapi;
 
     let content = if enable_dpapi {
         tracing::info!("DPAPI decryption enabled for config file");
@@ -88,21 +82,21 @@ async fn load_patch(matches: &ArgMatches, config_file: &PathBuf) -> Result<Confi
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let matches = Config::command().get_matches();
+    let mut options = ConfigPatch::parse();
 
     // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = matches.get_one::<PathBuf>("config_file") else {
+    let Some(config_file) = options.config_file.take() else {
         return Err(anyhow!("Config file not present"));
     };
 
-    validate_configuration_file_path(config_file, Validate::OwnerOnly)
+    validate_configuration_file_path(&config_file, Validate::OwnerOnly)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
     let mut config = Config::default();
 
     // Load config patch with DPAPI support
     #[cfg(windows)]
-    config.apply(load_patch(&matches, config_file).await?);
+    config.apply(load_patch(&options, &config_file).await?);
     #[cfg(not(windows))]
     config.apply(serde_saphyr::from_str::<ConfigPatch>(
         &read_to_string(config_file).await?,
@@ -112,7 +106,6 @@ async fn main() -> Result<()> {
             .with_prefix("LW_CLIENT_")
             .build_from_env()?,
     );
-    let options = Config::parse().into_patch_by_diff(Config::default());
     config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
