@@ -2,33 +2,56 @@ pub mod config;
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
+pub mod error;
+pub mod event_handlers;
 pub mod io;
 pub mod keepalive;
+#[cfg(feature = "mobile")]
+pub mod mobile;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
-
 #[cfg(feature = "mobile")]
-pub mod mobile;
+pub mod state;
 
 #[cfg(feature = "mobile")]
 uniffi::setup_scaffolding!();
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "mobile")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use bytes::BytesMut;
+#[cfg(desktop)]
 use bytesize::ByteSize;
-use futures::{FutureExt, stream::FuturesUnordered};
+use futures::FutureExt;
+#[cfg(not(feature = "mobile"))]
+use futures::stream::FuturesUnordered;
+#[cfg(feature = "mobile")]
+use futures::{
+    future::{OptionFuture, select_all},
+    stream::FusedStream,
+};
+#[cfg(feature = "mobile")]
+pub use io::inside::TunnelState;
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
+#[cfg(mobile)]
+use keepalive::KeepaliveResult;
 use lightway_app_utils::{
-    ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    ConnectionTicker, ConnectionTickerState, EventStreamCallback, args::Cipher,
 };
+use lightway_app_utils::{DplpmtudTimer, connection_ticker_cb};
+#[cfg(desktop)]
+use lightway_app_utils::{PacketCodecFactoryType, TunConfig};
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
+    ConnectionType, IOCallbackResult, InsideIpConfig, OutsidePacket, ipv4_update_destination,
+    ipv4_update_source,
 };
+#[cfg(not(feature = "mobile"))]
+use lightway_core::{EventCallback, InsideIOSendCallbackArg};
+#[cfg(feature = "mobile")]
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(feature = "debug")]
@@ -40,34 +63,46 @@ use crate::io::outside::BATCH_RECV_SIZE;
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
 use crate::route_manager::{RouteManager, RouteMode};
+#[cfg(feature = "mobile")]
+use crate::state::DeviceNetworkState;
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
 pub use lightway_core::{
     AuthMethod, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, PluginFactoryError, PluginFactoryList,
     RootCertificate, Version,
 };
+
 #[cfg(feature = "debug")]
 // re-export so client app does not need to depend on lightway-core
 pub use lightway_core::{enable_tls_debug, set_logging_callback};
 use pnet_packet::ipv4::Ipv4Packet;
+#[cfg(feature = "mobile")]
+use std::collections::HashMap;
+#[cfg(desktop)]
+use std::future::Future;
 #[cfg(desktop)]
 use std::net::IpAddr;
 #[cfg(feature = "debug")]
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{
-    future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
+#[cfg(desktop)]
+use tokio::sync::mpsc;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::{
     net::{TcpStream, UdpSocket},
-    sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
+    sync::oneshot,
 };
-use tokio_stream::{StreamExt, StreamMap};
-use tracing::info;
+use tokio_stream::StreamExt;
+#[cfg(desktop)]
+use tokio_stream::StreamMap;
+#[cfg(feature = "mobile")]
+use tracing::{Instrument, debug, info_span, warn};
+use tracing::{error, info};
 
 /// Connection type
 /// Applications can also attach socket for library to use directly,
@@ -86,6 +121,16 @@ impl std::fmt::Debug for ClientConnectionMode {
     }
 }
 
+impl std::convert::From<lightway_app_utils::args::ConnectionType> for ClientConnectionMode {
+    fn from(val: lightway_app_utils::args::ConnectionType) -> Self {
+        if val.is_tcp() {
+            ClientConnectionMode::Stream(None)
+        } else {
+            ClientConnectionMode::Datagram(None)
+        }
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "mobile", derive(uniffi::Enum))]
 pub enum ClientResult {
@@ -96,34 +141,10 @@ pub enum ClientResult {
     ServerGoodbye,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Error), uniffi(flat_error))]
-pub enum LightwayError {
-    #[error("Connection Error: `{0}`")]
-    ConnectionError(#[from] anyhow::Error),
-    #[error("Received empty endpoints")]
-    EmptyEndpointsError,
-    #[error("User is not authorized / authentication failed")]
-    Unauthorized,
-    #[error("Config Error: `{0}`")]
-    ConfigError(#[from] crate::config::Error),
-
-    #[cfg(feature = "mobile")]
-    #[error("Logging bridge initialization error: `{0}`")]
-    LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
-}
-
+#[cfg(not(feature = "mobile"))]
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
-    /// Auth parameters to use for connection
-    #[educe(Debug(ignore))]
-    pub auth: AuthMethod,
-
-    /// CA certificate
-    #[educe(Debug(ignore))]
-    pub root_ca_cert: RootCertificate<'cert>,
-
+pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Outside (wire) MTU
     pub outside_mtu: usize,
 
@@ -229,9 +250,32 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     pub keylog: Option<PathBuf>,
 }
 
+#[cfg(feature = "mobile")]
+#[derive(Clone)]
+pub struct ClientConfig {
+    tun_local_ip: Ipv4Addr,
+    tun_dns_ip: Ipv4Addr,
+    tun_fd: std::os::fd::RawFd,
+    preferred_connection_wait_interval: std::time::Duration,
+    internal_mtu: u16,
+    max_socket_buffer_len: usize,
+    enable_pmtud: bool,
+
+    external_event_handler: Arc<dyn crate::event_handlers::EventHandlers>,
+    connected_index: Arc<std::sync::OnceLock<usize>>,
+}
+
+/// The Conection configures for desktop clients
+#[cfg(not(feature = "mobile"))]
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
+    /// Auth for the connection
+    pub auth: lightway_core::AuthMethod,
+
+    /// CA content
+    pub ca_content: String,
+
     /// Connection mode
     pub mode: ClientConnectionMode,
 
@@ -261,6 +305,29 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     pub event_handler: Option<EventHandler>,
 }
 
+/// The Conection configures for mobile clients
+#[cfg(feature = "mobile")]
+pub struct ClientConnectionConfig {
+    auth: lightway_core::AuthMethod,
+    ca_content: String,
+    mode: ClientConnectionMode,
+    cipher: Cipher,
+    server_dn: Option<String>,
+    server: SocketAddr,
+    inside_plugins: PluginFactoryList,
+    outside_plugins: PluginFactoryList,
+
+    instance_id: usize,
+    outside_mtu: usize,
+    sni_header: String,
+    socket: Option<io::outside::OutsideSocket>,
+    enable_keepalive: bool,
+    enable_expresslane: bool,
+    online_signal_sender: tokio::sync::mpsc::Sender<usize>,
+    event_stream_handler: EventStreamCallback,
+    external_event_handler: Arc<dyn event_handlers::EventHandlers>,
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientInsidePacketCodecConfig {
@@ -272,6 +339,7 @@ pub struct ClientInsidePacketCodecConfig {
     pub encoding_request_signal: tokio::sync::mpsc::Receiver<bool>,
 }
 
+#[cfg(desktop)]
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
     f: &mut std::fmt::Formatter,
@@ -279,6 +347,7 @@ fn debug_fmt_plugin_list(
     write!(f, "{} plugins", list.len())
 }
 
+#[cfg(desktop)]
 fn debug_pkt_codec_fac(
     codec_fac: &Option<PacketCodecFactoryType>,
     f: &mut std::fmt::Formatter,
@@ -310,64 +379,6 @@ pub struct ConnectionState<ExtAppState: Send + Sync = ()> {
 impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppState> {
     fn connection_ticker(&self) -> &ConnectionTicker {
         &self.ticker
-    }
-}
-
-async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sync>(
-    mut stream: EventStream,
-    keepalive: Keepalive,
-    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
-    enable_encoding_when_online: bool,
-    mut event_handler: Option<A>,
-    connected_signal: oneshot::Sender<()>,
-    disconnected_signal: oneshot::Sender<()>,
-) {
-    let mut connected_signal = Some(connected_signal);
-    let mut disconnected_signal = Some(disconnected_signal);
-    while let Some(event) = stream.next().await {
-        match &event {
-            Event::StateChanged(state) => {
-                if matches!(state, State::Online) {
-                    if let Some(connected_signal) = connected_signal.take() {
-                        let _ = connected_signal.send(());
-                    }
-                    keepalive.online().await;
-                    let Some(conn) = weak.upgrade() else {
-                        break; // Connection disconnected.
-                    };
-
-                    if enable_encoding_when_online
-                        && let Err(e) = conn.lock().unwrap().set_encoding(true)
-                    {
-                        tracing::error!("Error encoutered when trying to toggle encoding. {}", e);
-                    }
-                } else if matches!(state, State::Disconnected)
-                    && let Some(disconnected_tx) = disconnected_signal.take()
-                {
-                    let _ = disconnected_tx.send(());
-                }
-            }
-            Event::KeepaliveReply => keepalive.reply_received().await,
-            Event::FirstPacketReceived => {
-                info!("First outside packet received");
-            }
-            Event::ExpresslaneStateChanged(state) => {
-                info!(?state, "Expresslane State Change");
-            }
-            Event::EncodingStateChanged { enabled } => {
-                info!("Encoding state changed to {enabled}");
-            }
-
-            // Server only events
-            Event::SessionIdRotationAcknowledged { .. }
-            | Event::TlsKeysUpdateStart
-            | Event::TlsKeysUpdateCompleted => {
-                unreachable!("server only event received");
-            }
-        }
-        if let Some(ref mut handler) = event_handler {
-            handler.event(event);
-        }
     }
 }
 
@@ -515,6 +526,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+#[cfg(not(feature = "mobile"))]
 async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
@@ -538,6 +550,73 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         }
     }
     ClientResult::UserDisconnect
+}
+
+#[cfg(feature = "mobile")]
+/// Handle all the network changes on the device.
+async fn handle_network_change(
+    keepalive: Keepalive,
+    mut network_change_receiver: tokio::sync::mpsc::Receiver<DeviceNetworkState>,
+    weak: Weak<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    #[cfg_attr(not(apple), allow(unused_variables))] reset_outside_io_tx: tokio::sync::mpsc::Sender<
+        (),
+    >,
+) -> uniffi::Result<ClientResult> {
+    while let Some(network_state) = network_change_receiver.recv().await {
+        let Some(conn) = weak.upgrade() else {
+            return Ok(ClientResult::UserDisconnect);
+        };
+        let conn_type = conn.lock().unwrap().connection_type();
+        info!("Device network state change to {network_state:?}");
+        match network_state {
+            DeviceNetworkState::Online | DeviceNetworkState::InterfaceChanged => {
+                match conn_type {
+                    ConnectionType::Datagram => {
+                        // We only need to use reset new socket on iOS but not on Android
+                        #[cfg(apple)]
+                        {
+                            // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
+                            // via the new network path and avoid using mobile data unnecessarily.
+                            info!("resetting udp transport due to network change ..");
+                            reset_outside_io_tx.send(()).await?;
+                        }
+                        #[cfg(not(apple))]
+                        // Trigger a new keepalive on the new socket (keepalive will
+                        // be triggered after the socket has been updated on iOS)
+                        keepalive.network_changed().await;
+                    }
+                    ConnectionType::Stream => {
+                        info!("client shutting down due to network change ..");
+                        let _ = conn.lock().unwrap().disconnect();
+                        return Ok(ClientResult::NetworkChange);
+                    }
+                }
+            }
+            DeviceNetworkState::RouteUpdated => {
+                match conn_type {
+                    ConnectionType::Datagram => {
+                        // UDP survives updating the network, but to ensure that the new network
+                        // with the current endpoint works reliably, we trigger keep-alives
+                        // e.g swapping from an unrestricted network to one that blocks UDP
+                        info!("sending keepalives due to network change ..");
+                        keepalive.network_changed().await;
+                    }
+                    ConnectionType::Stream => {
+                        info!("client shutting down due to network change ..");
+                        let _ = conn.lock().unwrap().disconnect();
+                        return Ok(ClientResult::NetworkChange);
+                    }
+                }
+            }
+            DeviceNetworkState::Offline => {
+                // Suspend keepalive timers as we're guaranteed
+                // to fail and disconnect after all failed attempts
+                info!("suspending keepalive...");
+                keepalive.suspend().await;
+            }
+        }
+    }
+    Ok(ClientResult::UserDisconnect)
 }
 
 pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
@@ -601,7 +680,7 @@ pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
             if err.is_fatal(conn.connection_type()) {
                 return Err(err.into());
             }
-            tracing::error!("Failed to process outside data: {err}");
+            error!("Failed to process outside data: {err}");
         }
     }
 
@@ -619,7 +698,7 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
         };
 
         if let Err(e) = conn.lock().unwrap().set_encoding(enable) {
-            tracing::error!(
+            error!(
                 "Error encoutered when trying to send encoding request. {}",
                 e
             );
@@ -629,25 +708,42 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
+#[cfg(desktop)]
 /// Represents a connection to a server. When dropped, the route table will be removed.
 pub struct ClientConnection<T: Send + Sync> {
+    #[cfg(desktop)]
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
-    #[cfg(desktop)]
     outside_io: Arc<dyn io::outside::OutsideIO>,
+    #[cfg(desktop)]
     connected_signal: Option<oneshot::Receiver<()>>,
+    #[cfg(desktop)]
     stop_signal: Option<oneshot::Sender<()>>,
+    #[cfg(desktop)]
     network_change_signal: mpsc::Sender<()>,
+    #[cfg(desktop)]
     encoding_request_signal: mpsc::Sender<bool>,
-    #[cfg(desktop)]
     route_manager: Option<RouteManager>,
-    #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
 
+#[cfg(mobile)]
+/// Represents a connection to a server
+pub struct ClientConnection {
+    pub conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    pub outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub new_outside_io_sender: tokio::sync::mpsc::Sender<()>,
+    pub keepalive: Keepalive,
+    pub keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub keepalive_config: KeepaliveConfig,
+    pub join_set: JoinSet<()>,
+    pub instance_id: usize,
+    pub expresslane_event_rx: Option<tokio::sync::mpsc::Receiver<state::ExpresslaneState>>,
+}
+
+#[cfg(desktop)]
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
-    #[cfg(desktop)]
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
@@ -674,7 +770,6 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         Ok(())
     }
 
-    #[cfg(desktop)]
     pub fn set_dns(
         &mut self,
         dns_config_mode: DnsConfigMode,
@@ -700,6 +795,49 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     }
 }
 
+#[cfg(mobile)]
+impl ClientConnection {
+    pub fn first_outside_io_exit(
+        connections: &mut HashMap<usize, ClientConnection>,
+    ) -> impl Future<Output = (usize, Result<uniffi::Result<()>, tokio::task::JoinError>)> + '_
+    {
+        if connections.is_empty() {
+            return futures::future::Either::Left(std::future::pending());
+        }
+        futures::future::Either::Right(
+            select_all(
+                connections.values_mut().map(|c| {
+                    Box::pin(async move { (c.instance_id, (&mut c.outside_io_task).await) })
+                }),
+            )
+            .map(|((id, result), _, _)| (id, result)),
+        )
+    }
+
+    pub async fn cleanup(
+        in_progress_connections_abort_handle: Vec<tokio::task::AbortHandle>,
+        completed_connections: Vec<ClientConnection>,
+    ) {
+        for conn in in_progress_connections_abort_handle {
+            if !conn.is_finished() {
+                conn.abort();
+            }
+        }
+        for mut c in completed_connections.into_iter() {
+            let span = info_span!("CleanupConnection", instance_id = ?c.instance_id);
+            span.in_scope(|| {
+                debug!("Disconnecting completed connection");
+                let _ = c.conn.lock().unwrap().disconnect();
+                c.outside_io_task.abort();
+                c.join_set.abort_all();
+            });
+            drop(c.keepalive);
+            c.keepalive_task.await;
+        }
+        info!("Cleaned up unused connections");
+    }
+}
+
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -709,40 +847,18 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         inside_io,
     )
 )]
+#[cfg(not(feature = "mobile"))]
 pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     mut server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
 ) -> Result<ClientConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
 
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match server_config.mode {
-            ClientConnectionMode::Datagram(maybe_sock) => {
-                #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server_config.server, maybe_sock)
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
-                    .context("Outside IO UDP")?;
-
-                #[cfg(batch_receive)]
-                if config.enable_batch_receive {
-                    sock.enable_batch_receive();
-                }
-
-                (ConnectionType::Datagram, Arc::new(sock))
-            }
-            ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
-                    .context("Outside IO TCP")?;
-                (ConnectionType::Stream, Arc::new(sock))
-            }
-        };
+    let (connection_type, outside_io) = io::outside::build(&mut server_config).await?;
 
     if let Some(size) = config.sndbuf {
         outside_io.set_send_buffer_size(size.as_u64().try_into()?)?;
@@ -782,7 +898,7 @@ pub async fn connect<
 
     let conn_builder = ClientContextBuilder::new(
         connection_type,
-        config.root_ca_cert,
+        RootCertificate::PemBuffer(server_config.ca_content.as_bytes()),
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
@@ -796,7 +912,7 @@ pub async fn connect<
         outside_io.clone().into_io_send_callback(),
         config.outside_mtu,
     )?
-    .with_auth(config.auth.clone())
+    .with_auth(server_config.auth)
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
@@ -830,7 +946,7 @@ pub async fn connect<
     let (disconnected_tx, disconnected_rx) = oneshot::channel();
 
     let event_handler = server_config.event_handler.take();
-    join_set.spawn(handle_events(
+    join_set.spawn(event_handlers::handle_events(
         event_stream,
         keepalive.clone(),
         Arc::downgrade(&conn),
@@ -949,6 +1065,149 @@ pub async fn connect<
     })
 }
 
+/// Individual connection to a lightway server
+#[cfg(feature = "mobile")]
+pub(crate) async fn connect(
+    config: ClientConfig,
+    ClientConnectionConfig {
+        instance_id,
+        mode,
+        cipher,
+        outside_mtu,
+        server_dn,
+        auth,
+        ca_content,
+        server,
+        inside_plugins,
+        mut outside_plugins,
+        sni_header,
+        socket,
+        enable_keepalive,
+        enable_expresslane,
+        online_signal_sender,
+        event_stream_handler,
+        external_event_handler,
+    }: ClientConnectionConfig,
+    inside_io: Arc<
+        dyn lightway_core::InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync,
+    >,
+) -> uniffi::Result<ClientConnection> {
+    let mut join_set = tokio::task::JoinSet::new();
+
+    // TODO: Should be strong type error
+    let socket = socket.ok_or(anyhow!("socket not provided"))?;
+
+    let (connection_type, outside_io) = io::outside::build(
+        socket,
+        server,
+        config.max_socket_buffer_len,
+        &mut outside_plugins,
+    )
+    .await?;
+
+    let (event_cb, event_stream) = EventStreamCallback::new();
+
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let state: ConnectionState<TunnelState> = ConnectionState {
+        ticker,
+        ip_config: None,
+        extended: None,
+    };
+    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
+
+    let conn_builder = ClientContextBuilder::new(
+        connection_type,
+        lightway_core::wolfssl::RootCertificate::PemBuffer(ca_content.as_bytes()),
+        Some(inside_io),
+        Arc::new(ClientIpConfigCb),
+        connection_ticker_cb,
+    )?
+    .with_cipher(cipher.into())?
+    .with_inside_plugins(inside_plugins)
+    .with_outside_plugins(outside_plugins)
+    .when(connection_type.is_datagram() && enable_expresslane, |b| {
+        b.with_expresslane()
+    })
+    .build()
+    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
+    .with_auth(auth)
+    .with_event_cb(Box::new(event_cb))
+    .when(server_dn.is_some(), |b| {
+        b.with_server_domain_name_validation(
+            server_dn.as_ref().expect("checked in builder pattern"),
+        )
+    })
+    .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
+    .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
+        b.with_pmtud_timer(pmtud_timer)
+    });
+
+    #[cfg(feature = "postquantum")]
+    let conn_builder = conn_builder.when(true, |b| b.with_pq_crypto());
+
+    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
+
+    let keepalive_config = KeepaliveConfig {
+        interval: Duration::new(2, 0),
+        timeout: Duration::new(6, 0),
+        continuous: enable_keepalive,
+        tracer_trigger_timeout: Some(Duration::from_secs(10)),
+    };
+    let (keepalive, keepalive_task) =
+        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    let notify_keepalive_reply = Arc::new(Notify::new());
+    let (expresslane_event_tx, expresslane_event_rx) =
+        if enable_expresslane && matches!(mode, ClientConnectionMode::Datagram(_)) {
+            Some(tokio::sync::mpsc::channel(5))
+        } else {
+            None
+        }
+        .unzip();
+
+    join_set.spawn(event_handlers::handle_events(
+        event_stream,
+        keepalive.clone(),
+        notify_keepalive_reply.clone(),
+        Arc::downgrade(&conn),
+        event_stream_handler,
+        online_signal_sender.clone(),
+        instance_id,
+        expresslane_event_tx,
+    ));
+
+    ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
+
+    let (new_outside_io_sender, new_outside_io_receiver) = tokio::sync::mpsc::channel(1);
+    let outside_io_task: JoinHandle<uniffi::Result<()>> = tokio::spawn(
+        io::outside::restartable_outside_io_task(
+            conn.clone(),
+            outside_mtu,
+            connection_type,
+            outside_io,
+            keepalive.clone(),
+            notify_keepalive_reply,
+            new_outside_io_receiver,
+            external_event_handler,
+            config.max_socket_buffer_len,
+        )
+        .in_current_span(),
+    );
+
+    Ok(ClientConnection {
+        conn,
+        outside_io_task,
+        new_outside_io_sender,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        join_set,
+        instance_id,
+        expresslane_event_rx,
+    })
+}
+
 /// Returns the index of the best connection.
 ///
 /// Receives `(index, connected_signal)` pairs from `connection_setup_rx` as connections
@@ -959,6 +1218,7 @@ pub async fn connect<
 /// duration before returning the highest priority connection (lowest index).
 /// If there is only one connection, or the preferred connection (index 0)
 /// is the first to connect, it will not wait.
+#[cfg(desktop)]
 async fn find_best_connection(
     mut connection_setup_rx: mpsc::Receiver<(usize, oneshot::Receiver<()>)>,
     preferred_connection_wait_interval: Duration,
@@ -1020,6 +1280,7 @@ async fn find_best_connection(
 /// Each connect future must yield `(index, Result<(connected_signal, connection)>)`.
 /// The `connected_signal` is forwarded to the selection logic; the `connection` is
 /// stored and returned alongside the winning index.
+#[cfg(desktop)]
 async fn select_best_from_futures<C, Fut>(
     mut connect_futs: FuturesUnordered<Fut>,
     preferred_connection_wait_interval: Duration,
@@ -1074,11 +1335,12 @@ where
     }
 }
 
+#[cfg(desktop)]
 fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
@@ -1109,11 +1371,12 @@ fn validate_client_config<
 /// priority connection (in the specified array order).
 ///
 /// stop_signal sends a signal if the program received INT/TERM signals
+#[cfg(not(feature = "mobile"))]
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    mut config: ClientConfig<'_, ExtAppState>,
+    mut config: ClientConfig<ExtAppState>,
     mut stop_signal: oneshot::Receiver<()>,
     conn_confs: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
@@ -1160,11 +1423,11 @@ pub async fn client<
         let connect_futs: FuturesUnordered<_> = conn_confs
             .into_iter()
             .enumerate()
-            .map(|(index, server_config)| {
+            .map(|(index, conn_config)| {
                 let config = &config;
                 let inside_io = inside_io.clone();
                 async move {
-                    let result = connect(config, server_config, inside_io)
+                    let result = connect(config, conn_config, inside_io)
                         .await
                         .map(|mut conn| (conn.connected_signal.take().unwrap(), conn));
                     (index, result)
@@ -1192,7 +1455,7 @@ pub async fn client<
     if let Some(signal) = config.best_connection_selected_signal.take()
         && signal.send(best_connection_index).is_err()
     {
-        tracing::error!("Failed to send best_connection_selected_signal");
+        error!("Failed to send best_connection_selected_signal");
     }
 
     let pos = connections
@@ -1210,7 +1473,7 @@ pub async fn client<
         tokio::spawn(async move {
             while network_change_signal.recv().await.is_some() {
                 if let Err(e) = connection_network_change_signal.send(()).await {
-                    tracing::error!("Failed to send network_change_signal: {e}");
+                    error!("Failed to send network_change_signal: {e}");
                 }
             }
         });
@@ -1221,7 +1484,7 @@ pub async fn client<
         tokio::spawn(async move {
             while let Some(enabled) = inside_pkt_codec_config.encoding_request_signal.recv().await {
                 if let Err(e) = connection_encoding_request_signal.send(enabled).await {
-                    tracing::error!("Failed to send encoding_request_signal: {e}");
+                    error!("Failed to send encoding_request_signal: {e}");
                 }
             }
         });
@@ -1231,7 +1494,7 @@ pub async fn client<
     tokio::spawn(async move {
         let _ = stop_signal.await;
         if let Err(()) = connection_stop_signal.send(()) {
-            tracing::error!("Failed to send stop signal");
+            error!("Failed to send stop signal");
         }
     });
 
@@ -1257,6 +1520,276 @@ pub async fn client<
     }
 
     result
+}
+
+#[cfg(feature = "mobile")]
+pub(crate) async fn client(
+    config: crate::ClientConfig,
+    conn_confs: Vec<crate::config::ConnectionConfig>,
+) -> uniffi::Result<ClientResult> {
+    let mut outside_sockets = conn_confs
+        .iter()
+        .map(|s| {
+            io::outside::OutsideSocket::new(
+                s.mode.is_tcp(),
+                Some(config.external_event_handler.clone()),
+            )
+            .ok()
+        })
+        .collect::<Vec<Option<io::outside::OutsideSocket>>>();
+
+    // Strore meta data before the server consumed
+    let server_len = conn_confs.len();
+    let tcp_connections_only = conn_confs.iter().all(|s| s.mode.is_tcp());
+
+    let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
+
+    let (online_signal_sender, mut online_signal) = tokio::sync::mpsc::channel(server_len);
+    let (event_handler, stream) = EventStreamCallback::new();
+    tokio::spawn(event_handlers::handle_global_events(
+        stream,
+        tokio::time::Instant::now(),
+        config.external_event_handler.clone(),
+    ));
+    let mut client_connect_configs = Vec::new();
+    for (instance_id, conn_conf) in conn_confs.into_iter().enumerate() {
+        let client_connect_config = conn_conf.into_client_connection_config(
+            instance_id,
+            &mut outside_sockets,
+            online_signal_sender.clone(),
+            event_handler.clone(),
+            config.external_event_handler.clone(),
+        )?;
+        client_connect_configs.push(client_connect_config)
+    }
+
+    let inside_io = Arc::new(io::inside::MobileInsideIo {
+        mtu: config.internal_mtu as usize,
+    });
+
+    let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
+        Vec<_>,
+        futures::stream::FuturesUnordered<_>,
+    ) = client_connect_configs
+        .into_iter()
+        .map(|c| {
+            let instance_id = c.instance_id;
+            let task = tokio::spawn(
+                // TODO
+                // check if it is possible to reduce clone in mobile, or make a clear note here
+                connect(config.clone(), c, inside_io.clone())
+                    .instrument(info_span!("ClientConnection", instance_id)),
+            );
+            (task.abort_handle(), task)
+        })
+        .unzip();
+
+    let mut wait_timer_task = tokio::spawn(tokio::time::sleep(
+        config.preferred_connection_wait_interval,
+    ));
+
+    debug!(
+        "Creating {} parallel connections",
+        in_progress_connections.len()
+    );
+
+    drop(outside_sockets);
+    drop(event_handler);
+
+    // Drop the last sender
+    drop(online_signal_sender);
+
+    let mut non_preferred_connections: Vec<(usize, ClientConnection)> = Vec::new();
+    let mut pending_online_connections: HashMap<usize, ClientConnection> =
+        HashMap::with_capacity(server_len);
+    let mut failed_connections = 0usize;
+    let mut connection_error_to_return = None;
+
+    debug!("Waiting for online signal");
+    let active_connection = loop {
+        tokio::select! {
+            // Prioritise management commands over other branches, also make sure we add
+            // ClientConnection to HashMap first to make sure when it goes online,
+            // we can remove it from the HashMap and break the loop.
+            biased;
+            _ = futures::future::ready(()), if failed_connections == server_len => {
+                error!("All connections failed, exiting...");
+                return Err(connection_error_to_return.unwrap_or(anyhow!("All connections failed")));
+            }
+
+            // On iOS specifically:
+            // If the library is called during a network change, it is possible all the TCP sockets
+            // created during this moment are "offline", and they cannot reach the servers.
+
+            // We early return and end connections attempt earlier for both Android and iOS as
+            // the connected server are going to get reset by the network change later anyway.
+            Some(DeviceNetworkState::Online | DeviceNetworkState::RouteUpdated | DeviceNetworkState::InterfaceChanged) = network_change_receiver.recv(), if tcp_connections_only => {
+                info!("client shutting down due to network change while connecting for Lightway - TCP");
+                return Ok(ClientResult::NetworkChange)
+            },
+
+            Some(connection_result) = in_progress_connections.next(), if !in_progress_connections.is_terminated() => {
+                match connection_result {
+                    Ok(Ok(connection)) => {
+                        debug!("Adding connections to hash map");
+                        let _ = pending_online_connections.insert(connection.instance_id, connection);
+                        continue;
+                    },
+                    Ok(Err(e)) => error!("Error while waiting for connection to set up: {:?}", e),
+                    Err(e) => error!("Join Error while waiting for connection to set up: {:?}", e)
+                };
+                failed_connections += 1;
+            },
+
+            _ = &mut wait_timer_task, if !wait_timer_task.is_finished() => {
+                if !non_preferred_connections.is_empty() {
+                    non_preferred_connections.sort_by_key(|(instance_id, _)| *instance_id);
+                    let (instance_id, connection) = non_preferred_connections.swap_remove(0);
+                    info!(?instance_id, "Defer timeout, choosing best connection");
+                    break connection;
+                }
+            },
+
+            Some(instance_id) = online_signal.recv() => {
+                debug!(?instance_id, "Online received for");
+                if let Some(connection) = pending_online_connections.remove(&instance_id) {
+                    if wait_timer_task.is_finished() {
+                        info!(?instance_id, "Defer timeout, using current connection");
+                        break connection;
+                    }
+                    // We don't defer connection if it's the first endpoint from the pecking order
+                    if instance_id == 0 {
+                        info!("Using best connection");
+                        break connection;
+                    }
+                    info!("Deferring connection {}", instance_id);
+                    non_preferred_connections.push((instance_id, connection));
+                } else {
+                    warn!(?instance_id, "Cannot find ClientConnection");
+                }
+            },
+
+            (instance_id, outside_io_result) = ClientConnection::first_outside_io_exit(&mut pending_online_connections) => {
+                // outside_io_task should not early return here, we're not going to use this connection anyway, removing it for clean-up
+                let connection = pending_online_connections.remove(&instance_id);
+                if let Some(connection) = connection {
+                    let _ = connection.conn.lock().unwrap().disconnect();
+                    drop(connection);
+                }
+                match outside_io_result {
+                    Ok(Err(e)) if matches!(e.downcast_ref::<ConnectionError>(), Some(ConnectionError::Unauthorized)) => {
+                        error!(?instance_id, "Unauthorized connection");
+                        connection_error_to_return = Some(ConnectionError::Unauthorized.into());
+                    }
+                    _ => error!(?instance_id, "Unexpected outside_io_task early exit: {:?}", outside_io_result),
+                }
+                failed_connections += 1;
+            }
+        }
+    };
+
+    // Drop the receiver so that no more connections can be active
+    drop(online_signal);
+
+    debug!(?active_connection.instance_id, "Using connection");
+    if let Err(e) = config.connected_index.set(active_connection.instance_id) {
+        warn!(
+            "Connection index has been set already, should only be called once: {}",
+            e
+        );
+    }
+
+    config
+        .external_event_handler
+        .handle_status_change(lightway_core::State::Online as u8);
+
+    non_preferred_connections.extend(pending_online_connections.drain());
+    drop(pending_online_connections);
+
+    let _ = in_progress_connection_abort_handles.swap_remove(active_connection.instance_id);
+    tokio::spawn(ClientConnection::cleanup(
+        in_progress_connection_abort_handles,
+        non_preferred_connections
+            .into_iter()
+            .map(|(_, connection)| connection)
+            .collect(),
+    ));
+
+    let ClientConnection {
+        conn,
+        outside_io_task,
+        new_outside_io_sender,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        expresslane_event_rx,
+        ..
+    } = active_connection;
+
+    // We are online listen for network changes
+    let network_change_task = tokio::spawn(handle_network_change(
+        keepalive.clone(),
+        network_change_receiver,
+        Arc::downgrade(&conn),
+        new_outside_io_sender,
+    ));
+
+    if let Some(mut expresslane_event_rx) = expresslane_event_rx {
+        // We only process Expresslane state changes after we selected the best connection
+        tokio::spawn(async move {
+            while let Some(state) = expresslane_event_rx.recv().await {
+                debug!(?state, "Expresslane State Change");
+                config
+                    .external_event_handler
+                    .handle_expresslane_state_change(state);
+            }
+        });
+    }
+
+    let tunnel_interface = Arc::new(
+        io::inside::Tun::new_with_tun_fd(config.tun_fd, config.tun_local_ip, config.tun_dns_ip)
+            .await
+            .context("Tun creation")?,
+    );
+
+    conn.lock().unwrap().app_state_mut().extended = Some(tunnel_interface.clone());
+    let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(
+        conn.clone(),
+        tunnel_interface,
+        config.tun_dns_ip,
+        keepalive,
+        keepalive_config,
+    ));
+
+    tokio::select! {
+        // Use biased selection to prioritize management commands and prevent race conditions
+        // where network_change_task exits early due to network change, dropping its mpsc sender and
+        // causing outside_io_task to throw channel errors and return wrong result to the app.
+        biased;
+        result = network_change_task => {
+            match result {
+                Ok(Ok(client_result)) => {
+                    info!("network change task result: {client_result:?}");
+                    Ok(client_result.into())
+                },
+                Ok(Err(e)) => {
+                    Err(anyhow!("error during network change: {e:?}"))
+                }
+                Err(e) => {
+                    Err(anyhow!("network change task error: {e:?}"))
+                }
+            }
+        }
+        Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
+        io = outside_io_task => match io {
+                Ok(Err(e)) if matches!(e.downcast_ref::<ConnectionError>(), Some(ConnectionError::Goodbye)) => {
+                    info!("Received server goodbye, returning result...");
+                    Ok(ClientResult::ServerGoodbye)
+                }
+                _ => Err(anyhow!("Outside IO loop exited: {io:?}"))
+        },
+        io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
+    }
 }
 
 #[cfg(test)]

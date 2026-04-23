@@ -46,6 +46,21 @@ impl Tun {
     fn name(&self) -> std::io::Result<String> {
         self.tun.name()
     }
+
+    #[cfg(feature = "mobile")]
+    pub async fn new_with_tun_fd(
+        tun_fd: std::os::fd::RawFd,
+        local_ip: Ipv4Addr,
+        dns_ip: Ipv4Addr,
+    ) -> Result<Self> {
+        let mut tun_config = TunConfig::default();
+
+        // Tun device should not be closed on client exit, since the same tunnel will be
+        // used by further connection
+        tun_config.raw_fd(tun_fd).close_fd_on_drop(false);
+
+        Ok(Self::new(&tun_config, local_ip, dns_ip).await?)
+    }
 }
 
 #[async_trait]
