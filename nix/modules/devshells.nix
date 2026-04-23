@@ -39,9 +39,11 @@
             };
             androidSdk = androidComposition.androidsdk;
             buildScript = pkgs.writeShellScriptBin "build" ''
+              cd $(git rev-parse --show-toplevel 2>/dev/null)
               cargo make build-android
             '';
             cleanScript = pkgs.writeShellScriptBin "clean" ''
+              cd $(git rev-parse --show-toplevel 2>/dev/null)
               cargo make clean-android
             '';
             pinned-cargo-ndk = pkgs.callPackage ../pkgs/cargo-ndk.nix { };
