@@ -168,9 +168,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     pub preferred_connection_wait_interval: Duration,
 
     /// Socket send buffer size
-    pub sndbuf: Option<ByteSize>,
+    pub sndbuf: ByteSize,
     /// Socket receive buffer size
-    pub rcvbuf: Option<ByteSize>,
+    pub rcvbuf: ByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS)
     #[cfg(batch_receive)]
@@ -746,13 +746,8 @@ pub async fn connect<
             }
         };
 
-    if let Some(size) = config.sndbuf {
-        outside_io.set_send_buffer_size(size.as_u64().try_into()?)?;
-    }
-
-    if let Some(size) = config.rcvbuf {
-        outside_io.set_recv_buffer_size(size.as_u64().try_into()?)?;
-    }
+    outside_io.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+    outside_io.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 

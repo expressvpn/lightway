@@ -117,11 +117,11 @@ pub struct Config {
     pub preferred_connection_wait_interval: Duration,
 
     /// Socket send buffer size
-    #[clap(long)]
-    pub sndbuf: Option<ByteSize>,
+    #[clap(long, default_value = "8MiB")]
+    pub sndbuf: ByteSize,
     /// Socket receive buffer size
-    #[clap(long)]
-    pub rcvbuf: Option<ByteSize>,
+    #[clap(long, default_value = "8MiB")]
+    pub rcvbuf: ByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS)
     #[cfg(batch_receive)]
@@ -191,6 +191,13 @@ pub struct Config {
     #[cfg(feature = "debug")]
     #[clap(long)]
     pub tls_debug: bool,
+
+    /// Wintun ring buffer capacity in bytes (Windows only).
+    /// Must be a power of two between 128KiB and 64MiB.
+    /// Larger values improve throughput.
+    #[cfg(windows)]
+    #[clap(long, default_value = "8MiB")]
+    pub wintun_ring_capacity: ByteSize,
 
     /// Enable DPAPI encryption/decryption for config file
     /// Only for Windows platform
