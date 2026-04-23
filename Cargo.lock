@@ -961,16 +961,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "envious"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e52788a407588138195a40c991f500621fea2cffa87e7345d86dbab77287dc7"
-dependencies = [
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1637,7 +1627,6 @@ dependencies = [
  "clap",
  "ctrlc",
  "educe",
- "envious",
  "futures",
  "libc",
  "lightway-app-utils",
@@ -1652,6 +1641,7 @@ dependencies = [
  "rtrb",
  "schemars 1.2.1",
  "serde",
+ "serde-env",
  "serde-inline-default",
  "serde-saphyr",
  "serde_json",
@@ -1718,7 +1708,6 @@ dependencies = [
  "ctrlc",
  "delegate",
  "educe",
- "envious",
  "ipnet",
  "jsonwebtoken",
  "libc",
@@ -1733,6 +1722,7 @@ dependencies = [
  "pwhash",
  "rand 0.10.1",
  "serde",
+ "serde-env",
  "serde-saphyr",
  "serde_json",
  "socket2",
@@ -2777,6 +2767,15 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-env"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d29a4f822b7a7e7eada47da087a9d29d9b266dba45edc375fdc700965860d7"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

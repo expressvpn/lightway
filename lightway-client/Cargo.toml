@@ -34,7 +34,6 @@ bytesize.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 educe.workspace = true
-envious.workspace = true 
 futures = "0.3.30"
 libc.workspace = true
 lightway-app-utils.workspace = true
@@ -42,6 +41,7 @@ lightway-core.workspace = true
 pnet_packet.workspace = true
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde-env.workspace = true
 serde-inline-default = "1.0.1"
 serde-saphyr.workspace = true
 serde_json = "1.0.149"

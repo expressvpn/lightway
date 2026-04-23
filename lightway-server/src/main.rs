@@ -87,11 +87,7 @@ async fn main() -> Result<()> {
 
     let mut config = Config::default();
     config.apply(serde_saphyr::from_str(&read_to_string(config_file).await?)?);
-    config.apply(
-        envious::Config::default()
-            .with_prefix("LW_SERVER_")
-            .build_from_env()?,
-    );
+    config.apply(serde_env::from_env_with_prefix("LW_SERVER")?);
     config.apply(options);
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)

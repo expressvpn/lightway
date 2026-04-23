@@ -133,11 +133,7 @@ async fn main() -> Result<()> {
     config.apply(serde_saphyr::from_str::<ConfigPatch>(
         &read_to_string(config_file).await?,
     )?);
-    config.apply(
-        envious::Config::default()
-            .with_prefix("LW_CLIENT_")
-            .build_from_env()?,
-    );
+    config.apply(serde_env::from_env_with_prefix("LW_CLIENT")?);
     config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
