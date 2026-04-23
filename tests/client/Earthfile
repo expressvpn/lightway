@@ -4,9 +4,8 @@ ARG --global debian
 build-container:
     ARG SERVER_ADDR
     ARG TOKIO_WORKER_THREADS
-    ARG BATCH_RECEIVE=false
     FROM ../base+container --debian=$debian
-    COPY (../..+build/lightway-client --debian=$debian --BATCH_RECEIVE=$BATCH_RECEIVE) .
+    COPY (../..+build/lightway-client --debian=$debian) .
     COPY --dir ../certs+client/* tests/certs/
     COPY --dir --chmod 0600 client_config.yaml parallel_connect/ .
     COPY --dir docker-entrypoint.sh run-test-inside.sh check-server.sh .

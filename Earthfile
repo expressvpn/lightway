@@ -51,13 +51,7 @@ source:
 build:
     FROM +source
 
-    ARG BATCH_RECEIVE=false
-    LET features = "io-uring"
-    IF [ "$BATCH_RECEIVE" = "true" ]
-        SET features = "$features,batch_receive"
-    END
-
-    DO lib-rust+CARGO --args="build --release --features $features" --output="release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --release --features io-uring" --output="release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/release/lightway-client AS LOCAL ./target/release/
     SAVE ARTIFACT ./target/release/lightway-server AS LOCAL ./target/release/
