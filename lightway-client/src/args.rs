@@ -123,7 +123,7 @@ pub struct Config {
     #[clap(long)]
     pub rcvbuf: Option<ByteSize>,
 
-    /// Enable batch receive (`recvmsg_x` on macOS)
+    /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android)
     #[cfg(batch_receive)]
     #[clap(long, default_value_t = false)]
     pub enable_batch_receive: bool,

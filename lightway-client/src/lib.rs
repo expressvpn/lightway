@@ -172,7 +172,7 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Socket receive buffer size
     pub rcvbuf: Option<ByteSize>,
 
-    /// Enable batch receive (`recvmsg_x` on macOS)
+    /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android)
     #[cfg(batch_receive)]
     pub enable_batch_receive: bool,
 
