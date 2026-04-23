@@ -66,11 +66,11 @@ pub(crate) mod mock {
     // -----------------------------------------------------------------------
 
     pub(crate) const ROOT_CERT: &[u8] =
-        &include!("../../lightway-core/tests/data/ca_cert_der_2048");
+        &include!("../../lightway-core/tests/common/data/ca_cert_der_2048");
     pub(crate) const SERVER_CERT: &[u8] =
-        &include!("../../lightway-core/tests/data/server_cert_der_2048");
+        &include!("../../lightway-core/tests/common/data/server_cert_der_2048");
     pub(crate) const SERVER_KEY: &[u8] =
-        &include!("../../lightway-core/tests/data/server_key_der_2048");
+        &include!("../../lightway-core/tests/common/data/server_key_der_2048");
 
     // -----------------------------------------------------------------------
     // MessageQueue — datagram-preserving queue (used by UdpIOCallbacks)

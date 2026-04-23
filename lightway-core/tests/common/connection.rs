@@ -449,16 +449,21 @@ pub async fn client<S: TestSock>(
     .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
     .when(enable_expresslane, |b| {
         b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
-    })
-    .build()
-    .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
-    .unwrap()
-    .when(use_versioned_token, |b| {
-        b.with_auth_versioned_token("LET ME IN", Version::MAXIMUM)
-    })
-    .when(!use_versioned_token, |b| b.with_auth_token("LET ME IN"))
-    .with_event_cb(Box::new(event_cb))
-    .with_inside_pkt_codec(packet_codec);
+    });
+
+    #[cfg(feature = "postquantum")]
+    let client = client.with_pq_crypto().unwrap();
+
+    let client = client
+        .build()
+        .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .when(use_versioned_token, |b| {
+            b.with_auth_versioned_token("LET ME IN", Version::MAXIMUM)
+        })
+        .when(!use_versioned_token, |b| b.with_auth_token("LET ME IN"))
+        .with_event_cb(Box::new(event_cb))
+        .with_inside_pkt_codec(packet_codec);
 
     #[cfg(feature = "postquantum")]
     let client = client.when_some(pqc.client_keyshare(), |b, ks| b.with_pq_crypto(ks));
@@ -667,7 +672,7 @@ pub async fn client<S: TestSock>(
 /// postquantum feature is disabled.
 #[cfg(not(feature = "postquantum"))]
 #[derive(Clone, Copy)]
-pub enum KeyShare {}
+enum KeyShare {}
 
 #[derive(Clone, Copy)]
 pub struct PQCrypto {
@@ -684,20 +689,33 @@ impl PQCrypto {
         self.keyshare
     }
 
-    fn expected_curve(&self) -> &str {
-        #[cfg(feature = "postquantum")]
-        {
-            if !self.server_pqc {
-                return "SECP256R1";
-            }
-            match self.keyshare {
-                Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
-                Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
-                None => "X25519MLKEM768", // wolfssl 5.0.0 default
+    pub fn expected_curve(&self) -> &str {
+        cfg_if::cfg_if! {
+            if #[cfg(all(feature = "postquantum", boringssl))] {
+                if !self.server_pqc {
+                    "P-256"
+                } else {
+                    // BoringSSL only exposes X25519MLKEM768 as a PQ key share group.
+                    // P521 hybrids and other ML-KEM variants are not supported.
+                    "X25519MLKEM768"
+                }
+            } else if #[cfg(all(feature = "postquantum", wolfssl))] {
+                if !self.server_pqc {
+                    "SECP256R1"
+                } else {
+                    match self.keyshare {
+                        Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
+                        Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
+                        // Test cases should always set a keyshare when server_pqc is on;
+                        // None falls back to KeyShare::default(), which on wolfSSL is
+                        // P521MLKEM1024.
+                        None => "SecP521r1MLKEM1024",
+                    }
+                }
+            } else {
+                "SECP256R1"
             }
         }
-        #[cfg(not(feature = "postquantum"))]
-        "SECP256R1"
     }
 }
 
@@ -706,7 +724,7 @@ impl Default for PQCrypto {
         #[cfg(feature = "postquantum")]
         return Self {
             server_pqc: true,
-            keyshare: Some(KeyShare::P521MLKEM1024),
+            keyshare: Some(KeyShare::default()),
         };
         #[cfg(not(feature = "postquantum"))]
         return Self {

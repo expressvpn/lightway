@@ -239,6 +239,15 @@ impl<AppState> ClientContextBuilder<AppState> {
         }
     }
 
+    /// Enable post-quantum cryptography by configuring PQC curve groups.
+    #[cfg(feature = "postquantum")]
+    pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
+        Ok(Self {
+            tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,
+            ..self
+        })
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let tls_ctx = self.tls_ctx.build();
@@ -371,13 +380,16 @@ const SERVER_CURVE_BASE_GROUPS: &[crate::tls::CurveGroup] = &[
     crate::tls::CurveGroup::EccX25519,
 ];
 
-/// server curves when PQC is enabled, in decreasing order of preference.
 #[cfg(feature = "postquantum")]
 const SERVER_CURVE_PQC_GROUPS: &[crate::tls::CurveGroup] = &[
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P521MLKEM1024,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P521KyberLevel5,
     crate::tls::CurveGroup::X25519MLKEM768,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P256MLKEM512,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P256KyberLevel1,
     crate::tls::CurveGroup::EccSecp256R1,
     crate::tls::CurveGroup::EccX25519,

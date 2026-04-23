@@ -1774,6 +1774,7 @@ dependencies = [
  "async-trait",
  "bitfield-struct",
  "bytes",
+ "cfg-if",
  "cfg_aliases",
  "delegate",
  "itertools 0.14.0",
