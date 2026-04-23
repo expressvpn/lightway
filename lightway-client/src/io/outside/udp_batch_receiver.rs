@@ -24,11 +24,15 @@ pub(crate) fn is_batch_receive_available() -> bool {
 #[cfg(apple)]
 type PlatformBatchRecv = apple::RecvmsgX;
 
+#[cfg(any(linux, android))]
+type PlatformBatchRecv = linux::Recvmmsg;
+
 pub(crate) fn recv_multiple(
     fd: libc::c_int,
     recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
     max_batch_size: usize,
 ) -> io::Result<usize> {
+    let max_batch_size = max_batch_size.min(BATCH_RECV_SIZE);
     PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
 }
 
@@ -117,6 +121,12 @@ mod apple {
             }
 
             let count = n as usize;
+            // Should not happen, but just to play it safe
+            if count > msg_count {
+                return Err(io::Error::other(
+                    "recvmsg_x returned more packets than requested",
+                ));
+            }
             for i in 0..count {
                 let len = hdrs[i].msg_datalen;
                 // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
@@ -148,6 +158,72 @@ mod apple {
         fn recvmsg_x_available_is_true() {
             // On macOS, recvmsg_x should be available as it ships with the OS kernel.
             assert!(*RECVMSG_X_AVAILABLE);
+        }
+    }
+}
+
+#[cfg(any(linux, android))]
+mod linux {
+    use crate::io::outside::udp_batch_receiver::BATCH_RECV_SIZE;
+    use bytes::BytesMut;
+    use lightway_core::MAX_OUTSIDE_MTU;
+    use std::{io, mem};
+
+    pub(crate) struct Recvmmsg;
+
+    impl super::BatchRecvSyscall for Recvmmsg {
+        /// Receive packets from the socket using the `recvmmsg` batch syscall.
+        /// Fills `recv_bufs` with up to `msg_count` messages and returns the number received.
+        #[allow(unsafe_code)]
+        fn recv_multiple(
+            fd: libc::c_int,
+            recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+            msg_count: usize,
+        ) -> io::Result<usize> {
+            // SAFETY: zeroed iovec is valid (null pointer + zero length).
+            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_RECV_SIZE]>() };
+            // SAFETY: zeroed mmsghdr is valid (null pointers + zero lengths).
+            let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; BATCH_RECV_SIZE]>() };
+            for i in 0..msg_count {
+                iovecs[i].iov_base =
+                    recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
+                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
+                hdrs[i].msg_hdr.msg_iov = &mut iovecs[i];
+                hdrs[i].msg_hdr.msg_iovlen = 1;
+            }
+
+            // SAFETY: hdrs and iovecs are valid for msg_count entries, fd is a valid and borrowed socket.
+            let n = unsafe {
+                libc::recvmmsg(
+                    fd,
+                    hdrs.as_mut_ptr(),
+                    msg_count as _,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let count = n as usize;
+            // Should not happen, but just to play it safe
+            if count > msg_count {
+                return Err(io::Error::other(
+                    "recvmmsg returned more packets than requested",
+                ));
+            }
+            for i in 0..count {
+                let len = hdrs[i].msg_len as usize;
+                // SAFETY: recvmmsg sets msg_len to the number of bytes received per message,
+                // and we have early returned already if we have received no packets from the kernel.
+                unsafe {
+                    recv_bufs[i].set_len(len);
+                }
+            }
+
+            Ok(count)
         }
     }
 }

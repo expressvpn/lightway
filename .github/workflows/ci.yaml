@@ -299,9 +299,8 @@ jobs:
       - name: Run clippy
         run: nix develop --command cargo make clippy
 
-      - name: Run recvmsg_x test (macOS only)
-        if: matrix.os == 'macos-26'
-        run: sudo nix develop --command cargo test batch_receiver --features batch_receive
+      - name: Run batch receiver test
+        run: nix develop --command cargo test batch_receiver --features batch_receive
 
       - name: Run privileged tests (macOS only)
         if: matrix.os == 'macos-26'
