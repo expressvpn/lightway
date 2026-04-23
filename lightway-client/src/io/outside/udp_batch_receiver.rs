@@ -289,8 +289,8 @@ mod tests {
         let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, BATCH_RECV_SIZE).unwrap();
         assert!(count >= 1);
         // Verify received packets are in order.
-        for i in 0..count {
-            assert_eq!(bufs[i][0], i as u8);
+        for (i, b) in bufs.iter().enumerate().take(count) {
+            assert_eq!(b[0], i as u8);
         }
     }
 }
