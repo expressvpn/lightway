@@ -11,16 +11,19 @@ use lightway_core::KeyShare as LWKeyShare;
 #[value(rename_all = "lowercase")]
 /// [`LWKeyShare`] wrapper compatible with clap and twelf
 pub enum KeyShare {
-    /// P-521 + ML-KEM-1024
+    /// P-521 + ML-KEM-1024 (wolfSSL only)
+    #[cfg(wolfssl)]
     #[default]
     P521Mlkem1024,
     /// X25519 + ML-KEM-768
+    #[cfg_attr(boringssl, default)]
     X25519Mlkem768,
 }
 
 impl From<KeyShare> for LWKeyShare {
     fn from(item: KeyShare) -> LWKeyShare {
         match item {
+            #[cfg(wolfssl)]
             KeyShare::P521Mlkem1024 => LWKeyShare::P521MLKEM1024,
             KeyShare::X25519Mlkem768 => LWKeyShare::X25519MLKEM768,
         }
