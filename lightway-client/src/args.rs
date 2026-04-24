@@ -5,6 +5,8 @@ use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use clap::Parser;
+#[cfg(feature = "postquantum")]
+use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use std::{net::Ipv4Addr, path::PathBuf};
@@ -91,8 +93,8 @@ pub struct Config {
 
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
-    #[clap(long, default_value_t)]
-    pub enable_pqc: bool,
+    #[clap(long, value_enum, default_value_t = KeyShare::P521Mlkem1024)]
+    pub keyshare: KeyShare,
 
     /// Interval between keepalives
     #[clap(long, default_value = "10s")]

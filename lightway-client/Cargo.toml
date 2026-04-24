@@ -20,7 +20,7 @@ default = ["postquantum"]
 mobile = ["uniffi", "tracing-core", "tracing-panic"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
-postquantum = ["lightway-core/postquantum"]
+postquantum = ["lightway-core/postquantum", "lightway-app-utils/postquantum"]
 
 [lints]
 workspace = true
