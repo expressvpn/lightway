@@ -77,6 +77,13 @@ pub struct Config {
     #[clap(long, default_value = None)]
     pub wintun_file: Option<String>,
 
+    /// Fixed GUID for the Wintun adapter (Windows only).
+    /// Ensures adapter creation retries reuse the same device node.
+    /// Accepts a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000").
+    #[cfg(windows)]
+    #[clap(long, default_value = None)]
+    pub device_guid: Option<String>,
+
     /// Local IP to use in Tun device
     #[clap(long, default_value = "100.64.0.6")]
     pub tun_local_ip: Ipv4Addr,
