@@ -5,7 +5,9 @@ use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use clap::Parser;
-use lightway_app_utils::args::{Cipher, ConnectionType, Duration, LogLevel, NonZeroDuration};
+use lightway_app_utils::args::{
+    Cipher, ConnectionType, Duration, ExactByteSize, LogLevel, NonZeroDuration,
+};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use std::{net::Ipv4Addr, path::PathBuf};
 use twelf::config;
@@ -197,7 +199,7 @@ pub struct Config {
     /// Larger values improve throughput.
     #[cfg(windows)]
     #[clap(long, default_value = "8MiB")]
-    pub wintun_ring_capacity: ByteSize,
+    pub wintun_ring_capacity: ExactByteSize,
 
     /// Enable DPAPI encryption/decryption for config file
     /// Only for Windows platform

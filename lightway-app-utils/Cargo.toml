@@ -20,6 +20,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytesize.workspace = true
 bytes.workspace = true
 clap.workspace = true
 educe = { workspace = true, features = ["Default"] }

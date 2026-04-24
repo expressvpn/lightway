@@ -1581,6 +1581,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bytes",
+ "bytesize",
  "cfg_aliases",
  "clap",
  "educe",

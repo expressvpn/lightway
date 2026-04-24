@@ -1,5 +1,6 @@
 //! Types useful for integrating with clap (CLI) and twelf (config file)
 
+mod byte_size;
 mod cipher;
 mod connection_type;
 mod duration;
@@ -7,6 +8,7 @@ mod ip_map;
 mod logging;
 mod nonzero_duration;
 
+pub use byte_size::ExactByteSize;
 pub use cipher::Cipher;
 pub use connection_type::ConnectionType;
 pub use duration::Duration;
