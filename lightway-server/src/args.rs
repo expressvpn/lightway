@@ -3,13 +3,12 @@ use std::{
     path::PathBuf,
 };
 
-use bytesize::ByteSize;
 use clap::Parser;
 use ipnet::Ipv4Net;
 use twelf::config;
 
 use lightway_app_utils::args::{
-    ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration,
+    ConnectionType, Duration, ExactByteSize, IpMap, LogFormat, LogLevel, NonZeroDuration,
 };
 
 #[config]
@@ -114,8 +113,8 @@ pub struct Config {
     pub proxy_protocol: bool,
 
     /// Set UDP buffer size. Default value is 15 MiB.
-    #[clap(long, default_value_t = ByteSize::mib(15))]
-    pub udp_buffer_size: ByteSize,
+    #[clap(long, default_value = "15MiB")]
+    pub udp_buffer_size: ExactByteSize,
 
     /// Enable WolfSSL debug logging
     #[cfg(feature = "debug")]

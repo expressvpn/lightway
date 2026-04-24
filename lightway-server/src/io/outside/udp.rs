@@ -8,7 +8,7 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use bytesize::ByteSize;
+use lightway_app_utils::args::ExactByteSize;
 #[cfg(target_os = "linux")]
 use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
@@ -121,7 +121,7 @@ impl UdpServer {
     pub(crate) async fn new(
         conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
-        udp_buffer_size: ByteSize,
+        udp_buffer_size: ExactByteSize,
         sock: Option<tokio::net::UdpSocket>,
     ) -> Result<UdpServer> {
         let sock = match sock {

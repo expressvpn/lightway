@@ -5,8 +5,8 @@ mod ip_manager;
 pub mod metrics;
 mod statistics;
 
-use bytesize::ByteSize;
 use connection::Connection;
+use lightway_app_utils::args::ExactByteSize;
 // re-export so server app does not need to depend on lightway-core
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
@@ -209,7 +209,7 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     pub proxy_protocol: bool,
 
     /// UDP Buffer size for the server
-    pub udp_buffer_size: ByteSize,
+    pub udp_buffer_size: ExactByteSize,
 
     /// Disable IP pool randomization
     /// Should be used for debugging only
