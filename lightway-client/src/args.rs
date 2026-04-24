@@ -3,7 +3,6 @@ use super::dns_manager::DnsConfigMode;
 #[cfg(desktop)]
 use super::route_manager::RouteMode;
 use anyhow::{Result, anyhow};
-use bytesize::ByteSize;
 use clap::Parser;
 use lightway_app_utils::args::{
     Cipher, ConnectionType, Duration, ExactByteSize, LogLevel, NonZeroDuration,
@@ -120,10 +119,10 @@ pub struct Config {
 
     /// Socket send buffer size
     #[clap(long, default_value = "8MiB")]
-    pub sndbuf: ByteSize,
+    pub sndbuf: ExactByteSize,
     /// Socket receive buffer size
     #[clap(long, default_value = "8MiB")]
-    pub rcvbuf: ByteSize,
+    pub rcvbuf: ExactByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android)
     #[cfg(batch_receive)]

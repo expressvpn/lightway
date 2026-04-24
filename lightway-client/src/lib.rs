@@ -16,13 +16,12 @@ uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
-use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
 use lightway_app_utils::{
     ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    PacketCodecFactoryType, TunConfig, args::Cipher, args::ExactByteSize, connection_ticker_cb,
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
@@ -168,9 +167,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     pub preferred_connection_wait_interval: Duration,
 
     /// Socket send buffer size
-    pub sndbuf: ByteSize,
+    pub sndbuf: ExactByteSize,
     /// Socket receive buffer size
-    pub rcvbuf: ByteSize,
+    pub rcvbuf: ExactByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android)
     #[cfg(batch_receive)]
