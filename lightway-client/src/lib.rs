@@ -308,7 +308,7 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
 #[educe(Debug)]
 pub struct ClientInsidePacketCodecConfig {
     /// Enables inside packet encoding when connection is established.
-    pub enable_encoding_at_connect: bool,
+    pub enable_inside_pkt_encoding: bool,
 
     /// Signal for send inside packet encoding request to the server.
     #[educe(Debug(ignore))]
@@ -319,7 +319,7 @@ pub struct ClientInsidePacketCodecConfig {
 /// Sent via `config_reload_signal` when the process receives a reload trigger (e.g. SIGHUP).
 #[derive(Debug, Default, PartialEq)]
 pub struct ReloadableClientConfig {
-    pub encoding_enabled: Option<bool>,
+    pub enable_inside_pkt_encoding: Option<bool>,
 }
 
 impl ReloadableClientConfig {
@@ -327,8 +327,9 @@ impl ReloadableClientConfig {
     /// Unchanged fields are set to `None`.
     pub fn delta(&self, prev: &Self) -> Self {
         Self {
-            encoding_enabled: (self.encoding_enabled != prev.encoding_enabled)
-                .then_some(self.encoding_enabled)
+            enable_inside_pkt_encoding: (self.enable_inside_pkt_encoding
+                != prev.enable_inside_pkt_encoding)
+                .then_some(self.enable_inside_pkt_encoding)
                 .flatten(),
         }
     }
@@ -699,7 +700,7 @@ async fn config_reload_task(
     while let Some(new_config) = signal.recv().await {
         tracing::info!("Applying reloaded config: {new_config:?}");
 
-        if let Some(enabled) = new_config.enable_encoding_at_connect
+        if let Some(enabled) = new_config.enable_inside_pkt_encoding
             && let Err(e) = encoding_request.send(enabled).await
         {
             tracing::error!("Failed to send encoding request from config reload: {e}");
@@ -927,7 +928,7 @@ pub async fn connect<
         config
             .inside_pkt_codec_config
             .as_ref()
-            .is_some_and(|x| x.enable_encoding_at_connect),
+            .is_some_and(|x| x.enable_inside_pkt_encoding),
         event_handler,
         connected_tx,
         disconnected_tx,

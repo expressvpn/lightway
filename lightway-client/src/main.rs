@@ -296,7 +296,7 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 
     // List ONLY the fields that CAN be reloaded at runtime.
     // Everything else is automatically caught by the PartialEq check.
-    let masked = mask_reloadable!(old, new, log_level, enable_inside_pkt_encoding_at_connect);
+    let masked = mask_reloadable!(old, new, log_level, enable_inside_pkt_encoding);
 
     if masked != *new {
         tracing::warn!("Non-reloadable config fields changed (requires restart to take effect)");
@@ -306,7 +306,7 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 impl From<&Config> for ReloadableClientConfig {
     fn from(config: &Config) -> Self {
         Self {
-            encoding_enabled: Some(config.enable_inside_pkt_encoding_at_connect),
+            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
         }
     }
 }

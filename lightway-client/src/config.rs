@@ -238,7 +238,8 @@ pub struct Config {
         attribute(doc = r#"Enable inside packet encoding once lightway connects
     Only used if a codec is set"#)
     )]
-    pub enable_inside_pkt_encoding_at_connect: bool,
+    #[serde(alias = "enable_inside_pkt_encoding_at_connect")]
+    pub enable_inside_pkt_encoding: bool,
 
     #[cfg(feature = "debug")]
     #[patch(attribute(clap(long)))]
