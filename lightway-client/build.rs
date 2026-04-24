@@ -22,8 +22,8 @@ fn main() {
                 tvos
             )
         },
-        // Feature alias
-        batch_receive: { all(any(linux, apple, android), feature = "batch_receive") },
+        // Feature that is supported on specific platforms
+        batch_receive: { any(linux, apple, android) },
     }
 
     let git_hash = get_git_hash();
