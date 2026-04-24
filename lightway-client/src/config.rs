@@ -238,7 +238,8 @@ pub struct Config {
         attribute(doc = r#"Enable inside packet encoding once lightway connects
     Only used if a codec is set"#)
     )]
-    pub enable_inside_pkt_encoding_at_connect: bool,
+    #[serde(alias = "enable_inside_pkt_encoding_at_connect")]
+    pub enable_inside_pkt_encoding: bool,
 
     #[cfg(feature = "debug")]
     #[patch(attribute(clap(long)))]
@@ -393,7 +394,7 @@ impl Default for Config {
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
-            enable_inside_pkt_encoding_at_connect: false,
+            enable_inside_pkt_encoding: false,
             #[cfg(feature = "debug")]
             keylog: None,
             #[cfg(feature = "debug")]
