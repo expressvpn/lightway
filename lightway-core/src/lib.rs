@@ -60,7 +60,7 @@ pub use utils::{
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
 };
 pub use version::Version;
-pub use wire::{AuthMethod, Header, SessionId};
+pub use wire::{AuthMethod, ExpresslaneKey, Header, SessionId};
 #[cfg(feature = "debug")]
 pub use wolfssl::{Tls13SecretCallbacks, WolfsslLoggingCallback};
 
