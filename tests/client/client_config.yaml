@@ -12,7 +12,7 @@ user: user
 password: password
 outside_mtu: 1500
 cipher: aes256
-enable_pqc: false
+# keyshare: p251mlkem1024
 enable_tun_iouring: false
 # iouring_sqpoll_idle_time: 100ms
 iouring_entry_count: 1024

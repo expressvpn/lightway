@@ -56,7 +56,11 @@ run-tcp-chacha20-test:
 
 # run-tcp-pqc-test runs e2e test using TCP and default cipher with PQC enabled
 run-tcp-pqc-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc"
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc"
+
+# run-tcp-pqc-x25519mlkem768-test runs e2e test using TCP with X25519MLKEM768 keyshare
+run-tcp-pqc-x25519mlkem768-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768"
 
 # run-udp-aes256-test runs e2e test using UDP and AES256 cipher
 run-udp-aes256-test:
@@ -68,7 +72,11 @@ run-udp-chacha20-test:
 
 # run-udp-pqc-test runs e2e test using UDP and default cipher with PQC enabled
 run-udp-pqc-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--enable-pqc"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc"
+
+# run-udp-pqc-x25519mlkem768-test runs e2e test using UDP with X25519MLKEM768 keyshare
+run-udp-pqc-x25519mlkem768-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768"
 
 # run-udp-floating-ip-test runs e2e test of UDP floating IP support
 run-udp-floating-ip-test:
@@ -140,9 +148,11 @@ run-all-tests:
     BUILD +run-tcp-aes256-test
     BUILD +run-tcp-chacha20-test
     BUILD +run-tcp-pqc-test
+    BUILD +run-tcp-pqc-x25519mlkem768-test
     BUILD +run-udp-aes256-test
     BUILD +run-udp-chacha20-test
     BUILD +run-udp-pqc-test
+    BUILD +run-udp-pqc-x25519mlkem768-test
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test

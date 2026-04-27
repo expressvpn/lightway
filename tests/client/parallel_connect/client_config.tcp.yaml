@@ -62,7 +62,6 @@ log_level: info
 user: user
 password: password
 outside_mtu: 1500
-enable_pqc: false
 enable_tun_iouring: false
 # iouring_sqpoll_idle_time: 100ms
 iouring_entry_count: 1024

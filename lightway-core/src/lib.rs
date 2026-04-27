@@ -10,6 +10,8 @@ mod context;
 mod encoding_request_states;
 mod features;
 mod io;
+#[cfg(feature = "postquantum")]
+mod keyshare;
 mod metrics;
 mod packet;
 mod packet_codec;
@@ -42,6 +44,8 @@ pub use features::LightwayFeature;
 pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, OutsideIOSendCallback, OutsideIOSendCallbackArg,
 };
+#[cfg(feature = "postquantum")]
+pub use keyshare::KeyShare;
 pub use packet::OutsidePacket;
 pub use packet_codec::{
     CodecStatus, PacketCodecResult, PacketDecoder, PacketDecoderType, PacketEncoder,

@@ -20,6 +20,8 @@ use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use keepalive::Keepalive;
+#[cfg(feature = "postquantum")]
+use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::{
     ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
     PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
@@ -146,9 +148,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// DNS IP to use in Tun device
     pub tun_dns_ip: Ipv4Addr,
 
-    /// Enable Post Quantum Crypto
+    /// Key share group for post-quantum key exchange
     #[cfg(feature = "postquantum")]
-    pub enable_pqc: bool,
+    pub keyshare: KeyShare,
 
     /// Interval between keepalives
     pub keepalive_interval: Duration,
@@ -805,7 +807,7 @@ pub async fn connect<
     });
 
     #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(config.enable_pqc, |b| b.with_pq_crypto());
+    let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
 
     #[cfg(feature = "debug")]
     let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {

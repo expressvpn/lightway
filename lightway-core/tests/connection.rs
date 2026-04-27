@@ -420,7 +420,7 @@ async fn client<S: TestSock>(
     .with_auth_token("LET ME IN")
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(packet_codec)
-    .when(pqc.enable_client(), |b| b.with_pq_crypto())
+    .when_some(pqc.client_keyshare(), |b, ks| b.with_pq_crypto(ks))
     .when_some(server_dn, |b, sdn| {
         b.with_server_domain_name_validation(sdn.to_string())
     })
@@ -618,42 +618,28 @@ async fn client<S: TestSock>(
 }
 
 #[derive(Clone, Copy)]
-enum PQCrypto {
-    // PQC enabled client and server
-    Enabled,
-    // PQC disabled client and server
-    Disabled,
-    // PQC available on server, but not on client
-    ServerOnly,
-    // PQC not enabled on server, but client tries to use
-    ClientOnly,
+struct PQCrypto {
+    server_pqc: bool,
+    keyshare: Option<KeyShare>,
 }
 
 impl PQCrypto {
     fn enable_server(&self) -> bool {
-        match self {
-            PQCrypto::Enabled => true,
-            PQCrypto::Disabled => false,
-            PQCrypto::ServerOnly => true,
-            PQCrypto::ClientOnly => false,
-        }
+        self.server_pqc
     }
 
-    fn enable_client(&self) -> bool {
-        match self {
-            PQCrypto::Enabled => true,
-            PQCrypto::Disabled => false,
-            PQCrypto::ServerOnly => false,
-            PQCrypto::ClientOnly => true,
-        }
+    fn client_keyshare(&self) -> Option<KeyShare> {
+        self.keyshare
     }
 
     fn expected_curve(&self) -> &str {
-        match self {
-            PQCrypto::Enabled => "SecP521r1MLKEM1024",
-            PQCrypto::Disabled => "SECP256R1",
-            PQCrypto::ServerOnly => "X25519MLKEM768",
-            PQCrypto::ClientOnly => "SECP256R1",
+        if !self.server_pqc {
+            return "SECP256R1";
+        }
+        match self.keyshare {
+            Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
+            Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
+            None => "X25519MLKEM768", // wolfSSL 5.0.0 default
         }
     }
 }
@@ -703,14 +689,15 @@ async fn run_test<S: TestSock>(
         .expect("Timed out");
 }
 
-#[test_case(None,                   PQCrypto::Enabled,    false, false; "Default cipher + PQC")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,    false, false; "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled,    false, false; "chacha20 +_PQC")]
-#[test_case(None,                   PQCrypto::Disabled,   false, false; "PQC disabled")]
-#[test_case(None,                   PQCrypto::ServerOnly, false, false; "PQC server only")]
-#[test_case(None,                   PQCrypto::ClientOnly, false, false; "PQC client only")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled,     true, false; "Inside packet codec")]
-#[test_case(None,                   PQCrypto::Enabled,    false,  true; "Default cipher + PQC + Expresslane")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "PQC P521MLKEM1024")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "PQC X25519MLKEM768")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "aes + PQC")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "chacha20 + PQC")]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "server PQC disabled")]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "server PQC disabled + X25519MLKEM768")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None },                           false, false; "PQC wolfSSL default")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },   true, false; "Inside packet codec")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false,  true; "PQC + Expresslane")]
 #[tokio::test]
 async fn test_datagram_connection(
     cipher: Option<Cipher>,
@@ -739,12 +726,13 @@ async fn test_datagram_connection(
     .await;
 }
 
-#[test_case(None,                   PQCrypto::Enabled;    "Default cipher + PQC")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto::Enabled;    "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto::Enabled;    "chacha20 + PQC")]
-#[test_case(None,                   PQCrypto::Disabled;   "PQC disabled")]
-#[test_case(None,                   PQCrypto::ServerOnly; "PQC server only")]
-#[test_case(None,                   PQCrypto::ClientOnly; "PQC client only")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "PQC P521MLKEM1024")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }; "PQC X25519MLKEM768")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "aes + PQC")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "chacha20 + PQC")]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) };  "server PQC disabled")]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }; "server PQC disabled + X25519MLKEM768")]
+#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None };                           "PQC wolfSSL default")]
 #[tokio::test]
 async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
     // Communicate over a local stream socket for simplicity
@@ -768,22 +756,18 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let (client_sock, server_sock) = UnixStream::pair().expect("UnixStream");
     let server_sock = Arc::new(TestStreamSock(server_sock));
     let client_sock = Arc::new(TestStreamSock(client_sock));
-
+    let pqc = PQCrypto {
+        server_pqc: true,
+        keyshare: Some(KeyShare::P521MLKEM1024),
+    };
     // We need the server end to be ready to receive before we can get
     // started, else we'll get a `WouldBlock`.
     let _ = client_sock.writable().await;
 
     let test = async move {
         tokio::join!(
-            server(server_sock, PQCrypto::Enabled, false),
-            client(
-                client_sock,
-                None,
-                PQCrypto::Enabled,
-                server_dn,
-                false,
-                false
-            )
+            server(server_sock, pqc, false),
+            client(client_sock, None, pqc, server_dn, false, false)
         )
     };
 
