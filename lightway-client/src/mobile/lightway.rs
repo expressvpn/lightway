@@ -646,7 +646,9 @@ async fn lightway_client_connect(
     });
 
     #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(true, |b| b.with_pq_crypto());
+    let conn_builder = conn_builder.when(true, |b| {
+        b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
+    });
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
