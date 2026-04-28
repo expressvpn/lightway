@@ -175,14 +175,30 @@ async fn main() -> Result<()> {
         .up();
 
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
-    let mut ctrlc_tx = Some(ctrlc_tx);
+    let ctrlc_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(ctrlc_tx)));
+    let ctrlc_tx_clone = ctrlc_tx.clone();
     ctrlc::set_handler(move || {
-        if let Some(Err(err)) = ctrlc_tx.take().map(|tx| tx.send(())) {
-            tracing::warn!("Failed to send Ctrl-C signal: {err:?}");
+        if let Some(tx) = ctrlc_tx_clone.lock().unwrap().take() {
+            let _ = tx.send(());
         }
     })?;
 
     let config_reload_signal = spawn_sighup_reload_handler(&config, config_file.clone());
+
+    // SIGTERM: ctrlc without `termination` only handles SIGINT
+    #[cfg(unix)]
+    {
+        let ctrlc_tx_term = ctrlc_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            sigterm.recv().await;
+            if let Some(tx) = ctrlc_tx_term.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+    }
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
@@ -316,13 +332,13 @@ fn spawn_sighup_reload_handler(
     config: &Config,
     config_file: PathBuf,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("Failed to register SIGHUP handler");
+
     let initial = ReloadableClientConfig::from(config);
 
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .expect("Failed to register SIGHUP handler");
-
         let mut prev = initial;
         let mut prev_config: Option<Config> = None;
 
