@@ -61,6 +61,9 @@ pub struct TunConfig {
     /// that adapter creation retries reuse the same device node rather than
     /// leaking duplicates.
     pub device_guid: Option<u128>,
+    /// Whether to enable TUN offloading (TSO/GSO) on Linux
+    #[cfg(linux)]
+    pub offload: bool,
 }
 
 impl Debug for TunConfig {
@@ -89,6 +92,8 @@ impl Debug for TunConfig {
         }
         #[cfg(unix)]
         s.field("close_fd_on_drop", &self.close_fd_on_drop);
+        #[cfg(linux)]
+        s.field("offload", &self.offload);
         s.finish()
     }
 }
@@ -177,6 +182,13 @@ impl TunConfig {
         self
     }
 
+    /// Set whether to enable TUN offloading or not on Linux
+    #[cfg(linux)]
+    pub fn offload(&mut self, value: bool) -> &mut Self {
+        self.offload = value;
+        self
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -202,6 +214,10 @@ impl TunConfig {
         #[cfg(macos)]
         {
             builder = builder.associate_route(false);
+        }
+        #[cfg(linux)]
+        {
+            builder = builder.offload(self.offload);
         }
         let device = builder.build_async()?;
 

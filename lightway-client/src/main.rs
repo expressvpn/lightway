@@ -168,6 +168,9 @@ async fn main() -> Result<()> {
         .destination(config.tun_peer_ip)
         .up();
 
+    #[cfg(linux)]
+    tun_config.offload(config.enable_batch_receive);
+
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
     let mut ctrlc_tx = Some(ctrlc_tx);
     ctrlc::set_handler(move || {
