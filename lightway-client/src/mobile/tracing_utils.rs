@@ -18,7 +18,7 @@ use tracing_core::dispatcher::{DefaultGuard, SetGlobalDefaultError, has_been_set
 use tracing_core::span::{Attributes, Id};
 use tracing_subscriber::registry::LookupSpan;
 
-#[uniffi::export(with_foreign)]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export(with_foreign))]
 pub trait RustLogger: Send + Sync {
     fn debug(&self, msg: String);
     fn info(&self, msg: String);

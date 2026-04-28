@@ -18,6 +18,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["postquantum"]
 mobile = ["uniffi", "tracing-core", "tracing-panic"]
+mobile-test = [ "mobile" ]  # Only mock struct, no uniffi structs
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum", "lightway-app-utils/postquantum"]

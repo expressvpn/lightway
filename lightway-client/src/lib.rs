@@ -11,7 +11,7 @@ pub mod route_manager;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 
-#[cfg(feature = "mobile")]
+#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
@@ -89,7 +89,10 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Enum))]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Enum)
+)]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
@@ -99,7 +102,11 @@ pub enum ClientResult {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Error), uniffi(flat_error))]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Error),
+    uniffi(flat_error)
+)]
 pub enum LightwayError {
     #[error("Connection Error: `{0}`")]
     ConnectionError(#[from] anyhow::Error),

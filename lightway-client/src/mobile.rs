@@ -5,7 +5,8 @@ pub(crate) mod tracing_utils;
 use std::sync::{Arc, OnceLock};
 use tracing::info;
 
-#[derive(Debug, uniffi::Enum, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Enum))]
 /// Current state of Expresslane
 pub enum ExpresslaneState {
     /// Expresslane not enabled in the config
@@ -32,7 +33,7 @@ impl TryFrom<lightway_core::ExpresslaneState> for ExpresslaneState {
     }
 }
 
-#[uniffi::export(with_foreign)]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export(with_foreign))]
 #[cfg_attr(test, mockall::automock)]
 pub trait RustEventHandlers: Send + Sync {
     /// Handles VPN connection status changes from the native Lightway client.
@@ -64,13 +65,13 @@ pub trait RustEventHandlers: Send + Sync {
     fn handle_inside_pkt_codec_status_change(&self, enabled: bool);
 }
 
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn get_lightway_client_hash() -> String {
     env!("GIT_HASH").to_string()
 }
 
 /// Get the version for WolfSSL
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn get_wolfssl_version() -> String {
     lightway_core::wolfssl::get_wolfssl_version_string().to_string()
 }
@@ -79,7 +80,7 @@ fn get_wolfssl_version() -> String {
 /// installing a panic hook for proper crash reporting.
 /// Invoking this multiple times replaces the previously registered logger so that the latest callback is used.
 /// A `LoggingBridgeError` error is returned if another global subscriber was installed externally.
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn initialize_rust_logging_bridge(
     logger_callback: Arc<dyn tracing_utils::RustLogger>,
 ) -> Result<(), LightwayError> {
@@ -87,7 +88,8 @@ fn initialize_rust_logging_bridge(
     tracing_utils::set_global_default_subscriber(logger_callback).map_err(|e| e.into())
 }
 
-#[derive(Debug, uniffi::Enum)]
+#[derive(Debug)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Enum))]
 /// Current network state of the device
 /// For Android, all the 3 enums (Online/InterfaceChanged/RouteUpdated) have the same behaviour
 pub enum DeviceNetworkState {
@@ -103,7 +105,7 @@ pub enum DeviceNetworkState {
     Offline,
 }
 
-#[derive(uniffi::Object)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Object))]
 struct RustVpnConnection {
     /// Timestamp when this connection object was created
     created_at: u64,
@@ -113,7 +115,7 @@ struct RustVpnConnection {
     _default_guard: Option<tracing_core::dispatcher::DefaultGuard>,
 }
 
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 impl RustVpnConnection {
     #[uniffi::constructor]
     fn new(logger_callback: Option<Arc<dyn crate::mobile::tracing_utils::RustLogger>>) -> Self {

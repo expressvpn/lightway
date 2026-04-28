@@ -478,7 +478,10 @@ impl ConnectionConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Error))]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Error)
+)]
 pub enum Error {
     /// Invalid network protocol
     #[error("Invalid network protocol")]
@@ -499,8 +502,12 @@ pub enum Error {
     InsufficientAuth,
 }
 
-#[cfg(feature = "mobile")]
-#[derive(Debug, uniffi::Record)]
+#[cfg(any(feature = "mobile", feature = "mobile-test"))]
+#[derive(Debug)]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Record)
+)]
 /// User settings from the mobile app, it is a small set config and easier to use in mobile
 pub struct MobileConfig {
     /// Enable continuous/NAT keep-alive
@@ -519,7 +526,11 @@ pub struct MobileConfig {
 
 /// Endpoint settings from the mobile app, it is a small set and easier to use in mobile
 #[cfg(feature = "mobile")]
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone)]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Record)
+)]
 pub struct MobileConnectionConfig {
     pub server_ip: IpAddress,
     pub port: u16,
@@ -580,7 +591,7 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
 }
 
 // Ref: https://mozilla.github.io/uniffi-rs/0.27/proc_macro/index.html#the-unifficustom_type-and-unifficustom_newtype-macros
-#[cfg(feature = "mobile")]
+#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 uniffi::custom_type!(IpAddress, String);
 
 #[cfg(feature = "mobile")]
@@ -597,7 +608,7 @@ impl std::fmt::Display for IpAddress {
     }
 }
 
-#[cfg(feature = "mobile")]
+#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 impl crate::UniffiCustomTypeConverter for IpAddress {
     type Builtin = String;
 

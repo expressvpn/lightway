@@ -231,7 +231,7 @@ jobs:
       run: nix develop -c cargo check --features=mobile
     - name: Test with mobile features
       working-directory: ./lightway-client
-      run: nix develop -c cargo test --features=mobile
+      run: nix develop -c cargo test --features=mobile-test
 
   nix-build:
     name: Nix Build (${{ matrix.target }})
