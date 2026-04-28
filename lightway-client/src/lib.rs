@@ -37,13 +37,13 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::debug::WiresharkKeyLogger;
 #[cfg(desktop)]
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
-#[cfg(batch_receive)]
-use crate::io::outside::BATCH_RECV_SIZE;
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
 use crate::route_manager::{RouteManager, RouteMode};
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
+#[cfg(batch_receive)]
+use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
     AuthMethod, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, PluginFactoryError, PluginFactoryList,
     RootCertificate, Version,
@@ -416,7 +416,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
     #[cfg(batch_receive)]
-    const BUF_COUNT: usize = BATCH_RECV_SIZE;
+    const BUF_COUNT: usize = MAX_IO_BATCH_SIZE;
     #[cfg(not(batch_receive))]
     const BUF_COUNT: usize = 1;
 
@@ -848,6 +848,9 @@ pub async fn connect<
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
         b.with_pmtud_timer(pmtud_timer)
+    })
+    .when(config.enable_batch_receive, |b| {
+        b.with_inside_batch_enabled()
     });
 
     #[cfg(feature = "postquantum")]

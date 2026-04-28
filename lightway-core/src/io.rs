@@ -2,6 +2,12 @@ use bytes::BytesMut;
 use std::{net::SocketAddr, sync::Arc};
 use wolfssl::IOCallbackResult;
 
+/// Maximum number of packets handled in a single batched IO call —
+/// covers both inbound (recvmmsg-style) reads and outbound
+/// ([`InsideIOSendCallback::send_multiple`] / sendmmsg-style) writes
+/// across both inside (TUN) and outside (socket) IO paths.
+pub const MAX_IO_BATCH_SIZE: usize = 32;
+
 /// Application provided callback used to send inside data.
 pub trait InsideIOSendCallback<AppState> {
     /// Called when Lightway wishes to send some inside data
