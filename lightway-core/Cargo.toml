@@ -24,7 +24,7 @@ anyhow.workspace = true
 bitfield-struct = "0.13.0"
 bytes.workspace = true
 delegate.workspace = true
-lru = "0.16.0"
+lru = "0.18.0"
 metrics.workspace = true
 more-asserts.workspace = true
 num_enum = "0.7.0"
@@ -35,7 +35,7 @@ rand.workspace = true
 rand_core = "0.10.0"
 thiserror.workspace = true
 tracing.workspace = true
-wolfssl = "5.0.0"
+wolfssl = "6.0.0"
 
 [dev-dependencies]
 async-trait.workspace = true
