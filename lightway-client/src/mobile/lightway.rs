@@ -812,7 +812,8 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             // Server-only events
             Event::SessionIdRotationAcknowledged { .. }
             | Event::TlsKeysUpdateStart
-            | Event::TlsKeysUpdateCompleted => {
+            | Event::TlsKeysUpdateCompleted
+            | Event::SessionIdRotationStarted { .. } => {
                 unreachable!("server only event received");
             }
         }
