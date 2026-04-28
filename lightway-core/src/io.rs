@@ -18,6 +18,33 @@ pub trait InsideIOSendCallback<AppState> {
     /// [`IOCallbackResult::WouldBlock`].
     fn send(&self, buf: BytesMut, state: &mut AppState) -> IOCallbackResult<usize>;
 
+    /// Called when Lightway wishes to send multiple inside data packets at once.
+    ///
+    /// Each entry in `bufs` is a single packet. Returns total bytes sent.
+    /// Default impl falls back to calling [`Self::send`] per packet.
+    #[cfg(target_os = "linux")]
+    fn send_multiple(
+        &self,
+        bufs: &mut [BytesMut],
+        state: &mut AppState,
+    ) -> IOCallbackResult<usize> {
+        let mut total = 0;
+        for buf in bufs.iter_mut() {
+            match self.send(std::mem::take(buf), state) {
+                IOCallbackResult::Ok(n) => total += n,
+                IOCallbackResult::WouldBlock => return IOCallbackResult::Ok(total),
+                IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+            }
+        }
+        IOCallbackResult::Ok(total)
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Returns whether the TUN device supports UDP and TCP GSO respectively.
+    fn gso(&self) -> (bool, bool) {
+        (false, false)
+    }
+
     /// MTU supported by this inside I/O path
     fn mtu(&self) -> usize;
 
