@@ -231,7 +231,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     /// Enable inside-batch mode. When set, [`Connection::send_to_inside`]
     /// queues onto an internal batch and the caller is expected to call
     /// [`Connection::flush_to_inside`] (or use
-    /// [`Connection::outside_data_received_multiple`]) to deliver them.
+    /// [`Connection::multiple_outside_data_received`]) to deliver them.
     ///
     /// Only available on Linux client for now.
     #[cfg(target_os = "linux")]
