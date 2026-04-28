@@ -24,8 +24,8 @@ use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
 use crate::context::ExpresslaneTickData;
 use crate::{
-    ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, PluginResult,
-    SessionId, TCP_HEADER_SIZE, Version,
+    ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
+    TCP_HEADER_SIZE, Version,
     borrowed_bytesmut::BorrowedBytesMut,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
@@ -554,7 +554,7 @@ impl<AppState: Send> Connection<AppState> {
                 args.expresslane_metrics,
             ),
             #[cfg(target_os = "linux")]
-            inside_send_batch: Vec::with_capacity(MAX_IO_BATCH_SIZE),
+            inside_send_batch: Vec::with_capacity(crate::MAX_IO_BATCH_SIZE),
             inside_batch_enabled: if cfg!(target_os = "linux") {
                 client_mode && args.inside_batch_enabled
             } else {
@@ -2103,10 +2103,11 @@ impl<AppState: Send> Connection<AppState> {
         #[cfg(target_os = "linux")]
         if self.inside_batch_enabled {
             let queued_packets = self.queue_to_inside(pkt);
-            if queued_packets > MAX_IO_BATCH_SIZE {
+            if queued_packets > crate::MAX_IO_BATCH_SIZE {
                 warn!(
                     queued_packets,
-                    "Queued packets somehow exceeds max io batch size {}", MAX_IO_BATCH_SIZE
+                    "Queued packets somehow exceeds max io batch size {}",
+                    crate::MAX_IO_BATCH_SIZE
                 );
             }
             return Ok(());
