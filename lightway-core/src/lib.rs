@@ -62,7 +62,7 @@ pub use utils::{
 pub use version::Version;
 pub use wire::{AuthMethod, Header, SessionId};
 #[cfg(feature = "debug")]
-pub use wolfssl::{Tls13SecretCallbacks, WolfsslLoggingCallback};
+pub use wolfssl::{LoggingCallback, Tls13SecretCallbacks};
 
 /// Default MTU size for a packet on the outside path (on the wire)
 pub const MAX_OUTSIDE_MTU: usize = 1500;
@@ -109,7 +109,7 @@ pub fn enable_tls_debug() {
 
 /// Enables debug logging from WolfSSL and sets the callback for the logs
 #[cfg(feature = "debug")]
-pub fn set_logging_callback(cb: WolfsslLoggingCallback) {
+pub fn set_logging_callback(cb: LoggingCallback) {
     enable_tls_debug();
     wolfssl::set_logging_callback(cb)
 }
