@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-build, nix-tests, windows-build]
+    needs: [earthly, e2e, coverage, nix-mobile-check, nix-build, nix-tests, windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -211,6 +211,27 @@ jobs:
       - name: Coverage check fails
         if: steps.coverage-check.outputs.failed == 'true'
         run: exit 1
+
+  # We do not have beef-up runners to build mobile lib for OSS repo,
+  # to prevent the code changes starting from OSS repo,
+  # so we do check and unit test on the Rust mobile lib
+  nix-mobile-check:
+    name: Mobile lib check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v21
+    - name: Setup Nix cache
+      uses: DeterminateSystems/magic-nix-cache-action@v13
+      with:
+        use-flakehub: false
+    - name: Check with mobile
+      working-directory: ./lightway-client
+      run: nix develop -c cargo check --features=mobile
+    - name: Test with mobile features
+      working-directory: ./lightway-client
+      run: nix develop -c cargo test --features=mobile
 
   nix-build:
     name: Nix Build (${{ matrix.target }})
