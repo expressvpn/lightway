@@ -61,7 +61,6 @@ pub struct ClientConnectionBuilder<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
-    #[cfg(target_os = "linux")]
     inside_batch_enabled: bool,
 }
 
@@ -109,7 +108,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             pmtud_base_mtu: None,
             outside_plugins,
             inside_pkt_codec: None,
-            #[cfg(target_os = "linux")]
             inside_batch_enabled: false,
         })
     }
@@ -278,7 +276,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
-            #[cfg(target_os = "linux")]
             inside_batch_enabled: self.inside_batch_enabled,
         })?)
     }
@@ -418,7 +415,6 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
-            #[cfg(target_os = "linux")]
             inside_batch_enabled: false,
         })?)
     }

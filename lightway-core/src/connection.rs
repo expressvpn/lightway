@@ -459,7 +459,8 @@ pub struct Connection<AppState: Send = ()> {
     /// expected to call [`Connection::flush_to_inside`] (or use
     /// [`Connection::multiple_outside_data_received`]) to deliver them.
     ///
-    /// This is only supported on Linux client
+    /// This is only supported on the Linux client
+    #[cfg_attr(not(target_os = "linux"), allow(unused))]
     inside_batch_enabled: bool,
 }
 
@@ -945,11 +946,14 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
+        #[cfg(target_os = "linux")]
         if self.inside_batch_enabled {
             self.flush_to_inside().map(|_| total)
         } else {
             Ok(total)
         }
+        #[cfg(not(target_os = "linux"))]
+        Ok(total)
     }
 
     /// Consume data received from inside path and send it as

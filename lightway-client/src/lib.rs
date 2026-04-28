@@ -842,8 +842,10 @@ pub async fn connect<
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
         b.with_pmtud_timer(pmtud_timer)
-    })
-    .when(config.enable_batch_receive, |b| {
+    });
+
+    #[cfg(linux)]
+    let conn_builder = conn_builder.when(config.enable_batch_receive, |b| {
         b.with_inside_batch_enabled()
     });
 
