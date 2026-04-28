@@ -445,19 +445,13 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             IOCallbackResult::Err(err) => return Err(err.into()),
         };
 
-        // TODO: Batch send the packets into the tun device at once
-        {
-            let mut conn = conn.lock().unwrap();
-            for b in &mut bufs[..count] {
-                let pkt = OutsidePacket::Wire(b, connection_type);
-                if let Err(err) = conn.outside_data_received(pkt) {
-                    if err.is_fatal(connection_type) {
-                        return Err(err.into());
-                    }
-                    tracing::error!("Failed to process outside data: {err}");
-                }
-            }
-        }
+        let pkts = bufs
+            .iter_mut()
+            .take(count)
+            .map(|b| OutsidePacket::Wire(b, connection_type));
+        conn.lock()
+            .unwrap()
+            .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
 
         for b in &mut bufs[..count] {
             b.clear();
