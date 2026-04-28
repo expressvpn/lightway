@@ -441,6 +441,14 @@ pub struct Connection<AppState: Send = ()> {
 
     // Expresslane state, config exchange, health monitoring, wire crypto, and callbacks
     expresslane: expresslane::Expresslane<AppState>,
+
+    /// When true, [`Connection::send_to_inside`] pushes onto
+    /// `inside_send_batch` instead of sending immediately. Caller is
+    /// expected to call [`Connection::flush_to_inside`] (or use
+    /// [`Connection::outside_data_received_multiple`]) to deliver them.
+    ///
+    /// This is only supported on Linux client
+    inside_batch_enabled: bool,
 }
 
 /// Information about the new session being established with a new
@@ -466,6 +474,7 @@ struct NewConnectionArgs<AppState> {
     expresslane: bool,
     expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
+    inside_batch_enabled: bool,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -482,6 +491,8 @@ impl<AppState: Send> Connection<AppState> {
             (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
             (_, false) => ExpresslaneState::Disabled,
         };
+
+        let client_mode = matches!(args.mode, ConnectionMode::Client { .. });
         let mut conn = Connection {
             connection_type: args.connection_type,
             tunnel_protocol_version: args.protocol_version,
@@ -530,6 +541,11 @@ impl<AppState: Send> Connection<AppState> {
                 args.expresslane_cb,
                 args.expresslane_metrics,
             ),
+            inside_batch_enabled: if cfg!(target_os = "linux") {
+                client_mode && args.inside_batch_enabled
+            } else {
+                false
+            },
         };
 
         // This will very likely fail since negotiation always needs
