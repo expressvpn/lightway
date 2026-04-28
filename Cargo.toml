@@ -41,7 +41,7 @@ async-trait = "0.1.77"
 bytes = "1.5.0"
 bytesize = { version = "1.3.0", features = ["serde"] }
 clap = { version = "4.4.7", features = ["derive"] }
-ctrlc = { version = "3.4.6", features = ["termination"] }
+ctrlc = { version = "3.4.6" }
 delegate = "0.12.0"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 ipnet = { version = "2.8.0", features = ["serde"]}
