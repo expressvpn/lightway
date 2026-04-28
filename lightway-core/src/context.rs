@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::{
-    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError, ExpresslaneCbType,
+    BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError,
     InsideIOSendCallbackArg, OutsideIOSendCallbackArg, OutsidePacket, PluginResult,
     RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg, Version,
+    connection::expresslane::{ExpresslaneCbType, ExpresslaneMetricsType},
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
@@ -119,7 +120,8 @@ pub struct ClientContext<AppState> {
     pub(crate) outside_plugins: Arc<PluginFactoryList>,
     pub(crate) rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
     pub(crate) expresslane: bool,
-    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
+    pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -144,7 +146,8 @@ pub struct ClientContextBuilder<AppState> {
     inside_plugins: Arc<PluginFactoryList>,
     outside_plugins: Arc<PluginFactoryList>,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<ExpresslaneCbType<AppState>>,
+    expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -175,6 +178,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             outside_plugins: Arc::new(PluginFactoryList::default()),
             expresslane: false,
             expresslane_cb: None,
+            expresslane_metrics: None,
         })
     }
 
@@ -214,9 +218,17 @@ impl<AppState> ClientContextBuilder<AppState> {
     }
 
     /// Sets callback for expresslane key update
-    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType<AppState>) -> Self {
         Self {
             expresslane_cb: Some(cb),
+            ..self
+        }
+    }
+
+    /// Sets the external provider for expresslane packet stats.
+    pub fn with_expresslane_metrics(self, metrics: ExpresslaneMetricsType) -> Self {
+        Self {
+            expresslane_metrics: Some(metrics),
             ..self
         }
     }
@@ -235,6 +247,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             rng: Arc::new(Mutex::new(rand::make_rng::<rand::rngs::StdRng>())),
             expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
+            expresslane_metrics: self.expresslane_metrics,
         }
     }
 }
@@ -282,7 +295,8 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) outside_plugins: PluginFactoryList,
     pub(crate) outside_plugins_instance: PluginList,
     pub(crate) expresslane: bool,
-    pub(crate) expresslane_cb: Option<ExpresslaneCbType>,
+    pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
+    pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -338,7 +352,8 @@ pub struct ServerContextBuilder<AppState> {
     inside_plugins: PluginFactoryList,
     outside_plugins: PluginFactoryList,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<ExpresslaneCbType<AppState>>,
+    expresslane_metrics: Option<ExpresslaneMetricsType>,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -402,6 +417,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             outside_plugins: PluginFactoryList::default(),
             expresslane: false,
             expresslane_cb: None,
+            expresslane_metrics: None,
         })
     }
 
@@ -464,9 +480,17 @@ impl<AppState> ServerContextBuilder<AppState> {
     }
 
     /// Sets callback for expresslane key update
-    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType) -> Self {
+    pub fn with_expresslane_cb(self, cb: ExpresslaneCbType<AppState>) -> Self {
         Self {
             expresslane_cb: Some(cb),
+            ..self
+        }
+    }
+
+    /// Sets the external metrics provider for expresslane packet stats.
+    pub fn with_expresslane_metrics(self, metrics: ExpresslaneMetricsType) -> Self {
+        Self {
+            expresslane_metrics: Some(metrics),
             ..self
         }
     }
@@ -501,6 +525,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             outside_plugins_instance,
             expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
+            expresslane_metrics: self.expresslane_metrics,
         })
     }
 }

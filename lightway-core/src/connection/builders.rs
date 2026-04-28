@@ -259,6 +259,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             inside_pkt_codec: self.inside_pkt_codec,
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
+            expresslane_metrics: self.ctx.expresslane_metrics.clone(),
         })?)
     }
 }
@@ -396,6 +397,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             inside_pkt_codec: self.inside_pkt_codec,
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
+            expresslane_metrics: self.ctx.expresslane_metrics.clone(),
         })?)
     }
 }

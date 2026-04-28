@@ -1,7 +1,7 @@
 mod builders;
 pub(crate) mod dplpmtud;
 mod event;
-pub(crate) mod expresslane_cb;
+pub(crate) mod expresslane;
 mod fragment_map;
 mod io_adapter;
 mod key_update;
@@ -35,16 +35,14 @@ use crate::{
     wire::{self, AuthMethod},
 };
 use crate::{
-    ExpresslaneCbData, ExpresslaneCbType, Header, LightwayFeature, OutsideIOSendCallbackArg,
-    TickType, dtls_required_outside_mtu, max_dtls_mtu,
+    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType,
+    dtls_required_outside_mtu, max_dtls_mtu,
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
-use crate::wire::{
-    AuthSuccessWithConfigV4, ExpresslaneData, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion,
-};
+use crate::wire::{AuthSuccessWithConfigV4, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion};
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
@@ -339,21 +337,7 @@ pub struct ConnectionActivity {
 
 /// The result of an operation on a [`Connection`].
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-/// Current state of Expresslane
-pub enum ExpresslaneState {
-    /// Expresslane not enabled in the config
-    #[default]
-    Disabled,
-    /// Server: configured but waiting for the client to initiate the key exchange
-    WaitingForClient,
-    /// Expresslane enabled in the config, but handshake not completed or peer has disabled Expresslane, so inactive
-    Inactive,
-    /// Expresslane enabled and being used in the current connection
-    Active,
-    /// Expresslane enabled, but connection is degraded and back to normal D/TLS for data packets
-    Degraded,
-}
+pub use expresslane::ExpresslaneState;
 
 /// A lightway connection
 pub struct Connection<AppState: Send = ()> {
@@ -455,14 +439,8 @@ pub struct Connection<AppState: Send = ()> {
     // States for encoding request
     encoding_request_states: EncodingRequestStates,
 
-    // Expresslane State
-    expresslane_state: ExpresslaneState,
-
-    // Expresslane engine
-    expresslane: ExpresslaneData,
-
-    // Express data config update callback
-    expresslane_cb: Option<ExpresslaneCbType>,
+    // Expresslane state, config exchange, health monitoring, wire crypto, and callbacks
+    expresslane: expresslane::Expresslane<AppState>,
 }
 
 /// Information about the new session being established with a new
@@ -486,7 +464,8 @@ struct NewConnectionArgs<AppState> {
     pmtud_base_mtu: Option<u16>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     expresslane: bool,
-    expresslane_cb: Option<ExpresslaneCbType>,
+    expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
+    expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -546,9 +525,11 @@ impl<AppState: Send> Connection<AppState> {
             inside_pkt_decoder,
             can_use_inside_pkt_encoding: false,
             encoding_request_states: EncodingRequestStates::default(),
-            expresslane_state,
-            expresslane: ExpresslaneData::default(),
-            expresslane_cb: args.expresslane_cb,
+            expresslane: expresslane::Expresslane::new(
+                expresslane_state,
+                args.expresslane_cb,
+                args.expresslane_metrics,
+            ),
         };
 
         // This will very likely fail since negotiation always needs
@@ -894,7 +875,18 @@ impl<AppState: Send> Connection<AppState> {
         let result = self.process_new_outside_data(payload, hdr);
         match result {
             // We only look into the session id after we verify the connection is valid
-            Ok(frames_read) if frames_read > 0 => self.update_session_id(hdr.map(|h| h.session)),
+            Ok(frames_read) if frames_read > 0 => {
+                if let Some(h) = hdr
+                    && h.session != self.session_id
+                {
+                    debug!(
+                        wire_session = ?h.session,
+                        current_session = ?self.session_id,
+                        "Received packet with different session ID"
+                    );
+                }
+                self.update_session_id(hdr.map(|h| h.session));
+            }
             _ => {}
         }
         result
@@ -1176,6 +1168,11 @@ impl<AppState: Send> Connection<AppState> {
 
                 *pending_session_id = Some(new_session_id);
 
+                self.event(Event::SessionIdRotationStarted {
+                    old: self.session_id,
+                    new: new_session_id,
+                });
+
                 Ok(new_session_id)
             }
         }
@@ -1319,6 +1316,7 @@ impl<AppState: Send> Connection<AppState> {
         {
             let (data, is_encoded) = self
                 .expresslane
+                .data
                 .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
 
             self.handle_outside_data_bytes(data, is_encoded)?;
@@ -1510,14 +1508,41 @@ impl<AppState: Send> Connection<AppState> {
         let total_peer_sent = payload.get_u64();
         let total_peer_recv = payload.get_u64();
 
-        let current_sent = self.expresslane.packets_sent();
-        let current_recv = self.expresslane.packets_received();
+        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
+
+        // Detect counter reset: cumulative stats should never decrease.
+        // If they do, an external stats provider re-initialized its state
+        // with fresh counters. Log for debugging but continue with the
+        // health check — the underflow will trigger degradation and fall
+        // back to DTLS as a safe default.
+        if total_peer_sent < self.expresslane.prev_peer_sent
+            || total_peer_recv < self.expresslane.prev_peer_recv
+        {
+            warn!(
+                total_peer_sent,
+                total_peer_recv,
+                prev_peer_sent = self.expresslane.prev_peer_sent,
+                prev_peer_recv = self.expresslane.prev_peer_recv,
+                "Peer expresslane counter reset detected"
+            );
+        }
+        if current_sent < self.expresslane.last_snapshot_sent
+            || current_recv < self.expresslane.last_snapshot_recv
+        {
+            warn!(
+                current_sent,
+                current_recv,
+                last_snapshot_sent = self.expresslane.last_snapshot_sent,
+                last_snapshot_recv = self.expresslane.last_snapshot_recv,
+                "Local expresslane counter reset detected"
+            );
+        }
 
         // Compute per-interval deltas for both sides.
-        let my_sent_delta = current_sent - self.expresslane.last_snapshot_sent;
-        let my_recv_delta = current_recv - self.expresslane.last_snapshot_recv;
-        let peer_sent_delta = total_peer_sent - self.expresslane.prev_peer_sent;
-        let peer_recv_delta = total_peer_recv - self.expresslane.prev_peer_recv;
+        let my_sent_delta = current_sent.wrapping_sub(self.expresslane.last_snapshot_sent);
+        let my_recv_delta = current_recv.wrapping_sub(self.expresslane.last_snapshot_recv);
+        let peer_sent_delta = total_peer_sent.wrapping_sub(self.expresslane.prev_peer_sent);
+        let peer_recv_delta = total_peer_recv.wrapping_sub(self.expresslane.prev_peer_recv);
 
         // Update snapshots
         self.expresslane.prev_peer_sent = total_peer_sent;
@@ -1579,7 +1604,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // If self key is equal to last retransmit key, it means peer has
         // already acknowledged. We can ignore the tick
-        if last_config.key == self.expresslane.self_key() {
+        if last_config.key == self.expresslane.data.self_key() {
             debug!("Expresslane config {} ack successful", last_config.counter);
             return Ok(());
         }
@@ -1613,24 +1638,22 @@ impl<AppState: Send> Connection<AppState> {
                 .tunnel_protocol_version
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && !matches!(
-                self.expresslane_state,
+                self.expresslane.state,
                 ExpresslaneState::Disabled | ExpresslaneState::WaitingForClient
             )
     }
 
     fn expresslane_ready(&self) -> bool {
-        self.expresslane_supported() && matches!(self.expresslane_state, ExpresslaneState::Active)
+        self.expresslane_supported() && matches!(self.expresslane.state, ExpresslaneState::Active)
     }
 
-    /// Set the expresslane state and emit the event if the state has changed (on the client-side)
+    /// Set the expresslane state and emit the event if the state has changed.
     fn set_expresslane_state(&mut self, new_state: ExpresslaneState) {
-        if self.expresslane_state == new_state {
+        if self.expresslane.state == new_state {
             return;
         }
-        self.expresslane_state = new_state;
-        if matches!(self.mode, ConnectionMode::Client { .. }) {
-            self.event(Event::ExpresslaneStateChanged(new_state));
-        }
+        self.expresslane.state = new_state;
+        self.event(Event::ExpresslaneStateChanged(new_state));
     }
 
     /// Encode expresslane metrics as a binary payload.
@@ -1645,8 +1668,7 @@ impl<AppState: Send> Connection<AppState> {
             return Default::default();
         }
 
-        let current_sent = self.expresslane.packets_sent();
-        let current_recv = self.expresslane.packets_received();
+        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
 
         let mut buf = bytes::BytesMut::with_capacity(16);
         buf.put_u64(current_sent);
@@ -1661,7 +1683,7 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        if config.version != self.expresslane.version {
+        if config.version != self.expresslane.data.version {
             return Err(ConnectionError::ExpresslaneVersionMismatch);
         }
 
@@ -1669,11 +1691,16 @@ impl<AppState: Send> Connection<AppState> {
         if config.ack {
             if config.counter == self.expresslane.config_counter {
                 // Peer acknowledged, can update local key now
-                self.expresslane.update_self_key();
+                self.expresslane.data.update_self_key();
                 self.publish_expresslane_key();
                 self.expresslane.retransmit_count = 0;
-                // Self key updated, check if expresslane is now ready
-                if self.expresslane.has_valid_keys() {
+                // Self key updated, check if expresslane is now ready.
+                // Don't re-activate if we're degraded — the degradation
+                // config ACK uses an INVALID key which must not be used
+                // for data packets.
+                if !matches!(self.expresslane.state, ExpresslaneState::Degraded)
+                    && self.expresslane.data.has_valid_keys()
+                {
                     self.set_expresslane_state(ExpresslaneState::Active);
                 }
             }
@@ -1683,7 +1710,7 @@ impl<AppState: Send> Connection<AppState> {
         // Dont allow to update the expresslane status, if expresslane is degraded
         // This also bypasses sending ACK, since peer should not enable
         // expresslane
-        if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
+        if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
             debug!("Ignoring expresslane config from peer (expresslane degraded)");
             return Ok(());
         }
@@ -1691,15 +1718,15 @@ impl<AppState: Send> Connection<AppState> {
         // Server starts in WaitingForClient. The client's first config
         // transitions the server to Pending, which enables
         // expresslane_supported() and allows the server to send its own key.
-        if matches!(self.expresslane_state, ExpresslaneState::WaitingForClient) {
+        if matches!(self.expresslane.state, ExpresslaneState::WaitingForClient) {
             self.set_expresslane_state(ExpresslaneState::Inactive);
         }
 
         if config.enabled {
-            debug!("Peer has enabled expresslane");
-            self.expresslane.update_peer_key(config.key)?;
+            debug!("Peer has updated expresslane key");
+            self.expresslane.data.update_peer_key(config.key)?;
             self.publish_expresslane_key();
-            if self.expresslane.has_valid_keys() {
+            if self.expresslane.data.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
             }
         } else {
@@ -1727,7 +1754,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         // Don't allow key rotation if expresslane is degraded
-        if matches!(self.expresslane_state, ExpresslaneState::Degraded) {
+        if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
             return Err(ConnectionError::ExpreslaneDegraded);
         }
 
@@ -1741,7 +1768,7 @@ impl<AppState: Send> Connection<AppState> {
         // [`self::handle_expresslane_config`]
         //
         // If updating key failed, send disabled to peer
-        let enabled = self.expresslane.update_next_self_key(key).is_ok();
+        let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
 
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
@@ -1755,7 +1782,7 @@ impl<AppState: Send> Connection<AppState> {
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
 
-        self.expresslane.update_last_key_rotation();
+        self.expresslane.last_key_rotation = Some(Instant::now());
 
         // Callback to schedule re-transmission if required
         (self.schedule_tick_cb)(
@@ -1771,7 +1798,7 @@ impl<AppState: Send> Connection<AppState> {
         self.set_expresslane_state(ExpresslaneState::Degraded);
 
         let key = ExpresslaneKey::INVALID;
-        let _ = self.expresslane.update_next_self_key(key);
+        let _ = self.expresslane.data.update_next_self_key(key);
 
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
@@ -1795,12 +1822,15 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn publish_expresslane_key(&self) {
-        if let Some(xp_config_cb) = &self.expresslane_cb {
-            let self_key = self.expresslane.self_key();
-            let peer_key = self.expresslane.peer_key();
-
-            let data = ExpresslaneCbData { self_key, peer_key };
-            xp_config_cb.update(self.session_id, data);
+        if let Some(xp_config_cb) = &self.expresslane.cb {
+            let self_key = self.expresslane.data.self_key();
+            let peer_key = self.expresslane.data.peer_key();
+            let data = ExpresslaneCbData {
+                self_key,
+                peer_key,
+                peer_sockaddr: self.peer_addr(),
+            };
+            xp_config_cb.update(self.session_id, data, &self.app_state);
         }
     }
 
@@ -1818,6 +1848,7 @@ impl<AppState: Send> Connection<AppState> {
         // In case of client there will be no pending_session_id, so it is fine
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
         self.expresslane
+            .data
             .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 

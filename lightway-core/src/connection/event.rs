@@ -8,6 +8,17 @@ pub enum Event {
     StateChanged(State),
     /// A reply was received after a [`crate::Connection::keepalive()`]
     KeepaliveReply,
+    /// A new session id has been generated and will be used in
+    /// outgoing packets. The old session id is still active until
+    /// the peer acknowledges the new one.
+    ///
+    /// Server connections only
+    SessionIdRotationStarted {
+        /// The current [`SessionId`]
+        old: SessionId,
+        /// The new [`SessionId`]
+        new: SessionId,
+    },
     /// A pending session id change (following a call to
     /// [`crate::Connection::rotate_session_id`]) has been
     /// acknowledged and applied to the connection.

@@ -11,9 +11,13 @@ use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
-    ServerAuthResult, Version,
+    ConnectionType, Event, ExpresslaneCbType, ExpresslaneMetricsType, PluginFactoryError,
+    PluginFactoryList, ServerAuth, ServerAuthHandle, ServerAuthResult, SessionId, Version,
 };
+
+/// Callback type for receiving per-connection events with session ID.
+/// Implement this to handle events like session rotation and disconnection.
+pub type ServerEventCbType = Arc<dyn Fn(SessionId, &Event) + Send + Sync>;
 
 use anyhow::{Context, Result, anyhow};
 use ipnet::Ipv4Net;
@@ -172,6 +176,20 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Callback for expresslane key updates
+    #[educe(Debug(ignore))]
+    pub expresslane_cb: Option<ExpresslaneCbType<ConnectionState>>,
+
+    /// External metrics provider for expresslane packet stats,
+    /// supplied when packet processing happens outside the lightway runtime.
+    #[educe(Debug(ignore))]
+    pub expresslane_metrics: Option<ExpresslaneMetricsType>,
+
+    /// Optional callback to receive per-connection events with session ID.
+    /// Called for every event (state changes, session rotation, etc.).
+    #[educe(Debug(ignore))]
+    pub event_cb: Option<ServerEventCbType>,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -314,12 +332,18 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     )?
     .with_key_update_interval(config.key_update_interval)
     .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.expresslane_cb.is_some(), |b| {
+        b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
+    .when(config.expresslane_metrics.is_some(), |b| {
+        b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
+    })
     .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
     .build()?;
 
-    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec);
+    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec, config.event_cb);
 
     tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
 

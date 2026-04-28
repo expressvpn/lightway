@@ -11,9 +11,32 @@ use async_trait::async_trait;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallbackArg};
 use std::{net::SocketAddr, sync::Arc};
 
+/// Platform-agnostic OS socket handle.
+/// `RawFd` (i32) on Unix, `RawSocket` (u64) on Windows.
+#[cfg(unix)]
+pub type RawSocketHandle = std::os::fd::RawFd;
+#[cfg(windows)]
+pub type RawSocketHandle = std::os::windows::io::RawSocket;
+
 /// Maximum number of packets to receive in a single batch syscall.
 #[cfg(batch_receive)]
 pub const BATCH_RECV_SIZE: usize = 32;
+
+/// The underlying outside socket, tagged with its transport type.
+/// Lets callers distinguish UDP from TCP without peeking at the handle.
+#[derive(Debug, Clone, Copy)]
+pub enum OutsideSocket {
+    Udp(RawSocketHandle),
+    Tcp(RawSocketHandle),
+}
+
+impl OutsideSocket {
+    pub fn raw_handle(&self) -> RawSocketHandle {
+        match self {
+            Self::Udp(h) | Self::Tcp(h) => *h,
+        }
+    }
+}
 
 #[async_trait]
 pub trait OutsideIO: Sync + Send {
@@ -44,4 +67,7 @@ pub trait OutsideIO: Sync + Send {
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg;
 
     fn peer_addr(&self) -> SocketAddr;
+
+    /// Returns the underlying socket tagged with its transport type.
+    fn socket(&self) -> OutsideSocket;
 }

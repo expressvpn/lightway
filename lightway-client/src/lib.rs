@@ -117,6 +117,26 @@ pub enum LightwayError {
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
 }
 
+/// Details about an established outside connection.
+/// Emitted after the best connection is selected so callers can attach
+/// to the live socket without reopening it.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionInfo {
+    /// The underlying socket, tagged with its transport type.
+    pub socket: io::outside::OutsideSocket,
+    /// Remote peer address the connection is established to.
+    pub peer_addr: std::net::SocketAddr,
+}
+
+/// Information about the selected best connection, sent via `best_connection_selected_signal`.
+#[derive(Debug)]
+pub struct BestConnectionInfo {
+    /// Index of the best connection in the original server list
+    pub index: usize,
+    /// Details about the established outside connection (socket type + peer).
+    pub connection: ConnectionInfo,
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
@@ -189,6 +209,15 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Callback for expresslane key updates
+    #[educe(Debug(ignore))]
+    pub expresslane_cb: Option<lightway_core::ExpresslaneCbType<ConnectionState<ExtAppState>>>,
+
+    /// External metrics provider for expresslane packet stats,
+    /// supplied when packet processing happens outside the lightway runtime.
+    #[educe(Debug(ignore))]
+    pub expresslane_metrics: Option<lightway_core::ExpresslaneMetricsType>,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -220,9 +249,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     #[educe(Debug(ignore))]
     pub network_change_signal: Option<mpsc::Receiver<()>>,
 
-    /// Signal for Lightway to notify the index of the best connection when it is selected
+    /// Signal for Lightway to notify about the best connection when it is selected
     #[educe(Debug(ignore))]
-    pub best_connection_selected_signal: Option<oneshot::Sender<usize>>,
+    pub best_connection_selected_signal: Option<oneshot::Sender<BestConnectionInfo>>,
 
     /// Enable WolfSsl debugging
     #[cfg(feature = "debug")]
@@ -363,7 +392,8 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
             }
 
             // Server only events
-            Event::SessionIdRotationAcknowledged { .. }
+            Event::SessionIdRotationStarted { .. }
+            | Event::SessionIdRotationAcknowledged { .. }
             | Event::TlsKeysUpdateStart
             | Event::TlsKeysUpdateCompleted => {
                 unreachable!("server only event received");
@@ -651,6 +681,14 @@ pub struct ClientConnection<T: Send + Sync> {
 }
 
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
+    /// Returns details about the established outside connection.
+    pub fn outside_connection_info(&self) -> ConnectionInfo {
+        ConnectionInfo {
+            socket: self.outside_io.socket(),
+            peer_addr: self.outside_io.peer_addr(),
+        }
+    }
+
     #[cfg(desktop)]
     pub async fn initialize_routes(
         &mut self,
@@ -790,6 +828,12 @@ pub async fn connect<
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)
     .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.expresslane_cb.is_some(), |b| {
+        b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+    })
+    .when(config.expresslane_metrics.is_some(), |b| {
+        b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
+    })
     .build()
     .start_connect(
         outside_io.clone().into_io_send_callback(),
@@ -1188,17 +1232,22 @@ pub async fn client<
         message = "Best connection selected",
         connection_id = best_connection_index,
     );
-    if let Some(signal) = config.best_connection_selected_signal.take()
-        && signal.send(best_connection_index).is_err()
-    {
-        tracing::error!("Failed to send best_connection_selected_signal");
-    }
-
     let pos = connections
         .iter()
         .position(|(idx, _)| *idx == best_connection_index)
         .unwrap();
     let (_, mut connection) = connections.swap_remove(pos);
+
+    if let Some(signal) = config.best_connection_selected_signal.take()
+        && signal
+            .send(BestConnectionInfo {
+                index: best_connection_index,
+                connection: connection.outside_connection_info(),
+            })
+            .is_err()
+    {
+        tracing::error!("Failed to send best_connection_selected_signal");
+    }
 
     for (_, conn) in connections.iter_mut() {
         let _ = conn.stop_signal.take().unwrap().send(());
