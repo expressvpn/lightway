@@ -15,8 +15,7 @@ use super::{FromWireError, FromWireResult, SessionId, expresslane_config::Expres
 /// This is a variable sized request.
 /// Note that this is not a regular lightway protocol packet. Expresslane
 /// data packets are send only with [`crate::wire::Header`] prefixed and no other
-/// lightway headers. i.e There is no [`crate::wire::Frame`] corresponding to this
-/// packet.
+/// lightway headers. i.e There is no `Frame` corresponding to this packet.
 /// Packets will be encrypted/decrypted directly with `express_data` set in
 /// [`crate::wire::Header`]
 ///
@@ -53,7 +52,16 @@ use super::{FromWireError, FromWireResult, SessionId, expresslane_config::Expres
 pub struct ExpresslaneKey(pub [u8; EXPRESSLANE_KEY_SIZE]);
 
 impl ExpresslaneKey {
+    /// Invalid Expresslane key
     pub const INVALID: Self = ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]);
+
+    /// Returns true if this key is the all-zero `INVALID` sentinel
+    /// emitted by [`ExpresslaneKey::default()`] when no real key has
+    /// been negotiated yet.
+    #[inline]
+    pub fn is_invalid(&self) -> bool {
+        *self == Self::INVALID
+    }
 }
 
 pub const EXPRESSLANE_KEY_SIZE: usize = 32;
