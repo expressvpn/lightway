@@ -42,7 +42,8 @@ pub use context::{
 };
 pub use features::LightwayFeature;
 pub use io::{
-    InsideIOSendCallback, InsideIOSendCallbackArg, OutsideIOSendCallback, OutsideIOSendCallbackArg,
+    InsideIOSendCallback, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, OutsideIOSendCallback,
+    OutsideIOSendCallbackArg,
 };
 #[cfg(feature = "postquantum")]
 pub use keyshare::KeyShare;

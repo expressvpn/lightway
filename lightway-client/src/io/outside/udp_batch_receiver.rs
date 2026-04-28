@@ -1,7 +1,7 @@
 #![cfg(batch_receive)]
 
-use super::BATCH_RECV_SIZE;
 use bytes::BytesMut;
+use lightway_core::MAX_IO_BATCH_SIZE;
 use std::io;
 
 /// Platform-specific batch receive syscall.
@@ -10,7 +10,7 @@ trait BatchRecvSyscall {
     /// Returns the number of packets actually received.
     fn recv_multiple(
         fd: libc::c_int,
-        recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+        recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
         msg_count: usize,
     ) -> io::Result<usize>;
 }
@@ -29,18 +29,17 @@ type PlatformBatchRecv = linux::Recvmmsg;
 
 pub(crate) fn recv_multiple(
     fd: libc::c_int,
-    recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+    recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
     max_batch_size: usize,
 ) -> io::Result<usize> {
-    let max_batch_size = max_batch_size.min(BATCH_RECV_SIZE);
+    let max_batch_size = max_batch_size.min(MAX_IO_BATCH_SIZE);
     PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
 }
 
 #[cfg(apple)]
 mod apple {
-    use super::BATCH_RECV_SIZE;
     use bytes::BytesMut;
-    use lightway_core::MAX_OUTSIDE_MTU;
+    use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::sync::LazyLock;
     use std::{io, mem};
 
@@ -98,13 +97,13 @@ mod apple {
         #[allow(unsafe_code)]
         fn recv_multiple(
             fd: libc::c_int,
-            recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+            recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
             msg_count: usize,
         ) -> io::Result<usize> {
             // SAFETY: zeroed iovec is valid (null pointer + zero length).
-            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_RECV_SIZE]>() };
+            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
             // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
-            let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_RECV_SIZE]>() };
+            let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; MAX_IO_BATCH_SIZE]>() };
             for i in 0..msg_count {
                 iovecs[i].iov_base =
                     recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
@@ -164,9 +163,8 @@ mod apple {
 
 #[cfg(any(linux, android))]
 mod linux {
-    use crate::io::outside::udp_batch_receiver::BATCH_RECV_SIZE;
     use bytes::BytesMut;
-    use lightway_core::MAX_OUTSIDE_MTU;
+    use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::{io, mem};
 
     pub(crate) struct Recvmmsg;
@@ -177,13 +175,13 @@ mod linux {
         #[allow(unsafe_code)]
         fn recv_multiple(
             fd: libc::c_int,
-            recv_bufs: &mut [BytesMut; BATCH_RECV_SIZE],
+            recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
             msg_count: usize,
         ) -> io::Result<usize> {
             // SAFETY: zeroed iovec is valid (null pointer + zero length).
-            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; BATCH_RECV_SIZE]>() };
+            let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
             // SAFETY: zeroed mmsghdr is valid (null pointers + zero lengths).
-            let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; BATCH_RECV_SIZE]>() };
+            let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; MAX_IO_BATCH_SIZE]>() };
             for i in 0..msg_count {
                 iovecs[i].iov_base =
                     recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
@@ -252,7 +250,7 @@ mod tests {
 
         sender.send(b"hello").await.unwrap();
 
-        let mut bufs: [BytesMut; BATCH_RECV_SIZE] =
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
 
         tokio::time::timeout(Duration::from_secs(2), receiver.readable())
@@ -261,7 +259,7 @@ mod tests {
             .unwrap();
 
         let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, BATCH_RECV_SIZE).unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
         assert!(count >= 1);
         assert_eq!(&bufs[0][..], b"hello");
     }
@@ -277,7 +275,7 @@ mod tests {
         // Give packets time to arrive in kernel buffer.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let mut bufs: [BytesMut; BATCH_RECV_SIZE] =
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
 
         tokio::time::timeout(Duration::from_secs(2), receiver.readable())
@@ -286,7 +284,7 @@ mod tests {
             .unwrap();
 
         let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, BATCH_RECV_SIZE).unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
         assert!(count >= 1);
         // Verify received packets are in order.
         for (i, b) in bufs.iter().enumerate().take(count) {
