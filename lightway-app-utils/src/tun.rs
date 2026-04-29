@@ -3,22 +3,23 @@ use bytes::BytesMut;
 use educe::Educe;
 use lightway_core::IOCallbackResult;
 
+#[cfg(mobile)]
+use std::os::fd::FromRawFd;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+#[cfg(feature = "io-uring")]
+use std::sync::Arc;
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
 use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr},
 };
-
-#[cfg(mobile)]
-use std::os::fd::FromRawFd;
-#[cfg(feature = "io-uring")]
-use std::sync::Arc;
 use tun_rs::AsyncDevice;
 #[cfg(desktop)]
 use tun_rs::DeviceBuilder;
+#[cfg(linux)]
+use tun_rs::{GROTable, VIRTIO_NET_HDR_LEN};
 
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
@@ -61,6 +62,9 @@ pub struct TunConfig {
     /// that adapter creation retries reuse the same device node rather than
     /// leaking duplicates.
     pub device_guid: Option<u128>,
+    /// Whether to enable TUN offloading (TSO/GSO) on Linux
+    #[cfg(linux)]
+    pub offload: bool,
 }
 
 impl Debug for TunConfig {
@@ -89,6 +93,8 @@ impl Debug for TunConfig {
         }
         #[cfg(unix)]
         s.field("close_fd_on_drop", &self.close_fd_on_drop);
+        #[cfg(linux)]
+        s.field("offload", &self.offload);
         s.finish()
     }
 }
@@ -180,6 +186,13 @@ impl TunConfig {
         self
     }
 
+    /// Set whether to enable TUN offloading or not on Linux
+    #[cfg(linux)]
+    pub fn offload(&mut self, value: bool) -> &mut Self {
+        self.offload = value;
+        self
+    }
+
     /// Creates an async device based on TunConfig
     #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
@@ -205,6 +218,10 @@ impl TunConfig {
         #[cfg(macos)]
         {
             builder = builder.associate_route(false);
+        }
+        #[cfg(linux)]
+        {
+            builder = builder.offload(self.offload);
         }
         let device = builder.build_async()?;
 
@@ -308,6 +325,25 @@ impl Tun {
         }
     }
 
+    /// Returns whether the tun device supports offloading for UDP and TCP GSO respectively.
+    #[cfg(linux)]
+    pub fn gso(&self) -> (bool, bool) {
+        match self {
+            Tun::Direct(tun) => (tun.udp_gso(), tun.tcp_gso()),
+            _ => (false, false),
+        }
+    }
+
+    /// Send multiple packets to `Tun`
+    #[cfg(linux)]
+    pub fn try_send_multiple(&self, bufs: &mut [BytesMut]) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.try_send_multiple(bufs),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => IOCallbackResult::Err(std::io::ErrorKind::Unsupported.into()),
+        }
+    }
+
     /// MTU of `Tun` interface
     pub fn mtu(&self) -> usize {
         match self {
@@ -355,6 +391,8 @@ pub struct TunDirect {
     fd: RawFd,
     #[cfg(unix)]
     close_fd_on_drop: bool,
+    #[cfg(linux)]
+    gro_table: std::sync::Mutex<GROTable>,
 }
 
 impl TunDirect {
@@ -377,6 +415,8 @@ impl TunDirect {
             fd,
             #[cfg(unix)]
             close_fd_on_drop: config.close_fd_on_drop,
+            #[cfg(linux)]
+            gro_table: std::sync::Mutex::new(GROTable::default()),
         })
     }
 
@@ -407,6 +447,48 @@ impl TunDirect {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
+    #[cfg(linux)]
+    /// Returns whether UDP Generic Segmentation Offload (GSO) is enabled.
+    pub fn udp_gso(&self) -> bool {
+        if let Some(tun) = self.tun.as_ref() {
+            tun.udp_gso()
+        } else {
+            false
+        }
+    }
+
+    #[cfg(linux)]
+    /// Returns whether TCP Generic Segmentation Offload (GSO) is enabled.
+    pub fn tcp_gso(&self) -> bool {
+        if let Some(tun) = self.tun.as_ref() {
+            tun.tcp_gso()
+        } else {
+            false
+        }
+    }
+
+    /// Send multiple packets via GRO. Each entry of `bufs` is replaced with
+    /// a buffer containing `VIRTIO_NET_HDR_LEN` zero bytes of head room
+    /// followed by the original packet — required by the underlying virtio
+    /// offload syscall.
+    #[cfg(linux)]
+    pub fn try_send_multiple(&self, bufs: &mut [BytesMut]) -> IOCallbackResult<usize> {
+        // TODO: Preallocate the offset somewhere earlier
+        for b in bufs.iter_mut() {
+            let mut framed = BytesMut::with_capacity(VIRTIO_NET_HDR_LEN + b.len());
+            framed.resize(VIRTIO_NET_HDR_LEN, 0);
+            framed.extend_from_slice(b);
+            *b = framed;
+        }
+
+        let tun: &tun_rs::DeviceImpl = self.tun.as_ref().unwrap();
+        let mut table = self.gro_table.lock().unwrap();
+        match tun.send_multiple(&mut table, bufs, VIRTIO_NET_HDR_LEN) {
+            Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) => IOCallbackResult::Err(err),
         }
     }

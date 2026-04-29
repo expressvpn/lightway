@@ -100,7 +100,7 @@ impl OutsideIO for Udp {
     /// If the config explicitly turned off batch receive, it will just run regular `recv_from` function.
     fn recv_bufs(
         &self,
-        bufs: &mut [bytes::BytesMut; super::BATCH_RECV_SIZE],
+        bufs: &mut [bytes::BytesMut; lightway_core::MAX_IO_BATCH_SIZE],
     ) -> IOCallbackResult<usize> {
         if !self.batch_receive_enabled {
             return match self.recv_buf(&mut bufs[0]) {
@@ -115,7 +115,7 @@ impl OutsideIO for Udp {
 
         loop {
             match self.sock.try_io(tokio::io::Interest::READABLE, || {
-                udp_batch_receiver::recv_multiple(fd, bufs, super::BATCH_RECV_SIZE)
+                udp_batch_receiver::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
             }) {
                 Ok(n) => return IOCallbackResult::Ok(n),
                 // try_io may return WouldBlock even if the socket isn't actually

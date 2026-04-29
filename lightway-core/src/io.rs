@@ -2,6 +2,12 @@ use bytes::BytesMut;
 use std::{net::SocketAddr, sync::Arc};
 use wolfssl::IOCallbackResult;
 
+/// Maximum number of packets handled in a single batched IO call —
+/// covers both inbound (recvmmsg-style) reads and outbound
+/// ([`InsideIOSendCallback::send_multiple`] / sendmmsg-style) writes
+/// across both inside (TUN) and outside (socket) IO paths.
+pub const MAX_IO_BATCH_SIZE: usize = 32;
+
 /// Application provided callback used to send inside data.
 pub trait InsideIOSendCallback<AppState> {
     /// Called when Lightway wishes to send some inside data
@@ -11,6 +17,33 @@ pub trait InsideIOSendCallback<AppState> {
     /// block [`std::io::ErrorKind::WouldBlock`] then return
     /// [`IOCallbackResult::WouldBlock`].
     fn send(&self, buf: BytesMut, state: &mut AppState) -> IOCallbackResult<usize>;
+
+    /// Called when Lightway wishes to send multiple inside data packets at once.
+    ///
+    /// Each entry in `bufs` is a single packet. Returns total bytes sent.
+    /// Default impl falls back to calling [`Self::send`] per packet.
+    #[cfg(target_os = "linux")]
+    fn send_multiple(
+        &self,
+        bufs: &mut [BytesMut],
+        state: &mut AppState,
+    ) -> IOCallbackResult<usize> {
+        let mut total = 0;
+        for buf in bufs.iter_mut() {
+            match self.send(std::mem::take(buf), state) {
+                IOCallbackResult::Ok(n) => total += n,
+                IOCallbackResult::WouldBlock => return IOCallbackResult::Ok(total),
+                IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+            }
+        }
+        IOCallbackResult::Ok(total)
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Returns whether the TUN device supports UDP and TCP GSO respectively.
+    fn gso(&self) -> (bool, bool) {
+        (false, false)
+    }
 
     /// MTU supported by this inside I/O path
     fn mtu(&self) -> usize;

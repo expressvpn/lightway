@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::net::AddrParseError;
 use std::num::{NonZeroU16, Wrapping};
 use std::{
+    io,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -233,6 +234,10 @@ pub enum ConnectionError {
     /// Encoding Request Retransmit CB does not exist
     #[error("Schedule Encoding Request Retransmit Cb Does Not Exist")]
     EncodingReqRetransmitCbDoesNotExist,
+
+    /// TUN Offload Error
+    #[error("TUN offload error")]
+    TunOffloadError(io::Error),
 }
 
 impl ConnectionError {
@@ -271,6 +276,7 @@ impl ConnectionError {
                     WireError(wire::FromWireError::InvalidExpressData) => false,
                     WireError(wire::FromWireError::ReplayedExpressData) => false,
                     WireError(_) => true,
+                    TunOffloadError(_) => true,
 
                     InvalidState => false, // Can be due to out of order or repeated messages
                     InvalidInsideIo => false, // Can be used for test only test control plane
@@ -441,6 +447,21 @@ pub struct Connection<AppState: Send = ()> {
 
     // Expresslane state, config exchange, health monitoring, wire crypto, and callbacks
     expresslane: expresslane::Expresslane<AppState>,
+
+    /// Inside packets queued for batched send via
+    /// [`InsideIOSendCallback::send_multiple`]. Drained by
+    /// [`Connection::flush_to_inside`].
+    #[cfg(target_os = "linux")]
+    inside_send_batch: Vec<BytesMut>,
+
+    /// When true, [`Connection::send_to_inside`] pushes onto
+    /// `inside_send_batch` instead of sending immediately. Caller is
+    /// expected to call [`Connection::flush_to_inside`] (or use
+    /// [`Connection::multiple_outside_data_received`]) to deliver them.
+    ///
+    /// This is only supported on the Linux client
+    #[cfg_attr(not(target_os = "linux"), allow(unused))]
+    inside_batch_enabled: bool,
 }
 
 /// Information about the new session being established with a new
@@ -466,6 +487,7 @@ struct NewConnectionArgs<AppState> {
     expresslane: bool,
     expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
+    inside_batch_enabled: bool,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -482,6 +504,8 @@ impl<AppState: Send> Connection<AppState> {
             (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
             (_, false) => ExpresslaneState::Disabled,
         };
+
+        let client_mode = matches!(args.mode, ConnectionMode::Client { .. });
         let mut conn = Connection {
             connection_type: args.connection_type,
             tunnel_protocol_version: args.protocol_version,
@@ -530,6 +554,13 @@ impl<AppState: Send> Connection<AppState> {
                 args.expresslane_cb,
                 args.expresslane_metrics,
             ),
+            #[cfg(target_os = "linux")]
+            inside_send_batch: Vec::with_capacity(crate::MAX_IO_BATCH_SIZE),
+            inside_batch_enabled: if cfg!(target_os = "linux") {
+                client_mode && args.inside_batch_enabled
+            } else {
+                false
+            },
         };
 
         // This will very likely fail since negotiation always needs
@@ -890,6 +921,39 @@ impl<AppState: Send> Connection<AppState> {
             _ => {}
         }
         result
+    }
+
+    /// If we have `inside_batch_enabled` is true, it will process multiple outside packets,
+    /// batching their inside-bound packets into a single [`InsideIOSendCallback::send_multiple`]
+    /// call at the end. If not, it will just process all the packets and send it to the TUN device
+    /// one-by-one.
+    ///
+    /// `is_fatal` is invoked for every per-packet error encountered. If it
+    /// returns `true`, processing stops and the error is returned immediately.
+    /// If it returns `false`, the error is treated as transient
+    /// and processing continues with the next packet with a single error log for debugging.
+    pub fn multiple_outside_data_received<'a>(
+        &mut self,
+        pkts: impl IntoIterator<Item = OutsidePacket<'a>>,
+        is_fatal: impl Fn(&ConnectionError) -> bool,
+    ) -> ConnectionResult<usize> {
+        let mut total = 0;
+        for pkt in pkts {
+            match self.outside_data_received(pkt) {
+                Ok(n) => total += n,
+                Err(e) if is_fatal(&e) => return Err(e),
+                Err(e) => error!("Failed to process outside data: {e}"),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.inside_batch_enabled {
+            self.flush_to_inside().map(|_| total)
+        } else {
+            Ok(total)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(total)
     }
 
     /// Consume data received from inside path and send it as
@@ -1995,8 +2059,13 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    /// Send a packet to the inside
-    pub fn send_to_inside(&mut self, mut inside_pkt: BytesMut) -> ConnectionResult<()> {
+    /// Validate, run egress plugins, and update activity. Returns the
+    /// (possibly mutated) packet to send, or `None` if dropped silently
+    /// by a plugin.
+    fn prepare_inside_pkt(
+        &mut self,
+        mut inside_pkt: BytesMut,
+    ) -> ConnectionResult<Option<BytesMut>> {
         use ConnectionError::InvalidInsidePacket;
         use InvalidPacketError::InvalidIpv4Packet;
 
@@ -2008,33 +2077,101 @@ impl<AppState: Send> Connection<AppState> {
             return Err(InvalidInsidePacket(InvalidIpv4Packet));
         }
 
-        let Some(inside_io) = &self.inside_io else {
+        if self.inside_io.is_none() {
             return Err(InvalidInsidePacket(InvalidIpv4Packet));
-        };
+        }
 
         match self.inside_plugins.do_egress(&mut inside_pkt) {
             PluginResult::Accept => {}
-            PluginResult::Drop => {
-                return Ok(());
-            }
+            PluginResult::Drop => return Ok(None),
             PluginResult::DropWithReply(b) => {
                 return Err(ConnectionError::PluginDropWithReply(b));
             }
-            PluginResult::Error(e) => {
-                return Err(ConnectionError::PluginError(e));
-            }
+            PluginResult::Error(e) => return Err(ConnectionError::PluginError(e)),
         }
 
         self.activity.last_data_traffic_from_peer = Instant::now();
-        match inside_io.send(inside_pkt, &mut self.app_state) {
-            IOCallbackResult::Ok(_nr) => {}
-            IOCallbackResult::Err(err) => {
-                metrics::inside_io_send_failed(err);
+        Ok(Some(inside_pkt))
+    }
+
+    /// Send a packet to the inside.
+    ///
+    /// When inside-batch mode is enabled (set via the connection builder),
+    /// the packet is queued via [`Self::queue_to_inside`] instead of sent
+    /// immediately. Caller is expected to call [`Self::flush_to_inside`] at
+    /// the end of a packet burst.
+    pub fn send_to_inside(&mut self, inside_pkt: BytesMut) -> ConnectionResult<()> {
+        let Some(pkt) = self.prepare_inside_pkt(inside_pkt)? else {
+            return Ok(());
+        };
+        #[cfg(target_os = "linux")]
+        if self.inside_batch_enabled {
+            let queued_packets = self.queue_to_inside(pkt);
+            if queued_packets > crate::MAX_IO_BATCH_SIZE {
+                warn!(
+                    queued_packets,
+                    "Queued packets somehow exceeds max io batch size {}",
+                    crate::MAX_IO_BATCH_SIZE
+                );
             }
-            IOCallbackResult::WouldBlock => {}
+            return Ok(());
         }
 
+        let inside_io = self
+            .inside_io
+            .as_ref()
+            .expect("checked in prepare_inside_pkt");
+        match inside_io.send(pkt, &mut self.app_state) {
+            IOCallbackResult::Ok(_nr) => {}
+            IOCallbackResult::Err(err) => metrics::inside_io_send_failed(err),
+            IOCallbackResult::WouldBlock => {}
+        }
         Ok(())
+    }
+
+    /// Queue an inside packet to be sent in a later batch. Caller must call
+    /// [`Self::flush_to_inside`] to actually deliver the queued packets.
+    #[cfg(target_os = "linux")]
+    pub fn queue_to_inside(&mut self, inside_pkt: BytesMut) -> usize {
+        self.inside_send_batch.push(inside_pkt);
+        self.inside_send_batch.len()
+    }
+
+    /// Flush any inside packets queued via [`Self::queue_to_inside`] in a
+    /// single [`InsideIOSendCallback::send_multiple`] call.
+    ///
+    /// Returns how many bytes are actually sent
+    /// Only Linux clients support this
+    #[cfg(target_os = "linux")]
+    pub fn flush_to_inside(&mut self) -> ConnectionResult<usize> {
+        if matches!(self.mode, ConnectionMode::Server { .. }) {
+            return Err(ConnectionError::InvalidMode);
+        }
+        let batched = self.inside_send_batch.len();
+        if batched == 0 {
+            return Ok(batched);
+        }
+        let Some(inside_io) = self.inside_io.as_ref() else {
+            self.inside_send_batch.clear();
+            return Err(ConnectionError::InvalidInsideIo);
+        };
+        let result = inside_io.send_multiple(&mut self.inside_send_batch, &mut self.app_state);
+        self.inside_send_batch.clear();
+        match result {
+            IOCallbackResult::Ok(bytes) => {
+                trace!(packets = batched, bytes, "flushed inside batch");
+                Ok(batched)
+            }
+            IOCallbackResult::Err(err) => {
+                trace!(packets = batched, ?err, "flush_to_inside failed");
+                // This is client-side only, no need to send metrics
+                Err(ConnectionError::TunOffloadError(err))
+            }
+            IOCallbackResult::WouldBlock => {
+                trace!(packets = batched, "flush_to_inside would block");
+                Ok(0)
+            }
+        }
     }
 
     fn handle_outside_data_packet(

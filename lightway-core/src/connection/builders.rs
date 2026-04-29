@@ -61,6 +61,7 @@ pub struct ClientConnectionBuilder<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
+    inside_batch_enabled: bool,
 }
 
 impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
@@ -107,6 +108,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             pmtud_base_mtu: None,
             outside_plugins,
             inside_pkt_codec: None,
+            inside_batch_enabled: false,
         })
     }
 
@@ -224,6 +226,20 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
+    /// Enable inside-batch mode. When set, [`Connection::send_to_inside`]
+    /// queues onto an internal batch and the caller is expected to call
+    /// [`Connection::flush_to_inside`] (or use
+    /// [`Connection::multiple_outside_data_received`]) to deliver them.
+    ///
+    /// Only available on Linux client for now.
+    #[cfg(target_os = "linux")]
+    pub fn with_inside_batch_enabled(self) -> Self {
+        Self {
+            inside_batch_enabled: true,
+            ..self
+        }
+    }
+
     /// Finalize the builder to create a [`Connection`] and begin the connection process.
     pub fn connect(self, app_state: AppState) -> ConnectionBuilderResult<Connection<AppState>> {
         let auth_method = self
@@ -260,6 +276,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
+            inside_batch_enabled: self.inside_batch_enabled,
         })?)
     }
 }
@@ -398,6 +415,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
+            inside_batch_enabled: false,
         })?)
     }
 }
