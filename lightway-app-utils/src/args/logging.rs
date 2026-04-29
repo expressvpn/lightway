@@ -7,7 +7,7 @@ use tracing_subscriber::{
     fmt::{SubscriberBuilder, format},
 };
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log format type compatible with clap
@@ -52,7 +52,7 @@ impl LogFormat {
     }
 }
 
-#[derive(Copy, Clone, ValueEnum, Debug, JsonSchema, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// Tracing log level type compatible with clap

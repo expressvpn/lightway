@@ -25,8 +25,8 @@ use std::net::IpAddr;
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
-#[derive(Debug, Deserialize, JsonSchema, Serialize, Patch)]
-#[patch(attribute(derive(Deserialize, Parser)))]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
 pub struct Config {
     #[patch(attribute(clap(short, long)))]
@@ -238,7 +238,8 @@ pub struct Config {
         attribute(doc = r#"Enable inside packet encoding once lightway connects
     Only used if a codec is set"#)
     )]
-    pub enable_inside_pkt_encoding_at_connect: bool,
+    #[serde(alias = "enable_inside_pkt_encoding_at_connect")]
+    pub enable_inside_pkt_encoding: bool,
 
     #[cfg(feature = "debug")]
     #[patch(attribute(clap(long)))]

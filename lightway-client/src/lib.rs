@@ -254,6 +254,11 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     #[educe(Debug(ignore))]
     pub network_change_signal: Option<mpsc::Receiver<()>>,
 
+    /// Signal for triggering a runtime config reload.
+    /// Each received value is applied to the running connection.
+    #[educe(Debug(ignore))]
+    pub config_reload_signal: Option<mpsc::Receiver<ReloadableClientConfig>>,
+
     /// Signal for Lightway to notify about the best connection when it is selected
     #[educe(Debug(ignore))]
     pub best_connection_selected_signal: Option<oneshot::Sender<BestConnectionInfo>>,
@@ -303,11 +308,31 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
 #[educe(Debug)]
 pub struct ClientInsidePacketCodecConfig {
     /// Enables inside packet encoding when connection is established.
-    pub enable_encoding_at_connect: bool,
+    pub enable_inside_pkt_encoding: bool,
 
     /// Signal for send inside packet encoding request to the server.
     #[educe(Debug(ignore))]
     pub encoding_request_signal: tokio::sync::mpsc::Receiver<bool>,
+}
+
+/// Config fields that can be updated at runtime without tearing down the connection.
+/// Sent via `config_reload_signal` when the process receives a reload trigger (e.g. SIGHUP).
+#[derive(Debug, Default, PartialEq)]
+pub struct ReloadableClientConfig {
+    pub enable_inside_pkt_encoding: Option<bool>,
+}
+
+impl ReloadableClientConfig {
+    /// Returns a new config containing only the fields that differ from `prev`.
+    /// Unchanged fields are set to `None`.
+    pub fn delta(&self, prev: &Self) -> Self {
+        Self {
+            enable_inside_pkt_encoding: (self.enable_inside_pkt_encoding
+                != prev.enable_inside_pkt_encoding)
+                .then_some(self.enable_inside_pkt_encoding)
+                .flatten(),
+        }
+    }
 }
 
 fn debug_fmt_plugin_list(
@@ -668,6 +693,23 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
     tracing::info!("toggle encode task has finished");
 }
 
+async fn config_reload_task(
+    mut signal: mpsc::Receiver<ReloadableClientConfig>,
+    encoding_request: mpsc::Sender<bool>,
+) {
+    while let Some(new_config) = signal.recv().await {
+        tracing::info!("Applying reloaded config: {new_config:?}");
+
+        if let Some(enabled) = new_config.enable_inside_pkt_encoding
+            && let Err(e) = encoding_request.send(enabled).await
+        {
+            tracing::error!("Failed to send encoding request from config reload: {e}");
+        }
+    }
+
+    tracing::info!("config reload task has finished");
+}
+
 /// Represents a connection to a server. When dropped, the route table will be removed.
 pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
@@ -886,7 +928,7 @@ pub async fn connect<
         config
             .inside_pkt_codec_config
             .as_ref()
-            .is_some_and(|x| x.enable_encoding_at_connect),
+            .is_some_and(|x| x.enable_inside_pkt_encoding),
         event_handler,
         connected_tx,
         disconnected_tx,
@@ -1280,6 +1322,11 @@ pub async fn client<
                 }
             }
         });
+    }
+
+    if let Some(reload_signal) = config.config_reload_signal.take() {
+        let encoding_request = connection.encoding_request_signal.clone();
+        tokio::spawn(config_reload_task(reload_signal, encoding_request));
     }
 
     let connection_stop_signal = connection.stop_signal.take().unwrap();

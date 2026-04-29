@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
 use tokio::fs::read_to_string;
+use tokio::sync::mpsc;
 
 use lightway_app_utils::{
     TunConfig, Validate,
@@ -127,9 +128,11 @@ async fn main() -> Result<()> {
     config.apply(load_patch(&options, &config_file).await?);
     #[cfg(not(windows))]
     config.apply(serde_saphyr::from_str::<ConfigPatch>(
-        &read_to_string(config_file).await?,
+        &read_to_string(&config_file).await?,
     )?);
-    config.apply(serde_env::from_env_with_prefix("LW_CLIENT")?);
+    let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
+    config.apply(env_patch.clone());
+    let cli_patch = options.clone();
     config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
@@ -174,12 +177,31 @@ async fn main() -> Result<()> {
         .up();
 
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
-    let mut ctrlc_tx = Some(ctrlc_tx);
+    let ctrlc_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(ctrlc_tx)));
+    let ctrlc_tx_clone = ctrlc_tx.clone();
     ctrlc::set_handler(move || {
-        if let Some(Err(err)) = ctrlc_tx.take().map(|tx| tx.send(())) {
-            tracing::warn!("Failed to send Ctrl-C signal: {err:?}");
+        if let Some(tx) = ctrlc_tx_clone.lock().unwrap().take() {
+            let _ = tx.send(());
         }
     })?;
+
+    let config_reload_signal =
+        spawn_sighup_reload_handler(&config, config_file.clone(), env_patch, cli_patch);
+
+    // SIGTERM: ctrlc without `termination` only handles SIGINT
+    #[cfg(unix)]
+    {
+        let ctrlc_tx_term = ctrlc_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            sigterm.recv().await;
+            if let Some(tx) = ctrlc_tx_term.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+    }
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
@@ -251,6 +273,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
         inside_pkt_codec_config: None,
+        config_reload_signal,
         network_change_signal: None,
         best_connection_selected_signal: None,
         #[cfg(feature = "debug")]
@@ -260,4 +283,113 @@ async fn main() -> Result<()> {
     };
 
     client(config, ctrlc_rx, conn_confs).await.map(|_| ())
+}
+
+fn reload_config(
+    path: &PathBuf,
+    env_patch: &ConfigPatch,
+    cli_patch: &ConfigPatch,
+) -> Option<Config> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| tracing::error!("Failed to read config: {e}"))
+        .ok()?;
+    let file_patch = serde_saphyr::from_str::<ConfigPatch>(&content)
+        .map_err(|e| tracing::error!("Failed to parse config on reload: {e}"))
+        .ok()?;
+
+    let mut config = Config::default();
+    config.apply(file_patch);
+    config.apply(env_patch.clone());
+    config.apply(cli_patch.clone());
+    Some(config)
+}
+
+/// Mask reloadable fields so only non-reloadable differences remain.
+/// Clone old, overwrite listed fields with new's values, then compare to new.
+/// Any remaining difference means a non-reloadable field changed.
+macro_rules! mask_reloadable {
+    ($old:expr, $new:expr, $($field:ident),+ $(,)?) => {{
+        let mut masked = $old.clone();
+        $(masked.$field = $new.$field.clone();)+
+        masked
+    }};
+}
+
+fn warn_non_reloadable_changes(old: &Config, new: &Config) {
+    if old == new {
+        return;
+    }
+
+    // List ONLY the fields that CAN be reloaded at runtime.
+    // Everything else is automatically caught by the PartialEq check.
+    let masked = mask_reloadable!(old, new, log_level, enable_inside_pkt_encoding);
+
+    if masked != *new {
+        tracing::warn!("Non-reloadable config fields changed (requires restart to take effect)");
+    }
+}
+
+impl From<&Config> for ReloadableClientConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_sighup_reload_handler(
+    config: &Config,
+    config_file: PathBuf,
+    env_patch: ConfigPatch,
+    cli_patch: ConfigPatch,
+) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("Failed to register SIGHUP handler");
+
+    let initial = ReloadableClientConfig::from(config);
+
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut prev = initial;
+        let mut prev_config: Option<Config> = None;
+
+        while sighup.recv().await.is_some() {
+            tracing::info!("SIGHUP received, reloading config");
+
+            let Some(new_config) = reload_config(&config_file, &env_patch, &cli_patch) else {
+                continue;
+            };
+
+            if let Some(old) = &prev_config {
+                warn_non_reloadable_changes(old, &new_config);
+            }
+
+            let current = ReloadableClientConfig::from(&new_config);
+            prev_config = Some(new_config);
+
+            if current == prev {
+                tracing::info!("Config unchanged, skipping reload");
+                continue;
+            }
+
+            let delta = current.delta(&prev);
+            prev = current;
+
+            if tx.send(delta).await.is_err() {
+                break;
+            }
+        }
+    });
+    Some(rx)
+}
+
+#[cfg(not(unix))]
+fn spawn_sighup_reload_handler(
+    _config: &Config,
+    _config_file: PathBuf,
+    _env_patch: ConfigPatch,
+    _cli_patch: ConfigPatch,
+) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
+    None
 }
