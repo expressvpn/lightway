@@ -130,7 +130,9 @@ async fn main() -> Result<()> {
     config.apply(serde_saphyr::from_str::<ConfigPatch>(
         &read_to_string(&config_file).await?,
     )?);
-    config.apply(serde_env::from_env_with_prefix("LW_CLIENT")?);
+    let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
+    config.apply(env_patch.clone());
+    let cli_patch = options.clone();
     config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
@@ -204,7 +206,7 @@ async fn main() -> Result<()> {
     }
 
     let config_reload_signal =
-        spawn_sighup_reload_handler(&config, config_file.clone());
+        spawn_sighup_reload_handler(&config, config_file.clone(), env_patch, cli_patch);
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
@@ -289,15 +291,23 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(unix)]
-fn reload_config_from_yaml(path: &PathBuf) -> Option<Config> {
-    let content = std::fs::read_to_string(path)
+async fn reload_config(
+    path: &PathBuf,
+    env_patch: &ConfigPatch,
+    cli_patch: &ConfigPatch,
+) -> Option<Config> {
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| tracing::error!("Failed to read config: {e}"))
         .ok()?;
-    let patch = serde_saphyr::from_str::<ConfigPatch>(&content)
+    let file_patch = serde_saphyr::from_str::<ConfigPatch>(&content)
         .map_err(|e| tracing::error!("Failed to parse config on reload: {e}"))
         .ok()?;
+
     let mut config = Config::default();
-    config.apply(patch);
+    config.apply(file_patch);
+    config.apply(env_patch.clone());
+    config.apply(cli_patch.clone());
     Some(config)
 }
 
@@ -339,30 +349,30 @@ impl From<&Config> for ReloadableClientConfig {
 fn spawn_sighup_reload_handler(
     config: &Config,
     config_file: PathBuf,
+    env_patch: ConfigPatch,
+    cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("Failed to register SIGHUP handler");
 
-    let initial = ReloadableClientConfig::from(config);
+    let initial = config.clone();
 
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        let mut prev = initial;
-        let mut prev_config: Option<Config> = None;
+        let mut prev = ReloadableClientConfig::from(&initial);
+        let mut prev_config = initial;
 
         while sighup.recv().await.is_some() {
             tracing::info!("SIGHUP received, reloading config");
 
-            let Some(new_config) = reload_config_from_yaml(&config_file) else {
+            let Some(new_config) = reload_config(&config_file, &env_patch, &cli_patch).await else {
                 continue;
             };
 
-            if let Some(old) = &prev_config {
-                warn_non_reloadable_changes(old, &new_config);
-            }
+            warn_non_reloadable_changes(&prev_config, &new_config);
 
             let current = ReloadableClientConfig::from(&new_config);
-            prev_config = Some(new_config);
+            prev_config = new_config;
 
             if current == prev {
                 tracing::info!("Config unchanged, skipping reload");
@@ -384,6 +394,8 @@ fn spawn_sighup_reload_handler(
 fn spawn_sighup_reload_handler(
     _config: &Config,
     _config_file: PathBuf,
+    _env_patch: ConfigPatch,
+    _cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     None
 }
