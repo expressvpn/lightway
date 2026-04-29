@@ -47,14 +47,38 @@ fn ifname_from_index(ifindex: u32) -> Option<String> {
     None
 }
 
-/// Returns `true` when systemd-resolved is actively running.
+/// Returns `true` when systemd-resolved is actively running and wired up as the
+/// system resolver.
 ///
-/// `/run/systemd/resolve/stub-resolv.conf` is written by systemd-resolved only
-/// while it is running. Because `/run` is tmpfs it is never stale across reboots,
-/// making it a reliable liveness indicator without spawning a process or requiring
-/// a D-Bus connection.
+/// Two checks:
+/// 1. `/run/systemd/resolve/stub-resolv.conf` exists. systemd-resolved writes
+///    this file only while running, and `/run` is tmpfs so it is never stale
+///    across reboots - a reliable liveness indicator without spawning a process
+///    or requiring a D-Bus connection.
+/// 2. `/etc/resolv.conf` is a symlink pointing at that stub file. If a user has
+///    deleted the symlink (or replaced it with an unrelated file), libc-based
+///    resolvers bypass systemd-resolved entirely; configuring DNS via
+///    `resolvectl` would silently have no effect on application DNS lookups.
+///    Fall back to the direct-file backend in that case.
 fn systemd_resolved_running() -> bool {
-    std::path::Path::new("/run/systemd/resolve/stub-resolv.conf").exists()
+    let stub = std::path::Path::new("/run/systemd/resolve/stub-resolv.conf");
+    if !stub.exists() {
+        return false;
+    }
+    match std::fs::read_link("/etc/resolv.conf") {
+        Ok(target) => {
+            let abs = if target.is_absolute() {
+                target
+            } else {
+                // ArchLinux recommends creating symlink with relative path:
+                // ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+                // Ref: https://wiki.archlinux.org/title/Systemd-resolved
+                std::path::Path::new("/etc").join(target)
+            };
+            std::fs::canonicalize(&abs).ok() == std::fs::canonicalize(stub).ok()
+        }
+        Err(_) => false,
+    }
 }
 
 /// Returns `true` when openresolv is actively managing DNS.
