@@ -687,6 +687,7 @@ pub struct ClientConnection<T: Send + Sync> {
 
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     /// Returns details about the established outside connection.
+    #[cfg(desktop)]
     pub fn outside_connection_info(&self) -> ConnectionInfo {
         ConnectionInfo {
             socket: self.outside_io.socket(),
@@ -1157,6 +1158,7 @@ fn validate_client_config<
 /// priority connection (in the specified array order).
 ///
 /// stop_signal sends a signal if the program received INT/TERM signals
+#[cfg(desktop)]
 pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
