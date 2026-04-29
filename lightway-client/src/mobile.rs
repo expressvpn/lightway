@@ -2,12 +2,11 @@ use crate::LightwayError;
 pub(crate) mod lightway;
 pub(crate) mod tracing_utils;
 
-use std::net::Ipv4Addr;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
-#[derive(Debug, uniffi::Enum, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Enum))]
 /// Current state of Expresslane
 pub enum ExpresslaneState {
     /// Expresslane not enabled in the config
@@ -34,7 +33,7 @@ impl TryFrom<lightway_core::ExpresslaneState> for ExpresslaneState {
     }
 }
 
-#[uniffi::export(with_foreign)]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export(with_foreign))]
 #[cfg_attr(test, mockall::automock)]
 pub trait RustEventHandlers: Send + Sync {
     /// Handles VPN connection status changes from the native Lightway client.
@@ -66,13 +65,13 @@ pub trait RustEventHandlers: Send + Sync {
     fn handle_inside_pkt_codec_status_change(&self, enabled: bool);
 }
 
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn get_lightway_client_hash() -> String {
     env!("GIT_HASH").to_string()
 }
 
 /// Get the version for WolfSSL
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn get_wolfssl_version() -> String {
     lightway_core::wolfssl::get_wolfssl_version_string().to_string()
 }
@@ -81,7 +80,7 @@ fn get_wolfssl_version() -> String {
 /// installing a panic hook for proper crash reporting.
 /// Invoking this multiple times replaces the previously registered logger so that the latest callback is used.
 /// A `LoggingBridgeError` error is returned if another global subscriber was installed externally.
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn initialize_rust_logging_bridge(
     logger_callback: Arc<dyn tracing_utils::RustLogger>,
 ) -> Result<(), LightwayError> {
@@ -89,7 +88,8 @@ fn initialize_rust_logging_bridge(
     tracing_utils::set_global_default_subscriber(logger_callback).map_err(|e| e.into())
 }
 
-#[derive(Debug, uniffi::Enum)]
+#[derive(Debug)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Enum))]
 /// Current network state of the device
 /// For Android, all the 3 enums (Online/InterfaceChanged/RouteUpdated) have the same behaviour
 pub enum DeviceNetworkState {
@@ -105,54 +105,7 @@ pub enum DeviceNetworkState {
     Offline,
 }
 
-#[derive(Debug, uniffi::Record)]
-/// User settings from the mobile app
-pub struct LightwayUserSettings {
-    /// Enable continuous/NAT keep-alive
-    pub enable_heart_beat: bool,
-    /// SNI header for TLS connections
-    pub sni_header: String,
-    /// Defer timeout in milliseconds
-    defer_timeout: i64,
-    /// Enable Expresslane for UDP connections
-    pub enable_expresslane: bool,
-    /// The local ip for TUN interface in ipv4 format
-    pub local_ip: String,
-    /// The dns ip in ipv4 format
-    pub dns_ip: String,
-}
-
-impl LightwayUserSettings {
-    const DEFAULT_PREFERRED_CONNECTION_WAIT_INTERVAL_IN_MILLISECS: u64 = 2000;
-    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 2);
-    const DNS_IP: Ipv4Addr = Ipv4Addr::new(100, 64, 100, 3);
-
-    pub fn get_defer_timeout_duration(&self) -> Duration {
-        let defer_timeout = self.defer_timeout;
-        let defer_interval = u64::try_from(defer_timeout).unwrap_or_else(|_| {
-            warn!("Defer timeout value {defer_timeout} is invalid. Using default value.");
-            Self::DEFAULT_PREFERRED_CONNECTION_WAIT_INTERVAL_IN_MILLISECS
-        });
-        info!("Using defer timeout value: {defer_timeout} ms");
-        Duration::from_millis(defer_interval)
-    }
-
-    pub fn local_ip(&self) -> Ipv4Addr {
-        self.local_ip.parse::<Ipv4Addr>().unwrap_or_else(|e| {
-            warn!("local ip is invalid: {e}. Using default.");
-            Self::LOCAL_IP
-        })
-    }
-
-    pub fn dns_ip(&self) -> Ipv4Addr {
-        self.dns_ip.parse::<Ipv4Addr>().unwrap_or_else(|e| {
-            warn!("dns ip is invalid: {e}. Using default.");
-            Self::DNS_IP
-        })
-    }
-}
-
-#[derive(uniffi::Object)]
+#[cfg_attr(not(feature = "mobile-test"), derive(uniffi::Object))]
 struct RustVpnConnection {
     /// Timestamp when this connection object was created
     created_at: u64,
@@ -162,7 +115,7 @@ struct RustVpnConnection {
     _default_guard: Option<tracing_core::dispatcher::DefaultGuard>,
 }
 
-#[uniffi::export]
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 impl RustVpnConnection {
     #[uniffi::constructor]
     fn new(logger_callback: Option<Arc<dyn crate::mobile::tracing_utils::RustLogger>>) -> Self {
@@ -191,12 +144,14 @@ impl RustVpnConnection {
     /// `LightwayError` for proper error handling.
     fn parallel_connect(
         &self,
-        endpoints: Vec<crate::endpoint::RustEndpointConfig>,
+        endpoints: Vec<crate::config::MobileConnectionConfig>,
         event_handler: Arc<dyn RustEventHandlers>,
         raw_tun_fd: i32,
-        user_settings: LightwayUserSettings,
+        mobile_config: crate::config::MobileConfig,
     ) -> Result<crate::ClientResult, LightwayError> {
         info!("start parallel Lightway connections");
+        let mut config = crate::config::Config::default();
+        config.apply_mobile_config(mobile_config);
 
         info!("Received {} endpoints", endpoints.len());
         if endpoints.is_empty() {
@@ -215,6 +170,7 @@ impl RustVpnConnection {
                 },
             );
         }
+        config.apply_mobile_connect_configs(endpoints);
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder
@@ -222,10 +178,9 @@ impl RustVpnConnection {
             .build()
             .unwrap()
             .block_on(lightway::async_lightway_start(
-                endpoints,
                 raw_tun_fd,
                 event_handler,
-                user_settings,
+                config,
                 self.connected_index.clone(),
             ))
             .map_err(|e| {

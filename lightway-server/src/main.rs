@@ -1,17 +1,16 @@
-mod args;
 mod auth;
-
-use std::path::PathBuf;
+mod config;
 
 use anyhow::{Context, Result, anyhow};
-use clap::CommandFactory;
+use clap::Parser;
+use struct_patch::Patch;
 
 use metrics_util::debugging::DebuggingRecorder;
+use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
-use twelf::Layer;
 
-use args::Config;
+use config::{Config, ConfigPatch};
 #[cfg(feature = "debug")]
 use lightway_app_utils::wolfssl_tracing_callback;
 use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
@@ -76,21 +75,20 @@ async fn metrics_debug() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let matches = Config::command().get_matches();
+    let mut options = ConfigPatch::parse();
 
     // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = matches.get_one::<PathBuf>("config_file") else {
+    let Some(config_file) = options.config_file.take() else {
         return Err(anyhow!("Config file not present"));
     };
 
-    validate_configuration_file_path(config_file, Validate::AllowWorldRead)
+    validate_configuration_file_path(&config_file, Validate::AllowWorldRead)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
-    let config = Config::with_layers(&[
-        Layer::Yaml(config_file.to_owned()),
-        Layer::Env(Some(String::from("LW_SERVER_"))),
-        Layer::Clap(matches),
-    ])?;
+    let mut config = Config::default();
+    config.apply(serde_saphyr::from_str(&read_to_string(config_file).await?)?);
+    config.apply(serde_env::from_env_with_prefix("LW_SERVER")?);
+    config.apply(options);
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)
         .with_context(|| format!("Invalid server key file {}", config.server_key.display()))?;

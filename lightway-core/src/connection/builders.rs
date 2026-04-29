@@ -162,9 +162,9 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     }
 
     /// Enable server domain name validation
-    pub fn with_server_domain_name_validation(self, server_dn: String) -> Self {
+    pub fn with_server_domain_name_validation(self, server_dn: &str) -> Self {
         Self {
-            session_config: self.session_config.with_checked_domain_name(&server_dn),
+            session_config: self.session_config.with_checked_domain_name(server_dn),
             ..self
         }
     }

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
 use ipnet::Ipv4Net;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -10,7 +11,7 @@ use thiserror::Error;
 ///
 /// When used via clap in the CLI the variant is always [`Self::Path`]
 /// but in the configuration file either form can be used.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum IpMap {
     /// A path pointing to a file containing YAML (NB: a superset of
@@ -56,5 +57,15 @@ impl TryFrom<IpMap> for HashMap<IpAddr, Ipv4Net> {
             }
             IpMap::Inline(m) => Ok(m),
         }
+    }
+}
+
+impl JsonSchema for IpMap {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IpMap".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        generator.subschema_for::<std::collections::HashMap<String, String>>()
     }
 }

@@ -1,8 +1,6 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use twelf::Layer;
-use twelf::reexports::{serde_json, serde_yaml};
 use windows_dpapi::{Scope, decrypt_data};
 
 pub fn decrypt_dpapi_config_file(encrypted_path: &Path, scope: Scope) -> Result<String> {
@@ -11,23 +9,14 @@ pub fn decrypt_dpapi_config_file(encrypted_path: &Path, scope: Scope) -> Result<
     Ok(String::from_utf8(decrypted_bytes)?)
 }
 
-pub fn into_config_layer_from_dpapi(decrypted_content: String) -> Result<Layer> {
-    let value: serde_json::Value = serde_yaml::from_str(&decrypted_content)?;
-    Ok(Layer::CustomFn({
-        let value = value.clone();
-        (move || value.clone()).into()
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
     use tempfile::TempDir;
-    use twelf::config;
 
     // test config struct
-    #[config]
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Serialize, PartialEq)]
     struct TestConfig {
         server: String,
         username: String,
@@ -40,7 +29,7 @@ mod tests {
             username: "user1".to_string(),
             password: "securepassword".to_string(),
         };
-        serde_yaml::to_string(&config).unwrap()
+        serde_saphyr::to_string(&config).unwrap()
     }
 
     // helper function to encrypt and write DPAPI config file
@@ -97,34 +86,5 @@ mod tests {
             output_path.exists(),
             "Encrypted file does not exist at expected path"
         );
-    }
-
-    #[test]
-    fn test_into_config_layer_from_dpapi_creates_layer() {
-        let config_str = generate_mock_config();
-
-        let result = into_config_layer_from_dpapi(config_str);
-        assert!(result.is_ok(), "Failed to create Layer from config");
-    }
-
-    #[test]
-    fn test_into_config_layer_loads_config_correctly() {
-        let config_str = generate_mock_config();
-
-        let layer = into_config_layer_from_dpapi(config_str).expect("Failed to create Layer");
-
-        let config = TestConfig::with_layers(&[layer]).expect("Failed to load config from Layer");
-
-        assert_eq!(config.server, "vpn.example.com");
-        assert_eq!(config.username, "user1");
-        assert_eq!(config.password, "securepassword");
-    }
-
-    #[test]
-    fn test_into_config_layer_invalid_yaml() {
-        let invalid_yaml = "bad: yaml: {{{".to_string();
-
-        let result = into_config_layer_from_dpapi(invalid_yaml);
-        assert!(result.is_err(), "Should error on invalid YAML");
     }
 }

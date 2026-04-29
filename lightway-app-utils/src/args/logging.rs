@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{
     EnvFilter,
@@ -6,10 +7,10 @@ use tracing_subscriber::{
     fmt::{SubscriberBuilder, format},
 };
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
-/// Tracing log format type compatible with clap and twelf
+/// Tracing log format type compatible with clap
 pub enum LogFormat {
     /// human-readable, single-line logs for each event that occurs
     Full,
@@ -51,10 +52,10 @@ impl LogFormat {
     }
 }
 
-#[derive(Copy, Clone, ValueEnum, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, ValueEnum, Debug, JsonSchema, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
-/// Tracing log level type compatible with clap and twelf
+/// Tracing log level type compatible with clap
 pub enum LogLevel {
     /// Trace
     Trace,

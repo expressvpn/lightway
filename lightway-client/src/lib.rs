@@ -1,7 +1,7 @@
+pub mod config;
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
-pub(crate) mod endpoint;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
@@ -11,7 +11,7 @@ pub mod route_manager;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 
-#[cfg(feature = "mobile")]
+#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
@@ -89,7 +89,10 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Enum))]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Enum)
+)]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
@@ -99,7 +102,11 @@ pub enum ClientResult {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "mobile", derive(uniffi::Error), uniffi(flat_error))]
+#[cfg_attr(
+    all(feature = "mobile", not(feature = "mobile-test")),
+    derive(uniffi::Error),
+    uniffi(flat_error)
+)]
 pub enum LightwayError {
     #[error("Connection Error: `{0}`")]
     ConnectionError(#[from] anyhow::Error),
@@ -107,11 +114,9 @@ pub enum LightwayError {
     EmptyEndpointsError,
     #[error("User is not authorized / authentication failed")]
     Unauthorized,
+    #[error("Config Error: `{0}`")]
+    ConfigError(#[from] crate::config::Error),
 
-    // These Endpoint Error is iOS only
-    #[cfg(feature = "mobile")]
-    #[error("Endpoint Error: `{0}`")]
-    EndpointError(#[from] crate::endpoint::EndpointError),
     #[cfg(feature = "mobile")]
     #[error("Logging bridge initialization error: `{0}`")]
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
@@ -844,7 +849,7 @@ pub async fn connect<
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
     .when_some(server_config.server_dn, |b, sdn| {
-        b.with_server_domain_name_validation(sdn)
+        b.with_server_domain_name_validation(&sdn)
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
         b.with_pmtud_timer(pmtud_timer)
@@ -1158,15 +1163,15 @@ pub async fn client<
 >(
     mut config: ClientConfig<'_, ExtAppState>,
     mut stop_signal: oneshot::Receiver<()>,
-    servers: Vec<ClientConnectionConfig<EventHandler>>,
+    conn_confs: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {
     tracing::info!(
-        "Client starting with config:\n{:#?}, servers:\n{:#?}",
+        "Client starting with config:\n{:#?}, connections:\n{:#?}",
         &config,
-        &servers
+        &conn_confs
     );
 
-    validate_client_config(&config, &servers)?;
+    validate_client_config(&config, &conn_confs)?;
 
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),
@@ -1200,7 +1205,7 @@ pub async fn client<
     let preferred_connection_wait_interval = config.preferred_connection_wait_interval;
 
     let (best_connection_index, mut connections) = {
-        let connect_futs: FuturesUnordered<_> = servers
+        let connect_futs: FuturesUnordered<_> = conn_confs
             .into_iter()
             .enumerate()
             .map(|(index, server_config)| {

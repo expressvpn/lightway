@@ -1,9 +1,10 @@
 use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use lightway_core::KeyShare as LWKeyShare;
 
-#[derive(Copy, Clone, Debug, ValueEnum, Serialize, Deserialize, Default)]
+#[derive(Copy, Clone, Debug, JsonSchema, ValueEnum, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// [`LWKeyShare`] wrapper compatible with clap and twelf

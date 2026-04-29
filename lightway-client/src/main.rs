@@ -1,23 +1,21 @@
+use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(windows)]
-use clap::ArgMatches;
-use clap::CommandFactory;
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
-use twelf::Layer;
+use tokio::fs::read_to_string;
 
 use lightway_app_utils::{
     TunConfig, Validate,
-    args::{ConnectionType, LogFormat},
+    args::{ConfigFormat, ConnectionType, LogFormat},
     validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
-mod args;
-use args::Config;
 
-use crate::args::ConnectionConfig;
+mod config;
+use config::{Config, ConfigPatch, ConnectionConfig};
 
 struct EventHandler;
 
@@ -63,56 +61,76 @@ async fn make_client_connection_config(
 }
 
 #[cfg(windows)]
-fn load_config_layer(matches: &ArgMatches, config_file: &PathBuf) -> Result<Layer> {
-    use crate::platform::windows::crypto::{
-        decrypt_dpapi_config_file, into_config_layer_from_dpapi,
-    };
+async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<ConfigPatch> {
+    use crate::platform::windows::crypto::decrypt_dpapi_config_file;
     use windows_dpapi::Scope::User;
 
     // Fetch whether DPAPI is enabled from CLI args
-    let enable_dpapi = matches
-        .get_one::<bool>("enable_dpapi")
-        .copied()
-        .unwrap_or(false);
+    let enable_dpapi = options.enable_dpapi;
 
-    if enable_dpapi {
+    let content = if enable_dpapi {
         tracing::info!("DPAPI decryption enabled for config file");
-        let decrypted_content = decrypt_dpapi_config_file(config_file, User)
-            .context("Failed to decrypt DPAPI-protected config file")?;
+        decrypt_dpapi_config_file(config_file, User)
+            .context("Failed to decrypt DPAPI-protected config file")?
+    } else {
+        tracing::debug!("Loading config file directly (no DPAPI)");
+        read_to_string(config_file).await?
+    };
+    Ok(serde_saphyr::from_str::<ConfigPatch>(&content)?)
+}
 
-        // Convert decrypted content into config layer
-        return into_config_layer_from_dpapi(decrypted_content)
-            .context("Failed to parse decrypted config content");
+fn generate_config(format: ConfigFormat, config_file: &PathBuf) -> Result<()> {
+    println!("Create {format:?} config to {}", config_file.display());
+
+    match format {
+        ConfigFormat::Yaml => {
+            let default_configs = Config::default();
+            let mut file = std::fs::File::create(config_file)?;
+            serde_saphyr::to_io_writer(&mut file, &default_configs)?;
+        }
+        ConfigFormat::JsonSchema => {
+            let settings = schemars::generate::SchemaSettings::draft07().with(|s| {
+                s.inline_subschemas = true;
+            });
+            let schema = settings.into_generator().into_root_schema_for::<Config>();
+            std::fs::write(config_file, serde_json::to_string_pretty(&schema)?)?;
+        }
     }
 
-    tracing::debug!("Loading config file directly (no DPAPI)");
-    Ok(Layer::Yaml(config_file.to_owned()))
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let matches = Config::command().get_matches();
+    let mut options = ConfigPatch::parse();
 
     // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = matches.get_one::<PathBuf>("config_file") else {
+    let Some(config_file) = options.config_file.take() else {
         return Err(anyhow!("Config file not present"));
     };
 
-    validate_configuration_file_path(config_file, Validate::OwnerOnly)
+    if let Some(config_format) = options.generate.take() {
+        return generate_config(config_format, &config_file);
+    }
+
+    validate_configuration_file_path(&config_file, Validate::OwnerOnly)
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
+    let mut config = Config::default();
+    // NOTE:
+    // RootCertificate of wolfssl is not a self handled Struct
+    // we need keep the PathBuf live outside
+    let mut _root_ca_cert_path: Option<PathBuf> = None;
+
+    // Load config patch with DPAPI support
     #[cfg(windows)]
-    // Load config layer with DPAPI support
-    let config_layer = load_config_layer(&matches, config_file)?;
-
+    config.apply(load_patch(&options, &config_file).await?);
     #[cfg(not(windows))]
-    let config_layer = Layer::Yaml(config_file.to_owned());
-
-    let mut config = Config::with_layers(&[
-        config_layer,
-        Layer::Env(Some(String::from("LW_CLIENT_"))),
-        Layer::Clap(matches),
-    ])?;
+    config.apply(serde_saphyr::from_str::<ConfigPatch>(
+        &read_to_string(config_file).await?,
+    )?);
+    config.apply(serde_env::from_env_with_prefix("LW_CLIENT")?);
+    config.apply(options);
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
@@ -126,28 +144,15 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
-    let auth = config.take_auth()?;
-
-    let root_ca_path = PathBuf::from(&config.ca_cert);
-    let root_ca_cert = if config
-        .ca_cert
-        .as_str()
-        .starts_with("-----BEGIN CERTIFICATE-----")
-    {
-        RootCertificate::PemBuffer(config.ca_cert.as_bytes())
-    } else {
-        RootCertificate::PemFileOrDirectory(&root_ca_path)
-    };
-
     let mut tun_config = TunConfig::default();
 
-    if let Some(tun_name) = config.tun_name {
+    if let Some(tun_name) = config.tun_name.take() {
         tun_config.tun_name(tun_name);
     }
 
     #[cfg(windows)]
     {
-        if let Some(wintun_file) = config.wintun_file {
+        if let Some(ref wintun_file) = config.wintun_file {
             tun_config.wintun_file(wintun_file);
         }
         tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
@@ -178,20 +183,23 @@ async fn main() -> Result<()> {
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
-    let servers = if config.servers.is_empty() {
-        vec![ConnectionConfig {
-            server: config.server,
+    if config.servers.is_empty() {
+        config.servers = vec![ConnectionConfig {
+            server: config.server.clone(),
             mode: config.mode,
-            server_dn: config.server_dn,
+            server_dn: config.server_dn.clone(),
             cipher: config.cipher,
-        }]
-    } else {
-        config.servers
-    };
+            ..Default::default()
+        }];
+    }
 
-    let servers = join_all(servers.into_iter().map(make_client_connection_config));
-    let servers = tokio::select! {
-        results = servers => {
+    let conn_confs = join_all(
+        std::mem::take::<Vec<ConnectionConfig>>(&mut config.servers)
+            .into_iter()
+            .map(make_client_connection_config),
+    );
+    let conn_confs = tokio::select! {
+        results = conn_confs => {
             results.into_iter()
                 .flat_map(|result| result.map_err(|e| tracing::error!("{e}")))
                 .collect::<Vec<_>>()
@@ -206,8 +214,10 @@ async fn main() -> Result<()> {
     };
 
     let config = ClientConfig {
-        auth,
-        root_ca_cert,
+        auth: config.take_auth()?,
+        root_ca_cert: config
+            .load_ca()
+            .unwrap_or(config.load_ca_file(&mut _root_ca_cert_path)),
         outside_mtu: config.outside_mtu,
         inside_io,
         tun_config,
@@ -246,8 +256,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "debug")]
         tls_debug: config.tls_debug,
         #[cfg(feature = "debug")]
-        keylog: config.keylog,
+        keylog: config.keylog.clone(),
     };
 
-    client(config, ctrlc_rx, servers).await.map(|_| ())
+    client(config, ctrlc_rx, conn_confs).await.map(|_| ())
 }

@@ -18,6 +18,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["postquantum"]
 mobile = ["uniffi", "tracing-core", "tracing-panic"]
+mobile-test = [ "mobile" ]  # Only mock struct, no uniffi structs
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 postquantum = ["lightway-core/postquantum", "lightway-app-utils/postquantum"]
@@ -38,15 +39,20 @@ libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core.workspace = true
 pnet_packet.workspace = true
+schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde-env.workspace = true
+serde-inline-default = "1.0.1"
+serde-saphyr.workspace = true
+serde_json = "1.0.149"
 socket2.workspace = true
+struct-patch.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
+tokio.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-twelf.workspace = true
 
 # mobile feature
 uniffi = { workspace = true, optional = true }
@@ -57,10 +63,11 @@ tracing-panic = { version = "0.1.2", optional= true }
 more-asserts.workspace = true
 test-case.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-serial_test = "3.2.0"
-tun-rs.workspace = true
-tempfile = "3.24.0"
 mockall = "0.14.0"
+regex.workspace = true
+serial_test = "3.2.0"
+tempfile = "3.24.0"
+tun-rs.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2.0"
