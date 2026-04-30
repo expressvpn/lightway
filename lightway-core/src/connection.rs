@@ -1688,12 +1688,36 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Set the expresslane state and emit the event if the state has changed.
+    ///
+    /// Activation is blocked while data path mode is [`DataPathMode::InsidePktCodec`].
+    /// Transitions to/from [`ExpresslaneState::Active`] automatically update
+    /// the [`DataPathMode`].
     fn set_expresslane_state(&mut self, new_state: ExpresslaneState) {
         if self.expresslane.state == new_state {
             return;
         }
+        if new_state == ExpresslaneState::Active
+            && self.data_path_mode == DataPathMode::InsidePktCodec
+        {
+            warn!("Blocking expresslane activation: InsidePktCodec is active");
+            return;
+        }
+
         self.expresslane.state = new_state;
         self.event(Event::ExpresslaneStateChanged(new_state));
+
+        match (new_state, self.data_path_mode) {
+            (ExpresslaneState::Active, _) => {
+                self.set_data_path_mode(DataPathMode::ExpressLane);
+            }
+            (_, DataPathMode::ExpressLane) => {
+                self.set_data_path_mode(DataPathMode::Standard);
+            }
+            (ExpresslaneState::Disabled, _)
+            | (ExpresslaneState::WaitingForClient, _)
+            | (ExpresslaneState::Inactive, _)
+            | (ExpresslaneState::Degraded, _) => {}
+        }
     }
 
     fn set_data_path_mode(&mut self, new_mode: DataPathMode) {
