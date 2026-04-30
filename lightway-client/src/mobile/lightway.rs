@@ -1,7 +1,7 @@
 use crate::config::{Config, ConnectionConfig};
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
-use crate::mobile::RustEventHandlers;
+use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
     ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
@@ -45,10 +45,7 @@ enum OutsideSocket {
 }
 
 impl OutsideSocket {
-    fn new(
-        use_tcp: bool,
-        event_handler: Option<Arc<dyn RustEventHandlers>>,
-    ) -> uniffi::Result<Self> {
+    fn new(use_tcp: bool, event_handler: Option<Arc<dyn EventHandlers>>) -> uniffi::Result<Self> {
         if use_tcp {
             let socket = TcpSocket::new_v4()?;
             let fd = socket.as_raw_fd();
@@ -177,7 +174,7 @@ async fn setup_tunnel_interface(
 
 pub(crate) async fn async_lightway_start(
     tun_fd: RawFd,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
     config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
@@ -445,7 +442,7 @@ async fn restartable_outside_io_task(
     keepalive: Keepalive,
     notify_keepalive_reply: Arc<Notify>,
     mut new_outside_io_receiver: MpscReceiver<()>,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
 ) -> uniffi::Result<()> {
     let mut current_outside_io = outside_io_config.outside_io;
     let mut first_run = true;
@@ -563,7 +560,7 @@ struct LightwayClientConnectArgs {
     expresslane_keys_rotation_interval: std::time::Duration,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
-    external_event_handler: Arc<dyn RustEventHandlers>,
+    external_event_handler: Arc<dyn EventHandlers>,
 }
 
 /// Individual connection to a lightway server
@@ -728,7 +725,7 @@ async fn lightway_client_connect(
 async fn handle_global_events(
     mut stream: EventStream,
     connection_start_time: Instant,
-    event_handler: Arc<dyn RustEventHandlers>,
+    event_handler: Arc<dyn EventHandlers>,
 ) {
     let mut current_state = State::Connecting;
     let mut is_first_packet_received = false;
@@ -890,7 +887,7 @@ async fn handle_network_change(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::mobile::MockRustEventHandlers;
+    use crate::mobile::MockEventHandlers;
     use mockall::Sequence;
     use mockall::predicate::eq;
 
@@ -907,7 +904,7 @@ mod test {
 
         // Make sure we don't advertise Online state in this function
         let mut seq = Sequence::new();
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
         mock_event_handler
             .expect_handle_status_change()
             .times(1)
@@ -941,7 +938,7 @@ mod test {
             sender.event(Event::StateChanged(State::Disconnected));
         });
 
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
         mock_event_handler
             .expect_handle_status_change()
             .times(0)
@@ -961,7 +958,7 @@ mod test {
             sender.event(Event::FirstPacketReceived);
         });
 
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
         mock_event_handler
             .expect_received_first_packet()
             .with(eq(174u64))
@@ -973,7 +970,7 @@ mod test {
     #[tokio::test]
     async fn test_outside_socket_new_calls_created_outside_fd() {
         // Test TCP socket creation
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
 
         mock_event_handler
             .expect_created_outside_fd()
@@ -984,7 +981,7 @@ mod test {
         assert!(tcp_result.is_ok());
 
         // Test UDP socket creation
-        let mut mock_event_handler = MockRustEventHandlers::new();
+        let mut mock_event_handler = MockEventHandlers::new();
 
         mock_event_handler
             .expect_created_outside_fd()

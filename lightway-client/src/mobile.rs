@@ -35,7 +35,7 @@ impl TryFrom<lightway_core::ExpresslaneState> for ExpresslaneState {
 
 #[cfg_attr(not(feature = "mobile-test"), uniffi::export(with_foreign))]
 #[cfg_attr(test, mockall::automock)]
-pub trait RustEventHandlers: Send + Sync {
+pub trait EventHandlers: Send + Sync {
     /// Handles VPN connection status changes from the native Lightway client.
     /// State values: 2=Connecting, 6=LinkUp, 5=Authenticating, 7=Online, 4=Disconnecting, 1=Disconnected (from lightway-core)
     ///
@@ -145,7 +145,7 @@ impl RustVpnConnection {
     fn parallel_connect(
         &self,
         endpoints: Vec<crate::config::MobileConnectionConfig>,
-        event_handler: Arc<dyn RustEventHandlers>,
+        event_handler: Arc<dyn EventHandlers>,
         raw_tun_fd: i32,
         mobile_config: Option<crate::config::MobileConfig>,
         config_content: String,
