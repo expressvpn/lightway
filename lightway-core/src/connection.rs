@@ -1794,6 +1794,11 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
+        if self.data_path_mode == DataPathMode::InsidePktCodec {
+            debug!("Ignoring expresslane config from peer (InsidePktCodec active)");
+            return Ok(());
+        }
+
         // Server starts in WaitingForClient. The client's first config
         // transitions the server to Pending, which enables
         // expresslane_supported() and allows the server to send its own key.
@@ -1858,8 +1863,20 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Mark expresslane as [Degraded](ExpresslaneState::Degraded) and notify the peer to also disable
+    /// Expresslane will not be re-enabled after being degraded
     fn set_expresslane_degraded(&mut self) {
         self.set_expresslane_state(ExpresslaneState::Degraded);
+
+        let key = ExpresslaneKey::INVALID;
+        let _ = self.expresslane.data.update_next_self_key(key);
+
+        self.send_expresslane_config(false, key);
+    }
+
+    /// Mark expresslane as [Inactive](ExpresslaneState::Inactive) and notify the peer to also disable
+    /// Unlike [`Self::set_expresslane_degraded`], this allows re-activation when InsidePktCodec is later disabled
+    fn set_expresslane_inactive(&mut self) {
+        self.set_expresslane_state(ExpresslaneState::Inactive);
 
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.data.update_next_self_key(key);
@@ -2197,6 +2214,15 @@ impl<AppState: Send> Connection<AppState> {
         // Update the latest acknowledged packet's id
         self.encoding_request_states.id_counter = er.id;
 
+        if er.enable {
+            if self.data_path_mode == DataPathMode::ExpressLane {
+                self.set_expresslane_inactive();
+            }
+            self.set_data_path_mode(DataPathMode::InsidePktCodec);
+        } else {
+            self.set_data_path_mode(DataPathMode::Standard);
+        }
+
         encoder.set_encoding_state(er.enable);
         debug!(
             "Client {:?}: EncodingRequest {} received. encoding state now: {}.",
@@ -2206,6 +2232,12 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         self.event(Event::EncodingStateChanged { enabled: er.enable });
+
+        if !er.enable && self.expresslane_supported() {
+            // Re-enable ExpressLane
+            self.expresslane.last_key_rotation = None;
+            let _ = self.rotate_expresslane_key();
+        }
 
         // Reply to the client.
         let msg = wire::Frame::EncodingResponse(wire::EncodingResponse {
@@ -2220,13 +2252,10 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         te: wire::EncodingResponse,
     ) -> ConnectionResult<()> {
-        let encoder = match &mut self.inside_pkt_encoder {
-            Some(encoder) => encoder,
-            None => {
-                error!("Received EncodingResponse packet even without an encoder.");
-                return Err(ConnectionError::PacketCodecDoesNotExist);
-            }
-        };
+        if self.inside_pkt_encoder.is_none() {
+            error!("Received EncodingResponse packet even without an encoder.");
+            return Err(ConnectionError::PacketCodecDoesNotExist);
+        }
 
         if !matches!(self.state, State::Online) {
             warn!("Received encoding request packet before state is Online");
@@ -2260,7 +2289,19 @@ impl<AppState: Send> Connection<AppState> {
 
         let new_setting = te.enable;
 
-        encoder.set_encoding_state(new_setting);
+        if new_setting {
+            if self.data_path_mode == DataPathMode::ExpressLane {
+                self.set_expresslane_inactive();
+            }
+            self.set_data_path_mode(DataPathMode::InsidePktCodec);
+        } else {
+            self.set_data_path_mode(DataPathMode::Standard);
+        }
+
+        self.inside_pkt_encoder
+            .as_mut()
+            .unwrap()
+            .set_encoding_state(new_setting);
         info!("inside packet encoding state is now set to {}", new_setting);
 
         self.event(Event::EncodingStateChanged {
@@ -2269,6 +2310,11 @@ impl<AppState: Send> Connection<AppState> {
 
         // Removes from pending pkt store such that it is no longer retransmitted
         self.encoding_request_states.pending_request_pkt = None;
+
+        if !new_setting && self.expresslane_supported() {
+            self.expresslane.last_key_rotation = None;
+            let _ = self.rotate_expresslane_key();
+        }
 
         Ok(())
     }
