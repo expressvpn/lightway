@@ -1,4 +1,4 @@
-use crate::connection::ExpresslaneState;
+use crate::connection::{DataPathMode, ExpresslaneState};
 use crate::{SessionId, State};
 
 /// A lightway event
@@ -52,4 +52,6 @@ pub enum Event {
     },
     /// Expresslane state changed
     ExpresslaneStateChanged(ExpresslaneState),
+    /// Data path mode changed
+    DataPathModeChanged(DataPathMode),
 }

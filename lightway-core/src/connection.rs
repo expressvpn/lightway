@@ -78,6 +78,24 @@ const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 /// Maximum number of retransmissions attempts for each encoding request packet.
 const ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 
+/// Which mutually exclusive data path optimization is active.
+///
+/// ExpressLane and InsidePktCodec cannot be active simultaneously.
+/// This enum is the single source of truth for which mode governs
+/// the data path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DataPathMode {
+    /// Standard data path (i.e. non-ExpressLane, non-InsidePktCodec)
+    #[default]
+    Standard,
+
+    /// ExpressLane
+    ExpressLane,
+
+    /// InsidePktCodec
+    InsidePktCodec,
+}
+
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -436,6 +454,9 @@ pub struct Connection<AppState: Send = ()> {
 
     // Expresslane state, config exchange, health monitoring, wire crypto, and callbacks
     expresslane: expresslane::Expresslane<AppState>,
+
+    /// Which mutually exclusive data path optimization is active
+    data_path_mode: DataPathMode,
 }
 
 /// Information about the new session being established with a new
@@ -527,6 +548,7 @@ impl<AppState: Send> Connection<AppState> {
                 args.expresslane_metrics,
                 args.expresslane_keys_rotation_interval,
             ),
+            data_path_mode: DataPathMode::Standard,
         };
 
         // This will very likely fail since negotiation always needs
@@ -1674,6 +1696,14 @@ impl<AppState: Send> Connection<AppState> {
         self.event(Event::ExpresslaneStateChanged(new_state));
     }
 
+    fn set_data_path_mode(&mut self, new_mode: DataPathMode) {
+        if self.data_path_mode == new_mode {
+            return;
+        }
+        self.data_path_mode = new_mode;
+        self.event(Event::DataPathModeChanged(new_mode));
+    }
+
     /// Encode expresslane metrics as a binary payload.
     ///
     /// Encodes absolute cumulative counters: [packets_sent: u64, packets_received: u64].
@@ -2235,6 +2265,11 @@ impl<AppState: Send> Connection<AppState> {
         self.encoding_request_states.pending_request_pkt = None;
 
         Ok(())
+    }
+
+    /// Get the current data path mode
+    pub fn data_path_mode(&self) -> DataPathMode {
+        self.data_path_mode
     }
 
     /// Get the current encoding state from the encoder
