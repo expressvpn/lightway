@@ -147,15 +147,13 @@ impl RustVpnConnection {
         endpoints: Vec<crate::config::MobileConnectionConfig>,
         event_handler: Arc<dyn RustEventHandlers>,
         raw_tun_fd: i32,
-        mobile_config: crate::config::MobileConfig,
+        mobile_config: Option<crate::config::MobileConfig>,
+        config_content: String,
     ) -> Result<crate::ClientResult, LightwayError> {
         info!("start parallel Lightway connections");
         let mut config = crate::config::Config::default();
-        config.apply_mobile_config(mobile_config);
-
-        info!("Received {} endpoints", endpoints.len());
-        if endpoints.is_empty() {
-            return Err(LightwayError::EmptyEndpointsError);
+        if let Some(mobile_config) = mobile_config {
+            config.apply_mobile_config(mobile_config);
         }
 
         for endpoint in &endpoints {
@@ -170,7 +168,30 @@ impl RustVpnConnection {
                 },
             );
         }
+
         config.apply_mobile_connect_configs(endpoints);
+        if !config_content.is_empty() {
+            use struct_patch::Patch;
+            config.apply(serde_saphyr::from_str(&config_content)?);
+            config.servers.push(crate::config::ConnectionConfig {
+                server: config.server.clone(),
+                mode: config.mode,
+                server_dn: config.server_dn.take(),
+                cipher: config.cipher,
+                outside_mtu: config.outside_mtu,
+                username: config.user.take(),
+                password: config.password.take(),
+                token: config.token.take(),
+                ca_cert: Some(config.ca_cert.clone()),
+            });
+        }
+
+        info!("Received {} endpoints", config.servers.len());
+        if config.servers.is_empty() {
+            return Err(LightwayError::EmptyEndpointsError);
+        }
+
+        tracing::debug!("Config:\n{config:#?}");
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder
