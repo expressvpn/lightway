@@ -1,6 +1,6 @@
 use crate::tls::IOCallbackResult;
 use bytes::BytesMut;
-use std::{net::SocketAddr, sync::Arc};
+use std::{io::IoSlice, net::SocketAddr, sync::Arc};
 
 /// Maximum number of packets handled in a single batched IO call —
 /// covers both inbound (recvmmsg-style) reads and outbound
@@ -60,6 +60,12 @@ pub trait OutsideIOSendCallback {
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
         Err(std::io::Error::other("pmtud probe not supported"))
     }
+
+    /// Send concatenated wire packets via kernel GSO (`UDP_SEGMENT`).
+    /// The implementation gathers `bufs` into one payload via
+    /// `sendmsg`, which the kernel splits into `gso_size`-byte
+    /// segments. The trailing segment may be shorter than `gso_size`.
+    fn send_gso(&self, bufs: &[IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize>;
 }
 
 /// Convenience type to use as function arguments

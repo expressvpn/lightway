@@ -145,6 +145,10 @@ impl OutsideIOSendCallback for TestDatagramSock {
         }
     }
 
+    fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
+        todo!()
+    }
+
     fn peer_addr(&self) -> SocketAddr {
         todo!()
     }
@@ -192,6 +196,10 @@ impl OutsideIOSendCallback for TestStreamSock {
             }
             Err(err) => IOCallbackResult::Err(err),
         }
+    }
+
+    fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
+        todo!()
     }
 
     fn peer_addr(&self) -> SocketAddr {

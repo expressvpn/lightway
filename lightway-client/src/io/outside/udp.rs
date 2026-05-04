@@ -206,6 +206,10 @@ impl OutsideIOSendCallback for Udp {
         }
     }
 
+    fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
+        todo!()
+    }
+
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr()
     }
