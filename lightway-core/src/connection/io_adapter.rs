@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", test))]
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::{Buf, BytesMut};
@@ -9,6 +11,91 @@ use crate::tls::IOCallbackResult;
 use crate::{
     ConnectionType, OutsideIOSendCallbackArg, PluginResult, Version, plugin::PluginList, wire,
 };
+
+/// Per-connection UDP GSO coalescing buffer + batch state.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+pub(crate) struct GsoBuffer {
+    /// Coalescing buffer for the current GSO frame. Retained across
+    /// batches — `clear()`ed on reset, never dropped — so the
+    /// allocation is reused for the connection's lifetime. Starts
+    /// (and stays, on connections that never coalesce) zero-capacity,
+    /// costing only the `BytesMut` struct.
+    buf: BytesMut,
+    state: GsoBufferState,
+}
+
+/// State of the in-progress GSO batch.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+enum GsoBufferState {
+    /// Not coalescing — `udp_send` passes a single datagram straight
+    /// to the socket (cf. a non-GSO skb, `gso_size == 0`).
+    #[default]
+    Passthrough,
+    /// Batch open, awaiting the first segment; `gso_size` not yet
+    /// established.
+    Pending,
+    /// First segment fixed `gso_size`; later segments coalesce at
+    /// this stride for `UDP_SEGMENT`.
+    Coalescing(NonZeroUsize),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl GsoBuffer {
+    /// Open a GSO batch. Reserves worst-case capacity on first call;
+    /// subsequent calls are a no-op on the underlying allocation.
+    pub(crate) fn open(&mut self) {
+        debug_assert!(matches!(self.state, GsoBufferState::Passthrough));
+        self.buf.reserve(crate::gso::MAX_GSO_FRAME_BYTES);
+        self.state = GsoBufferState::Pending;
+    }
+
+    /// True iff a batch is open (state ≠ Passthrough). `udp_send`
+    /// uses this to dispatch between coalescing and pass-through.
+    pub(crate) fn is_batching(&self) -> bool {
+        !matches!(self.state, GsoBufferState::Passthrough)
+    }
+
+    /// Append one encrypted segment to the frame — echoes `skb_put`.
+    ///
+    /// The first segment fixes `gso_size`; every later segment must
+    /// be `<= gso_size`, a shorter one being the final datagram. A
+    /// non-final segment shorter than `gso_size` would misalign the
+    /// kernel's slicing.
+    pub(crate) fn put(&mut self, seg: &[u8]) {
+        match self.state {
+            GsoBufferState::Passthrough => unreachable!("put before open"),
+            GsoBufferState::Pending => {
+                let Some(gso_size) = NonZeroUsize::new(seg.len()) else {
+                    unreachable!("zero-length first GSO segment")
+                };
+                self.state = GsoBufferState::Coalescing(gso_size);
+            }
+            GsoBufferState::Coalescing(gso_size) => {
+                debug_assert!(seg.len() <= gso_size.get())
+            }
+        }
+        self.buf.extend_from_slice(seg);
+    }
+
+    /// The assembled frame and its `gso_size` for the `UDP_SEGMENT`
+    /// sendmsg, or `None` if nothing was coalesced (Passthrough or
+    /// Pending). Does not reset — call `reset` after the send.
+    pub(crate) fn frame(&self) -> Option<(&[u8], NonZeroUsize)> {
+        match self.state {
+            GsoBufferState::Coalescing(gso_size) => Some((&self.buf[..], gso_size)),
+            _ => None,
+        }
+    }
+
+    /// Clear the frame and return to `Passthrough`, keeping `buf`'s
+    /// capacity.
+    pub(crate) fn reset(&mut self) {
+        self.buf.clear();
+        self.state = GsoBufferState::Passthrough;
+    }
+}
 
 pub(crate) struct SendBuffer {
     data: BytesMut,
@@ -100,6 +187,12 @@ pub(crate) struct TlsIOAdapter {
     /// This buffer will be used to save the remaining data, to be sent in next call.
     pub(crate) send_buf: SendBuffer,
 
+    /// Per-connection UDP GSO coalescing buffer + batch state. On
+    /// connections that never see GSO, this stays zero-capacity and
+    /// costs only the `GsoBuffer` struct (no heap).
+    #[cfg(target_os = "linux")]
+    pub(crate) gso_buf: GsoBuffer,
+
     /// Application provided object used to send data.
     pub(crate) io: OutsideIOSendCallbackArg,
 
@@ -136,7 +229,23 @@ impl TlsIOAdapter {
         }
     }
 
-    pub(crate) fn udp_send(&self, buf: &[u8], expresslane_data: bool) -> IOCallbackResult<usize> {
+    pub(crate) fn udp_send(
+        &mut self,
+        buf: &[u8],
+        expresslane_data: bool,
+    ) -> IOCallbackResult<usize> {
+        // GSO buffering: when a batch is open, coalesce the raw
+        // post-encrypt, pre-`wire::Header` bytes; `udp_send_gso` will
+        // later wrap each segment with `wire::Header` and flush via
+        // `sendmsg(UDP_SEGMENT)`. Both DTLS and expresslane callers
+        // hand us bytes in the same shape (post-encrypt, no header),
+        // so this branch covers both.
+        #[cfg(target_os = "linux")]
+        if self.gso_buf.is_batching() {
+            self.gso_buf.put(buf);
+            return IOCallbackResult::Ok(buf.len());
+        }
+
         // Prepend our `wire::Header` to the data we've been asked to
         // send.
         let h = wire::Header {
@@ -203,6 +312,115 @@ impl TlsIOAdapter {
             wb @ IOCallbackResult::WouldBlock => wb,
             err @ IOCallbackResult::Err(_) => err,
         }
+    }
+
+    /// Take the raw encrypted segments coalesced in `self.gso_buf`,
+    /// wrap each with `wire::Header` (+ plugins), and send as one
+    /// `sendmsg` with `UDP_SEGMENT`. The caller is responsible for
+    /// calling `gso_buf.reset()` after this returns.
+    ///
+    /// When no outside plugins are configured, the encrypted payload
+    /// is sent zero-copy: the kernel gathers a shared header buffer
+    /// and slices of `tun_buf` via `iovec`, with no intermediate copy
+    /// of the segment bytes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn udp_send_gso(
+        &mut self,
+        gso_segs: usize,
+        expresslane_data: bool,
+    ) -> IOCallbackResult<usize> {
+        use std::io::{Error, IoSlice};
+
+        // No coalesced frame yet — caller's `gso.reset()` cleanup
+        // path runs unconditionally, so this is also the safe exit
+        // when nothing was buffered.
+        let Some((tun_buf, tun_gso_size)) = self.gso_buf.frame() else {
+            return IOCallbackResult::Ok(0);
+        };
+        let tun_gso_size = tun_gso_size.get();
+
+        if gso_segs == 0 {
+            return IOCallbackResult::Ok(0);
+        }
+
+        // Same Lightway header for every segment.
+        let hdr = wire::Header {
+            version: self.protocol_version,
+            aggressive_mode: false,
+            expresslane_data,
+            session: self.session_id,
+        };
+        let mut hdr_buf = BytesMut::with_capacity(wire::Header::WIRE_SIZE);
+        hdr.append_to_wire(&mut hdr_buf);
+
+        // Fast path: no outside plugins. Segments are not mutated, so
+        // we scatter-gather via iovec — shared header buffer plus
+        // borrowed slices of `tun_buf`, zero payload copies.
+        if self.outside_plugins.is_empty() {
+            let stride = (wire::Header::WIRE_SIZE + tun_gso_size) as u16;
+            let mut iovs: Vec<IoSlice<'_>> = Vec::with_capacity(gso_segs * 2);
+            for i in 0..gso_segs {
+                let start = i * tun_gso_size;
+                let end = ((i + 1) * tun_gso_size).min(tun_buf.len());
+                iovs.push(IoSlice::new(&hdr_buf[..]));
+                iovs.push(IoSlice::new(&tun_buf[start..end]));
+            }
+            return self.io.send_gso(&iovs, stride);
+        }
+
+        // Plugin path: each segment is built into its own BytesMut so
+        // plugins can freely mutate it. The Vec<BytesMut> outlives the
+        // Vec<IoSlice> built from it, so the borrows are sound.
+        let mut segs: Vec<BytesMut> = Vec::with_capacity(gso_segs);
+        let mut wire_gso_size: Option<usize> = None;
+
+        for i in 0..gso_segs {
+            let start = i * tun_gso_size;
+            let end = ((i + 1) * tun_gso_size).min(tun_buf.len());
+            debug_assert_le!(start, end);
+
+            let mut seg = BytesMut::with_capacity(self.outside_mtu);
+            seg.extend_from_slice(&hdr_buf[..]);
+            seg.extend_from_slice(&tun_buf[start..end]);
+
+            match self.outside_plugins.do_egress(&mut seg) {
+                PluginResult::Accept => {}
+                PluginResult::Drop | PluginResult::DropWithReply(_) => continue,
+                PluginResult::Error(e) => {
+                    return IOCallbackResult::Err(Error::other(e));
+                }
+            }
+
+            // UDP_SEGMENT requires every segment except the last to
+            // have identical stride.
+            let is_last = i == gso_segs - 1;
+            match wire_gso_size {
+                None => wire_gso_size = Some(seg.len()),
+                Some(s) if !is_last && seg.len() != s => {
+                    return IOCallbackResult::Err(Error::other(
+                        "outside plugins produced non-uniform GSO segment size",
+                    ));
+                }
+                Some(s) if is_last && seg.len() > s => {
+                    return IOCallbackResult::Err(Error::other(
+                        "outside plugins produced oversized trailing GSO segment",
+                    ));
+                }
+                _ => {}
+            }
+
+            segs.push(seg);
+        }
+
+        // All segments dropped by plugins — nothing to put on the wire,
+        // but report success for the inside bytes the caller handed us.
+        if segs.is_empty() {
+            return IOCallbackResult::Ok(tun_buf.len());
+        }
+
+        let stride = wire_gso_size.unwrap_or(0) as u16;
+        let iovs: Vec<IoSlice<'_>> = segs.iter().map(|s| IoSlice::new(&s[..])).collect();
+        self.io.send_gso(&iovs, stride)
     }
 
     // In general, TCP send can succeed even for partial data and the caller
@@ -383,6 +601,8 @@ mod tests {
             io,
             session_id: SessionId::from_const(*b"\xde\xad\xbe\xef\xde\xad\xbe\xef"),
             outside_plugins: outside_plugins.into(),
+            #[cfg(target_os = "linux")]
+            gso_buf: GsoBuffer::default(),
         }
     }
 
@@ -392,7 +612,7 @@ mod tests {
     fn udp_send_plugin(r: PluginResult) -> IOCallbackResult<usize> {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let plugins = PluginList::from(plugins);
-        let a = make_adapter(ConnectionType::Datagram, FakeOutsideIOSend::new(), plugins);
+        let mut a = make_adapter(ConnectionType::Datagram, FakeOutsideIOSend::new(), plugins);
         a.udp_send(b"abc", false)
     }
 
@@ -403,7 +623,7 @@ mod tests {
     #[test_case(vec![IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v.is_empty(); "error")]
     fn udp_send_io(fakes: Vec<IOCallbackResult<usize>>) -> (IOCallbackResult<usize>, Vec<u8>) {
         let io = FakeOutsideIOSend::with_fakes(fakes.into());
-        let a = make_adapter(ConnectionType::Datagram, io.clone(), Default::default());
+        let mut a = make_adapter(ConnectionType::Datagram, io.clone(), Default::default());
         let r = a.udp_send(b"abcdefghi", false);
 
         let (fakes, sent) = &*io.0.lock().unwrap();
@@ -569,5 +789,113 @@ mod tests {
         assert_eq!(buf.original_len(), 0);
         assert_eq!(buf.actual_len(), 0);
         assert_eq!(buf.data.capacity(), buf.total_capacity);
+    }
+
+    #[test]
+    fn gso_default_is_passthrough() {
+        let g = GsoBuffer::default();
+        assert!(!g.is_batching());
+        assert!(g.frame().is_none());
+        assert_eq!(g.buf.capacity(), 0);
+    }
+
+    #[test]
+    fn gso_open_transitions_to_pending() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        assert!(g.is_batching());
+        assert!(g.frame().is_none());
+        assert!(g.buf.capacity() >= crate::gso::MAX_GSO_FRAME_BYTES);
+    }
+
+    #[test]
+    fn gso_put_fixes_stride() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[0xAB; 1280]);
+
+        let (bytes, stride) = g.frame().expect("Coalescing");
+        assert_eq!(bytes.len(), 1280);
+        assert_eq!(stride.get(), 1280);
+        assert!(bytes.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn gso_put_appends_subsequent_segments() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[0xAA; 1280]);
+        g.put(&[0xBB; 1280]);
+
+        let (bytes, stride) = g.frame().expect("Coalescing");
+        assert_eq!(bytes.len(), 2560);
+        assert_eq!(stride.get(), 1280);
+        assert!(bytes[..1280].iter().all(|&b| b == 0xAA));
+        assert!(bytes[1280..].iter().all(|&b| b == 0xBB));
+    }
+
+    #[test]
+    fn gso_put_allows_shorter_trailing() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[0xAA; 1280]);
+        g.put(&[0xBB; 800]);
+
+        let (bytes, stride) = g.frame().expect("Coalescing");
+        assert_eq!(bytes.len(), 1280 + 800);
+        assert_eq!(stride.get(), 1280);
+    }
+
+    #[test]
+    fn gso_reset_clears_state_keeps_capacity() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[0xAA; 1280]);
+        let cap_before = g.buf.capacity();
+        g.reset();
+
+        assert!(!g.is_batching());
+        assert!(g.frame().is_none());
+        assert_eq!(g.buf.len(), 0);
+        assert_eq!(g.buf.capacity(), cap_before);
+        assert!(g.buf.capacity() >= crate::gso::MAX_GSO_FRAME_BYTES);
+    }
+
+    #[test]
+    fn gso_open_then_reset_then_open_reuses_buf() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        let cap_after_first_open = g.buf.capacity();
+        g.put(&[0xAA; 1280]);
+        g.reset();
+
+        g.open();
+        assert_eq!(g.buf.capacity(), cap_after_first_open);
+        assert!(g.is_batching());
+    }
+
+    #[test]
+    #[should_panic(expected = "put before open")]
+    fn gso_put_without_open_panics() {
+        let mut g = GsoBuffer::default();
+        g.put(&[0xAA; 1280]);
+    }
+
+    #[test]
+    #[should_panic(expected = "zero-length first GSO segment")]
+    fn gso_put_zero_length_first_segment_panics() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[]);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn gso_put_oversized_segment_debug_asserts() {
+        let mut g = GsoBuffer::default();
+        g.open();
+        g.put(&[0xAA; 1280]);
+        g.put(&[0xBB; 1281]);
     }
 }

@@ -1891,9 +1891,13 @@ impl<AppState: Send> Connection<AppState> {
             .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 
-        match self.session.io_cb().udp_send(buf.as_ref(), true) {
-            IOCallbackResult::Ok(_) => ConnectionResult::Ok(()),
-            IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
+        // `udp_send` coalesces into the per-connection `GsoBuffer`
+        // when a batch has been opened by an upstream `gso_buf.open()`
+        // (currently only `send_to_outside_gso`), or wraps + sends
+        // immediately otherwise. Both branches hand the same shape
+        // of bytes to `udp_send_gso` at flush time.
+        match self.session.io_cb_mut().udp_send(buf.as_ref(), true) {
+            IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
             IOCallbackResult::Err(_e) => ConnectionResult::Err(ConnectionError::AccessDenied),
         }
     }
