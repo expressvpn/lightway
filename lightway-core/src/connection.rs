@@ -110,6 +110,13 @@ pub enum InvalidPacketError {
     /// Packet size greater than MAX_MTU
     #[error("Packet size greater than MAX_MTU")]
     InvalidPacketSize,
+
+    /// GSO superpacket failed validation (bad virtio_net_hdr,
+    /// per-segment build failure, etc.). The specific cause is
+    /// reflected in the `gso_dropped_*` and `gso_build_segment_failed`
+    /// metrics.
+    #[error("Invalid GSO superpacket")]
+    InvalidGsoPacket,
 }
 
 /// An error from an operation on a [`Connection`]
@@ -983,6 +990,215 @@ impl<AppState: Send> Connection<AppState> {
             // If no packet encoder presents, directly send to outside
             self.send_to_outside(pkt, false)
         }
+    }
+
+    /// Process a GSO superpacket as a single packet through the pipeline.
+    ///
+    /// Unlike `inside_data_received`, this skips the MTU check (the
+    /// superpacket is intentionally oversized) and `tcp_clamp_mss`
+    /// (GSO packets are never SYN). Plugins and encoder see the whole
+    /// superpacket as one packet.
+    #[cfg(target_os = "linux")]
+    pub fn inside_data_received_gso(
+        &mut self,
+        pkt: &mut BytesMut,
+        hdr: &crate::gso::VirtioNetHdr,
+    ) -> ConnectionResult<()> {
+        use ConnectionError::InvalidInsidePacket;
+        use InvalidPacketError::InvalidIpv4Packet;
+
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
+        if !matches!(self.state, State::Online) {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let Some(inside_io) = &self.inside_io else {
+            return Err(ConnectionError::InvalidState);
+        };
+        let mtu = inside_io.mtu();
+
+        // No MTU check — GSO superpacket is intentionally oversized
+        if !ipv4_is_valid_packet(pkt.as_ref()) {
+            return Err(InvalidInsidePacket(InvalidIpv4Packet));
+        }
+
+        let _ = self.rotate_expresslane_key();
+
+        // No tcp_clamp_mss — GSO packets are never SYN
+
+        // Plugins see the whole superpacket as one packet
+        match self.inside_plugins.do_ingress(pkt) {
+            PluginResult::Accept => {}
+            PluginResult::Drop => {
+                return Ok(());
+            }
+            PluginResult::DropWithReply(b) => {
+                return Err(ConnectionError::PluginDropWithReply(b));
+            }
+            PluginResult::Error(e) => {
+                return Err(ConnectionError::PluginError(e));
+            }
+        }
+
+        // Encoder sees the whole superpacket
+        if let Some(encoder) = &mut self.inside_pkt_encoder {
+            let codec_state = encoder.store(pkt);
+            match codec_state {
+                Ok(CodecStatus::PacketAccepted) => return Ok(()),
+                Ok(CodecStatus::SkipPacket) => {}
+                Err(e) => return Err(ConnectionError::PacketCodecError(e)),
+            }
+        }
+
+        self.send_to_outside_gso(pkt, hdr, mtu)
+    }
+
+    /// Split a GSO superpacket into segments, encrypt each, and send
+    /// the entire wire buffer as one `sendmsg` with `UDP_SEGMENT`.
+    ///
+    /// For expresslane: encrypts with AES-GCM, frames via `udp_frame`,
+    /// collects into wire buffer.
+    ///
+    /// For DTLS: `send_frame_or_drop` triggers wolfssl `try_write` which
+    /// calls the IO callback `send()`. The IO callback detects the
+    /// open `GsoBuffer` batch and coalesces framed wire packets there
+    /// instead of sending.
+    #[cfg(target_os = "linux")]
+    fn send_to_outside_gso(
+        &mut self,
+        pkt: &mut BytesMut,
+        hdr: &crate::gso::VirtioNetHdr,
+        mtu: usize,
+    ) -> ConnectionResult<()> {
+        use crate::gso;
+
+        // Parse the protocol header length from the packet itself. We
+        // can't trust `hdr.hdr_len` — Linux's TUN puts `skb_headlen`
+        // (~MTU for multi-segment aggregates) there, not the protocol
+        // header length the virtio-net spec calls for.
+        let hdr_len = match gso::calc_hdr_len(pkt.as_ref()) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    pkt_len = pkt.len(),
+                    "cannot parse hdr_len in superpacket, dropping"
+                );
+                crate::metrics::gso_dropped_invalid_hdr_len(e.metric_reason());
+                return Err(ConnectionError::InvalidInsidePacket(
+                    InvalidPacketError::InvalidGsoPacket,
+                ));
+            }
+        };
+
+        // Kernel-supplied gso_size of 0 would div-by-zero in
+        // calc_gso_segs and produce a degenerate single segment in
+        // build_segment. Treat as an invalid aggregate.
+        if hdr.gso_size == 0 {
+            tracing::warn!("invalid gso_size = 0 in superpacket, dropping");
+            crate::metrics::gso_dropped_zero_gso_size();
+            return Err(ConnectionError::InvalidInsidePacket(
+                InvalidPacketError::InvalidGsoPacket,
+            ));
+        }
+
+        let gso_segs = gso::calc_gso_segs(pkt.len(), hdr_len, hdr.gso_size as usize);
+        if gso_segs == 0 {
+            return Ok(());
+        }
+
+        if gso_segs > gso::MAX_GSO_SEGS {
+            tracing::warn!(
+                gso_segs,
+                MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
+                "too many segments in superpacket, dropping"
+            );
+            crate::metrics::gso_dropped_iov_overflow();
+            return Err(ConnectionError::InvalidInsidePacket(
+                InvalidPacketError::InvalidGsoPacket,
+            ));
+        }
+
+        // Per-segment MTU guard: when TUN_F_TSO4 is enabled the kernel
+        // hands us GSO aggregates without enforcing per-segment MTU.
+        // If anything upstream (TS-unaware MSS, missing MSS clamp, a
+        // forwarding fastpath that skipped ip_finish_output_gso) put a
+        // segment in here larger than the tunnel can carry, drop the
+        // aggregate to avoid the build_segment slice overflow.
+        let seg_size = hdr_len + hdr.gso_size as usize;
+        if seg_size > mtu {
+            tracing::warn!(
+                hdr_len,
+                gso_size = hdr.gso_size,
+                mtu,
+                "header-wrapped segment exceeds tunnel MTU, dropping"
+            );
+            crate::metrics::gso_dropped_oversized_segment();
+            return Err(ConnectionError::InvalidInsidePacket(
+                InvalidPacketError::InvalidGsoPacket,
+            ));
+        }
+
+        let expresslane = self.expresslane_ready();
+
+        // One reusable segment buffer. `build_segment` calls `clear()`
+        // and then `extend_from_slice` to materialize the segment, so
+        // we only need capacity here — no zero-init.
+        let mut segment = BytesMut::with_capacity(mtu);
+
+        // Open the GSO coalescing buffer — IO callback will coalesce
+        // here. Both DTLS and expresslane paths detect this and
+        // append encrypted segments instead of sending immediately.
+        self.session.io_cb_mut().gso_buf.open();
+
+        let mut result = Ok(());
+
+        for i in 0..gso_segs {
+            if let Err(e) = gso::build_segment(hdr, hdr_len, pkt.as_ref(), i, &mut segment) {
+                tracing::warn!(
+                    ?e,
+                    gso_idx = i,
+                    csum_start = hdr.csum_start,
+                    hdr_len,
+                    "GSO build_segment header parse failed"
+                );
+                crate::metrics::gso_build_segment_failed(e.metric_reason());
+                // Abort the whole batch — UDP_SEGMENT requires
+                // uniform-stride segments, so we can't ship a partial
+                // aggregate.
+                result = Err(ConnectionError::InvalidInsidePacket(
+                    InvalidPacketError::InvalidGsoPacket,
+                ));
+                break;
+            }
+
+            if let Err(e) = self.send_outside_data(&mut segment, false) {
+                result = Err(e);
+                break;
+            }
+        }
+
+        if result.is_ok() {
+            self.activity.last_data_traffic_from_peer = Instant::now();
+            match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
+                IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
+                IOCallbackResult::Err(e) => {
+                    tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
+                    crate::metrics::gso_send_failed();
+                }
+            }
+        }
+
+        // Always reset the GSO coalescing buffer on exit. udp_send_gso
+        // borrows it; this returns to Passthrough and clears the
+        // bytes in place so the underlying allocation is reused on
+        // the next batch.
+        self.session.io_cb_mut().gso_buf.reset();
+
+        result
     }
 
     /// Send a packet to the outside
