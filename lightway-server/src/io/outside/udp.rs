@@ -100,6 +100,10 @@ impl OutsideIOSendCallback for UdpSocket {
         send_to_socket(&self.sock, buf, &peer_addr.1, self.reply_pktinfo)
     }
 
+    fn send_gso(&self, _buf: &[u8], _gso_size: u16) -> IOCallbackResult<usize> {
+        todo!()
+    }
+
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr.read().unwrap().0
     }
