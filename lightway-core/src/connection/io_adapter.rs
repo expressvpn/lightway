@@ -355,6 +355,14 @@ mod tests {
             }
         }
 
+        fn send_gso(
+            &self,
+            _bufs: &[std::io::IoSlice<'_>],
+            _gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+
         fn peer_addr(&self) -> std::net::SocketAddr {
             std::unreachable!("Should not be testing peer_addr");
         }
