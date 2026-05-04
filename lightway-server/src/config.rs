@@ -103,6 +103,12 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable TUN offload (GRO/GSO) for batch packet processing"))]
+    pub enable_tun_offload: bool,
+
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
     pub enable_tun_iouring: bool,
 
@@ -192,6 +198,7 @@ impl Default for Config {
                 lightway_server::DEFAULT_STATISTICS_REPORTING_INTERVAL,
             ),
             enable_pqc: false,
+            enable_tun_offload: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
