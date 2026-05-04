@@ -1850,6 +1850,25 @@ impl<AppState: Send> Connection<AppState> {
         // If updating key failed, send disabled to peer
         let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
 
+        self.send_expresslane_config(enabled, key);
+
+        self.expresslane.last_key_rotation = Some(Instant::now());
+
+        Ok(())
+    }
+
+    /// Mark expresslane as [Degraded](ExpresslaneState::Degraded) and notify the peer to also disable
+    fn set_expresslane_degraded(&mut self) {
+        self.set_expresslane_state(ExpresslaneState::Degraded);
+
+        let key = ExpresslaneKey::INVALID;
+        let _ = self.expresslane.data.update_next_self_key(key);
+
+        self.send_expresslane_config(false, key);
+    }
+
+    /// Build an ExpresslaneConfig, send it to the peer, and schedule retransmission.
+    fn send_expresslane_config(&mut self, enabled: bool, key: ExpresslaneKey) {
         // Outgoing version: if we have already negotiated a version
         // with the peer, use that. Otherwise advertise our local max
         let version = match self.expresslane.data.version {
@@ -1869,43 +1888,6 @@ impl<AppState: Send> Connection<AppState> {
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
 
-        self.expresslane.last_key_rotation = Some(Instant::now());
-
-        // Callback to schedule re-transmission if required
-        (self.schedule_tick_cb)(
-            self.expresslane.retransmit_wait_time(),
-            &mut self.app_state,
-            TickType::ExpresslaneKeyShareTick(ExpresslaneTickData(config)),
-        );
-        Ok(())
-    }
-
-    /// Mark expresslane as [Degraded](ExpresslaneState::Degraded) and notify the peer to also disable
-    fn set_expresslane_degraded(&mut self) {
-        self.set_expresslane_state(ExpresslaneState::Degraded);
-
-        let key = ExpresslaneKey::INVALID;
-        let _ = self.expresslane.data.update_next_self_key(key);
-
-        let version = match self.expresslane.data.version {
-            ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
-            v => v,
-        };
-
-        self.expresslane.config_counter += 1;
-        let config = wire::ExpresslaneConfig {
-            enabled: false,
-            key,
-            version,
-            ack: false,
-            counter: self.expresslane.config_counter,
-        };
-
-        let msg = wire::Frame::ExpresslaneConfig(config);
-        let _ = self.send_frame_or_drop(msg);
-
-        // Callback to schedule re-transmission if required
-        // reuses same retry logic as key rotation
         (self.schedule_tick_cb)(
             self.expresslane.retransmit_wait_time(),
             &mut self.app_state,
