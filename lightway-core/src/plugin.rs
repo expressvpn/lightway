@@ -53,6 +53,10 @@ pub enum PluginResult {
 }
 
 impl PluginList {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+
     pub(crate) fn do_ingress(&self, data: &mut BytesMut) -> PluginResult {
         for plugin in self.plugins.iter() {
             let res = plugin.ingress(data);

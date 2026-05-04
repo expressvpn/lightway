@@ -100,6 +100,16 @@ pub(crate) struct TlsIOAdapter {
     /// This buffer will be used to save the remaining data, to be sent in next call.
     pub(crate) send_buf: SendBuffer,
 
+    /// When `Some`, the wolfssl IO callback `send()` appends raw
+    /// encrypted segments here instead of sending to the socket.
+    /// After all segments are collected, `udp_send_gso` wraps each
+    /// with `wire::Header`, runs plugins, and sends via `send_gso`.
+    pub(crate) gso_buf: Option<BytesMut>,
+
+    /// Size of the first encrypted segment appended to `gso_buf`.
+    /// Used as the stride to split the buffer back into segments.
+    pub(crate) gso_size: usize,
+
     /// Application provided object used to send data.
     pub(crate) io: OutsideIOSendCallbackArg,
 
@@ -205,6 +215,114 @@ impl TlsIOAdapter {
         }
     }
 
+    /// Take the raw encrypted segments from `gso_buf`, wrap each with
+    /// `wire::Header` (+ plugins), and send as one `sendmsg` with
+    /// `UDP_SEGMENT`. Clears `gso_buf` regardless of outcome.
+    ///
+    /// When no outside plugins are configured, the encrypted payload
+    /// is sent zero-copy: the kernel gathers a shared header buffer
+    /// and slices of `tun_buf` via `iovec`, with no intermediate copy
+    /// of the segment bytes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn udp_send_gso(
+        &mut self,
+        gso_segs: usize,
+        expresslane_data: bool,
+    ) -> IOCallbackResult<usize> {
+        use std::io::{Error, IoSlice};
+
+        // Consume the accumulated encrypted segments. Leaves
+        // `gso_buf = None` so GSO mode is off until the next batch
+        // explicitly re-enables it.
+        let tun_buf = self
+            .gso_buf
+            .take()
+            .expect("udp_send_gso called without gso_buf");
+        let tun_gso_size = std::mem::take(&mut self.gso_size);
+
+        if gso_segs == 0 || tun_buf.is_empty() {
+            return IOCallbackResult::Ok(0);
+        }
+
+        // Same Lightway header for every segment.
+        let hdr = wire::Header {
+            version: self.protocol_version,
+            aggressive_mode: false,
+            expresslane_data,
+            session: self.session_id,
+        };
+        let mut hdr_buf = BytesMut::with_capacity(wire::Header::WIRE_SIZE);
+        hdr.append_to_wire(&mut hdr_buf);
+
+        // Fast path: no outside plugins. Segments are not mutated, so
+        // we scatter-gather via iovec — shared header buffer plus
+        // borrowed slices of `tun_buf`, zero payload copies.
+        if self.outside_plugins.is_empty() {
+            let stride = (wire::Header::WIRE_SIZE + tun_gso_size) as u16;
+            let mut iovs: Vec<IoSlice<'_>> = Vec::with_capacity(gso_segs * 2);
+            for i in 0..gso_segs {
+                let start = i * tun_gso_size;
+                let end = ((i + 1) * tun_gso_size).min(tun_buf.len());
+                iovs.push(IoSlice::new(&hdr_buf[..]));
+                iovs.push(IoSlice::new(&tun_buf[start..end]));
+            }
+            return self.io.send_gso(&iovs, stride);
+        }
+
+        // Plugin path: each segment is built into its own BytesMut so
+        // plugins can freely mutate it. The Vec<BytesMut> outlives the
+        // Vec<IoSlice> built from it, so the borrows are sound.
+        let mut segs: Vec<BytesMut> = Vec::with_capacity(gso_segs);
+        let mut wire_gso_size: Option<usize> = None;
+
+        for i in 0..gso_segs {
+            let start = i * tun_gso_size;
+            let end = ((i + 1) * tun_gso_size).min(tun_buf.len());
+            debug_assert_le!(start, end);
+
+            let mut seg = BytesMut::with_capacity(self.outside_mtu);
+            seg.extend_from_slice(&hdr_buf[..]);
+            seg.extend_from_slice(&tun_buf[start..end]);
+
+            match self.outside_plugins.do_egress(&mut seg) {
+                PluginResult::Accept => {}
+                // Drop semantics on the GSO path are all-or-nothing:
+                // skipping a middle segment would break UDP_SEGMENT's
+                // uniform stride requirement.
+                PluginResult::Drop | PluginResult::DropWithReply(_) => {
+                    return IOCallbackResult::Ok(tun_buf.len());
+                }
+                PluginResult::Error(e) => {
+                    return IOCallbackResult::Err(Error::other(e));
+                }
+            }
+
+            // UDP_SEGMENT requires every segment except the last to
+            // have identical stride.
+            let is_last = i == gso_segs - 1;
+            match wire_gso_size {
+                None => wire_gso_size = Some(seg.len()),
+                Some(s) if !is_last && seg.len() != s => {
+                    return IOCallbackResult::Err(Error::other(
+                        "outside plugins produced non-uniform GSO segment size",
+                    ));
+                }
+                Some(s) if is_last && seg.len() > s => {
+                    return IOCallbackResult::Err(Error::other(
+                        "outside plugins produced oversized trailing GSO segment",
+                    ));
+                }
+                _ => {}
+            }
+
+            segs.push(seg);
+        }
+
+        let stride = wire_gso_size.unwrap_or(0) as u16;
+        let iovs: Vec<IoSlice<'_>> = segs.iter().map(|s| IoSlice::new(&s[..])).collect();
+        self.io.send_gso(&iovs, stride)
+    }
+
     // In general, TCP send can succeed even for partial data and the caller
     // has to call send again with remaining data.
     // This api tries to hide the partial send behavior by buffering it.
@@ -291,7 +409,19 @@ impl crate::tls::IOCallbacks for TlsIOAdapter {
     fn send(&mut self, buf: &[u8]) -> IOCallbackResult<usize> {
         match self.connection_type {
             ConnectionType::Stream => self.tcp_send(buf),
-            ConnectionType::Datagram => self.udp_send(buf, false),
+            ConnectionType::Datagram => {
+                if let Some(gso_buf) = self.gso_buf.as_mut() {
+                    // GSO: buffer raw encrypted data; udp_send_gso
+                    // will wrap each segment with wire::Header later.
+                    if gso_buf.is_empty() {
+                        self.gso_size = buf.len();
+                    }
+                    gso_buf.extend_from_slice(buf);
+                    IOCallbackResult::Ok(buf.len())
+                } else {
+                    self.udp_send(buf, false)
+                }
+            }
         }
     }
 }
@@ -383,6 +513,8 @@ mod tests {
             io,
             session_id: SessionId::from_const(*b"\xde\xad\xbe\xef\xde\xad\xbe\xef"),
             outside_plugins: outside_plugins.into(),
+            gso_buf: None,
+            gso_size: 0,
         }
     }
 
