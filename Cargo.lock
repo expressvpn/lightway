@@ -1672,6 +1672,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tun-rs",
  "wolfssl",
 ]
 
@@ -1715,6 +1716,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "tun-rs",
 ]
 
 [[package]]
