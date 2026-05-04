@@ -985,6 +985,145 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
+    /// Process a GSO superpacket as a single packet through the pipeline.
+    ///
+    /// Unlike `inside_data_received`, this skips the MTU check (the
+    /// superpacket is intentionally oversized) and `tcp_clamp_mss`
+    /// (GSO packets are never SYN). Plugins and encoder see the whole
+    /// superpacket as one packet.
+    #[cfg(target_os = "linux")]
+    pub fn inside_data_received_gso(
+        &mut self,
+        pkt: &mut BytesMut,
+        hdr: &crate::gso::VirtioNetHdr,
+    ) -> ConnectionResult<()> {
+        use ConnectionError::InvalidInsidePacket;
+        use InvalidPacketError::InvalidIpv4Packet;
+
+        if matches!(self.state, State::Disconnected) {
+            return Err(ConnectionError::Disconnected);
+        }
+
+        if !matches!(self.state, State::Online) {
+            return Err(ConnectionError::InvalidState);
+        }
+
+        let Some(inside_io) = &self.inside_io else {
+            return Err(ConnectionError::InvalidState);
+        };
+        let mtu = inside_io.mtu();
+
+        // No MTU check — GSO superpacket is intentionally oversized
+        if !ipv4_is_valid_packet(pkt.as_ref()) {
+            return Err(InvalidInsidePacket(InvalidIpv4Packet));
+        }
+
+        let _ = self.rotate_expresslane_key();
+
+        // No tcp_clamp_mss — GSO packets are never SYN
+
+        // Plugins see the whole superpacket as one packet
+        match self.inside_plugins.do_ingress(pkt) {
+            PluginResult::Accept => {}
+            PluginResult::Drop => {
+                return Ok(());
+            }
+            PluginResult::DropWithReply(b) => {
+                return Err(ConnectionError::PluginDropWithReply(b));
+            }
+            PluginResult::Error(e) => {
+                return Err(ConnectionError::PluginError(e));
+            }
+        }
+
+        // Encoder sees the whole superpacket
+        if let Some(encoder) = &mut self.inside_pkt_encoder {
+            let codec_state = encoder.store(pkt);
+            match codec_state {
+                Ok(CodecStatus::PacketAccepted) => return Ok(()),
+                Ok(CodecStatus::SkipPacket) => {}
+                Err(e) => return Err(ConnectionError::PacketCodecError(e)),
+            }
+        }
+
+        self.send_to_outside_gso(pkt, hdr, mtu)
+    }
+
+    /// Split a GSO superpacket into segments, encrypt each, and send
+    /// the entire wire buffer as one `sendmsg` with `UDP_SEGMENT`.
+    ///
+    /// For expresslane: encrypts with AES-GCM, frames via `udp_frame`,
+    /// collects into wire buffer.
+    ///
+    /// For DTLS: `send_frame_or_drop` triggers wolfssl `try_write` which
+    /// calls the IO callback `send()`. The IO callback detects `gso_buf`
+    /// and appends framed wire packets there instead of sending.
+    #[cfg(target_os = "linux")]
+    fn send_to_outside_gso(
+        &mut self,
+        pkt: &mut BytesMut,
+        hdr: &crate::gso::VirtioNetHdr,
+        mtu: usize,
+    ) -> ConnectionResult<()> {
+        use crate::gso;
+
+        let n = gso::segment_count(hdr, pkt.len());
+        if n == 0 {
+            return Ok(());
+        }
+
+        let expresslane = self.expresslane_ready();
+
+        // One reusable segment buffer: zero-init to `mtu` once so each
+        // iteration can `set_len(mtu)` (capacity bytes are initialized)
+        // before `build_segment` overwrites them.
+        let mut segment = BytesMut::zeroed(mtu);
+
+        // Enable GSO wire buffer — IO callback will append here.
+        // Both DTLS and expresslane paths detect this and append
+        // encrypted segments instead of sending immediately.
+        self.session.io_cb_mut().gso_buf = Some(BytesMut::with_capacity(n * self.outside_mtu));
+
+        let mut result = Ok(());
+
+        for i in 0..n {
+            // Build segment in-place into `segment`. `set_len(mtu)` is
+            // sound because all `mtu` bytes were initialized at alloc
+            // (and only ever overwritten or shrunk thereafter).
+            // SAFETY: capacity ≥ mtu and bytes 0..mtu are initialized.
+            #[allow(unsafe_code)]
+            unsafe {
+                segment.set_len(mtu);
+            }
+            let total_len = gso::build_segment(hdr, pkt.as_ref(), &mut segment, i);
+            // SAFETY: build_segment wrote 0..total_len; total_len ≤ mtu.
+            #[allow(unsafe_code)]
+            unsafe {
+                segment.set_len(total_len);
+            }
+
+            if let Err(e) = self.send_outside_data(&mut segment, false) {
+                result = Err(e);
+                break;
+            }
+        }
+
+        self.activity.last_data_traffic_from_peer = Instant::now();
+
+        if result.is_ok() {
+            match self.session.io_cb_mut().udp_send_gso(n, expresslane) {
+                IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
+                IOCallbackResult::Err(e) => {
+                    tracing::warn!(error = %e, segs = n, "udp_send_gso failed");
+                }
+            }
+        } else {
+            self.session.io_cb_mut().gso_buf.take();
+        }
+
+        result
+    }
+
     /// Send a packet to the outside
     pub fn send_to_outside(
         &mut self,
@@ -1890,7 +2029,17 @@ impl<AppState: Send> Connection<AppState> {
             .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
         self.activity.last_data_traffic_from_peer = Instant::now();
 
-        match self.session.io_cb().udp_send(buf.as_ref(), true) {
+        // GSO path: buffer encrypted data for batch send
+        let io = self.session.io_cb_mut();
+        if let Some(gso_buf) = io.gso_buf.as_mut() {
+            if gso_buf.is_empty() {
+                io.gso_size = buf.len();
+            }
+            gso_buf.extend_from_slice(&buf);
+            return Ok(());
+        }
+
+        match io.udp_send(buf.as_ref(), true) {
             IOCallbackResult::Ok(_) => ConnectionResult::Ok(()),
             IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
             IOCallbackResult::Err(_e) => ConnectionResult::Err(ConnectionError::AccessDenied),
