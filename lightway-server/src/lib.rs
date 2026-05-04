@@ -6,6 +6,8 @@ mod ip_manager;
 pub mod metrics;
 mod statistics;
 
+#[cfg(target_os = "linux")]
+use bytes::Buf;
 // re-export so server app does not need to depend on lightway-core
 pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
 pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
@@ -207,6 +209,10 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
+    /// Enable TUN offload (GRO/GSO) for batch packet processing
+    #[cfg(target_os = "linux")]
+    pub enable_tun_offload: bool,
+
     #[cfg(feature = "io-uring")]
     /// Enable IO-uring interface for Tunnel
     pub enable_tun_iouring: bool,
@@ -280,6 +286,145 @@ pub(crate) fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionRe
     }
 }
 
+async fn inside_io_loop_default(
+    inside_io: Arc<dyn InsideIO>,
+    ip_manager: Arc<IpManager<Arc<Connection>>>,
+    lightway_client_ip: Ipv4Addr,
+) -> anyhow::Result<()> {
+    let mtu = inside_io.mtu();
+    let mut buf = BytesMut::with_capacity(mtu);
+    loop {
+        buf.clear();
+        buf.resize(mtu, 0);
+        match inside_io.recv_buf(&mut buf).await {
+            IOCallbackResult::Ok(_n) => {}
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => {
+                break Err(anyhow!(err).context("InsideIO recv buf error"));
+            }
+        };
+
+        let packet = Ipv4Packet::new(buf.as_ref());
+        let Some(packet) = packet else {
+            eprintln!("Invalid inside packet size (less than Ipv4 header)!");
+            continue;
+        };
+        let conn = ip_manager.find_connection(packet.get_destination());
+
+        ipv4_update_destination(buf.as_mut(), lightway_client_ip);
+
+        if let Some(conn) = conn {
+            let result = conn.inside_data_received(&mut buf);
+            handle_inside_io_error(conn, result);
+        } else {
+            metrics::tun_rejected_packet_no_connection();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn inside_io_loop_gso(
+    inside_io: Arc<dyn InsideIO>,
+    ip_manager: Arc<IpManager<Arc<Connection>>>,
+    lightway_client_ip: Ipv4Addr,
+) -> anyhow::Result<()> {
+    use lightway_core::gso::{
+        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN, gso_none_checksum,
+    };
+
+    // Receive buffer reused across iterations. Allocate once and
+    // recv directly into it (no per-packet `BytesMut::from(&...)`
+    // copy + alloc).
+    //
+    // Mental model: `BytesMut` is a (ptr, len, cap) *window* into a
+    // backing slab. `cap` is the distance from `ptr` to the end of
+    // the slab — NOT the slab size. Every `advance(N)` below slides
+    // `ptr += N` and shrinks `cap -= N`; the slab itself doesn't
+    // change. Without intervention, the window crawls toward the
+    // end of the slab and `cap` decays.
+    //
+    // `pkt.reserve(initial_cap)` below is the "slide back" call: if
+    // the window can already hold `initial_cap` more bytes after
+    // `len`, it's a free no-op; otherwise BytesMut compacts the
+    // window back to the start of the slab (with `len = 0` after
+    // `clear()`, this is just a pointer reset — no memcpy).
+    let initial_cap = VIRTIO_NET_HDR_LEN + 65535;
+    let mut pkt = bytes::BytesMut::zeroed(initial_cap);
+
+    loop {
+        // Reset the window to start of slab (cheap; no-op while still
+        // at slab start, pointer-only reset after `advance()` has
+        // drifted us).
+        pkt.reserve(initial_cap);
+
+        // Expose the full slab to `recv_gso` as `&mut [u8]`.
+        // SAFETY: every byte of the slab was zero-initialized at
+        // construction; subsequent iters only ever shrunk `len` or
+        // overwrote bytes. We never hand out uninitialized memory.
+        #[allow(unsafe_code)]
+        unsafe {
+            pkt.set_len(pkt.capacity());
+        }
+
+        let len = match inside_io.recv_gso(pkt.as_mut()).await {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => {
+                break Err(anyhow!(err).context("InsideIO recv gso error"));
+            }
+        };
+
+        // SAFETY: `recv_gso` wrote `len` bytes; `len ≤ pkt.capacity()`.
+        #[allow(unsafe_code)]
+        unsafe {
+            pkt.set_len(len);
+        }
+
+        if len <= VIRTIO_NET_HDR_LEN {
+            tracing::warn!("TUN read too short ({len} <= {VIRTIO_NET_HDR_LEN})");
+            pkt.clear();
+            continue;
+        }
+
+        let hdr = match VirtioNetHdr::from_bytes(&pkt[..VIRTIO_NET_HDR_LEN]) {
+            Ok(hdr) => *hdr,
+            Err(err) => {
+                tracing::warn!("Failed to decode virtio header: {err}");
+                pkt.clear();
+                continue;
+            }
+        };
+        // Strip the virtio header — `pkt` is now the IP payload.
+        pkt.advance(VIRTIO_NET_HDR_LEN);
+
+        if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+            gso_none_checksum(pkt.as_mut(), hdr.csum_start, hdr.csum_offset);
+        }
+
+        let packet = Ipv4Packet::new(pkt.as_ref());
+        let Some(packet) = packet else {
+            pkt.clear();
+            continue;
+        };
+        let conn = ip_manager.find_connection(packet.get_destination());
+
+        ipv4_update_destination(pkt.as_mut(), lightway_client_ip);
+
+        if let Some(conn) = conn {
+            let result = if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+                conn.inside_data_received(&mut pkt)
+            } else {
+                conn.inside_data_received_gso(&mut pkt, &hdr)
+            };
+            handle_inside_io_error(conn, result);
+        } else {
+            metrics::tun_rejected_packet_no_connection();
+        }
+
+        pkt.clear();
+    }
+}
+
 pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'static>(
     mut config: ServerConfig<SA>,
 ) -> Result<()> {
@@ -324,6 +469,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         Some(io) => io,
         None => {
             use io::inside::Tun;
+            #[cfg(target_os = "linux")]
+            if config.enable_tun_offload {
+                config.tun_config.offload = true;
+            }
             #[cfg(not(feature = "io-uring"))]
             let tun = Tun::new(&config.tun_config).await;
             #[cfg(feature = "io-uring")]
@@ -403,39 +552,31 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         ),
     };
 
-    let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        let mtu = inside_io.mtu();
-        let mut buf = BytesMut::with_capacity(mtu);
-        loop {
-            buf.clear();
-            buf.resize(mtu, 0);
-            match inside_io.recv_buf(&mut buf).await {
-                IOCallbackResult::Ok(_n) => {}
-                IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
-                IOCallbackResult::Err(err) => {
-                    break Err(anyhow!(err).context("InsideIO recv buf error"));
-                }
-            };
+    let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
+        #[cfg(target_os = "linux")]
+        let gso = config.enable_tun_offload;
+        #[cfg(not(target_os = "linux"))]
+        let gso = false;
 
-            // Find connection based on client ip (dest ip) and forward packet
-            let packet = Ipv4Packet::new(buf.as_ref());
-            let Some(packet) = packet else {
-                eprintln!("Invalid inside packet size (less than Ipv4 header)!");
-                continue;
-            };
-            let conn = ip_manager.find_connection(packet.get_destination());
-
-            // Update destination IP address to client's ip
-            ipv4_update_destination(buf.as_mut(), config.lightway_client_ip);
-
-            if let Some(conn) = conn {
-                let result = conn.inside_data_received(&mut buf);
-                handle_inside_io_error(conn, result);
-            } else {
-                metrics::tun_rejected_packet_no_connection();
+        if gso {
+            #[cfg(target_os = "linux")]
+            {
+                tokio::spawn(inside_io_loop_gso(
+                    inside_io,
+                    ip_manager.clone(),
+                    config.lightway_client_ip,
+                ))
             }
+            #[cfg(not(target_os = "linux"))]
+            unreachable!()
+        } else {
+            tokio::spawn(inside_io_loop_default(
+                inside_io,
+                ip_manager.clone(),
+                config.lightway_client_ip,
+            ))
         }
-    });
+    };
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
 
@@ -468,7 +609,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 
     tokio::select! {
         err = server.run() => err.context("Outside IO loop exited"),
-        io = inside_io_loop =>  io.map_err(|e| anyhow!(e).context("Inside IO loop panicked"))?.context("Inside IO loop exited"),
+        io = inside_io_loop => io.map_err(|e| anyhow!(e).context("Inside IO loop panicked"))?.context("Inside IO loop exited"),
         _ = ctrlc_rx => {
             info!("Sigterm or Sigint received");
             conn_manager.shutdown();
