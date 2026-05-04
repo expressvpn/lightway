@@ -173,6 +173,24 @@ pub(crate) enum GsoHdrError {
     UnsupportedL4Proto(u8),
 }
 
+impl GsoHdrError {
+    /// Stable, low-cardinality label used as the `reason` field of the
+    /// `gso_dropped_invalid_hdr_len` counter. Production has no
+    /// datapath logs, so this label is the only way to distinguish
+    /// failure modes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Truncated { stage } => stage,
+            Self::UnsupportedIpVersion(_) => "unsupported_ip_version",
+            Self::BadIpv4Ihl => "bad_ipv4_ihl",
+            Self::BadTcpDataOffset => "bad_tcp_data_offset",
+            Self::UnsupportedL4Proto(_) => "unsupported_l4_proto",
+        }
+    }
+}
+
 /// Why `build_segment` could not produce one wire-format segment.
 ///
 /// Each variant corresponds to a `pnet_packet` constructor returning
