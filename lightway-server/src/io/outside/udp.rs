@@ -15,6 +15,7 @@ use lightway_core::{
 use socket2::{MaybeUninitSlice, MsgHdr, MsgHdrMut, SockAddr, SockRef};
 use std::os::fd::AsRawFd;
 use std::{
+    io::IoSlice,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, RwLock},
 };
@@ -49,32 +50,45 @@ impl std::fmt::Display for BindMode {
 
 fn send_to_socket(
     sock: &Arc<tokio::net::UdpSocket>,
-    buf: &[u8],
+    bufs: &[IoSlice<'_>],
     peer_addr: &SockAddr,
     pktinfo: Option<libc::in_pktinfo>,
+    gso_size: Option<u16>,
 ) -> IOCallbackResult<usize> {
+    #[cfg(target_vendor = "apple")]
+    const IP_PKTINFO_LEVEL: libc::c_int = libc::IPPROTO_IP;
+    #[cfg(not(target_vendor = "apple"))]
+    const IP_PKTINFO_LEVEL: libc::c_int = libc::SOL_IP;
+
+    const CMSG_SIZE: usize =
+        cmsg::Message::space::<libc::in_pktinfo>() + cmsg::Message::space::<u16>();
+
     let res = sock.try_io(Interest::WRITABLE, || {
         let sock = SockRef::from(sock.as_ref());
-        let bufs = [std::io::IoSlice::new(buf)];
 
-        let msghdr = MsgHdr::new().with_addr(peer_addr).with_buffers(&bufs);
-
-        const CMSG_SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
+        // Track used bytes so we don't pass trailing zeroes that
+        // the kernel would interpret as a malformed cmsg header.
         let mut cmsg = cmsg::BufferMut::<CMSG_SIZE>::zeroed();
+        let mut cmsg_len: usize = 0;
 
-        let msghdr = if let Some(pktinfo) = pktinfo {
+        if pktinfo.is_some() || gso_size.is_some() {
             let mut builder = cmsg.builder();
-            #[cfg(target_vendor = "apple")]
-            let (cmsg_level, cmsg_type) = (libc::IPPROTO_IP, libc::IP_PKTINFO);
-            #[cfg(not(target_vendor = "apple"))]
-            let (cmsg_level, cmsg_type) = (libc::SOL_IP, libc::IP_PKTINFO);
+            if let Some(pi) = pktinfo {
+                builder.fill_next(IP_PKTINFO_LEVEL, libc::IP_PKTINFO, pi)?;
+                cmsg_len += cmsg::Message::space::<libc::in_pktinfo>();
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(size) = gso_size {
+                builder.fill_next(libc::SOL_UDP, libc::UDP_SEGMENT, size)?;
+                cmsg_len += cmsg::Message::space::<u16>();
+            }
+        }
 
-            builder.fill_next(cmsg_level, cmsg_type, pktinfo)?;
-
-            msghdr.with_control(cmsg.as_ref())
-        } else {
-            msghdr
-        };
+        // If cmsg_len is 0, the kernel will never read cmsg.
+        let msghdr = MsgHdr::new()
+            .with_addr(peer_addr)
+            .with_buffers(bufs)
+            .with_control(&cmsg.as_ref()[..cmsg_len]);
 
         sock.sendmsg(&msghdr, 0)
     });
@@ -97,11 +111,24 @@ struct UdpSocket {
 impl OutsideIOSendCallback for UdpSocket {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         let peer_addr = self.peer_addr.read().unwrap();
-        send_to_socket(&self.sock, buf, &peer_addr.1, self.reply_pktinfo)
+        send_to_socket(
+            &self.sock,
+            &[IoSlice::new(buf)],
+            &peer_addr.1,
+            self.reply_pktinfo,
+            None,
+        )
     }
 
-    fn send_gso(&self, _buf: &[u8], _gso_size: u16) -> IOCallbackResult<usize> {
-        todo!()
+    fn send_gso(&self, bufs: &[IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize> {
+        let peer_addr = self.peer_addr.read().unwrap();
+        send_to_socket(
+            &self.sock,
+            bufs,
+            &peer_addr.1,
+            self.reply_pktinfo,
+            Some(gso_size),
+        )
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -292,7 +319,13 @@ impl UdpServer {
         msg.append_to_wire(&mut buf);
 
         // Ignore failure to send.
-        let _ = send_to_socket(&self.sock, &buf, &peer_addr, reply_pktinfo);
+        let _ = send_to_socket(
+            &self.sock,
+            &[IoSlice::new(&buf)],
+            &peer_addr,
+            reply_pktinfo,
+            None,
+        );
     }
 }
 
