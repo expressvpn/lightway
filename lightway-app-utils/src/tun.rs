@@ -21,6 +21,31 @@ use tun_rs::DeviceBuilder;
 #[cfg(linux)]
 use tun_rs::{GROTable, VIRTIO_NET_HDR_LEN};
 
+/// Default MTU configured on the inside (TUN) interface.
+pub const DEFAULT_TUN_MTU: u16 = 1350;
+
+/// Size of the scratch buffer required by [`Tun::recv_multiple_buf`].
+/// Holds the raw virtio super-packet read from the kernel before tun-rs
+/// segments it. Matches the recommended sizing in tun-rs docs.
+#[cfg(linux)]
+pub const RECV_MULTIPLE_TUN_BUFFER_SIZE: usize = VIRTIO_NET_HDR_LEN + 65535;
+
+/// Maximum number of segmented packets a single
+/// [`Tun::recv_multiple_buf`] call may produce.
+///
+/// Per tun-rs docs (see `recv_multiple`), the `bufs`/`sizes` arrays
+/// must satisfy `len > 65535 / MTU` because the kernel can deliver up
+/// to a 65535-byte GRO super-packet per call. 64 covers MTUs down to
+/// ~1024 with headroom;
+#[cfg(linux)]
+pub const RECV_MULTIPLE_MAX_SEGMENTS: usize = 64;
+
+#[cfg(linux)]
+const _: () = assert!(
+    RECV_MULTIPLE_MAX_SEGMENTS * DEFAULT_TUN_MTU as usize > 65535,
+    "RECV_MULTIPLE_MAX_SEGMENTS must satisfy `len > 65535 / DEFAULT_TUN_MTU` per tun-rs",
+);
+
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
 
@@ -413,7 +438,7 @@ impl TunDirect {
         let mtu = tun_device.mtu()?;
         // This currently is not supported for Android and IOS
         #[cfg(mobile)]
-        let mtu = 1350;
+        let mtu = DEFAULT_TUN_MTU;
         let tun = Some(tun_device);
 
         Ok(TunDirect {

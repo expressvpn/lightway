@@ -5,7 +5,7 @@ use struct_patch::Patch;
 use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
 use lightway_app_utils::{
-    TunConfig, Validate,
+    DEFAULT_TUN_MTU, TunConfig, Validate,
     args::{ConfigFormat, ConnectionType, LogFormat},
     validate_configuration_file_path,
 };
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
 
     // TODO: Fix in future PR
     tun_config
-        .mtu(1350)
+        .mtu(DEFAULT_TUN_MTU)
         .address(config.tun_local_ip.into())
         .destination(config.tun_peer_ip)
         .up();
