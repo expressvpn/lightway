@@ -113,6 +113,8 @@ impl Connection {
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
             pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
+            #[cfg(target_os = "linux")]
+            pub fn inside_data_received_gso(&self, pkt: &mut BytesMut, hdr: &lightway_core::gso::VirtioNetHdr) -> ConnectionResult<()>;
         }
     }
 
