@@ -50,8 +50,8 @@ impl Tun {
 
 #[async_trait]
 impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
-    async fn recv_buf(&self) -> IOCallbackResult<BytesMut> {
-        self.tun.recv_buf().await
+    async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
+        self.tun.recv_buf(buf).await
     }
 
     /// Api to send packet in the tunnel
@@ -72,6 +72,10 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
 
         self.tun.try_send(pkt);
         Ok(pkt_len)
+    }
+
+    fn mtu(&self) -> usize {
+        self.tun.mtu()
     }
 
     fn into_io_send_callback(

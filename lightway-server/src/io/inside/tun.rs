@@ -43,11 +43,11 @@ impl AsRawFd for Tun {
 
 #[async_trait]
 impl InsideIORecv for Tun {
-    async fn recv_buf(&self) -> IOCallbackResult<bytes::BytesMut> {
-        match self.0.recv_buf().await {
-            IOCallbackResult::Ok(buf) => {
-                metrics::tun_to_client(buf.len());
-                IOCallbackResult::Ok(buf)
+    async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
+        match self.0.recv_buf(buf).await {
+            IOCallbackResult::Ok(n) => {
+                metrics::tun_to_client(n);
+                IOCallbackResult::Ok(n)
             }
             e => e,
         }
