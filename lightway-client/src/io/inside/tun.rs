@@ -5,6 +5,8 @@ use std::{net::Ipv4Addr, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
+#[cfg(linux)]
+use lightway_app_utils::TunOffloadBuffers;
 use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
 use lightway_core::{
     IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, InsideIpConfig,
@@ -53,6 +55,15 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         self.tun.recv_buf(buf).await
     }
 
+    #[cfg(linux)]
+    async fn recv_multiple_buf(
+        &self,
+        offload_buffer: &mut TunOffloadBuffers,
+        bufs: &mut [BytesMut],
+    ) -> IOCallbackResult<usize> {
+        self.tun.recv_multiple_buf(offload_buffer, bufs).await
+    }
+
     /// Api to send packet in the tunnel
     fn try_send(&self, mut pkt: BytesMut, ip_config: Option<InsideIpConfig>) -> Result<usize> {
         let pkt_len = pkt.len();
@@ -75,6 +86,11 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
 
     fn mtu(&self) -> usize {
         self.tun.mtu()
+    }
+
+    #[cfg(linux)]
+    fn gso(&self) -> (bool, bool) {
+        self.tun.gso()
     }
 
     fn into_io_send_callback(

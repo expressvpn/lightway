@@ -405,6 +405,24 @@ impl Tun {
         }
     }
 
+    /// Recv multiple packets from `Tun`. `buffers` is caller-owned scratch
+    /// reused across calls; each variant uses only the part it needs (see
+    /// [`TunOffloadBuffers`]). `bufs` entries must be pre-sized to
+    /// MTU by the caller; populated entries are truncated to each packet's
+    /// length on return. Returns the number of packets written.
+    #[cfg(linux)]
+    pub async fn recv_multiple_buf(
+        &self,
+        offload_buffer: &mut TunOffloadBuffers,
+        bufs: &mut [BytesMut],
+    ) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.recv_multiple_buf(offload_buffer, bufs).await,
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => IOCallbackResult::Err(std::io::ErrorKind::Unsupported.into()),
+        }
+    }
+
     /// MTU of `Tun` interface
     pub fn mtu(&self) -> usize {
         match self {
@@ -528,6 +546,38 @@ impl TunDirect {
             tun.tcp_gso()
         } else {
             false
+        }
+    }
+
+    /// Recv multiple packets, segmenting any GRO super-packet using virtio
+    /// offload metadata. `bufs` entries must be pre-sized to MTU; on
+    /// return, populated entries are truncated to each packet's length.
+    #[cfg(linux)]
+    pub async fn recv_multiple_buf(
+        &self,
+        tun_buffer: &mut TunOffloadBuffers,
+        bufs: &mut [BytesMut],
+    ) -> IOCallbackResult<usize> {
+        assert!(
+            bufs.len() <= RECV_MULTIPLE_MAX_SEGMENTS,
+            "bufs length cannot be greater than {RECV_MULTIPLE_MAX_SEGMENTS}"
+        );
+
+        let raw_buffer = &mut tun_buffer.raw_data_buffer;
+        let sizes = &mut tun_buffer.sizes[..bufs.len()];
+
+        let tun = self.tun.as_ref().unwrap();
+        match tun.recv_multiple(raw_buffer, bufs, sizes, 0).await {
+            Ok(count) => {
+                for i in 0..count {
+                    bufs[i].truncate(sizes[i]);
+                }
+                IOCallbackResult::Ok(count)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
         }
     }
 
