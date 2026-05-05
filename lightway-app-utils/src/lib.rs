@@ -30,7 +30,7 @@ pub use iouring::IOUring;
 pub use tun::TunIoUring;
 pub use tun::{DEFAULT_TUN_MTU, Tun, TunConfig, TunDirect};
 #[cfg(linux)]
-pub use tun::{RECV_MULTIPLE_MAX_SEGMENTS, RECV_MULTIPLE_TUN_BUFFER_SIZE};
+pub use tun::{RECV_MULTIPLE_MAX_SEGMENTS, RECV_MULTIPLE_TUN_BUFFER_SIZE, TunOffloadBuffers};
 
 #[cfg(feature = "io-uring")]
 mod metrics;

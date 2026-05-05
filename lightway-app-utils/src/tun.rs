@@ -49,6 +49,33 @@ const _: () = assert!(
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
 
+/// Caller-owned buffers required by [`Tun::recv_multiple_buf`].
+///
+/// [`Tun::Direct`] uses `tun_buffer` (virtio super-packet scratch the
+/// kernel writes into) and `sizes` (per-segment lengths populated by
+/// tun-rs after splitting the super-packet).
+#[cfg(linux)]
+pub struct TunOffloadBuffers {
+    /// Direct path: scratch the kernel writes the raw virtio super-packet
+    /// into before tun-rs splits it into segmented IP packets.
+    pub raw_data_buffer: Vec<u8>,
+    /// Direct path: tun-rs writes per-segment lengths here, one per
+    /// produced packet.
+    pub sizes: Vec<usize>,
+}
+
+#[cfg(linux)]
+impl TunOffloadBuffers {
+    /// Allocate buffers. `max_segments` sizes the Direct-path `sizes` slice
+    /// (typically [`RECV_MULTIPLE_MAX_SEGMENTS`]).
+    pub fn new(max_segments: usize) -> Self {
+        Self {
+            raw_data_buffer: vec![0u8; RECV_MULTIPLE_TUN_BUFFER_SIZE],
+            sizes: vec![0; max_segments],
+        }
+    }
+}
+
 /// Configuration options for creating a interface
 ///
 /// This struct provides a builder-like interface for configuring TUN interfaces
@@ -363,6 +390,7 @@ impl Tun {
     pub fn gso(&self) -> (bool, bool) {
         match self {
             Tun::Direct(tun) => (tun.udp_gso(), tun.tcp_gso()),
+            #[cfg(feature = "io-uring")]
             _ => (false, false),
         }
     }
