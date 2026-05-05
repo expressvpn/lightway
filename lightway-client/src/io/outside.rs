@@ -8,6 +8,8 @@ pub use udp::Udp;
 
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(batch_receive)]
+use lightway_core::MAX_IO_BATCH_SIZE;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallbackArg};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -17,10 +19,6 @@ use std::{net::SocketAddr, sync::Arc};
 pub type RawSocketHandle = std::os::fd::RawFd;
 #[cfg(windows)]
 pub type RawSocketHandle = std::os::windows::io::RawSocket;
-
-/// Maximum number of packets to receive in a single batch syscall.
-#[cfg(batch_receive)]
-pub const BATCH_RECV_SIZE: usize = 32;
 
 /// The underlying outside socket, tagged with its transport type.
 /// Lets callers distinguish UDP from TCP without peeking at the handle.
@@ -57,7 +55,10 @@ pub trait OutsideIO: Sync + Send {
     /// appropriate for stream transports (e.g. TCP) or UDP without batch support.
     /// Transports with a native batch-receive syscall should override this.
     #[cfg(batch_receive)]
-    fn recv_bufs(&self, bufs: &mut [bytes::BytesMut; BATCH_RECV_SIZE]) -> IOCallbackResult<usize> {
+    fn recv_bufs(
+        &self,
+        bufs: &mut [bytes::BytesMut; MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
         match self.recv_buf(&mut bufs[0]) {
             IOCallbackResult::Ok(_size) => IOCallbackResult::Ok(1),
             others => others,

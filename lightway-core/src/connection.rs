@@ -892,6 +892,28 @@ impl<AppState: Send> Connection<AppState> {
         result
     }
 
+    /// Process multiple outside packets.
+    ///
+    /// `is_fatal` is invoked for every per-packet error encountered. If it
+    /// returns `true`, processing stops and the error is returned immediately.
+    /// If it returns `false`, the error is treated as transient
+    /// and processing continues with the next packet with a single error log for debugging.
+    pub fn multiple_outside_data_received<'a>(
+        &mut self,
+        pkts: impl IntoIterator<Item = OutsidePacket<'a>>,
+        is_fatal: impl Fn(&ConnectionError) -> bool,
+    ) -> ConnectionResult<usize> {
+        let mut total = 0;
+        for pkt in pkts {
+            match self.outside_data_received(pkt) {
+                Ok(n) => total += n,
+                Err(e) if is_fatal(&e) => return Err(e),
+                Err(e) => error!("Failed to process outside data: {e}"),
+            }
+        }
+        Ok(total)
+    }
+
     /// Consume data received from inside path and send it as
     /// outside data packet.
     /// The returned Poll value reflects the inside I/O requirements.
