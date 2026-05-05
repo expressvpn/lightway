@@ -7,7 +7,7 @@ use serde_with::{DisplayFromStr, serde_as};
 
 /// Wrapper for compatibility with both clap
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NonZeroDuration(#[serde_as(as = "DisplayFromStr")] humantime::Duration);
 
 impl std::fmt::Display for NonZeroDuration {

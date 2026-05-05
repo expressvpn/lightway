@@ -32,7 +32,6 @@ async-trait.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
 clap.workspace = true
-ctrlc.workspace = true
 educe.workspace = true
 futures = "0.3.30"
 libc.workspace = true
@@ -83,6 +82,7 @@ objc2-core-foundation = "0.3.1"
 objc2-system-configuration = "0.3.1"
 
 [target.'cfg(windows)'.dependencies]
+ctrlc.workspace = true
 uuid = "1"
 windows-dpapi = "0.2.0"
 windows-sys = { workspace = true, features = [

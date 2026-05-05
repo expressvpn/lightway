@@ -38,7 +38,7 @@ use tokio::{
     net::{TcpListener, UdpSocket},
     task::JoinHandle,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 pub use crate::connection::ConnectionState;
 pub use crate::io::inside::{InsideIO, InsideIORecv};
@@ -399,12 +399,33 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     });
 
     let (ctrlc_tx, ctrlc_rx) = tokio::sync::oneshot::channel();
-    let mut ctrlc_tx = Some(ctrlc_tx);
-    ctrlc::set_handler(move || {
-        if let Some(Err(err)) = ctrlc_tx.take().map(|tx| tx.send(())) {
-            warn!("Failed to send Ctrl-C signal: {err:?}");
-        }
-    })?;
+
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to register SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+            let _ = ctrlc_tx.send(());
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        let mut ctrlc_tx = Some(ctrlc_tx);
+        ctrlc::set_handler(move || {
+            if let Some(Err(err)) = ctrlc_tx.take().map(|tx| tx.send(())) {
+                tracing::warn!("Failed to send Ctrl-C signal: {err:?}");
+            }
+        })?;
+    }
 
     tokio::select! {
         err = server.run() => err.context("Outside IO loop exited"),

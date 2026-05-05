@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use lightway_core::Cipher as LWCipher;
 
-#[derive(Copy, Clone, Debug, JsonSchema, ValueEnum, Serialize, Deserialize, Default, PartialEq)]
+#[derive(
+    Copy, Clone, PartialEq, Eq, Debug, JsonSchema, ValueEnum, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 /// [`LWCipher`] wrapper compatible with clap

@@ -23,7 +23,6 @@ average = "0.17.0"
 bytes.workspace = true
 bytesize.workspace = true
 clap.workspace = true
-ctrlc.workspace = true
 delegate.workspace = true
 educe.workspace = true
 ipnet.workspace = true
@@ -52,6 +51,9 @@ tokio-stream = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-log = "0.2.0"
 tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc.workspace = true
 
 [dev-dependencies]
 more-asserts.workspace = true

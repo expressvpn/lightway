@@ -7,7 +7,7 @@ use serde_with::{DisplayFromStr, serde_as};
 
 /// Wrapper for compatibility with clap
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Duration(#[serde_as(as = "DisplayFromStr")] humantime::Duration);
 
 impl std::fmt::Display for Duration {
