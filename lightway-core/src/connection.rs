@@ -449,7 +449,7 @@ pub struct Connection<AppState: Send = ()> {
     expresslane: expresslane::Expresslane<AppState>,
 
     /// Inside packets queued for batched send via
-    /// [`InsideIOSendCallback::send_multiple`]. Drained by
+    /// `InsideIOSendCallback::send_multiple`. Drained by
     /// [`Connection::flush_to_inside`].
     #[cfg(target_os = "linux")]
     inside_send_batch: Vec<BytesMut>,
@@ -924,7 +924,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Process multiple outside packets. If `inside_batch_enabled` is true, it will batch
-    /// their inside-bound packets into a single [`InsideIOSendCallback::send_multiple`]
+    /// their inside-bound packets into a single [`InsideIOSendCallback::send_multiple`
     /// call at the end. If not, it will just process all the packets and send it to the TUN device
     /// one-by-one.
     ///
@@ -2138,7 +2138,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Flush any inside packets queued via [`Self::queue_to_inside`] in a
-    /// single [`InsideIOSendCallback::send_multiple`] call.
+    /// single [`InsideIOSendCallback::send_multiple` call.
     ///
     /// Returns how many bytes are actually sent
     /// Only Linux clients support this
