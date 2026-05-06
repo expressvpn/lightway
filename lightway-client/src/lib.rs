@@ -509,9 +509,13 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
     };
     let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
+    let mtu = inside_io.mtu();
+    let mut buf = BytesMut::with_capacity(mtu);
     loop {
-        let mut buf = match inside_io.recv_buf().await {
-            IOCallbackResult::Ok(buf) => buf,
+        buf.clear();
+        buf.resize(mtu, 0);
+        match inside_io.recv_buf(&mut buf).await {
+            IOCallbackResult::Ok(_n) => {}
             IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
             IOCallbackResult::Err(err) => {
                 // Fatal error

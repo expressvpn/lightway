@@ -20,6 +20,7 @@ pub use lightway_core::{
 pub type ServerEventCbType = Arc<dyn Fn(SessionId, &Event) + Send + Sync>;
 
 use anyhow::{Context, Result, anyhow};
+use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use lightway_app_utils::{PacketCodecFactoryType, TunConfig, connection_ticker_cb};
 use lightway_core::{
@@ -369,9 +370,13 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     };
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        let mtu = inside_io.mtu();
+        let mut buf = BytesMut::with_capacity(mtu);
         loop {
-            let mut buf = match inside_io.recv_buf().await {
-                IOCallbackResult::Ok(buf) => buf,
+            buf.clear();
+            buf.resize(mtu, 0);
+            match inside_io.recv_buf(&mut buf).await {
+                IOCallbackResult::Ok(_n) => {}
                 IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
                 IOCallbackResult::Err(err) => {
                     break Err(anyhow!(err).context("InsideIO recv buf error"));

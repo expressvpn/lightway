@@ -290,12 +290,20 @@ impl Tun {
         ))
     }
 
-    /// Recv a packet from `Tun`
-    pub async fn recv_buf(&self) -> IOCallbackResult<bytes::BytesMut> {
+    /// Recv a packet from `Tun` into `buf`.
+    ///
+    /// On success, `buf` holds the packet bytes and `buf.len()` equals the
+    /// returned size. The caller must size `buf` to at least the interface
+    /// MTU before calling (e.g. via `resize(mtu, 0)`).
+    ///
+    /// The [`Tun::Direct`] backend fills `buf` in place. The `IoUring` backend
+    /// swaps `buf` for a buffer from its internal pool, so the underlying
+    /// allocation may differ between calls.
+    pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self {
-            Tun::Direct(t) => t.recv_buf().await,
+            Tun::Direct(t) => t.recv_buf(buf).await,
             #[cfg(feature = "io-uring")]
-            Tun::IoUring(t) => t.recv_buf().await,
+            Tun::IoUring(t) => t.recv_buf(buf).await,
         }
     }
 
@@ -381,16 +389,15 @@ impl TunDirect {
     }
 
     /// Recv from Tun
-    pub async fn recv_buf(&self) -> IOCallbackResult<bytes::BytesMut> {
+    pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
-        let mut buf = BytesMut::zeroed(self.mtu as usize);
-        match tun.recv(buf.as_mut()).await {
+        match tun.recv(buf).await {
             // TODO: Check whether we can use poll
             // Getting spurious reads
             Ok(0) => IOCallbackResult::WouldBlock,
             Ok(nr) => {
-                let _ = buf.split_off(nr);
-                IOCallbackResult::Ok(buf)
+                buf.truncate(nr);
+                IOCallbackResult::Ok(nr)
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
@@ -488,9 +495,13 @@ impl TunIoUring {
     }
 
     /// Recv from Tun
-    pub async fn recv_buf(&self) -> IOCallbackResult<BytesMut> {
+    pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self.tun_io_uring.recv().await {
-            Ok(pkt) => IOCallbackResult::Ok(pkt),
+            Ok(pkt) => {
+                let len = pkt.len();
+                *buf = pkt;
+                IOCallbackResult::Ok(len)
+            }
             Err(e) => IOCallbackResult::Err(std::io::Error::other(e)),
         }
     }

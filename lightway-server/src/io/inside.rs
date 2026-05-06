@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait InsideIORecv: Sync + Send {
-    async fn recv_buf(&self) -> IOCallbackResult<bytes::BytesMut>;
+    async fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize>;
 
     fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState>;
 }

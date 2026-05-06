@@ -16,9 +16,12 @@ use crate::ConnectionState;
 /// Trait for InsideIORecv
 /// This will be used client app to fetch inside packets
 pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
-    async fn recv_buf(&self) -> IOCallbackResult<BytesMut>;
+    async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize>;
 
     fn try_send(&self, pkt: BytesMut, ip_config: Option<InsideIpConfig>) -> Result<usize>;
+
+    /// MTU of the underlying interface.
+    fn mtu(&self) -> usize;
 
     fn into_io_send_callback(
         self: Arc<Self>,
