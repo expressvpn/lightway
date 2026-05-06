@@ -94,6 +94,10 @@ run-udp-iouring-test:
 run-udp-batch-receive-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive"
 
+# run-udp-offload-batch-receive-test runs e2e test using UDP with TUN offloading and batch receive enabled
+run-udp-offload-batch-receive-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-offload --enable-batch-receive"
+
 # run-udp-expresslane-test runs e2e test using UDP with expresslane enabled
 run-udp-expresslane-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane"
@@ -157,6 +161,7 @@ run-all-tests:
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
     BUILD +run-udp-batch-receive-test
+    BUILD +run-udp-offload-batch-receive-test
     BUILD +run-udp-expresslane-test
     BUILD +run-udp-expresslane-compat-test
     BUILD +run-tcp-iouring-test
