@@ -11,8 +11,6 @@ use tokio_stream::StreamExt;
 use tracing::{error, trace};
 
 use config::{Config, ConfigPatch};
-#[cfg(feature = "debug")]
-use lightway_app_utils::wolfssl_tracing_callback;
 use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
 #[cfg(feature = "debug")]
 use lightway_core::set_logging_callback;
@@ -102,7 +100,7 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "debug")]
     if config.tls_debug {
-        set_logging_callback(Some(wolfssl_tracing_callback));
+        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
     }
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();

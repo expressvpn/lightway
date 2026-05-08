@@ -40,8 +40,6 @@ use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
 use crate::route_manager::{RouteManager, RouteMode};
-#[cfg(feature = "debug")]
-use lightway_app_utils::wolfssl_tracing_callback;
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
@@ -847,7 +845,7 @@ pub async fn connect<
 
     #[cfg(feature = "debug")]
     if config.tls_debug {
-        set_logging_callback(Some(wolfssl_tracing_callback));
+        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
     }
 
     let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) =
