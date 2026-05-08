@@ -108,11 +108,10 @@ pub fn enable_tls_debug() {
     wolfssl::enable_debugging(true)
 }
 
-/// Enables debug logging from WolfSSL and sets the callback for the logs
+/// Sets the callback for the logs from WolfSSL
 #[cfg(feature = "debug")]
 pub fn set_logging_callback(cb: LoggingCallback) {
-    enable_tls_debug();
-    wolfssl::set_logging_callback(cb)
+    wolfssl::install_logging_callback(cb)
 }
 
 #[cfg(feature = "fuzzing_api")]

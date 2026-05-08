@@ -4259,9 +4259,9 @@ dependencies = [
 
 [[package]]
 name = "wolfssl"
-version = "6.0.0"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2378ebfea89ff50a554abdf75920def17cada824660248b00d8771e887ea72c2"
+checksum = "5a726e0194293a979ccdc87c6bc9fe7ff6f9ac66931f29d0d96e394e180f9933"
 dependencies = [
  "bytes",
  "log",
