@@ -153,20 +153,9 @@ impl RustVpnConnection {
         let mut config = crate::config::Config::default();
 
         config.apply(serde_saphyr::from_str(&config_content)?);
-        config.servers.push(crate::config::ConnectionConfig {
-            server: config.server.clone(),
-            mode: config.mode,
-            server_dn: config.server_dn.take(),
-            cipher: config.cipher,
-            outside_mtu: config.outside_mtu,
-            user: config.user.take(),
-            password: config.password.take(),
-            token: config.token.take(),
-            ca_cert: Some(config.ca_cert.clone()),
-        });
 
-        info!("Received {} endpoints", config.servers.len());
-        if config.servers.is_empty() {
+        info!("Received {} endpoints", config.len());
+        if config.is_empty() {
             return Err(LightwayError::EmptyEndpointsError);
         }
 

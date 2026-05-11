@@ -290,6 +290,12 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     /// Server IP address and port
     pub server: SocketAddr,
 
+    /// Auth parameters to use for connection
+    pub auth: AuthMethod,
+
+    /// Content of CA certificate
+    pub cert_content: String,
+
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub inside_plugins: PluginFactoryList,
@@ -805,16 +811,28 @@ pub async fn connect<
     ExtAppState: 'static + Default + Send + Sync,
 >(
     config: &ClientConfig<'_, ExtAppState>,
-    mut server_config: ClientConnectionConfig<EventHandler>,
+    server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
 ) -> Result<ClientConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
+    let ClientConnectionConfig {
+        mode,
+        cipher,
+        server,
+        server_dn,
+        auth,
+        cert_content,
+        inside_pkt_codec,
+        inside_plugins,
+        outside_plugins,
+        event_handler,
+    } = server_config;
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match server_config.mode {
+        match mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server_config.server, maybe_sock)
+                let mut sock = io::outside::Udp::new(server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                     .context("Outside IO UDP")?;
@@ -827,7 +845,7 @@ pub async fn connect<
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(server_config.server, maybe_sock)
+                let sock = io::outside::Tcp::new(server, maybe_sock)
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
@@ -853,29 +871,28 @@ pub async fn connect<
         set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
     }
 
-    let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) =
-        match &server_config.inside_pkt_codec {
-            Some(codec_factory) => {
-                let codec = codec_factory.build();
-                (
-                    Some((codec.encoder, codec.decoder)),
-                    Some(codec.encoded_pkt_receiver),
-                    Some(codec.decoded_pkt_receiver),
-                )
-            }
-            None => (None, None, None),
-        };
+    let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) = match &inside_pkt_codec {
+        Some(codec_factory) => {
+            let codec = codec_factory.build();
+            (
+                Some((codec.encoder, codec.decoder)),
+                Some(codec.encoded_pkt_receiver),
+                Some(codec.decoded_pkt_receiver),
+            )
+        }
+        None => (None, None, None),
+    };
 
     let conn_builder = ClientContextBuilder::new(
         connection_type,
-        config.root_ca_cert,
+        RootCertificate::PemBuffer(cert_content.as_bytes()),
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
     )?
-    .with_cipher(server_config.cipher.into())?
-    .with_inside_plugins(server_config.inside_plugins)
-    .with_outside_plugins(server_config.outside_plugins)
+    .with_cipher(cipher.into())?
+    .with_inside_plugins(inside_plugins)
+    .with_outside_plugins(outside_plugins)
     .when(config.enable_expresslane, |b| {
         b.with_expresslane(config.expresslane_keys_rotation_interval)
     })
@@ -890,11 +907,11 @@ pub async fn connect<
         outside_io.clone().into_io_send_callback(),
         config.outside_mtu,
     )?
-    .with_auth(config.auth.clone())
+    .with_auth(auth)
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(inside_io_codec)
     .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
-    .when_some(server_config.server_dn, |b, sdn| {
+    .when_some(server_dn, |b, sdn| {
         b.with_server_domain_name_validation(&sdn)
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
@@ -923,7 +940,6 @@ pub async fn connect<
     let (connected_tx, connected_rx) = oneshot::channel();
     let (disconnected_tx, disconnected_rx) = oneshot::channel();
 
-    let event_handler = server_config.event_handler.take();
     join_set.spawn(handle_events(
         event_stream,
         keepalive.clone(),
@@ -994,8 +1010,8 @@ pub async fn connect<
             Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
             io = &mut outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
             io = &mut inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
-            io = &mut encoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
-            io = &mut decoded_pkt_send_task, if server_config.inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
+            io = &mut encoded_pkt_send_task, if inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
+            io = &mut decoded_pkt_send_task, if inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
             _ = &mut ticker_task => Err(anyhow!("Ticker task stopped")),
             result = &mut network_change_task => {
                 match result {

@@ -175,18 +175,18 @@ async fn setup_tunnel_interface(
 pub(crate) async fn async_lightway_start(
     tun_fd: RawFd,
     external_event_handler: Arc<dyn EventHandlers>,
-    config: Config,
+    mut config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
-    let mut outside_sockets = config
-        .servers
+    let servers = config.take_servers()?;
+    let mut outside_sockets = servers
         .iter()
         .map(|s| OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok())
         .collect::<Vec<Option<OutsideSocket>>>();
 
     // Strore meta data before the server consumed
-    let server_len = config.servers.len();
-    let tcp_connections_only = config.servers.iter().all(|s| s.mode.is_tcp());
+    let server_len = servers.len();
+    let tcp_connections_only = servers.iter().all(|s| s.mode.is_tcp());
 
     let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
 
@@ -204,8 +204,7 @@ pub(crate) async fn async_lightway_start(
     let (mut in_progress_connection_abort_handles, mut in_progress_connections): (
         Vec<_>,
         FuturesUnordered<_>,
-    ) = config
-        .servers
+    ) = servers
         .into_iter()
         .enumerate()
         .map(|(instance_id, connect_conf)| {
