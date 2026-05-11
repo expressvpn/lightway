@@ -232,10 +232,6 @@ async fn main() -> Result<()> {
     };
 
     let config = ClientConfig {
-        auth: config.take_auth()?,
-        root_ca_cert: config
-            .load_ca()
-            .unwrap_or(config.load_ca_file(&mut _root_ca_cert_path)),
         outside_mtu: config.outside_mtu,
         inside_io,
         tun_config,
