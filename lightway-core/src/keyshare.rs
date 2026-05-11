@@ -12,10 +12,10 @@ pub enum KeyShare {
 
 impl KeyShare {
     /// Get the corresponding curve group
-    pub fn as_curve_group(&self) -> wolfssl::CurveGroup {
+    pub fn as_curve_group(&self) -> crate::tls::CurveGroup {
         match self {
-            KeyShare::P521MLKEM1024 => wolfssl::CurveGroup::P521MLKEM1024,
-            KeyShare::X25519MLKEM768 => wolfssl::CurveGroup::X25519MLKEM768,
+            KeyShare::P521MLKEM1024 => crate::tls::CurveGroup::P521MLKEM1024,
+            KeyShare::X25519MLKEM768 => crate::tls::CurveGroup::X25519MLKEM768,
         }
     }
 }

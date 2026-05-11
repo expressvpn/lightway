@@ -70,10 +70,10 @@ fn get_lightway_client_hash() -> String {
     env!("GIT_HASH").to_string()
 }
 
-/// Get the version for WolfSSL
+/// Get the version for TLS library
 #[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
-fn get_wolfssl_version() -> String {
-    lightway_core::wolfssl::get_wolfssl_version_string().to_string()
+fn get_tls_library_version() -> String {
+    lightway_core::tls::get_version_string().to_string()
 }
 
 /// Sets up a global default logging bridge between Rust and the mobile app, while

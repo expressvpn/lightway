@@ -4,7 +4,7 @@ use bytes::{Buf, BytesMut};
 use delegate::delegate;
 use more_asserts::*;
 
-use wolfssl::IOCallbackResult;
+use crate::tls::IOCallbackResult;
 
 use crate::{
     ConnectionType, OutsideIOSendCallbackArg, PluginResult, Version, plugin::PluginList, wire,
@@ -78,9 +78,8 @@ impl SendBuffer {
     }
 }
 
-/// Adapt requirements of [`crate::Connection`] to those of the
-/// [`wolfssl::IOCallbacks`] API.
-pub(crate) struct WolfSSLIOAdapter {
+/// Adapt requirements of [`crate::Connection`] to those of the TLS/DTLS I/O API.
+pub(crate) struct TlsIOAdapter {
     pub(crate) connection_type: ConnectionType,
 
     pub(crate) protocol_version: Version,
@@ -96,7 +95,7 @@ pub(crate) struct WolfSSLIOAdapter {
 
     /// In case of TCP, send can succeed even for partial data and the caller
     /// has to call send again with remaining data.
-    /// But since we run the data through plugins, we cannot reliably let WolfSSL
+    /// But since we run the data through plugins, we cannot reliably let the TLS layer
     /// know about the remaining data to send.
     /// This buffer will be used to save the remaining data, to be sent in next call.
     pub(crate) send_buf: SendBuffer,
@@ -110,7 +109,7 @@ pub(crate) struct WolfSSLIOAdapter {
     pub(crate) outside_plugins: Arc<PluginList>,
 }
 
-impl WolfSSLIOAdapter {
+impl TlsIOAdapter {
     pub(crate) fn set_session_id(&mut self, session_id: wire::SessionId) {
         self.session_id = session_id;
     }
@@ -192,12 +191,12 @@ impl WolfSSLIOAdapter {
                 // `wire::Header::WIRE_SIZE` + `b.len()` that we
                 // tried to send.
                 //
-                // WolfSSL does not know about header, so return buf.len()
+                // TLS library does not know about header, so return buf.len()
                 if n > wire::Header::WIRE_SIZE {
                     IOCallbackResult::Ok(buf.len())
                 } else {
                     // We didn't even manage to side the header, so we
-                    // sent nothing from WolfSSL's point of view.
+                    // sent nothing from the TLS library's point of view.
                     IOCallbackResult::Ok(0)
                 }
             }
@@ -243,7 +242,7 @@ impl WolfSSLIOAdapter {
             // We have buffered data, so we have previously returned
             // `WouldBlock` and continue to send the remaining data.
             //
-            // WolfSSL API says we will be called back with the same
+            // TLS API says we will be called back with the same
             // data, possibly plus some extra (so the new `buf` we've
             // been given this time should have the original `buf`
             // from last time as a prefix).
@@ -275,7 +274,7 @@ impl WolfSSLIOAdapter {
     }
 }
 
-impl wolfssl::IOCallbacks for WolfSSLIOAdapter {
+impl crate::tls::IOCallbacks for TlsIOAdapter {
     fn recv(&mut self, buf: &mut [u8]) -> IOCallbackResult<usize> {
         let pending_buf = &mut self.recv_buf;
         if pending_buf.is_empty() {
@@ -365,8 +364,8 @@ mod tests {
         connection_type: ConnectionType,
         io: OutsideIOSendCallbackArg,
         outside_plugins: PluginList,
-    ) -> WolfSSLIOAdapter {
-        WolfSSLIOAdapter {
+    ) -> TlsIOAdapter {
+        TlsIOAdapter {
             connection_type,
             protocol_version: Version::MAXIMUM,
             aggressive_send: false,

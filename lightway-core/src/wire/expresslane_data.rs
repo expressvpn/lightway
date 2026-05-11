@@ -78,16 +78,16 @@ impl From<[u8; EXPRESSLANE_KEY_SIZE]> for ExpresslaneKey {
     }
 }
 
-// Make sure WolfSsl Aes256Gcm key size is as expected
+// Make sure TLS library Aes256Gcm key size is as expected
 const _: () = {
-    assert!(wolfssl::Aes256Gcm::KEY_SIZE == EXPRESSLANE_KEY_SIZE);
+    assert!(crate::tls::Aes256Gcm::KEY_SIZE == EXPRESSLANE_KEY_SIZE);
 };
 
 struct ExpresslaneDataCipher {
     // Expresslane key
     pub key: ExpresslaneKey,
     // Underlying cipher algo
-    cipher: wolfssl::Aes256Gcm,
+    cipher: crate::tls::Aes256Gcm,
 }
 
 impl Debug for ExpresslaneDataCipher {
@@ -308,7 +308,7 @@ impl ExpresslaneData {
 
     pub(crate) fn update_next_self_key(&mut self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
         let mut cipher =
-            wolfssl::Aes256Gcm::new().map_err(|_| ExpresslaneError::NewCipherFailed)?;
+            crate::tls::Aes256Gcm::new().map_err(|_| ExpresslaneError::NewCipherFailed)?;
         cipher
             .set_key(key.0)
             .map_err(|_| ExpresslaneError::SetKeyFailed)?;
@@ -325,7 +325,7 @@ impl ExpresslaneData {
 
     pub(crate) fn update_peer_key(&mut self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
         let mut cipher =
-            wolfssl::Aes256Gcm::new().map_err(|_| ExpresslaneError::NewCipherFailed)?;
+            crate::tls::Aes256Gcm::new().map_err(|_| ExpresslaneError::NewCipherFailed)?;
         cipher
             .set_key(key.0)
             .map_err(|_| ExpresslaneError::SetKeyFailed)?;

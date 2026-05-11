@@ -5,7 +5,7 @@ use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
 #[cfg(feature = "debug")]
-use wolfssl::Tls13SecretCallbacksArg;
+use crate::tls::Tls13SecretCallbacksArg;
 
 #[cfg(feature = "postquantum")]
 use crate::KeyShare;
@@ -36,8 +36,8 @@ pub enum ConnectionBuilderError {
     #[error("Unsupported Outside MTU: {0}")]
     UnsupportedOutsideMtu(usize),
     /// Failed to create a new Session
-    #[error("WolfSSL Error: {0}")]
-    FailedNew(#[from] wolfssl::NewSessionError),
+    #[error("TLS Error: {0}")]
+    FailedNew(#[from] crate::tls::NewSessionError),
     /// Plugin factory error occurred
     #[error("PluginFactory Error: {0}")]
     PluginFactory(#[from] PluginFactoryError),
@@ -55,7 +55,7 @@ pub struct ClientConnectionBuilder<AppState> {
     outside_mtu: usize,
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
-    session_config: wolfssl::SessionConfig<super::WolfSSLIOAdapter>,
+    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
@@ -78,19 +78,19 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::WolfSSLIOAdapter {
+        let io = super::TlsIOAdapter {
             connection_type,
             protocol_version: Version::MAXIMUM,
             aggressive_send: connection_type.is_datagram(),
             outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::IOAdapterSendBuffer::new(outside_mtu),
+            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
             session_id: SessionId::EMPTY,
             outside_plugins: outside_plugins.clone(),
         };
         let session_config =
-            wolfssl::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
+            crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
                     .with_dtls_nonblocking(true)
             });
@@ -230,7 +230,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             .auth_method
             .ok_or(ConnectionBuilderError::AuthRequired)?;
 
-        let session = self.ctx.wolfssl.new_session(self.session_config)?;
+        let session = self.ctx.tls_ctx.new_session(self.session_config)?;
 
         tracing::info!("New Connection");
 
@@ -275,7 +275,7 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     ctx: &'a ServerContext<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
-    session_config: wolfssl::SessionConfig<super::WolfSSLIOAdapter>,
+    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
@@ -300,19 +300,19 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::WolfSSLIOAdapter {
+        let io = super::TlsIOAdapter {
             connection_type,
             protocol_version,
             aggressive_send: false,
             outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::IOAdapterSendBuffer::new(outside_mtu),
+            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
             session_id,
             outside_plugins: outside_plugins.clone(),
         };
         let session_config =
-            wolfssl::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
+            crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
                     .with_dtls_nonblocking(true)
                     .with_dtls13_allow_ch_frag(true)
@@ -369,7 +369,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             ));
         }
 
-        let session = self.ctx.wolfssl.new_session(self.session_config)?;
+        let session = self.ctx.tls_ctx.new_session(self.session_config)?;
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,

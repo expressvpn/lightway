@@ -136,7 +136,7 @@ impl UdpServer {
         sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Omit)?;
 
         // Check for the socket's writable ready status, so that it can be used
-        // successfuly in WolfSsl's `OutsideIOSendCallback` callback
+        // successfully in `OutsideIOSendCallback` callback
         sock.writable().await?;
         let sock = Arc::new(sock);
 
@@ -228,7 +228,7 @@ impl UdpServer {
         match conn.outside_data_received(pkt) {
             Ok(0) => {
                 // We will hit this case when there is UDP packet duplication.
-                // Wolfssl skip duplicate packets and thus no frames read.
+                // TLS library skips duplicate packets and thus no frames read.
                 // It is also possible that adversary can capture the packet
                 // and replay it. In any case, skip processing further
                 if update_peer_address {
@@ -236,7 +236,7 @@ impl UdpServer {
                 }
             }
             Ok(_) => {
-                // NOTE: We wait until the first successful WolfSSL
+                // NOTE: We wait until the first successful TLS
                 // decrypt to protect against the case where a crafted
                 // packet with a session ID causes us to change the
                 // connection IP without verifying the SSL connection

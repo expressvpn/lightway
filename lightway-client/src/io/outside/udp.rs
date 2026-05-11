@@ -38,7 +38,7 @@ impl Udp {
         };
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
         // Check for the socket's writable ready status, so that it can be used
-        // successfuly in WolfSsl's `OutsideIOSendCallback` callback
+        // successfuly in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
 
         Ok(Self {
@@ -162,14 +162,14 @@ impl OutsideIOSendCallback for Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
                 // Possibly the server isn't listening (yet).
                 //
-                // Swallow the error so the WolfSSL socket does not
-                // enter the error state, and DTLS would handle retransmission as well.
+                // Swallow the error so the TLS socket does not
+                // enter the error state, and DTLS would handles the retransmission as well.
                 //
                 // This way we can continue if/when the server shows up.
                 //
                 // Returning the number of bytes requested to be sent to mock
                 // that the send is successful.
-                // Otherwise, WolfSSL perceives that no data is sent and try
+                // Otherwise, TLS perceives that no data is sent and try
                 // to send the same data again, creating a live-lock until
                 // the network is reachable.
                 IOCallbackResult::Ok(buf.len())

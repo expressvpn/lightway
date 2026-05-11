@@ -16,15 +16,13 @@ mod metrics;
 mod packet;
 mod packet_codec;
 mod plugin;
+pub mod tls;
 mod utils;
 mod version;
 mod wire;
 
-// Reexport wolfssl types
-pub use wolfssl::{IOCallbackResult, ProtocolVersion, RootCertificate, Secret};
-
-// Re-export wolfssl in case applications need it
-pub use wolfssl;
+// Reexport TLS types
+pub use tls::{IOCallbackResult, ProtocolVersion, RootCertificate, Secret};
 
 // Reexport our own types
 pub use builder_predicates::BuilderPredicates;
@@ -56,14 +54,14 @@ pub use plugin::{
     Plugin, PluginFactory, PluginFactoryError, PluginFactoryList, PluginFactoryType, PluginResult,
     PluginType,
 };
+#[cfg(feature = "debug")]
+pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
 };
 pub use version::Version;
 pub use wire::{AuthMethod, ExpresslaneKey, Header, SessionId};
-#[cfg(feature = "debug")]
-pub use wolfssl::{LoggingCallback, Tls13SecretCallbacks};
 
 /// Default MTU size for a packet on the outside path (on the wire)
 pub const MAX_OUTSIDE_MTU: usize = 1500;
@@ -102,16 +100,16 @@ pub const MIN_INSIDE_MTU: usize = 1250;
 /// The largest supported inside MTU.
 pub const MAX_INSIDE_MTU: usize = 1500;
 
-/// Enable debug logging from WolfSSL
+/// Enable debug logging from the TLS library
 #[cfg(feature = "debug")]
 pub fn enable_tls_debug() {
-    wolfssl::enable_debugging(true)
+    tls::enable_debugging(true)
 }
 
-/// Sets the callback for the logs from WolfSSL
+/// Sets the callback for the logs from the TLS library
 #[cfg(feature = "debug")]
-pub fn set_logging_callback(cb: LoggingCallback) {
-    wolfssl::install_logging_callback(cb)
+pub fn set_logging_callback(cb: TlsLoggingCallback) {
+    tls::install_logging_callback(cb)
 }
 
 #[cfg(feature = "fuzzing_api")]

@@ -50,7 +50,7 @@ impl State {
     /// Implicitly transitions to `Self::Pending` if required.
     ///
     /// On a true result the caller must start a key update i.e. call
-    /// `wolfssl::Session.try_trigger_update_key()`.
+    /// `Session::try_trigger_update_key()`.
     pub fn required(&mut self) -> bool {
         match *self {
             Self::Disabled | Self::Initializing { .. } | Self::Pending { .. } => false,
@@ -71,7 +71,7 @@ impl State {
     /// Implicitly transitions to `Self::Waiting` if required.
     ///
     /// Should be called whenever
-    /// `wolfssl::Session::is_update_keys_pending()` is false.
+    /// `Session::is_update_keys_pending()` is false.
     pub fn complete(&mut self) -> bool {
         match *self {
             Self::Disabled | Self::Initializing { .. } | Self::Waiting { .. } => false,

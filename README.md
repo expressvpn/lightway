@@ -516,8 +516,8 @@ The resulting file can then be exported to Wireshark to decrypt data traffic. Th
 https://www.wireshark.org/docs/wsug_html_chunked/ChIOExportSection.html#ChIOExportTLSSessionKeys
 https://wiki.wireshark.org/TLS#using-the-pre-master-secret
 
-### WolfSSL debug logging
+### TLS debug logging
 
 Both `lightway-client` and `lightway-server` support a `--tls-debug`
 option when built with their respective `debug` feature enabled. This
-enables WolfSSL's debug logging.
+enables TLS's debug logging.

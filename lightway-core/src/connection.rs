@@ -6,6 +6,7 @@ mod fragment_map;
 mod io_adapter;
 mod key_update;
 
+use crate::tls::{ErrorKind, IOCallbackResult, ProtocolVersion};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
 use rand::distr::{Distribution, StandardUniform};
@@ -19,7 +20,6 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
-use wolfssl::{ErrorKind, IOCallbackResult, ProtocolVersion};
 
 use crate::context::ExpresslaneTickData;
 use crate::{
@@ -46,20 +46,20 @@ use crate::wire::{AuthSuccessWithConfigV4, ExpresslaneError, ExpresslaneKey, Exp
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
-pub(crate) use io_adapter::{SendBuffer as IOAdapterSendBuffer, WolfSSLIOAdapter};
+pub(crate) use io_adapter::TlsIOAdapter;
 
 /// D/TLS is a UDP based protocol and requires the application
 /// (rather than the OS as with TCP) to keep track of the need to do
 /// retransmits on packet loss.
 ///
-/// Currently Wolf has timeouts based in seconds. However this is not
+/// Currently the TLS library has timeouts based in seconds. However this is not
 /// sufficient for our goal of sub-second connection times.
 ///
-/// As WolfSSL lacks millisecond timers we use its internal timers but
+/// As the TLS library lacks millisecond timers we use its internal timers but
 /// change its definition to be in 100 millisecond intervals instead of
-/// seconds. So a wolf timeout of 1 second means 100 milliseconds.
+/// seconds. So a TLS timeout of 1 second means 100 milliseconds.
 ///
-/// By default wolf's DTLS max timeout is 64 seconds which translates to
+/// By default the TLS library's DTLS max timeout is 64 seconds which translates to
 /// 6.4 seconds. Since it scales from 1 to 64 by a factor
 /// of 2 each timeout. The total timeout is 12.7 seconds with this scaling
 /// which for our purposes is plenty.
@@ -68,9 +68,9 @@ pub(crate) use io_adapter::{SendBuffer as IOAdapterSendBuffer, WolfSSLIOAdapter}
 /// timeout (firing after a period of inactivity) but instead treat it
 /// as a tick (albeit with an interval which may be adjusted over
 /// time). This tick runs until the connection reaches `State::Online`.
-const WOLF_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
+const TLS_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 
-const WOLF_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
+const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 
 /// Maximum number of retransmissions attempts for lightway frames
 const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
@@ -206,9 +206,9 @@ pub enum ConnectionError {
     #[error("Data Fragment Error: {0}")]
     DataFragmentError(#[from] fragment_map::FragmentMapError),
 
-    /// A WolfSSL error occurred
-    #[error("WolfSSL Error: {0}")]
-    WolfSSL(#[from] wolfssl::Error),
+    /// A TLS error occurred
+    #[error("TLS Error: {0}")]
+    Tls(#[from] crate::tls::Error),
 
     /// Expresslane version mismatch
     #[error("Expresslane version mismatch")]
@@ -261,10 +261,10 @@ impl ConnectionError {
                     Disconnected => true,
                     EncodingReqRetransmitCbDoesNotExist => true,
                     PathMtuDiscoveryRequired { .. } => true,
-                    WolfSSL(wolfssl::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
-                    WolfSSL(wolfssl::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
-                    WolfSSL(wolfssl::Error::Fatal(ErrorKind::PeerClosed)) => true,
-                    WolfSSL(wolfssl::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
+                    Tls(crate::tls::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
+                    Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
+                    Tls(crate::tls::Error::Fatal(ErrorKind::PeerClosed)) => true,
+                    Tls(crate::tls::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
 
                     WireError(wire::FromWireError::UnknownFrameType) => false,
                     WireError(wire::FromWireError::InsufficientData) => false,
@@ -284,7 +284,7 @@ impl ConnectionError {
                     ExpresslaneVersionMismatch => false,
                     ExpreslaneDegraded => false,
                     ExpresslaneError(_) => false,
-                    WolfSSL(_) => false,
+                    Tls(_) => false,
                 }
             }
         }
@@ -362,8 +362,8 @@ pub struct Connection<AppState: Send = ()> {
     /// Current state of the connection
     state: State,
 
-    /// The WolfSSL connection/session
-    session: wolfssl::Session<WolfSSLIOAdapter>,
+    /// The TLS connection/session
+    session: crate::tls::Session<TlsIOAdapter>,
 
     /// Client vs Server state.
     mode: ConnectionMode<AppState>,
@@ -406,14 +406,13 @@ pub struct Connection<AppState: Send = ()> {
     /// When is next tick due (independent of
     /// `is_tick_timer_running`, since application might be using
     /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
-    wolfssl_tick_interval: Option<Duration>,
+    tls_tick_interval: Option<Duration>,
 
-    /// Pending packet to write to WolfSSL
+    /// Pending packet to write to the TLS library
     /// In nonblocking I/O mode, if the underlying I/O could not satisfy the
-    /// needs of wolfSSL_write() to continue, the api will return SSL_ERROR_WANT_WRITE.
+    /// needs of the TLS write to continue, the api will return WANT_WRITE.
     /// In that case, application has to call the api with same buffer again.
-    /// Ref: <https://www.wolfssl.com/documentation/manuals/wolfssl/ssl_8h.html#function-wolfssl_write>
-    wolfssl_pending_pkt: Option<BytesMut>,
+    tls_pending_pkt: Option<BytesMut>,
 
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
@@ -449,7 +448,7 @@ struct NewConnectionArgs<AppState> {
     app_state: AppState,
     connection_type: ConnectionType,
     protocol_version: Version,
-    session: wolfssl::Session<WolfSSLIOAdapter>,
+    session: crate::tls::Session<TlsIOAdapter>,
     session_id: SessionId,
     mode: ConnectionMode<AppState>,
     rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
@@ -503,8 +502,8 @@ impl<AppState: Send> Connection<AppState> {
                 last_data_traffic_from_peer: now,
                 last_outside_data_received: now,
             },
-            wolfssl_tick_interval: None,
-            wolfssl_pending_pkt: None,
+            tls_tick_interval: None,
+            tls_pending_pkt: None,
             fragment_map: once_cell::unsync::Lazy::new(Box::new(move || {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
@@ -536,9 +535,9 @@ impl<AppState: Send> Connection<AppState> {
         // more data than will be available. It's just about possible
         // it might succeed under test conditions.
         match conn.session.try_negotiate()? {
-            wolfssl::Poll::PendingWrite | wolfssl::Poll::PendingRead => {}
-            wolfssl::Poll::Ready(_) => conn.set_state(State::LinkUp)?,
-            wolfssl::Poll::AppData(_) => metrics::wolfssl_appdata(&ProtocolVersion::Unknown),
+            crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {}
+            crate::tls::Poll::Ready(_) => conn.set_state(State::LinkUp)?,
+            crate::tls::Poll::AppData(_) => metrics::tls_appdata(&ProtocolVersion::Unknown),
         }
 
         conn.update_tick_interval();
@@ -712,19 +711,19 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         if matches!(self.state, State::Online) && !key_update_pending {
-            self.wolfssl_tick_interval = None;
+            self.tls_tick_interval = None;
             return;
         }
 
         // Get and scale the tick interval
-        let mut interval = self.session.dtls_current_timeout() / WOLF_TICK_INTERVAL_DIVISOR;
+        let mut interval = self.session.dtls_current_timeout() / TLS_TICK_INTERVAL_DIVISOR;
 
         if matches!(self.tls_protocol_version(), ProtocolVersion::DtlsV1_3)
             && self.session.dtls13_use_quick_timeout()
         {
-            interval /= WOLF_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR;
+            interval /= TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR;
         }
-        self.wolfssl_tick_interval = Some(interval);
+        self.tls_tick_interval = Some(interval);
 
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
@@ -753,7 +752,7 @@ impl<AppState: Send> Connection<AppState> {
     /// `Some(_)`, [`Connection::tick`] should be called that amount
     /// of time later.
     pub fn tick_interval(&self) -> Option<Duration> {
-        self.wolfssl_tick_interval
+        self.tls_tick_interval
     }
 
     /// Inject a tick to the connection. See
@@ -785,15 +784,15 @@ impl<AppState: Send> Connection<AppState> {
                 return Err(ConnectionError::Disconnected);
             }
             _ if self.connection_type.is_datagram() => match self.session.dtls_has_timed_out() {
-                wolfssl::Poll::Ready(true) => {
+                crate::tls::Poll::Ready(true) => {
                     warn!(session_id = ?self.session_id, "DTLS timed out, disconnecting client");
                     let _ = self.disconnect();
                     return Err(ConnectionError::TimedOut);
                 }
-                wolfssl::Poll::PendingWrite
-                | wolfssl::Poll::PendingRead
-                | wolfssl::Poll::Ready(false) => {}
-                wolfssl::Poll::AppData(_) => metrics::wolfssl_appdata(&self.tls_protocol_version()),
+                crate::tls::Poll::PendingWrite
+                | crate::tls::Poll::PendingRead
+                | crate::tls::Poll::Ready(false) => {}
+                crate::tls::Poll::AppData(_) => metrics::tls_appdata(&self.tls_protocol_version()),
             },
             _ => {}
         };
@@ -820,7 +819,7 @@ impl<AppState: Send> Connection<AppState> {
         Ok(auth_handle.expired())
     }
 
-    /// Update WolfSSL Session to use the new outside IO Callback
+    /// Update TLS Session to use the new outside IO Callback
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
         self.session.io_cb_mut().io = new_io;
     }
@@ -1139,7 +1138,7 @@ impl<AppState: Send> Connection<AppState> {
     /// and send the frame in next call.
     fn send_frame_or_drop(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
         // If there is a packet pending, send it first and drop the current one
-        let mut buf = match self.wolfssl_pending_pkt.take() {
+        let mut buf = match self.tls_pending_pkt.take() {
             None => {
                 let mut buf = BytesMut::new();
                 frame.append_to_wire(&mut buf);
@@ -1149,13 +1148,13 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         match self.session.try_write(&mut buf)? {
-            wolfssl::Poll::PendingWrite | wolfssl::Poll::PendingRead => {
-                self.wolfssl_pending_pkt = Some(buf);
+            crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
+                self.tls_pending_pkt = Some(buf);
                 Ok(())
             }
-            wolfssl::Poll::Ready(_) => Ok(()),
-            wolfssl::Poll::AppData(_) => {
-                metrics::wolfssl_appdata(&self.tls_protocol_version());
+            crate::tls::Poll::Ready(_) => Ok(()),
+            crate::tls::Poll::AppData(_) => {
+                metrics::tls_appdata(&self.tls_protocol_version());
                 Ok(())
             }
         }
@@ -1306,21 +1305,20 @@ impl<AppState: Send> Connection<AppState> {
         // It's time to update keys!
         info!(session = ?self.session_id, "Update TLS keys");
         match self.session.try_trigger_update_key()? {
-            // From https://github.com/wolfSSL/wolfssl/blob/3b3c175af0e993ffaae251871421e206cc41963f/src/tls13.c#L12167:
-            //
-            // > If using non-blocking I/O and
-            // > WOLFSSL_ERROR_WANT_WRITE is returned then calling
-            // > wolfSSL_write() will have the message sent when ready.
+            // If using non-blocking I/O and WANT_WRITE is returned,
+            // calling try_write() again will have the message sent when ready.
             //
             // So we need not worry about `PendingWrite` here -- the
             // actual update will happen at some future `try_write`.
-            wolfssl::Poll::PendingWrite | wolfssl::Poll::PendingRead | wolfssl::Poll::Ready(_) => {
+            crate::tls::Poll::PendingWrite
+            | crate::tls::Poll::PendingRead
+            | crate::tls::Poll::Ready(_) => {
                 self.event(Event::TlsKeysUpdateStart);
                 self.update_tick_interval();
                 Ok(())
             }
-            wolfssl::Poll::AppData(_) => {
-                metrics::wolfssl_appdata(&self.tls_protocol_version());
+            crate::tls::Poll::AppData(_) => {
+                metrics::tls_appdata(&self.tls_protocol_version());
                 Ok(())
             }
         }
@@ -1350,20 +1348,20 @@ impl<AppState: Send> Connection<AppState> {
 
         let frame_read_count_result = match self.state {
             State::Connecting => match self.session.try_negotiate()? {
-                wolfssl::Poll::PendingWrite => {
+                crate::tls::Poll::PendingWrite => {
                     self.update_tick_interval();
                     Ok(0)
                 }
-                wolfssl::Poll::PendingRead => {
+                crate::tls::Poll::PendingRead => {
                     self.update_tick_interval();
                     Ok(0)
                 }
-                wolfssl::Poll::Ready(_) => {
+                crate::tls::Poll::Ready(_) => {
                     self.set_state(State::LinkUp)?;
                     self.handle_messages()
                 }
-                wolfssl::Poll::AppData(_) => {
-                    metrics::wolfssl_appdata(&self.tls_protocol_version());
+                crate::tls::Poll::AppData(_) => {
+                    metrics::tls_appdata(&self.tls_protocol_version());
                     Ok(0)
                 }
             },
@@ -1401,12 +1399,12 @@ impl<AppState: Send> Connection<AppState> {
                     self.receive_buf.reserve(self.outside_mtu);
 
                     match self.session.try_read(&mut self.receive_buf)? {
-                        wolfssl::Poll::PendingWrite => break,
-                        wolfssl::Poll::PendingRead => break,
-                        wolfssl::Poll::Ready(_) => continue,
-                        wolfssl::Poll::AppData(data) => {
+                        crate::tls::Poll::PendingWrite => break,
+                        crate::tls::Poll::PendingRead => break,
+                        crate::tls::Poll::Ready(_) => continue,
+                        crate::tls::Poll::AppData(data) => {
                             self.receive_buf.extend_from_slice(&data[..]);
-                            metrics::wolfssl_appdata(&self.tls_protocol_version());
+                            metrics::tls_appdata(&self.tls_protocol_version());
                             continue;
                         }
                     }

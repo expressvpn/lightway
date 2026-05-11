@@ -30,7 +30,7 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | connection_accept_proxy_header_failed | server | Counter | A new connection did cnot present a valid PROXY header |
 | conn_create_failed | server | Counter | A new connection could not be created |
 | conn_alloc_frag_map | core | Counter | A connection has used a fragmented data packet.<br>Therefore the 2M FragmentMap has been allocated |
-| wolfssl_appdata | core | Counter | An AppData result occurred during a WolfSSL operation.<br><br>Given current configuration we do not expect this to be non-zero |
+| tls_appdata | core | Counter | An AppData result occurred during a TLS operation.<br><br>Given current configuration we do not expect this to be non-zero |
 | session_id_mismatch | core | Counter | Server has received a mismatched session_id in the header after the packet content has been validated <br><br>Should generally be expected to happen rarely|
 | received_encoding_req_non_online | core | Counter | Server received an encoding request when the Connection state is not Online |
 | received_encoding_req_with_tcp | core | Counter | Server received an encoding request when the Connection type is TCP |
@@ -43,8 +43,8 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | conn_online | server | Counter | Counts connection which have reached the “online” state after successful authentication |
 | conn_rejected_no_free_ip | server | Counter | Counts connections which were rejected at auth time due to a lack of free IPs in the server pool<br><br>Should generally be expected to be 0 |
 | conn_rejected_access_denied | server | Counter | Counts connections rejected due to invalid auth |
-| conn_tls_error | server | Counter | Counts connections which failed due to a TLS failure from WolfSSL |
-| conn_unknown_error | server | Counter | Counts connections which failed due to a non-TLS failure from WolfSSL |
+| conn_tls_error | server | Counter | Counts connections which failed due to a TLS failure|
+| conn_unknown_error | server | Counter | Counts connections which failed due to a non-TLS failure |
 | conn_aged_out | server | Counter | Counts connections which are disconnected due to being idle (after 1 day of inactivity) |
 | user_auth_eviction | server | Counter | Counts connections which are disconnected due to their auth expiring |
 | conn_client_closed | server | Counter | Counts connections which have been closed since client initiate Disconnect |

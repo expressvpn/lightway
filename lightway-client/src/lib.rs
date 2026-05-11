@@ -261,7 +261,7 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
     #[educe(Debug(ignore))]
     pub best_connection_selected_signal: Option<oneshot::Sender<BestConnectionInfo>>,
 
-    /// Enable WolfSsl debugging
+    /// Enable TLS debugging
     #[cfg(feature = "debug")]
     pub tls_debug: bool,
 

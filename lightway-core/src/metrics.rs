@@ -1,11 +1,11 @@
+use crate::tls::{Aes256GcmError, ProtocolVersion};
 use metrics::{Counter, counter};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
-use wolfssl::{Aes256GcmError, ProtocolVersion};
 
 static METRIC_CONNECTION_ALLOC_FRAG_MAP: LazyLock<Counter> =
     LazyLock::new(|| counter!("conn_alloc_frag_map"));
-const METRIC_WOLFSSL_APPDATA: &str = "wolfssl_appdata";
+const METRIC_TLS_APPDATA: &str = "tls_appdata";
 static METRIC_INSIDE_IO_SEND_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("inside_io_send_failed"));
 static METRIC_SESSION_ID_MISMATCH: LazyLock<Counter> =
@@ -33,11 +33,10 @@ pub(crate) fn connection_alloc_frag_map() {
     METRIC_CONNECTION_ALLOC_FRAG_MAP.increment(1);
 }
 
-/// [`wolfssl`] returned [`wolfssl::Poll::AppData`] which is not expected with
+/// TLS library returned [`crate::tls::Poll::AppData`] which is not expected with
 /// TLS/DTLS 1.3
-pub(crate) fn wolfssl_appdata(tls_version: &ProtocolVersion) {
-    counter!(METRIC_WOLFSSL_APPDATA, TLS_PROTOCOL_VERSION_LABEL => tls_version.as_str())
-        .increment(1);
+pub(crate) fn tls_appdata(tls_version: &ProtocolVersion) {
+    counter!(METRIC_TLS_APPDATA, TLS_PROTOCOL_VERSION_LABEL => tls_version.as_str()).increment(1);
 }
 
 /// A call to [`crate::io::InsideIOSendCallback::send`] failed
