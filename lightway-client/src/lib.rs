@@ -144,15 +144,7 @@ pub struct BestConnectionInfo {
 
 #[derive(educe::Educe)]
 #[educe(Debug)]
-pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
-    /// Auth parameters to use for connection
-    #[educe(Debug(ignore))]
-    pub auth: AuthMethod,
-
-    /// CA certificate
-    #[educe(Debug(ignore))]
-    pub root_ca_cert: RootCertificate<'cert>,
-
+pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Outside (wire) MTU
     pub outside_mtu: usize,
 
@@ -810,7 +802,7 @@ pub async fn connect<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
 ) -> Result<ClientConnection<ExtAppState>> {
@@ -1188,7 +1180,7 @@ fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
 >(
-    config: &ClientConfig<'_, ExtAppState>,
+    config: &ClientConfig<ExtAppState>,
     servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
     if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
@@ -1224,7 +1216,7 @@ pub async fn client<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: 'static + Default + Send + Sync,
 >(
-    mut config: ClientConfig<'_, ExtAppState>,
+    mut config: ClientConfig<ExtAppState>,
     mut stop_signal: oneshot::Receiver<()>,
     conn_confs: Vec<ClientConnectionConfig<EventHandler>>,
 ) -> Result<ClientResult> {

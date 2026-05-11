@@ -9,7 +9,7 @@ use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
 };
-use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, RootCertificate};
+use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
@@ -377,32 +377,6 @@ impl Config {
         }
         Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
     }
-
-    /// Try build auth from config
-    pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
-        take_auth(self.token.take(), self.user.take(), self.password.take())
-    }
-
-    /// Try build CA from ca_crt
-    pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-        load_ca(&self.ca_cert)
-    }
-
-    /// Try build CA from ca_crt file
-    /// If input ca_path is none, will take ca_cert field as path and pass to SSL
-    pub fn load_ca_file<'a>(
-        &self,
-        ca_path: &'a mut Option<PathBuf>,
-    ) -> lightway_core::tls::RootCertificate<'a> {
-        if ca_path.is_none() {
-            *ca_path = Some(PathBuf::from(&self.ca_cert));
-        }
-        RootCertificate::PemFileOrDirectory(
-            ca_path
-                .as_ref()
-                .expect("the path already initialized if it is none"),
-        )
-    }
 }
 
 impl Default for Config {
@@ -523,7 +497,15 @@ impl ConnectionConfig {
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
-            .map(load_ca)
+            .map(|ca| {
+                if check_cert_header(ca) {
+                    Ok(lightway_core::tls::RootCertificate::PemBuffer(
+                        ca.as_bytes(),
+                    ))
+                } else {
+                    Err(Error::InvalidCertificate)
+                }
+            })
             .ok_or(Error::InvalidCertificate)?
     }
 
@@ -574,14 +556,6 @@ fn take_auth(
         (Some(token), _, _) => Ok(AuthMethod::Token { token }),
         (_, Some(user), Some(password)) => Ok(AuthMethod::UserPass { user, password }),
         _ => Err(Error::InsufficientAuth),
-    }
-}
-
-fn load_ca(ca: &String) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-    if check_cert_header(&ca) {
-        Ok(RootCertificate::PemBuffer(ca.as_bytes()))
-    } else {
-        Err(Error::InvalidCertificate)
     }
 }
 
