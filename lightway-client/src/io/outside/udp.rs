@@ -178,6 +178,10 @@ impl OutsideIOSendCallback for Udp {
         #[cfg(not(any(ios, tvos)))]
         let send_result = self.sock.try_send_to(buf, self.peer_addr);
 
+        if let Err(ref e) = send_result {
+            tracing::warn!("failed to send outside UDP: {}", e);
+        }
+
         match send_result {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
