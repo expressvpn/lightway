@@ -71,4 +71,10 @@ pub trait OutsideIO: Sync + Send {
 
     /// Returns the underlying socket tagged with its transport type.
     fn socket(&self) -> OutsideSocket;
+
+    /// Notify the transport that the host network has changed so it can
+    /// refresh kernel-side state (e.g. re-`connect` a UDP socket so the
+    /// kernel re-binds the source address / route on Apple platforms).
+    #[cfg(any(ios, tvos))]
+    async fn network_changed(&self) -> Result<()>;
 }

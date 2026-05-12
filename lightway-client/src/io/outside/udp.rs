@@ -155,6 +155,18 @@ impl OutsideIO for Udp {
         let handle = self.sock.as_raw_socket();
         OutsideSocket::Udp(handle)
     }
+
+    /// Re-`connect` the socket to the peer address so the kernel re-binds the
+    /// outgoing source address / route after the host network has changed
+    /// (e.g. Wi-Fi → cellular). Without this the connected socket would keep
+    /// trying to send from the stale source address.
+    #[cfg(any(ios, tvos))]
+    async fn network_changed(&self) -> Result<()> {
+        self.sock
+            .connect(self.peer_addr)
+            .await
+            .map_err(anyhow::Error::from)
+    }
 }
 
 impl OutsideIOSendCallback for Udp {
