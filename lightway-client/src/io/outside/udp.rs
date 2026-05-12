@@ -41,6 +41,11 @@ impl Udp {
         // successfuly in WolfSsl's `OutsideIOSendCallback` callback
         sock.writable().await?;
 
+        // Connect the socket so that `try_send` can be used in the hot send
+        // path. On Apple platform this brings surprising benefits
+        #[cfg(any(ios, tvos))]
+        sock.connect(peer_addr).await?;
+
         Ok(Self {
             sock: Arc::new(sock),
             peer_addr,
@@ -154,7 +159,14 @@ impl OutsideIO for Udp {
 
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
+        // On Apple platforms the socket is `connect`ed at construction so we
+        // can use `try_send`, which is meaningfully faster than `try_send_to`.
+        #[cfg(any(ios, tvos))]
+        let send_result = self.sock.try_send(buf);
+        #[cfg(not(any(ios, tvos)))]
+        let send_result = self.sock.try_send_to(buf, self.peer_addr);
+
+        match send_result {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
