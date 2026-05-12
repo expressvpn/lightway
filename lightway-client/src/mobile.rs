@@ -3,6 +3,7 @@ pub(crate) mod lightway;
 pub(crate) mod tracing_utils;
 
 use std::sync::{Arc, OnceLock};
+use struct_patch::Patch;
 use tracing::info;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,47 +145,25 @@ impl RustVpnConnection {
     /// `LightwayError` for proper error handling.
     fn parallel_connect(
         &self,
-        endpoints: Vec<crate::config::MobileConnectionConfig>,
         event_handler: Arc<dyn EventHandlers>,
         raw_tun_fd: i32,
-        mobile_config: Option<crate::config::MobileConfig>,
         config_content: String,
     ) -> Result<crate::ClientResult, LightwayError> {
         info!("start parallel Lightway connections");
         let mut config = crate::config::Config::default();
-        if let Some(mobile_config) = mobile_config {
-            config.apply_mobile_config(mobile_config);
-        }
 
-        for endpoint in &endpoints {
-            info!(
-                "Endpoint {}:{} with {}",
-                endpoint.server_ip,
-                endpoint.port,
-                if endpoint.use_tcp {
-                    "lightway_tcp"
-                } else {
-                    "lightway_udp"
-                },
-            );
-        }
-
-        config.apply_mobile_connect_configs(endpoints);
-        if !config_content.is_empty() {
-            use struct_patch::Patch;
-            config.apply(serde_saphyr::from_str(&config_content)?);
-            config.servers.push(crate::config::ConnectionConfig {
-                server: config.server.clone(),
-                mode: config.mode,
-                server_dn: config.server_dn.take(),
-                cipher: config.cipher,
-                outside_mtu: config.outside_mtu,
-                username: config.user.take(),
-                password: config.password.take(),
-                token: config.token.take(),
-                ca_cert: Some(config.ca_cert.clone()),
-            });
-        }
+        config.apply(serde_saphyr::from_str(&config_content)?);
+        config.servers.push(crate::config::ConnectionConfig {
+            server: config.server.clone(),
+            mode: config.mode,
+            server_dn: config.server_dn.take(),
+            cipher: config.cipher,
+            outside_mtu: config.outside_mtu,
+            username: config.user.take(),
+            password: config.password.take(),
+            token: config.token.take(),
+            ca_cert: Some(config.ca_cert.clone()),
+        });
 
         info!("Received {} endpoints", config.servers.len());
         if config.servers.is_empty() {
