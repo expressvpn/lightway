@@ -159,7 +159,7 @@ impl RustVpnConnection {
             server_dn: config.server_dn.take(),
             cipher: config.cipher,
             outside_mtu: config.outside_mtu,
-            username: config.user.take(),
+            user: config.user.take(),
             password: config.password.take(),
             token: config.token.take(),
             ca_cert: Some(config.ca_cert.clone()),

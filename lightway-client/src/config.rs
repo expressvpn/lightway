@@ -429,7 +429,7 @@ pub struct ConnectionConfig {
 
     /// Username for User/Pass Auth
     #[serde(default)]
-    pub username: Option<String>,
+    pub user: Option<String>,
 
     /// Passwordfor User/Pass Auth
     #[serde(default)]
@@ -452,11 +452,7 @@ impl ConnectionConfig {
     /// Try build auth from config
     #[cfg(feature = "mobile")]
     pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
-        take_auth(
-            self.token.take(),
-            self.username.take(),
-            self.password.take(),
-        )
+        take_auth(self.token.take(), self.user.take(), self.password.take())
     }
 
     /// Try build CA from ca_crt
