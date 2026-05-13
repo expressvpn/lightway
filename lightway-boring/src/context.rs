@@ -251,3 +251,116 @@ impl Context {
         matches!(self.method, Method::DtlsClientV1_3 | Method::DtlsServerV1_3)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::mock::{ROOT_CERT, SERVER_CERT, SERVER_KEY};
+    use crate::{ContextBuilder, Method, RootCertificate, Secret};
+
+    #[test]
+    fn context_builder_all_methods() {
+        // All four Method variants must construct a valid context without error.
+        ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        ContextBuilder::new(Method::TlsServerV1_3).unwrap().build();
+        ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
+        ContextBuilder::new(Method::DtlsServerV1_3).unwrap().build();
+    }
+
+    #[test]
+    fn with_root_certificate_pem_buffer() {
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .with_root_certificate(RootCertificate::PemBuffer(ROOT_CERT))
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn with_certificate_and_private_key() {
+        ContextBuilder::new(Method::TlsServerV1_3)
+            .unwrap()
+            .with_certificate(Secret::PemBuffer(SERVER_CERT))
+            .unwrap()
+            .with_private_key(Secret::PemBuffer(SERVER_KEY))
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn with_groups_empty() {
+        // An empty slice is a no-op and must succeed.
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .with_groups(&[])
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn try_when_branches() {
+        // true branch: the closure is called and cert is loaded successfully.
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .try_when(true, |b| {
+                b.with_root_certificate(RootCertificate::PemBuffer(ROOT_CERT))
+            })
+            .unwrap()
+            .build();
+
+        // false branch: the closure must NOT be called.
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .try_when(false, |_b| {
+                panic!("false branch must not invoke the closure")
+            })
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn try_when_some_branches() {
+        // Some: closure is invoked with the contained value.
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .try_when_some(Some(ROOT_CERT), |b, cert| {
+                b.with_root_certificate(RootCertificate::PemBuffer(cert))
+            })
+            .unwrap()
+            .build();
+
+        // None: closure must NOT be called.
+        let no_cert: Option<&[u8]> = None;
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .try_when_some(no_cert, |_b, _cert| {
+                panic!("None branch must not invoke the closure")
+            })
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn with_cipher_list_is_noop() {
+        // TLS 1.3 ignores the cipher list; method must return Ok regardless.
+        ContextBuilder::new(Method::TlsClientV1_3)
+            .unwrap()
+            .with_cipher_list("ECDHE-RSA-AES256-GCM-SHA384")
+            .unwrap()
+            .build();
+    }
+
+    #[test]
+    fn is_dtls_classification() {
+        let dtls_ctx = ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
+        assert!(
+            dtls_ctx.is_dtls(),
+            "DtlsClientV1_3 should report is_dtls()=true"
+        );
+
+        let tls_ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        assert!(
+            !tls_ctx.is_dtls(),
+            "TlsClientV1_3 should report is_dtls()=false"
+        );
+    }
+}
