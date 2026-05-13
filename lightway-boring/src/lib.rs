@@ -19,6 +19,8 @@ mod config;
 mod context;
 mod error;
 mod session;
+#[cfg(test)]
+mod test_utils;
 mod types;
 
 // Re-export all public types at crate root (drop-in replacement for wolfssl crate)

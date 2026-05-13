@@ -392,3 +392,170 @@ where
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::mock::{
+        make_connected_dtls_pair, make_connected_tls_pair, MockIOAdapter, UdpIOCallbacks,
+    };
+    use crate::{ContextBuilder, Method, Poll, SessionConfig};
+
+    #[test]
+    fn try_negotiate_tls() {
+        let (client, server) = make_connected_tls_pair();
+        assert!(client.is_handshake_complete());
+        assert!(server.is_handshake_complete());
+    }
+
+    #[test]
+    fn try_negotiate_dtls() {
+        let (client, server) = make_connected_dtls_pair();
+        assert!(client.is_handshake_complete());
+        assert!(server.is_handshake_complete());
+    }
+
+    #[test]
+    fn try_read_write_roundtrip() {
+        use bytes::BytesMut;
+
+        let (mut client, mut server) = make_connected_tls_pair();
+
+        let msg = b"hello, world!";
+        let mut write_buf = BytesMut::from(msg.as_ref());
+        let result = client.try_write(&mut write_buf).unwrap();
+        assert!(
+            matches!(result, Poll::Ready(n) if n == msg.len()),
+            "unexpected write result: {:?}",
+            result
+        );
+
+        let mut read_buf = BytesMut::new();
+        let result = server.try_read(&mut read_buf).unwrap();
+        assert!(
+            matches!(result, Poll::Ready(n) if n == msg.len()),
+            "unexpected read result: {:?}",
+            result
+        );
+        assert_eq!(&read_buf[..], msg.as_ref());
+    }
+
+    #[test]
+    fn try_write_empty_buffer() {
+        use bytes::BytesMut;
+
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let mut session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        // Empty write must short-circuit before touching SSL state.
+        let result = session.try_write(&mut BytesMut::new()).unwrap();
+        assert!(matches!(result, Poll::Ready(0)));
+    }
+
+    #[test]
+    fn get_current_cipher_name_after_handshake() {
+        let (client, server) = make_connected_tls_pair();
+
+        let client_cipher = client.get_current_cipher_name();
+        let server_cipher = server.get_current_cipher_name();
+
+        assert!(client_cipher.is_some(), "client cipher should be set");
+        assert!(server_cipher.is_some(), "server cipher should be set");
+        assert_eq!(
+            client_cipher, server_cipher,
+            "both sides must negotiate the same cipher"
+        );
+    }
+
+    #[test]
+    fn get_current_curve_name_before_handshake() {
+        use crate::test_utils::mock::TcpIOCallbacks;
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let session = ctx
+            .new_session(SessionConfig::new(TcpIOCallbacks::pair().0))
+            .unwrap();
+
+        assert_eq!(
+            session.get_current_curve_name(),
+            None,
+            "curve name should be None before handshake completes"
+        );
+    }
+
+    #[test]
+    fn get_current_curve_name_after_tls_handshake() {
+        let (client, server) = make_connected_tls_pair();
+
+        let client_curve = client.get_current_curve_name();
+        let server_curve = server.get_current_curve_name();
+
+        // Assert concrete value — BoringSSL's default preferred group is X25519
+        assert_eq!(
+            client_curve.as_deref(),
+            Some("X25519"),
+            "client should report X25519 as the negotiated curve"
+        );
+        assert_eq!(
+            client_curve, server_curve,
+            "both sides must negotiate the same curve"
+        );
+    }
+
+    #[test]
+    fn get_current_curve_name_after_dtls_handshake() {
+        let (client, server) = make_connected_dtls_pair();
+
+        let client_curve = client.get_current_curve_name();
+        let server_curve = server.get_current_curve_name();
+
+        // DTLS should also negotiate a valid, known curve name
+        assert!(
+            client_curve.is_some(),
+            "client curve should be set after DTLS handshake"
+        );
+        assert!(
+            !client_curve.as_ref().unwrap().starts_with("Unknown"),
+            "curve name should be a known group, got: {:?}",
+            client_curve
+        );
+        assert_eq!(
+            client_curve, server_curve,
+            "both sides must negotiate the same curve"
+        );
+    }
+
+    #[test]
+    fn dtls13_use_quick_timeout_transitions() {
+        // Before handshake: quick timeout should be enabled for DTLS.
+        let ctx = ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
+        let session = ctx
+            .new_session(SessionConfig::new(UdpIOCallbacks::pair().0))
+            .unwrap();
+        assert!(
+            session.dtls13_use_quick_timeout(),
+            "expected quick timeout before handshake"
+        );
+
+        // After a completed handshake: quick timeout should be disabled.
+        let (client, _server) = make_connected_dtls_pair();
+        assert!(
+            !client.dtls13_use_quick_timeout(),
+            "expected no quick timeout after handshake"
+        );
+    }
+
+    #[test]
+    fn is_handshake_complete_transitions() {
+        // Before negotiation: false.
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let session = ctx
+            .new_session(SessionConfig::new(MockIOAdapter::new()))
+            .unwrap();
+        assert!(!session.is_handshake_complete());
+
+        // After completed handshake: true on both sides.
+        let (client, server) = make_connected_tls_pair();
+        assert!(client.is_handshake_complete());
+        assert!(server.is_handshake_complete());
+    }
+}
