@@ -72,12 +72,16 @@ impl Udp {
 impl OutsideIO for Udp {
     fn set_send_buffer_size(&self, size: usize) -> Result<()> {
         let socket = socket2::SockRef::from(&self.sock);
-        socket.set_send_buffer_size(size)?;
+        if let Err(e) = socket.set_send_buffer_size(size) {
+            tracing::warn!("Failed to set UDP send buffer size to {size}: {e}");
+        }
         Ok(())
     }
     fn set_recv_buffer_size(&self, size: usize) -> Result<()> {
         let socket = socket2::SockRef::from(&self.sock);
-        socket.set_recv_buffer_size(size)?;
+        if let Err(e) = socket.set_recv_buffer_size(size) {
+            tracing::warn!("Failed to set UDP recv buffer size to {size}: {e}");
+        }
         Ok(())
     }
 

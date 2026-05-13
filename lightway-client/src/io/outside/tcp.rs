@@ -28,12 +28,16 @@ impl Tcp {
 impl OutsideIO for Tcp {
     fn set_send_buffer_size(&self, size: usize) -> Result<()> {
         let socket = socket2::SockRef::from(&self.0);
-        socket.set_send_buffer_size(size)?;
+        if let Err(e) = socket.set_send_buffer_size(size) {
+            tracing::warn!("Failed to set TCP send buffer size to {size}: {e}");
+        }
         Ok(())
     }
     fn set_recv_buffer_size(&self, size: usize) -> Result<()> {
         let socket = socket2::SockRef::from(&self.0);
-        socket.set_recv_buffer_size(size)?;
+        if let Err(e) = socket.set_recv_buffer_size(size) {
+            tracing::warn!("Failed to set TCP recv buffer size to {size}: {e}");
+        }
         Ok(())
     }
 
