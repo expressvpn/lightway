@@ -229,10 +229,6 @@ pub enum ConnectionError {
     /// A Packet Codec error occurred
     #[error("Packet Codec error: {0}")]
     PacketCodecError(Box<dyn std::error::Error + Sync + Send>),
-
-    /// Encoding Request Retransmit CB does not exist
-    #[error("Schedule Encoding Request Retransmit Cb Does Not Exist")]
-    EncodingReqRetransmitCbDoesNotExist,
 }
 
 impl ConnectionError {
@@ -258,7 +254,6 @@ impl ConnectionError {
                     PacketCodecDoesNotExist => true,
                     PacketCodecError(_) => true,
                     Disconnected => true,
-                    EncodingReqRetransmitCbDoesNotExist => true,
                     PathMtuDiscoveryRequired { .. } => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
