@@ -353,10 +353,6 @@ impl ExpresslaneData {
             return Err(FromWireError::ReplayedExpressData);
         }
 
-        let mut auth_vec: [u8; 16] = [0; 16];
-        auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..].copy_from_slice(&wire_counter.to_be_bytes()[..]);
-
         let mut iv = [0u8; 12];
         buf.copy_to_slice(&mut iv);
         let mut auth_tag = [0u8; 16];
@@ -364,6 +360,11 @@ impl ExpresslaneData {
         let data_len = buf.get_u16() as usize;
         let flags = Flags::from(buf.get_u16());
         let is_encoded = flags.encoded();
+
+        let mut auth_vec: [u8; 18] = [0; 18];
+        auth_vec[..8].copy_from_slice(&session_id.0[..]);
+        auth_vec[8..16].copy_from_slice(&wire_counter.to_be_bytes()[..]);
+        auth_vec[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
 
         if buf.len() < data_len {
             return Err(FromWireError::InsufficientData);
@@ -416,16 +417,17 @@ impl ExpresslaneData {
 
         self.wire_counter = self.wire_counter.wrapping_add(1);
 
-        let mut auth_vec: [u8; 16] = [0; 16];
+        let flags = Flags::new().with_encoded(is_encoded);
+
+        let mut auth_vec: [u8; 18] = [0; 18];
         auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..].copy_from_slice(&self.wire_counter.to_be_bytes()[..]);
+        auth_vec[8..16].copy_from_slice(&self.wire_counter.to_be_bytes()[..]);
+        auth_vec[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
 
         let (cipher_text, auth_tag) = current
             .cipher
             .encrypt(iv, plain_text.as_ref(), &auth_vec)
             .expect("Encrypt failed");
-
-        let flags = Flags::new().with_encoded(is_encoded);
 
         buf.put_u64(self.wire_counter);
         buf.put(iv.as_ref());
