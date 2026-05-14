@@ -901,4 +901,38 @@ mod tests {
             FromWireError::ReplayedExpressData
         ));
     }
+
+    /// On-path attacker flips the encoded flag on the wire. AEAD must reject
+    /// the packet because the flags field is bound into the auth tag via AAD.
+    #[test]
+    fn tampered_flags_rejected_by_aead() {
+        let mut sender = ExpresslaneData::default();
+        let mut receiver = ExpresslaneData::default();
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"sensitive payload";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        // Flags occupy bytes 38..40 (after counter[0..8], iv[8..20],
+        // auth_tag[20..36], data_len[36..38]). Encoded is the MSB of the
+        // u16 in MSB bit ordering, so 0x80 in byte 38 flips it.
+        assert_eq!(buf[38] & 0x80, 0, "precondition: encoded flag is clear");
+        buf[38] |= 0x80;
+
+        let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let result = receiver.try_from_wire(&mut borrowed_buf, session_id);
+        assert!(
+            matches!(result, Err(FromWireError::InvalidExpressData)),
+            "tampered flags should fail AEAD auth, got {:?}",
+            result.as_ref().map(|_| "Ok")
+        );
+    }
 }
