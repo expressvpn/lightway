@@ -9,6 +9,7 @@ use bytesize::ByteSize;
 use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
 pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
+pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
@@ -217,6 +218,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// How often to check for connections to expire aged connections
     pub connection_age_expiration_interval: Duration,
 
+    /// Interval between session statistics reports
+    pub statistics_reporting_interval: Duration,
+
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub inside_plugins: PluginFactoryList,
@@ -361,7 +365,11 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.connection_age_expiration_interval,
     );
 
-    tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
+    tokio::spawn(statistics::run(
+        conn_manager.clone(),
+        ip_manager.clone(),
+        config.statistics_reporting_interval,
+    ));
 
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => Box::new(

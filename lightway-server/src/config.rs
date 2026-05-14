@@ -91,6 +91,10 @@ pub struct Config {
     pub connection_age_expiration_interval: Duration,
 
     #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Interval between session statistics reports"))]
+    pub statistics_reporting_interval: Duration,
+
+    #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
@@ -183,6 +187,9 @@ impl Default for Config {
             ),
             connection_age_expiration_interval: Duration::from_std_duration(
                 lightway_server::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
+            ),
+            statistics_reporting_interval: Duration::from_std_duration(
+                lightway_server::DEFAULT_STATISTICS_REPORTING_INTERVAL,
             ),
             enable_pqc: false,
             enable_tun_iouring: false,
