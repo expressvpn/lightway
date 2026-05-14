@@ -10,6 +10,25 @@ use tracing::debug;
 
 use super::{FromWireError, FromWireResult, SessionId, expresslane_config::ExpresslaneVersion};
 
+/// Build AEAD AAD for an expresslane data packet.
+/// Returns a fixed-size buffer and the number of significant bytes
+fn build_aad(
+    version: ExpresslaneVersion,
+    session_id: &SessionId,
+    wire_counter: u64,
+    flags: Flags,
+) -> ([u8; 18], usize) {
+    let mut buf = [0u8; 18];
+    buf[..8].copy_from_slice(&session_id.0[..]);
+    buf[8..16].copy_from_slice(&wire_counter.to_be_bytes()[..]);
+    if version >= ExpresslaneVersion::Version2 {
+        buf[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
+        (buf, 18)
+    } else {
+        (buf, 16)
+    }
+}
+
 /// A expresslane data frame
 ///
 /// This is a variable sized request.
@@ -383,10 +402,9 @@ impl ExpresslaneData {
         let flags = Flags::from(buf.get_u16());
         let is_encoded = flags.encoded();
 
-        let mut auth_vec: [u8; 18] = [0; 18];
-        auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..16].copy_from_slice(&wire_counter.to_be_bytes()[..]);
-        auth_vec[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
+        let (auth_vec_buf, auth_vec_len) =
+            build_aad(self.version, &session_id, wire_counter, flags);
+        let auth_vec = &auth_vec_buf[..auth_vec_len];
 
         if buf.len() < data_len {
             return Err(FromWireError::InsufficientData);
@@ -401,7 +419,7 @@ impl ExpresslaneData {
 
         let plain_text = current
             .cipher
-            .decrypt(iv, data.as_ref(), &auth_vec[..], &auth_tag)
+            .decrypt(iv, data.as_ref(), auth_vec, &auth_tag)
             .map_err(|_| FromWireError::InvalidExpressData);
 
         let plain_text = match plain_text {
@@ -409,7 +427,7 @@ impl ExpresslaneData {
             Err(e) => {
                 if let Some(prev) = &mut self.prev_peer {
                     prev.cipher
-                        .decrypt(iv, data.as_ref(), &auth_vec[..], &auth_tag)
+                        .decrypt(iv, data.as_ref(), auth_vec, &auth_tag)
                         .inspect_err(metrics::expresslane_decrypt_failed)
                         .map_err(|_| e)?
                 } else {
@@ -446,14 +464,13 @@ impl ExpresslaneData {
 
         let flags = Flags::new().with_encoded(is_encoded);
 
-        let mut auth_vec: [u8; 18] = [0; 18];
-        auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..16].copy_from_slice(&self.wire_counter.to_be_bytes()[..]);
-        auth_vec[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
+        let (auth_vec_buf, auth_vec_len) =
+            build_aad(self.version, &session_id, self.wire_counter, flags);
+        let auth_vec = &auth_vec_buf[..auth_vec_len];
 
         let (cipher_text, auth_tag) = current
             .cipher
-            .encrypt(iv, plain_text.as_ref(), &auth_vec)
+            .encrypt(iv, plain_text.as_ref(), auth_vec)
             .expect("Encrypt failed");
 
         buf.put_u64(self.wire_counter);
@@ -931,12 +948,83 @@ mod tests {
         ));
     }
 
+    /// V1 sender ↔ V1 receiver roundtrip succeeds without flags-in-AAD.
+    /// Proves the downgrade path still interoperates with legacy V1
+    /// peers (which compute AAD over session_id||counter only).
+    #[test]
+    fn v1_roundtrip_without_flags_in_aad() {
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"v1 payload";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        let mut borrowed = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let (decrypted, _) = receiver.try_from_wire(&mut borrowed, session_id).unwrap();
+        assert_eq!(decrypted.as_ref(), plain_text);
+    }
+
+    /// V1 sender ↔ V2 receiver must fail: AAD layouts differ (V1 omits
+    /// flags, V2 includes them) so AEAD verification cannot match. This
+    /// is intentional - version negotiation should have downgraded the
+    /// receiver to V1 long before this point.
+    #[test]
+    fn cross_version_v1_to_v2_fails() {
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"v1 to v2";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        let mut borrowed = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let result = receiver.try_from_wire(&mut borrowed, session_id);
+        assert!(matches!(result, Err(FromWireError::InvalidExpressData)));
+    }
+
     /// On-path attacker flips the encoded flag on the wire. AEAD must reject
     /// the packet because the flags field is bound into the auth tag via AAD.
+    /// Only applies to V2 - V1 keeps the original AAD layout (no flags) for
+    /// backwards compatibility with old V1 peers.
     #[test]
     fn tampered_flags_rejected_by_aead() {
-        let mut sender = ExpresslaneData::default();
-        let mut receiver = ExpresslaneData::default();
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
 
         let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
         sender.update_next_self_key(test_key).unwrap();

@@ -1796,11 +1796,18 @@ impl<AppState: Send> Connection<AppState> {
         // If updating key failed, send disabled to peer
         let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
 
+        // Outgoing version: if we have already negotiated a version
+        // with the peer, use that. Otherwise advertise our local max
+        let version = match self.expresslane.data.version {
+            ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
+            v => v,
+        };
+
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled,
             key,
-            version: ExpresslaneVersion::MAX,
+            version,
             ack: false,
             counter: self.expresslane.config_counter,
         };
@@ -1826,11 +1833,16 @@ impl<AppState: Send> Connection<AppState> {
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.data.update_next_self_key(key);
 
+        let version = match self.expresslane.data.version {
+            ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
+            v => v,
+        };
+
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled: false,
             key,
-            version: ExpresslaneVersion::MAX,
+            version,
             ack: false,
             counter: self.expresslane.config_counter,
         };

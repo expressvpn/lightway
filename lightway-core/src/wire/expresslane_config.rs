@@ -15,13 +15,18 @@ use super::{FromWireError, FromWireResult, expresslane_data::ExpresslaneKey};
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Default)]
 pub enum ExpresslaneVersion {
     #[default]
+    // Not used
     Unknown = 0,
+    // Initial Expresslane format
     Version1 = 1,
+    /// same wire layout as V1, but the expresslane flags field
+    /// is bound into the AEAD AAD. Incompatible with V1 builds
+    Version2 = 2,
 }
 
 impl ExpresslaneVersion {
     /// Highest expresslane version this build supports.
-    pub const MAX: Self = Self::Version1;
+    pub const MAX: Self = Self::Version2;
 
     /// Negotiate the wire version against a peer's advertised value.
     /// Forward-compatible by design: if the peer advertised a version
@@ -46,6 +51,7 @@ impl From<u8> for ExpresslaneVersion {
     fn from(value: u8) -> Self {
         match value {
             1 => Self::Version1,
+            2 => Self::Version2,
             _ => Self::Unknown,
         }
     }
@@ -225,22 +231,37 @@ mod tests {
     fn version_enum_conversions() {
         assert_eq!(ExpresslaneVersion::from(0), ExpresslaneVersion::Unknown);
         assert_eq!(ExpresslaneVersion::from(1), ExpresslaneVersion::Version1);
+        assert_eq!(ExpresslaneVersion::from(2), ExpresslaneVersion::Version2);
         // Any byte > LOCAL_MAX collapses to Unknown.
-        assert_eq!(ExpresslaneVersion::from(2), ExpresslaneVersion::Unknown);
+        assert_eq!(ExpresslaneVersion::from(3), ExpresslaneVersion::Unknown);
         assert_eq!(ExpresslaneVersion::from(255), ExpresslaneVersion::Unknown);
 
         assert_eq!(ExpresslaneVersion::Unknown as u8, 0);
         assert_eq!(ExpresslaneVersion::Version1 as u8, 1);
+        assert_eq!(ExpresslaneVersion::Version2 as u8, 2);
     }
 
+    /// Forward compatibility: a future peer advertising a higher
+    /// version byte than we know about must still negotiate cleanly
+    /// down to our local max - NOT cause expresslane to be rejected.
+    /// This is the property that lets us ship V2 today and add V3
+    /// later without breaking the binaries already in the field, in
+    /// either rollout direction (older talking to newer, or newer
+    /// talking to older).
     #[test]
     fn negotiation_handles_future_peer_versions() {
-        assert_eq!(ExpresslaneVersion::MAX, ExpresslaneVersion::Version1);
+        assert_eq!(ExpresslaneVersion::MAX, ExpresslaneVersion::Version2);
 
-        // Peer advertised V1 → matched.
+        // Peer advertised V1 → V1 (peer is the constraint).
         assert_eq!(
             ExpresslaneVersion::negotiate(ExpresslaneVersion::Version1),
             ExpresslaneVersion::Version1
+        );
+
+        // Peer advertised V2 → V2 (matched).
+        assert_eq!(
+            ExpresslaneVersion::negotiate(ExpresslaneVersion::Version2),
+            ExpresslaneVersion::Version2
         );
 
         assert_eq!(

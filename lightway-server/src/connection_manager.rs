@@ -195,7 +195,9 @@ async fn handle_events(
             }
             Event::TlsKeysUpdateStart => handle_tls_keys_update_start(&conn),
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
-            Event::ExpresslaneStateChanged(_) => {}
+            Event::ExpresslaneStateChanged(s) => {
+                info!("Setting expresslane state to {:?}", s);
+            }
             Event::FirstPacketReceived => {
                 unreachable!("client only event received");
             }
