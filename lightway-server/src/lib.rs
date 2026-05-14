@@ -8,6 +8,7 @@ mod statistics;
 use bytesize::ByteSize;
 use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
+pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
@@ -213,6 +214,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// The key update interval for DTLS/TLS 1.3 connections
     pub key_update_interval: Duration,
 
+    /// How often to check for connections to expire aged connections
+    pub connection_age_expiration_interval: Duration,
+
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
     pub inside_plugins: PluginFactoryList,
@@ -350,7 +354,12 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .with_outside_plugins(config.outside_plugins)
     .build()?;
 
-    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec, config.event_cb);
+    let conn_manager = ConnectionManager::new(
+        ctx,
+        config.inside_pkt_codec,
+        config.event_cb,
+        config.connection_age_expiration_interval,
+    );
 
     tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
 

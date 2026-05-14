@@ -87,6 +87,10 @@ pub struct Config {
     pub expresslane_keys_rotation_interval: Duration,
 
     #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "How often to check for aged connections to expire"))]
+    pub connection_age_expiration_interval: Duration,
+
+    #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
@@ -176,6 +180,9 @@ impl Default for Config {
             enable_expresslane: false,
             expresslane_keys_rotation_interval: Duration::from_std_duration(
                 lightway_server::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
+            connection_age_expiration_interval: Duration::from_std_duration(
+                lightway_server::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
             ),
             enable_pqc: false,
             enable_tun_iouring: false,

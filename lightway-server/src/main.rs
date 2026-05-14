@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
         key_update_interval: config.key_update_interval.into(),
+        connection_age_expiration_interval: config.connection_age_expiration_interval.into(),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         inside_pkt_codec: None,
