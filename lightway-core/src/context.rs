@@ -8,7 +8,9 @@ use crate::{
     BuilderPredicates, Cipher, ClientConnectionBuilder, ConnectionBuilderError,
     InsideIOSendCallbackArg, OutsideIOSendCallbackArg, OutsidePacket, PluginResult,
     RootCertificate, Secret, ServerConnectionBuilder, ServerIpPoolArg, Version,
-    connection::expresslane::{ExpresslaneCbType, ExpresslaneMetricsType},
+    connection::expresslane::{
+        DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, ExpresslaneCbType, ExpresslaneMetricsType,
+    },
     context::ip_pool::ClientIpConfigArg,
     packet::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
@@ -122,6 +124,7 @@ pub struct ClientContext<AppState> {
     pub(crate) expresslane: bool,
     pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
+    pub(crate) expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -148,6 +151,7 @@ pub struct ClientContextBuilder<AppState> {
     expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<ExpresslaneMetricsType>,
+    expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -179,6 +183,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             expresslane: false,
             expresslane_cb: None,
             expresslane_metrics: None,
+            expresslane_keys_rotation_interval: DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
         })
     }
 
@@ -209,10 +214,11 @@ impl<AppState> ClientContextBuilder<AppState> {
         Ok(Self { tls_ctx, ..self })
     }
 
-    /// Enable expresslane data path
-    pub fn with_expresslane(self) -> Self {
+    /// Enable expresslane data path with the given key rotation interval
+    pub fn with_expresslane(self, keys_rotation_interval: std::time::Duration) -> Self {
         Self {
             expresslane: true,
+            expresslane_keys_rotation_interval: keys_rotation_interval,
             ..self
         }
     }
@@ -247,6 +253,7 @@ impl<AppState> ClientContextBuilder<AppState> {
             rng: Arc::new(Mutex::new(rand::make_rng::<rand::rngs::StdRng>())),
             expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
+            expresslane_keys_rotation_interval: self.expresslane_keys_rotation_interval,
             expresslane_metrics: self.expresslane_metrics,
         }
     }
@@ -297,6 +304,7 @@ pub struct ServerContext<AppState = ()> {
     pub(crate) expresslane: bool,
     pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
+    pub(crate) expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 impl<AppState: Send + 'static> ServerContext<AppState> {
@@ -354,6 +362,7 @@ pub struct ServerContextBuilder<AppState> {
     expresslane: bool,
     expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<ExpresslaneMetricsType>,
+    expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 /// server curves when PQC is not enabled, in decreasing order of preference.
@@ -418,6 +427,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             expresslane: false,
             expresslane_cb: None,
             expresslane_metrics: None,
+            expresslane_keys_rotation_interval: DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
         })
     }
 
@@ -471,10 +481,11 @@ impl<AppState> ServerContextBuilder<AppState> {
         }
     }
 
-    /// Enable expresslane data path
-    pub fn with_expresslane(self) -> Self {
+    /// Enable expresslane data path with the given key rotation interval
+    pub fn with_expresslane(self, keys_rotation_interval: std::time::Duration) -> Self {
         Self {
             expresslane: true,
+            expresslane_keys_rotation_interval: keys_rotation_interval,
             ..self
         }
     }
@@ -526,6 +537,7 @@ impl<AppState> ServerContextBuilder<AppState> {
             expresslane: self.expresslane,
             expresslane_cb: self.expresslane_cb,
             expresslane_metrics: self.expresslane_metrics,
+            expresslane_keys_rotation_interval: self.expresslane_keys_rotation_interval,
         })
     }
 }

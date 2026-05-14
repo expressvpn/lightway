@@ -11,8 +11,9 @@ use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, Event, ExpresslaneCbType, ExpresslaneMetricsType, PluginFactoryError,
-    PluginFactoryList, ServerAuth, ServerAuthHandle, ServerAuthResult, SessionId, Version,
+    ConnectionType, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, Event, ExpresslaneCbType,
+    ExpresslaneMetricsType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
+    ServerAuthResult, SessionId, Version,
 };
 
 /// Callback type for receiving per-connection events with session ID.
@@ -177,6 +178,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Interval between Expresslane key rotations
+    pub expresslane_keys_rotation_interval: Duration,
+
     /// Callback for expresslane key updates
     #[educe(Debug(ignore))]
     pub expresslane_cb: Option<ExpresslaneCbType<ConnectionState>>,
@@ -332,7 +336,9 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         connection_ticker_cb,
     )?
     .with_key_update_interval(config.key_update_interval)
-    .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.enable_expresslane, |b| {
+        b.with_expresslane(config.expresslane_keys_rotation_interval)
+    })
     .when(config.expresslane_cb.is_some(), |b| {
         b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
     })

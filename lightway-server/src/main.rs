@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
         lightway_dns_ip: config.lightway_dns_ip,
         use_dynamic_client_ip: false,
         enable_expresslane: config.enable_expresslane,
+        expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
         expresslane_cb: None,
         expresslane_metrics: None,
         event_cb: None,

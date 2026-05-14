@@ -203,6 +203,11 @@ pub struct Config {
     pub enable_expresslane: bool,
 
     #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    pub expresslane_keys_rotation_interval: Duration,
+
+    #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
@@ -389,6 +394,9 @@ impl Default for Config {
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
             enable_expresslane: false,
+            expresslane_keys_rotation_interval: Duration::from_std_duration(
+                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
             enable_pmtud: false,
             pmtud_base_mtu: None,
             enable_tun_iouring: false,

@@ -231,7 +231,9 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bo
     .with_maximum_protocol_version(Version::MAXIMUM)
     .unwrap()
     .when(pqc.enable_server(), |s| s.with_pq_crypto().unwrap())
-    .when(enable_expresslane, |s| s.with_expresslane())
+    .when(enable_expresslane, |s| {
+        s.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+    })
     .build()
     .unwrap();
 
@@ -413,7 +415,9 @@ async fn client<S: TestSock>(
     )
     .unwrap()
     .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
-    .when(enable_expresslane, |b| b.with_expresslane())
+    .when(enable_expresslane, |b| {
+        b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+    })
     .build()
     .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
     .unwrap()

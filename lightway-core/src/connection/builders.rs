@@ -260,6 +260,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
+            expresslane_keys_rotation_interval: self.ctx.expresslane_keys_rotation_interval,
         })?)
     }
 }
@@ -398,6 +399,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
             expresslane_metrics: self.ctx.expresslane_metrics.clone(),
+            expresslane_keys_rotation_interval: self.ctx.expresslane_keys_rotation_interval,
         })?)
     }
 }

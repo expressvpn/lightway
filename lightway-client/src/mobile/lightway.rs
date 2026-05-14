@@ -220,6 +220,9 @@ pub(crate) async fn async_lightway_start(
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
+                    expresslane_keys_rotation_interval: config
+                        .expresslane_keys_rotation_interval
+                        .into(),
                     online_signal_sender: online_signal_sender.clone(),
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
@@ -557,6 +560,7 @@ struct LightwayClientConnectArgs {
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
+    expresslane_keys_rotation_interval: std::time::Duration,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
     external_event_handler: Arc<dyn RustEventHandlers>,
@@ -571,6 +575,7 @@ async fn lightway_client_connect(
         socket,
         enable_keepalive,
         enable_expresslane,
+        expresslane_keys_rotation_interval,
         online_signal_sender,
         event_stream_handler,
         external_event_handler,
@@ -630,7 +635,7 @@ async fn lightway_client_connect(
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(connection_type.is_datagram() && enable_expresslane, |b| {
-        b.with_expresslane()
+        b.with_expresslane(expresslane_keys_rotation_interval)
     })
     .build()
     .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?

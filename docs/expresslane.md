@@ -214,7 +214,7 @@ sequenceDiagram
             end
         end
 
-        loop Key Rotation (Every 60 seconds)
+        loop Key Rotation (every expresslane_keys_rotation_interval; default 15 min, configurable)
             T->>S: Key Rotation Timer
             S->>S: Generate new key K2, increment counter
             S->>C: ExpresslaneConfig(enabled=true, ack=false, counter=N, key=K2)

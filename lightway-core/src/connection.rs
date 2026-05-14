@@ -465,6 +465,7 @@ struct NewConnectionArgs<AppState> {
     expresslane: bool,
     expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
+    expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -528,6 +529,7 @@ impl<AppState: Send> Connection<AppState> {
                 expresslane_state,
                 args.expresslane_cb,
                 args.expresslane_metrics,
+                args.expresslane_keys_rotation_interval,
             ),
         };
 

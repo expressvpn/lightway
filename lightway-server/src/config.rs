@@ -83,6 +83,10 @@ pub struct Config {
     pub enable_expresslane: bool,
 
     #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
+    pub expresslane_keys_rotation_interval: Duration,
+
+    #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
@@ -170,6 +174,9 @@ impl Default for Config {
             lightway_client_ip: Ipv4Addr::new(10, 125, 0, 5),
             lightway_dns_ip: Ipv4Addr::new(10, 125, 0, 1),
             enable_expresslane: false,
+            expresslane_keys_rotation_interval: Duration::from_std_duration(
+                lightway_server::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
             enable_pqc: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
