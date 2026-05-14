@@ -249,7 +249,6 @@ impl ConnectionError {
                 match self {
                     TimedOut => true,
                     Unauthorized => true,
-                    InvalidProtocolVersion => true,
                     InvalidMode => true,
                     InvalidConnectionType => true,
                     NoAvailableClientIp => true,
@@ -270,8 +269,10 @@ impl ConnectionError {
                     WireError(wire::FromWireError::InsufficientData) => false,
                     WireError(wire::FromWireError::InvalidExpressData) => false,
                     WireError(wire::FromWireError::ReplayedExpressData) => false,
+                    WireError(wire::FromWireError::InvalidProtocolVersion(..)) => false,
                     WireError(_) => true,
 
+                    InvalidProtocolVersion => false,
                     InvalidState => false, // Can be due to out of order or repeated messages
                     InvalidInsideIo => false, // Can be used for test only test control plane
                     UnknownSessionID => false,
