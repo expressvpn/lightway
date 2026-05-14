@@ -4,12 +4,42 @@ use bytes::{Buf, BufMut, BytesMut};
 
 use super::{FromWireError, FromWireResult, expresslane_data::ExpresslaneKey};
 
+/// On-wire expresslane version.
+///
+/// Unknown represents both "byte 0 (never advertised)" and "a future
+/// version byte this build does not yet recognise". Both cases are
+/// handled the same way at negotiation time - fall back to our local
+/// max - so collapsing them into one variant keeps the type simple
+/// without giving up forward compat.
 #[repr(u8)]
-#[derive(PartialEq, Debug, Copy, Clone, Default)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Default)]
 pub enum ExpresslaneVersion {
-    Unknown = 0,
     #[default]
+    Unknown = 0,
     Version1 = 1,
+}
+
+impl ExpresslaneVersion {
+    /// Highest expresslane version this build supports.
+    pub const MAX: Self = Self::Version1;
+
+    /// Negotiate the wire version against a peer's advertised value.
+    /// Forward-compatible by design: if the peer advertised a version
+    /// we don't recognise, we fall back to `Self::MAX`. Otherwise
+    /// we take the lower of our local max and the peer's advertised
+    /// version.
+    ///
+    /// Scenarios:
+    ///   * V1 peer + V1 build -> V1.
+    ///   * V1 peer + V2 build -> V2 build downgrades, both at V1.
+    ///   * V2 peer + V1 build -> V1 build sees Unknown, replies with
+    ///     its own MAX (V1). V2 peer downgrades on its side and stay at V1.
+    pub(crate) fn negotiate(peer: Self) -> Self {
+        match peer {
+            Self::Unknown => Self::MAX,
+            v => Self::MAX.min(v),
+        }
+    }
 }
 
 impl From<u8> for ExpresslaneVersion {
@@ -130,7 +160,7 @@ mod tests {
     #[test]
     fn default() {
         let config = ExpresslaneConfig::default();
-        assert_eq!(config.version, ExpresslaneVersion::Version1);
+        assert_eq!(config.version, ExpresslaneVersion::Unknown);
         assert!(!config.enabled);
         assert!(!config.ack);
         assert_eq!(config.counter, 0);
@@ -193,11 +223,29 @@ mod tests {
 
     #[test]
     fn version_enum_conversions() {
-        assert_eq!(ExpresslaneVersion::from(1), ExpresslaneVersion::Version1);
         assert_eq!(ExpresslaneVersion::from(0), ExpresslaneVersion::Unknown);
+        assert_eq!(ExpresslaneVersion::from(1), ExpresslaneVersion::Version1);
+        // Any byte > LOCAL_MAX collapses to Unknown.
+        assert_eq!(ExpresslaneVersion::from(2), ExpresslaneVersion::Unknown);
         assert_eq!(ExpresslaneVersion::from(255), ExpresslaneVersion::Unknown);
 
-        assert_eq!(ExpresslaneVersion::Version1 as u8, 1);
         assert_eq!(ExpresslaneVersion::Unknown as u8, 0);
+        assert_eq!(ExpresslaneVersion::Version1 as u8, 1);
+    }
+
+    #[test]
+    fn negotiation_handles_future_peer_versions() {
+        assert_eq!(ExpresslaneVersion::MAX, ExpresslaneVersion::Version1);
+
+        // Peer advertised V1 → matched.
+        assert_eq!(
+            ExpresslaneVersion::negotiate(ExpresslaneVersion::Version1),
+            ExpresslaneVersion::Version1
+        );
+
+        assert_eq!(
+            ExpresslaneVersion::negotiate(ExpresslaneVersion::Unknown),
+            ExpresslaneVersion::MAX,
+        );
     }
 }

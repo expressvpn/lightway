@@ -1701,8 +1701,15 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        if config.version != self.expresslane.data.version {
-            return Err(ConnectionError::ExpresslaneVersionMismatch);
+        let neg_version = ExpresslaneVersion::negotiate(config.version);
+        if neg_version != self.expresslane.data.version {
+            info!(
+                "Negotiated expresslane version: {:?} [max:{:?} peer:{:?}]",
+                neg_version,
+                ExpresslaneVersion::MAX,
+                config.version,
+            );
+            self.expresslane.data.version = neg_version;
         }
 
         // Handle acknowledgement from peer
@@ -1752,9 +1759,10 @@ impl<AppState: Send> Connection<AppState> {
             self.set_expresslane_state(ExpresslaneState::Inactive);
         }
 
-        // Send acknowledgement
+        // Send acknowledgement with the negotiated version
         let mut config = config;
         config.ack = true;
+        config.version = self.expresslane.data.version;
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
 
@@ -1792,7 +1800,7 @@ impl<AppState: Send> Connection<AppState> {
         let config = wire::ExpresslaneConfig {
             enabled,
             key,
-            version: ExpresslaneVersion::Version1,
+            version: ExpresslaneVersion::MAX,
             ack: false,
             counter: self.expresslane.config_counter,
         };
@@ -1822,7 +1830,7 @@ impl<AppState: Send> Connection<AppState> {
         let config = wire::ExpresslaneConfig {
             enabled: false,
             key,
-            version: ExpresslaneVersion::Version1,
+            version: ExpresslaneVersion::MAX,
             ack: false,
             counter: self.expresslane.config_counter,
         };
