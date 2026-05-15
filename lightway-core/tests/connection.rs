@@ -229,13 +229,17 @@ async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bo
     .with_minimum_protocol_version(Version::MINIMUM)
     .unwrap()
     .with_maximum_protocol_version(Version::MAXIMUM)
-    .unwrap()
-    .when(pqc.enable_server(), |s| s.with_pq_crypto().unwrap())
-    .when(enable_expresslane, |s| {
-        s.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
-    })
-    .build()
     .unwrap();
+
+    #[cfg(feature = "postquantum")]
+    let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.with_pq_crypto().unwrap());
+
+    let server_ctx = server_ctx
+        .when(enable_expresslane, |s| {
+            s.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+        })
+        .build()
+        .unwrap();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
     // Use Version::MAXIMUM to match default client version
@@ -423,13 +427,17 @@ async fn client<S: TestSock>(
     .unwrap()
     .with_auth_token("LET ME IN")
     .with_event_cb(Box::new(event_cb))
-    .with_inside_pkt_codec(packet_codec)
-    .when_some(pqc.client_keyshare(), |b, ks| b.with_pq_crypto(ks))
-    .when_some(server_dn, |b, sdn| {
-        b.with_server_domain_name_validation(sdn)
-    })
-    .connect(state)
-    .unwrap();
+    .with_inside_pkt_codec(packet_codec);
+
+    #[cfg(feature = "postquantum")]
+    let client = client.when_some(pqc.client_keyshare(), |b, ks| b.with_pq_crypto(ks));
+
+    let client = client
+        .when_some(server_dn, |b, sdn| {
+            b.with_server_domain_name_validation(sdn)
+        })
+        .connect(state)
+        .unwrap();
     let client = Arc::new(Mutex::new(client));
 
     ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
@@ -624,6 +632,12 @@ async fn client<S: TestSock>(
     }
 }
 
+/// Uninhabited stand-in for `lightway_core::KeyShare` when the
+/// postquantum feature is disabled.
+#[cfg(not(feature = "postquantum"))]
+#[derive(Clone, Copy)]
+enum KeyShare {}
+
 #[derive(Clone, Copy)]
 struct PQCrypto {
     server_pqc: bool,
@@ -640,15 +654,34 @@ impl PQCrypto {
     }
 
     fn expected_curve(&self) -> &str {
-        if !self.server_pqc {
-            return "SECP256R1";
+        #[cfg(feature = "postquantum")]
+        {
+            if !self.server_pqc {
+                return "SECP256R1";
+            }
+            match self.keyshare {
+                Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
+                Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
+                None => "X25519MLKEM768", // wolfssl 5.0.0 default
+            }
         }
-        match self.keyshare {
-            Some(KeyShare::P521MLKEM1024) => "SecP521r1MLKEM1024",
-            Some(KeyShare::X25519MLKEM768) => "X25519MLKEM768",
-            // Based on the default set in KeyShare
-            None => "X25519MLKEM768", // wolfssl 5.0.0 default
-        }
+        #[cfg(not(feature = "postquantum"))]
+        "SECP256R1"
+    }
+}
+
+impl Default for PQCrypto {
+    fn default() -> Self {
+        #[cfg(feature = "postquantum")]
+        return Self {
+            server_pqc: true,
+            keyshare: Some(KeyShare::P521MLKEM1024),
+        };
+        #[cfg(not(feature = "postquantum"))]
+        return Self {
+            server_pqc: false,
+            keyshare: None,
+        };
     }
 }
 
@@ -697,15 +730,22 @@ async fn run_test<S: TestSock>(
         .expect("Timed out");
 }
 
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "PQC P521MLKEM1024")]
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "PQC X25519MLKEM768")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "chacha20 + PQC")]
-#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "server PQC disabled")]
-#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "server PQC disabled + X25519MLKEM768")]
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None },                           false, false; "PQC wolfSSL default")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },   true, false; "Inside packet codec")]
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false,  true; "PQC + Expresslane")]
+#[cfg_attr(feature = "postquantum",
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "PQC P521MLKEM1024"),
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "PQC X25519MLKEM768"),
+    test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "aes + PQC"),
+    test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "chacha20 + PQC"),
+    test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) },  false, false; "server PQC disabled"),
+    test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }, false, false; "server PQC disabled + X25519MLKEM768"),
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None },                           false, false; "PQC wolfSSL default"),
+    test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },   true, false; "Inside packet codec"),
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) },  false,  true; "PQC + Expresslane"),
+)]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: None }, false, false; "no PQC")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: false, keyshare: None }, false, false; "no PQC + aes")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: false, keyshare: None }, false, false; "no PQC + chacha20")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: false, keyshare: None },  true, false; "no PQC + Inside packet codec")]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: None }, false,  true; "no PQC + Expresslane")]
 #[tokio::test]
 async fn test_datagram_connection(
     cipher: Option<Cipher>,
@@ -734,13 +774,18 @@ async fn test_datagram_connection(
     .await;
 }
 
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "PQC P521MLKEM1024")]
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }; "PQC X25519MLKEM768")]
-#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "aes + PQC")]
-#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "chacha20 + PQC")]
-#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) };  "server PQC disabled")]
-#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }; "server PQC disabled + X25519MLKEM768")]
-#[test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None };                           "PQC wolfSSL default")]
+#[cfg_attr(feature = "postquantum",
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "PQC P521MLKEM1024"),
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::X25519MLKEM768) }; "PQC X25519MLKEM768"),
+    test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "aes + PQC"),
+    test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: true,  keyshare: Some(KeyShare::P521MLKEM1024) };  "chacha20 + PQC"),
+    test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::P521MLKEM1024) };  "server PQC disabled"),
+    test_case(None,                   PQCrypto { server_pqc: false, keyshare: Some(KeyShare::X25519MLKEM768) }; "server PQC disabled + X25519MLKEM768"),
+    test_case(None,                   PQCrypto { server_pqc: true,  keyshare: None };                           "PQC wolfSSL default"),
+)]
+#[test_case(None,                   PQCrypto { server_pqc: false, keyshare: None }; "no PQC")]
+#[test_case(Some(Cipher::Aes256),   PQCrypto { server_pqc: false, keyshare: None }; "no PQC + aes")]
+#[test_case(Some(Cipher::Chacha20), PQCrypto { server_pqc: false, keyshare: None }; "no PQC + chacha20")]
 #[tokio::test]
 async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
     // Communicate over a local stream socket for simplicity
@@ -764,10 +809,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let (client_sock, server_sock) = UnixStream::pair().expect("UnixStream");
     let server_sock = Arc::new(TestStreamSock(server_sock));
     let client_sock = Arc::new(TestStreamSock(client_sock));
-    let pqc = PQCrypto {
-        server_pqc: true,
-        keyshare: Some(KeyShare::P521MLKEM1024),
-    };
+    let pqc = PQCrypto::default();
     // We need the server end to be ready to receive before we can get
     // started, else we'll get a `WouldBlock`.
     let _ = client_sock.writable().await;
