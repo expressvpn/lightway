@@ -31,7 +31,7 @@ async fn metrics_debug() {
         return;
     }
 
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_mins(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 

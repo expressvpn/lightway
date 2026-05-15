@@ -22,7 +22,7 @@ const PROBE_SMALL_STEP: u16 = 8;
 /// Timeout for the PROBE_TIMER timer
 const PROBE_TIME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the PMTU_RAISE_TIMER timer. Also used a CONFIRMATION_TIMER.
-const PMTU_RAISE_TIMER_TIMEOUT: Duration = Duration::from_secs(600);
+const PMTU_RAISE_TIMER_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// Returns the required [`wire::Ping`] payload size needed to
 /// construct a probe frame corresponding to the given PLPMTU.
@@ -1137,7 +1137,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(pmtud.state, State::SearchComplete));
         assert!(pmtud.effective_pmtu().is_some());
-        timer.expect_pending(Duration::from_secs(600));
+        timer.expect_pending(Duration::from_mins(10));
 
         pmtud.plpmtu
     }
@@ -1180,7 +1180,7 @@ mod tests {
         // Search now complete with PMTU 1232 and PMTU_RAISE_TIMER pending
         assert!(matches!(pmtud.state, State::SearchComplete));
         assert_eq!(pmtud.plpmtu, 1282);
-        timer.expect_pending(Duration::from_secs(600));
+        timer.expect_pending(Duration::from_mins(10));
 
         (action, pmtud)
     }
@@ -1249,7 +1249,7 @@ mod tests {
 
         assert!(matches!(action, Action::None));
         assert!(matches!(pmtud.state, State::SearchComplete));
-        timer.expect_pending(Duration::from_secs(600));
+        timer.expect_pending(Duration::from_mins(10));
 
         pmtud.plpmtu
     }
@@ -1425,7 +1425,7 @@ mod tests {
         }
 
         assert!(matches!(pmtud.state, State::SearchComplete));
-        timer.expect_pending(Duration::from_secs(600));
+        timer.expect_pending(Duration::from_mins(10));
 
         pmtud.offline(&mut ());
         assert!(matches!(pmtud.state, State::Disabled));

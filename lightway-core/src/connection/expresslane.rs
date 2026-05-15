@@ -29,7 +29,7 @@ pub trait ExpresslaneCb<AppState> {
 pub type ExpresslaneCbType<AppState> = Arc<dyn ExpresslaneCb<AppState> + Sync + Send>;
 
 /// Default interval between expresslane key rotations
-pub const DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
+pub const DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_mins(15);
 
 /// Packet counters for ExpressLane health monitoring.
 #[derive(Debug, Default, Clone, Copy)]

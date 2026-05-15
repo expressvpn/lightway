@@ -32,20 +32,20 @@ use lightway_core::{
 use crate::handle_inside_io_error;
 
 /// Default interval to check for connections to expire aged connections
-pub const DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::from_mins(1);
 
 /// How often to check for connections to expire connections where authentication has expired
-const CONNECTION_AUTH_EXPIRATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const CONNECTION_AUTH_EXPIRATION_INTERVAL: Duration = Duration::from_hours(6);
 
 /// How often to check for pending session ids to cleanup
-const PENDING_SESSION_ID_EXPIRATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const PENDING_SESSION_ID_EXPIRATION_INTERVAL: Duration = Duration::from_hours(6);
 
 /// How long a connection can be idle for
-const CONNECTION_MAX_IDLE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CONNECTION_MAX_IDLE_AGE: Duration = Duration::from_hours(24);
 
 /// How long a connection can take to become Online
 /// If connection is not online by this time, it will be closed to save resources
-const CONNECTION_STALE_AGE: Duration = Duration::from_secs(60);
+const CONNECTION_STALE_AGE: Duration = Duration::from_mins(1);
 
 impl connection_map::Value for Connection {
     fn socket_addr(&self) -> SocketAddr {

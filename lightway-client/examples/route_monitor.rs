@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             Err(e) => {
                 error!("Error listening for route changes: {}", e);
                 // Continue monitoring even on errors with a small delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
