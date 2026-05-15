@@ -508,69 +508,79 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     };
     let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
     let mtu = inside_io.mtu();
-    let mut buf = BytesMut::with_capacity(mtu);
+    #[cfg(linux)]
+    let mut recv_buf = {
+        let (udp_gso, tcp_gso) = inside_io.gso();
+        if udp_gso || tcp_gso {
+            info!(
+                udp_gso,
+                tcp_gso, "TUN offloading is on, will use batched receiving"
+            );
+            io::inside::InsideRecvBuf::new_batched(
+                mtu,
+                lightway_app_utils::RECV_MULTIPLE_MAX_SEGMENTS,
+            )
+        } else {
+            io::inside::InsideRecvBuf::new(mtu)
+        }
+    };
+    #[cfg(not(linux))]
+    let mut recv_buf = io::inside::InsideRecvBuf::new(mtu);
+
     loop {
-        buf.clear();
-        buf.resize(mtu, 0);
-        match inside_io.recv_buf(&mut buf).await {
-            IOCallbackResult::Ok(_n) => {}
-            IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
-            IOCallbackResult::Err(err) => {
-                // Fatal error
-                return Err(err.into());
-            }
+        let (count, bufs) = match recv_buf.recv(inside_io.as_ref()).await {
+            IOCallbackResult::Ok(b) => b,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
         };
 
         let last_outside_data_received = {
             let mut conn = conn.lock().unwrap();
 
-            // Update source IP address to server assigned IP address
             let ip_config = conn.app_state().ip_config;
-            if let Some(ip_config) = &ip_config {
-                ipv4_update_source(buf.as_mut(), ip_config.client_ip);
+            for buf in bufs.iter_mut() {
+                // Update source IP address to server-assigned IP address
+                if let Some(ip_config) = &ip_config {
+                    ipv4_update_source(buf.as_mut(), ip_config.client_ip);
 
-                // Update TUN device DNS IP address to server provided DNS address
-                let packet = Ipv4Packet::new(buf.as_ref());
-                if let Some(packet) = packet
-                    && packet.get_destination() == tun_dns_ip
-                {
-                    ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
-                };
-            }
+                    // Update TUN device DNS IP address to server-provided DNS address
+                    let packet = Ipv4Packet::new(buf.as_ref());
+                    if let Some(packet) = packet
+                        && packet.get_destination() == tun_dns_ip
+                    {
+                        ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
+                    };
+                }
 
-            match conn.inside_data_received(&mut buf) {
-                Ok(()) => conn.activity().last_outside_data_received,
-                Err(ConnectionError::PluginDropWithReply(reply)) => {
-                    // Send the reply packet to inside path
-                    let _ = inside_io.try_send(reply, ip_config);
-                    continue;
-                }
-                Err(ConnectionError::InvalidState) => {
-                    // Ignore the packet till the connection is online
-                    continue;
-                }
-                Err(ConnectionError::InvalidInsidePacket(_)) => {
-                    // Ignore invalid inside packet
-                    continue;
-                }
-                Err(err) => {
-                    // Fatal error
-                    return Err(err.into());
+                // TODO: Batch send packets out with sendmmsg
+                match conn.inside_data_received(buf) {
+                    Ok(()) => {}
+                    Err(ConnectionError::PluginDropWithReply(reply)) => {
+                        // Send the reply packet to inside path
+                        let _ = inside_io.try_send(reply, ip_config);
+                    }
+                    Err(ConnectionError::InvalidState) => {
+                        // Ignore the packet till the connection is online
+                    }
+                    Err(ConnectionError::InvalidInsidePacket(_)) => {
+                        // Ignore invalid inside packet
+                    }
+                    Err(err) => {
+                        // Fatal error
+                        return Err(err.into());
+                    }
                 }
             }
+            conn.activity().last_outside_data_received
         };
-
-        let now = Instant::now();
-        let duration_since_last_outside_data = now.duration_since(last_outside_data_received);
+        recv_buf.reset(count);
 
         if !tracer_trigger_timeout.is_zero()
-            && duration_since_last_outside_data > tracer_trigger_timeout
+            && last_outside_data_received.elapsed() > tracer_trigger_timeout
             && tracer_timeout_last_outside_data_rcvd.is_none_or(|x| x != last_outside_data_received)
         {
-            {
-                tracer_timeout_last_outside_data_rcvd = Some(last_outside_data_received);
-                keepalive.tracer_delta_exceeded().await;
-            }
+            tracer_timeout_last_outside_data_rcvd = Some(last_outside_data_received);
+            keepalive.tracer_delta_exceeded().await;
         }
     }
 }
@@ -892,6 +902,11 @@ pub async fn connect<
     })
     .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
         b.with_pmtud_timer(pmtud_timer)
+    });
+
+    #[cfg(linux)]
+    let conn_builder = conn_builder.when(config.enable_batch_receive, |b| {
+        b.with_inside_batch_enabled()
     });
 
     #[cfg(feature = "postquantum")]

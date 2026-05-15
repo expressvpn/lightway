@@ -4,16 +4,15 @@ use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
-use lightway_core::{Event, EventCallback};
-use tokio::fs::read_to_string;
-use tokio::sync::mpsc;
-
 use lightway_app_utils::{
-    TunConfig, Validate,
+    DEFAULT_TUN_MTU, TunConfig, Validate,
     args::{ConfigFormat, ConnectionType, LogFormat},
     validate_configuration_file_path,
 };
 use lightway_client::{io::inside::InsideIO, *};
+use lightway_core::{Event, EventCallback};
+use tokio::fs::read_to_string;
+use tokio::sync::mpsc;
 
 mod config;
 use config::{Config, ConfigPatch, ConnectionConfig};
@@ -171,10 +170,21 @@ async fn main() -> Result<()> {
 
     // TODO: Fix in future PR
     tun_config
-        .mtu(1350)
+        .mtu(DEFAULT_TUN_MTU)
         .address(config.tun_local_ip.into())
         .destination(config.tun_peer_ip)
         .up();
+
+    #[cfg(linux)]
+    if config.enable_offload {
+        if config.enable_tun_iouring {
+            tracing::warn!("TUN offloading is not available when using io-uring, ignoring");
+            tun_config.offload(false);
+        } else {
+            tun_config.offload(true);
+            config.enable_batch_receive = true;
+        }
+    }
 
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
 

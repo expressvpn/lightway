@@ -175,6 +175,15 @@ pub struct Config {
     ))]
     pub enable_batch_receive: bool,
 
+    #[cfg(linux)]
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable TUN offloading. It will also enable batch receive if this is on"
+    ))]
+    pub enable_offload: bool,
+
     #[cfg(desktop)]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"Setup of route table
@@ -383,6 +392,8 @@ impl Default for Config {
             rcvbuf: ByteSize::mib(8),
             #[cfg(batch_receive)]
             enable_batch_receive: false,
+            #[cfg(linux)]
+            enable_offload: false,
             #[cfg(desktop)]
             route_mode: RouteMode::default(),
             #[cfg(desktop)]

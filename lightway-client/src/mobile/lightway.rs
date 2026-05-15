@@ -11,7 +11,7 @@ use futures::StreamExt;
 use futures::future::{FutureExt, OptionFuture, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
 use lightway_app_utils::{
-    ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
+    ConnectionTicker, DEFAULT_TUN_MTU, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
     connection_ticker_cb,
 };
 use lightway_core::{
@@ -34,7 +34,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use uniffi::deps::anyhow::{Context, anyhow, bail};
 use uniffi::deps::bytes::BytesMut;
 
-const INTERNAL_MTU: u16 = 1350;
+const INTERNAL_MTU: u16 = DEFAULT_TUN_MTU;
 #[cfg(apple)]
 const MAX_SOCKET_BUFFER_LEN: usize = 1024000;
 const ENABLE_PMTUD: bool = false;

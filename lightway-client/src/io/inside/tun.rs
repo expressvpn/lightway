@@ -5,13 +5,14 @@ use std::{net::Ipv4Addr, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
-use pnet_packet::ipv4::Ipv4Packet;
-
+#[cfg(linux)]
+use lightway_app_utils::TunOffloadBuffers;
 use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
 use lightway_core::{
     IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, InsideIpConfig,
     ipv4_update_destination, ipv4_update_source,
 };
+use pnet_packet::ipv4::Ipv4Packet;
 
 use crate::{ConnectionState, io::inside::InsideIORecv};
 
@@ -54,6 +55,15 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         self.tun.recv_buf(buf).await
     }
 
+    #[cfg(linux)]
+    async fn recv_multiple_buf(
+        &self,
+        offload_buffer: &mut TunOffloadBuffers,
+        bufs: &mut [BytesMut],
+    ) -> IOCallbackResult<usize> {
+        self.tun.recv_multiple_buf(offload_buffer, bufs).await
+    }
+
     /// Api to send packet in the tunnel
     fn try_send(&self, mut pkt: BytesMut, ip_config: Option<InsideIpConfig>) -> Result<usize> {
         let pkt_len = pkt.len();
@@ -76,6 +86,11 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
 
     fn mtu(&self) -> usize {
         self.tun.mtu()
+    }
+
+    #[cfg(linux)]
+    fn gso(&self) -> (bool, bool) {
+        self.tun.gso()
     }
 
     fn into_io_send_callback(
@@ -105,6 +120,35 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
         }
 
         self.tun.try_send(buf)
+    }
+
+    #[cfg(linux)]
+    fn send_multiple(
+        &self,
+        bufs: &mut [BytesMut],
+        state: &mut ConnectionState<ExtAppState>,
+    ) -> IOCallbackResult<usize> {
+        for b in bufs.iter_mut() {
+            // Update destination IP from server provided inside ip to TUN device ip
+            ipv4_update_destination(b.as_mut(), self.ip);
+
+            // Update source IP from server DNS ip to TUN DNS ip
+            if let Some(ip_config) = state.ip_config {
+                let packet = Ipv4Packet::new(b.as_ref());
+                if let Some(packet) = packet
+                    && packet.get_source() == ip_config.dns_ip
+                {
+                    ipv4_update_source(b.as_mut(), self.dns_ip);
+                };
+            }
+        }
+
+        self.tun.try_send_multiple(bufs)
+    }
+
+    #[cfg(linux)]
+    fn gso(&self) -> (bool, bool) {
+        self.tun.gso()
     }
 
     fn mtu(&self) -> usize {
