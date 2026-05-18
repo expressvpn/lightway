@@ -472,17 +472,16 @@ impl ConnectionConfig {
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
-            .map(|ca| load_ca(ca))
+            .map(load_ca)
             .ok_or(Error::InvalidCertificate)?
     }
 
     /// Try build SocketAddress from server field
     #[cfg(feature = "mobile")]
     pub fn skt_addr(&self) -> Result<std::net::SocketAddr, Error> {
-        Ok(self
-            .server
+        self.server
             .parse()
-            .map_err(|_e| Error::InvalidSocketAddress)?)
+            .map_err(|_e| Error::InvalidSocketAddress)
     }
 }
 
@@ -570,7 +569,7 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
         }: MobileConnectionConfig,
     ) -> ConnectionConfig {
         ConnectionConfig {
-            server: format!("{}:{}", server_ip.ip.to_string(), port),
+            server: format!("{}:{}", server_ip.ip, port),
             mode: if use_tcp {
                 ConnectionType::Tcp
             } else {

@@ -81,7 +81,7 @@ struct OutsideIOBuilder {
     server_sockaddr: SocketAddr,
 }
 
-impl<'a> OutsideIOBuilder {
+impl OutsideIOBuilder {
     fn new(socket: OutsideSocket, server_sockaddr: SocketAddr) -> Self {
         Self {
             socket,
@@ -409,7 +409,7 @@ pub(crate) async fn async_lightway_start(
             match result {
                 Ok(Ok(client_result)) => {
                     info!("network change task result: {client_result:?}");
-                    Ok(client_result.into())
+                    Ok(client_result)
                 },
                 Ok(Err(e)) => {
                     Err(anyhow!("error during network change: {e:?}"))
@@ -803,10 +803,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             Event::ExpresslaneStateChanged(state) => {
                 if let Some(tx) = expresslane_event_tx.as_ref()
                     && let Ok(state) = (*state).try_into()
+                    && let Err(e) = tx.try_send(state)
                 {
-                    if let Err(e) = tx.try_send(state) {
-                        warn!("Unable to send Expresslane state change event: {:?}", e);
-                    }
+                    warn!("Unable to send Expresslane state change event: {:?}", e);
                 }
                 continue;
             }
