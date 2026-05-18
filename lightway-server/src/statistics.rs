@@ -1,6 +1,6 @@
 use lightway_core::ConnectionActivity;
 use std::sync::{Arc, Weak};
-use time::Duration;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tracing::info;
 
@@ -10,11 +10,12 @@ use crate::{
     metrics::{self, ConnectionIntervalStats},
 };
 
-const STATISTICS_REPORTING_INTERVAL: Duration = Duration::seconds(30);
+/// Default interval between statistics reports
+pub const DEFAULT_STATISTICS_REPORTING_INTERVAL: Duration = Duration::from_secs(30);
 
-const FIVE_MINUTES: Duration = Duration::minutes(5);
-const FIFTEEN_MINUTES: Duration = Duration::minutes(15);
-const SIXTY_MINUTES: Duration = Duration::hours(1);
+const FIVE_MINUTES: Duration = Duration::from_mins(5);
+const FIFTEEN_MINUTES: Duration = Duration::from_mins(15);
+const SIXTY_MINUTES: Duration = Duration::from_hours(1);
 
 /// Return is (standby, active)
 fn calculate_session_stats(
@@ -106,11 +107,15 @@ fn ip_manager_stats(ip_manager: &Weak<IpManager>) {
     metrics::assigned_internal_ips(count);
 }
 
-pub(crate) async fn run(conn_manager: Arc<ConnectionManager>, ip_manager: Arc<IpManager>) {
+pub(crate) async fn run(
+    conn_manager: Arc<ConnectionManager>,
+    ip_manager: Arc<IpManager>,
+    reporting_interval: Duration,
+) {
     let conn_manager = Arc::downgrade(&conn_manager);
     let ip_manager = Arc::downgrade(&ip_manager);
 
-    let mut ticker = tokio::time::interval(STATISTICS_REPORTING_INTERVAL.unsigned_abs());
+    let mut ticker = tokio::time::interval(reporting_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 
@@ -144,19 +149,19 @@ mod tests {
         assert_eq!(format!("{}+{}", standby.fmt(), active.fmt()), "0:0:0+0:0:0");
     }
 
-    #[test_case(Duration::ZERO,        Duration::ZERO        => "0:0:0+1:1:1" ; "active, very recent data")]
-    #[test_case(Duration::ZERO,        Duration::minutes(1)  => "0:0:0+1:1:1" ; "active, 1m since data")]
-    #[test_case(Duration::ZERO,        Duration::minutes(6)  => "1:0:0+0:1:1" ; "active, 5+ mins since data")]
-    #[test_case(Duration::ZERO,        Duration::minutes(16) => "1:1:0+0:0:1" ; "active, 15+ mins since data")]
-    #[test_case(Duration::ZERO,        Duration::minutes(61) => "1:1:1+0:0:0" ; "active, 60+ mins since data")]
-    #[test_case(Duration::minutes(1),  Duration::hours(2)    => "1:1:1+0:0:0" ; "inactive for 1 min, data older")]
-    #[test_case(Duration::minutes(6),  Duration::hours(2)    => "0:1:1+0:0:0" ; "inactive for 5+ min, data older")]
-    #[test_case(Duration::minutes(16), Duration::hours(2)    => "0:0:1+0:0:0" ; "inactive for 15+ min, data older")]
-    #[test_case(Duration::minutes(61), Duration::hours(2)    => "0:0:0+0:0:0" ; "inactive for 60+ min, data older")]
-    #[test_case(Duration::minutes(1),  Duration::minutes(1)  => "0:0:0+1:1:1" ; "inactive for 1 min, data same age")]
-    #[test_case(Duration::minutes(6),  Duration::minutes(6)  => "0:0:0+0:1:1" ; "inactive for 5+ min, data same age")]
-    #[test_case(Duration::minutes(16), Duration::minutes(16) => "0:0:0+0:0:1" ; "inactive for 15+ min, data same age")]
-    #[test_case(Duration::minutes(61), Duration::minutes(61) => "0:0:0+0:0:0" ; "inactive for 60+ min, recent data")]
+    #[test_case(Duration::ZERO,              Duration::ZERO              => "0:0:0+1:1:1" ; "active, very recent data")]
+    #[test_case(Duration::ZERO,              Duration::from_mins(1)      => "0:0:0+1:1:1" ; "active, 1m since data")]
+    #[test_case(Duration::ZERO,              Duration::from_mins(6)      => "1:0:0+0:1:1" ; "active, 5+ mins since data")]
+    #[test_case(Duration::ZERO,              Duration::from_mins(16)     => "1:1:0+0:0:1" ; "active, 15+ mins since data")]
+    #[test_case(Duration::ZERO,              Duration::from_mins(61)     => "1:1:1+0:0:0" ; "active, 60+ mins since data")]
+    #[test_case(Duration::from_mins(1),      Duration::from_hours(2)     => "1:1:1+0:0:0" ; "inactive for 1 min, data older")]
+    #[test_case(Duration::from_mins(6),      Duration::from_hours(2)     => "0:1:1+0:0:0" ; "inactive for 5+ min, data older")]
+    #[test_case(Duration::from_mins(16),     Duration::from_hours(2)     => "0:0:1+0:0:0" ; "inactive for 15+ min, data older")]
+    #[test_case(Duration::from_mins(61),     Duration::from_hours(2)     => "0:0:0+0:0:0" ; "inactive for 60+ min, data older")]
+    #[test_case(Duration::from_mins(1),      Duration::from_mins(1)      => "0:0:0+1:1:1" ; "inactive for 1 min, data same age")]
+    #[test_case(Duration::from_mins(6),      Duration::from_mins(6)      => "0:0:0+0:1:1" ; "inactive for 5+ min, data same age")]
+    #[test_case(Duration::from_mins(16),     Duration::from_mins(16)     => "0:0:0+0:0:1" ; "inactive for 15+ min, data same age")]
+    #[test_case(Duration::from_mins(61),     Duration::from_mins(61)     => "0:0:0+0:0:0" ; "inactive for 60+ min, recent data")]
     fn calculate_stats_aging(outside_data_age: Duration, data_traffic_age: Duration) -> String {
         assert_le!(
             outside_data_age,

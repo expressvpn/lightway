@@ -3,6 +3,7 @@ mod connection_map;
 use bytes::BytesMut;
 use delegate::delegate;
 use parking_lot::Mutex;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -12,7 +13,6 @@ use std::{
     },
 };
 use thiserror::Error;
-use time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::StreamExt;
 use tracing::{info, instrument, warn};
@@ -31,21 +31,21 @@ use lightway_core::{
 
 use crate::handle_inside_io_error;
 
-/// How often to check for connections to expire aged connections
-pub(crate) const CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::minutes(1);
+/// Default interval to check for connections to expire aged connections
+pub const DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::from_mins(1);
 
 /// How often to check for connections to expire connections where authentication has expired
-const CONNECTION_AUTH_EXPIRATION_INTERVAL: Duration = Duration::hours(6);
+const CONNECTION_AUTH_EXPIRATION_INTERVAL: Duration = Duration::from_hours(6);
 
 /// How often to check for pending session ids to cleanup
-const PENDING_SESSION_ID_EXPIRATION_INTERVAL: Duration = Duration::hours(6);
+const PENDING_SESSION_ID_EXPIRATION_INTERVAL: Duration = Duration::from_hours(6);
 
 /// How long a connection can be idle for
-const CONNECTION_MAX_IDLE_AGE: Duration = Duration::days(1);
+const CONNECTION_MAX_IDLE_AGE: Duration = Duration::from_hours(24);
 
 /// How long a connection can take to become Online
 /// If connection is not online by this time, it will be closed to save resources
-const CONNECTION_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+const CONNECTION_STALE_AGE: Duration = Duration::from_mins(1);
 
 impl connection_map::Value for Connection {
     fn socket_addr(&self) -> SocketAddr {
@@ -93,6 +93,8 @@ pub(crate) struct ConnectionManager {
     inside_io_codec_factory: Option<PacketCodecFactoryType>,
     /// Optional callback to forward per-connection events with session ID
     event_cb: Option<crate::ServerEventCbType>,
+    /// How often to check for aged connections to expire
+    connection_age_expiration_interval: Duration,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -193,7 +195,9 @@ async fn handle_events(
             }
             Event::TlsKeysUpdateStart => handle_tls_keys_update_start(&conn),
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
-            Event::ExpresslaneStateChanged(_) => {}
+            Event::ExpresslaneStateChanged(s) => {
+                info!("Setting expresslane state to {:?}", s);
+            }
             Event::FirstPacketReceived => {
                 unreachable!("client only event received");
             }
@@ -313,6 +317,7 @@ impl ConnectionManager {
         ctx: ServerContext<ConnectionState>,
         inside_io_codec_factory: Option<PacketCodecFactoryType>,
         event_cb: Option<crate::ServerEventCbType>,
+        connection_age_expiration_interval: Duration,
     ) -> Arc<Self> {
         let conn_manager = Arc::new(Self {
             ctx,
@@ -321,10 +326,11 @@ impl ConnectionManager {
             total_sessions: Default::default(),
             inside_io_codec_factory,
             event_cb,
+            connection_age_expiration_interval,
         });
 
         conn_manager.spawn_periodic_task(
-            CONNECTION_AGE_EXPIRATION_INTERVAL,
+            connection_age_expiration_interval,
             Self::evict_idle_connections,
         );
         conn_manager.spawn_periodic_task(
@@ -346,7 +352,7 @@ impl ConnectionManager {
         let weak_conn_manager = Arc::downgrade(self);
 
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval.unsigned_abs());
+            let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 
@@ -369,6 +375,10 @@ impl ConnectionManager {
 
     pub(crate) fn total_sessions(&self) -> usize {
         self.total_sessions.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn connection_age_expiration_interval(&self) -> Duration {
+        self.connection_age_expiration_interval
     }
 
     pub(crate) fn pending_session_id_rotations_count(&self) -> usize {

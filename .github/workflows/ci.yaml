@@ -229,6 +229,9 @@ jobs:
     - name: Check with mobile
       working-directory: ./lightway-client
       run: nix develop -c cargo check --features=mobile
+    - name: Clippy with mobile
+      working-directory: ./lightway-client
+      run: nix develop -c cargo clippy --features=mobile --all-targets -- -D warnings
     - name: Test with mobile features
       working-directory: ./lightway-client
       run: nix develop -c cargo test --features=mobile-test

@@ -28,8 +28,8 @@ pub trait ExpresslaneCb<AppState> {
 /// Convenience type for [`ExpresslaneCb`] trait objects.
 pub type ExpresslaneCbType<AppState> = Arc<dyn ExpresslaneCb<AppState> + Sync + Send>;
 
-/// Interval between expresslane key rotations
-pub(crate) const EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_secs(60 * 15);
+/// Default interval between expresslane key rotations
+pub const DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_mins(15);
 
 /// Packet counters for ExpressLane health monitoring.
 #[derive(Debug, Default, Clone, Copy)]
@@ -82,6 +82,8 @@ pub(crate) struct Expresslane<AppState: Send> {
     pub(crate) cb: Option<ExpresslaneCbType<AppState>>,
     /// External metrics provider
     pub(crate) metrics: Option<ExpresslaneMetricsType>,
+    /// Interval between expresslane key rotations
+    pub(crate) keys_rotation_interval: Duration,
 }
 
 impl<AppState: Send> Expresslane<AppState> {
@@ -89,6 +91,7 @@ impl<AppState: Send> Expresslane<AppState> {
         state: ExpresslaneState,
         cb: Option<ExpresslaneCbType<AppState>>,
         metrics: Option<ExpresslaneMetricsType>,
+        keys_rotation_interval: Duration,
     ) -> Self {
         Self {
             state,
@@ -102,6 +105,7 @@ impl<AppState: Send> Expresslane<AppState> {
             data: ExpresslaneData::default(),
             cb,
             metrics,
+            keys_rotation_interval,
         }
     }
 
@@ -124,7 +128,7 @@ impl<AppState: Send> Expresslane<AppState> {
     pub(crate) fn time_to_rotate_key(&self) -> bool {
         match self.last_key_rotation {
             None => true,
-            Some(last) => last.elapsed() > EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            Some(last) => last.elapsed() > self.keys_rotation_interval,
         }
     }
 }

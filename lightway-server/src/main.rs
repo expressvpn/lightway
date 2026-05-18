@@ -31,7 +31,7 @@ async fn metrics_debug() {
         return;
     }
 
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_mins(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 
@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
         lightway_dns_ip: config.lightway_dns_ip,
         use_dynamic_client_ip: false,
         enable_expresslane: config.enable_expresslane,
+        expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
         expresslane_cb: None,
         expresslane_metrics: None,
         event_cb: None,
@@ -181,6 +182,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "io-uring")]
         iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
         key_update_interval: config.key_update_interval.into(),
+        connection_age_expiration_interval: config.connection_age_expiration_interval.into(),
+        statistics_reporting_interval: config.statistics_reporting_interval.into(),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         inside_pkt_codec: None,

@@ -550,7 +550,7 @@ impl RouteManagerInner {
                        Err(e) => {
                            // Continue monitoring even on transient errors
                            tracing::debug!("Error listening for route changes: {}", e);
-                           tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                           tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                        }
                    }}
 
@@ -702,7 +702,7 @@ mod tests {
         // Add 50ms sleep to allow TUN device to be fully initialized
         // NOTE: This sometimes adds an additional route after the tests have stored the initial route
         //       which may lead to inaccurate tests. 50ms is eternity and enough to stabilise this.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let tun_index = tun_device.if_index()?;
 

@@ -8,11 +8,14 @@ mod statistics;
 use bytesize::ByteSize;
 use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
+pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
+pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
-    ConnectionType, Event, ExpresslaneCbType, ExpresslaneMetricsType, PluginFactoryError,
-    PluginFactoryList, ServerAuth, ServerAuthHandle, ServerAuthResult, SessionId, Version,
+    ConnectionType, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, Event, ExpresslaneCbType,
+    ExpresslaneMetricsType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
+    ServerAuthResult, SessionId, Version,
 };
 
 /// Callback type for receiving per-connection events with session ID.
@@ -177,6 +180,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Interval between Expresslane key rotations
+    pub expresslane_keys_rotation_interval: Duration,
+
     /// Callback for expresslane key updates
     #[educe(Debug(ignore))]
     pub expresslane_cb: Option<ExpresslaneCbType<ConnectionState>>,
@@ -208,6 +214,12 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
     /// The key update interval for DTLS/TLS 1.3 connections
     pub key_update_interval: Duration,
+
+    /// How often to check for connections to expire aged connections
+    pub connection_age_expiration_interval: Duration,
+
+    /// Interval between session statistics reports
+    pub statistics_reporting_interval: Duration,
 
     /// Inside plugins to use
     #[educe(Debug(method(debug_fmt_plugin_list)))]
@@ -332,7 +344,9 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         connection_ticker_cb,
     )?
     .with_key_update_interval(config.key_update_interval)
-    .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.enable_expresslane, |b| {
+        b.with_expresslane(config.expresslane_keys_rotation_interval)
+    })
     .when(config.expresslane_cb.is_some(), |b| {
         b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
     })
@@ -344,9 +358,18 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .with_outside_plugins(config.outside_plugins)
     .build()?;
 
-    let conn_manager = ConnectionManager::new(ctx, config.inside_pkt_codec, config.event_cb);
+    let conn_manager = ConnectionManager::new(
+        ctx,
+        config.inside_pkt_codec,
+        config.event_cb,
+        config.connection_age_expiration_interval,
+    );
 
-    tokio::spawn(statistics::run(conn_manager.clone(), ip_manager.clone()));
+    tokio::spawn(statistics::run(
+        conn_manager.clone(),
+        ip_manager.clone(),
+        config.statistics_reporting_interval,
+    ));
 
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => Box::new(

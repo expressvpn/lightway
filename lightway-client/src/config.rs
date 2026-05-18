@@ -203,6 +203,11 @@ pub struct Config {
     pub enable_expresslane: bool,
 
     #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    pub expresslane_keys_rotation_interval: Duration,
+
+    #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
@@ -389,6 +394,9 @@ impl Default for Config {
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
             enable_expresslane: false,
+            expresslane_keys_rotation_interval: Duration::from_std_duration(
+                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
             enable_pmtud: false,
             pmtud_base_mtu: None,
             enable_tun_iouring: false,
@@ -464,17 +472,16 @@ impl ConnectionConfig {
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
-            .map(|ca| load_ca(ca))
+            .map(load_ca)
             .ok_or(Error::InvalidCertificate)?
     }
 
     /// Try build SocketAddress from server field
     #[cfg(feature = "mobile")]
     pub fn skt_addr(&self) -> Result<std::net::SocketAddr, Error> {
-        Ok(self
-            .server
+        self.server
             .parse()
-            .map_err(|_e| Error::InvalidSocketAddress)?)
+            .map_err(|_e| Error::InvalidSocketAddress)
     }
 }
 
@@ -562,7 +569,7 @@ impl From<MobileConnectionConfig> for ConnectionConfig {
         }: MobileConnectionConfig,
     ) -> ConnectionConfig {
         ConnectionConfig {
-            server: format!("{}:{}", server_ip.ip.to_string(), port),
+            server: format!("{}:{}", server_ip.ip, port),
             mode: if use_tcp {
                 ConnectionType::Tcp
             } else {

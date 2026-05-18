@@ -254,6 +254,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "postquantum")]
         keyshare: config.keyshare,
         enable_expresslane: config.enable_expresslane,
+        expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
         expresslane_cb: None,
         expresslane_metrics: None,
         keepalive_interval: config.keepalive_interval.into(),

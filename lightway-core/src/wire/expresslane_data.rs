@@ -10,6 +10,25 @@ use tracing::debug;
 
 use super::{FromWireError, FromWireResult, SessionId, expresslane_config::ExpresslaneVersion};
 
+/// Build AEAD AAD for an expresslane data packet.
+/// Returns a fixed-size buffer and the number of significant bytes
+fn build_aad(
+    version: ExpresslaneVersion,
+    session_id: &SessionId,
+    wire_counter: u64,
+    flags: Flags,
+) -> ([u8; 18], usize) {
+    let mut buf = [0u8; 18];
+    buf[..8].copy_from_slice(&session_id.0[..]);
+    buf[8..16].copy_from_slice(&wire_counter.to_be_bytes()[..]);
+    if version >= ExpresslaneVersion::Version2 {
+        buf[16..].copy_from_slice(&u16::from(flags).to_be_bytes());
+        (buf, 18)
+    } else {
+        (buf, 16)
+    }
+}
+
 /// A expresslane data frame
 ///
 /// This is a variable sized request.
@@ -205,11 +224,33 @@ impl ReplayWindow {
         }
     }
 
-    /// Check if a wire counter should be accepted and update window state
+    /// To short-circuit obvious garbage before paying AEAD cost.
+    /// Returns true iff the packet should be rejected. Does NOT mutate
+    /// window state - that is reserved for [`Self::commit`] after the
+    /// packet has been deprotected successfully.
+    fn would_reject(&self, wire_counter: u64) -> bool {
+        if !self.initialized {
+            return false;
+        }
+        if wire_counter > self.max_counter {
+            return false;
+        }
+        let age = self.max_counter - wire_counter;
+        if age >= Self::WINDOW_SIZE {
+            // Too old.
+            return true;
+        }
+        // Within window: reject if bit already set (replay).
+        self.test_bit(age)
+    }
+
+    /// Commit a successfully-deprotected wire counter into the window.
     ///
-    /// Returns true if the packet is valid and should be processed.
-    /// Returns false if it's a replay or too old.
-    fn check_and_update(&mut self, wire_counter: u64) -> bool {
+    /// MUST only be called after AEAD verification succeeds. Returns
+    /// true if accepted and the window was updated; false if the
+    /// counter is a replay or too old (in which case state is
+    /// unchanged).
+    fn commit(&mut self, wire_counter: u64) -> bool {
         if !self.initialized {
             self.initialized = true;
             self.max_counter = wire_counter;
@@ -349,13 +390,9 @@ impl ExpresslaneData {
         let wire_counter = buf.get_u64();
 
         // Check for replay attacks using sliding window
-        if !self.replay_window.check_and_update(wire_counter) {
+        if self.replay_window.would_reject(wire_counter) {
             return Err(FromWireError::ReplayedExpressData);
         }
-
-        let mut auth_vec: [u8; 16] = [0; 16];
-        auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..].copy_from_slice(&wire_counter.to_be_bytes()[..]);
 
         let mut iv = [0u8; 12];
         buf.copy_to_slice(&mut iv);
@@ -364,6 +401,10 @@ impl ExpresslaneData {
         let data_len = buf.get_u16() as usize;
         let flags = Flags::from(buf.get_u16());
         let is_encoded = flags.encoded();
+
+        let (auth_vec_buf, auth_vec_len) =
+            build_aad(self.version, &session_id, wire_counter, flags);
+        let auth_vec = &auth_vec_buf[..auth_vec_len];
 
         if buf.len() < data_len {
             return Err(FromWireError::InsufficientData);
@@ -378,7 +419,7 @@ impl ExpresslaneData {
 
         let plain_text = current
             .cipher
-            .decrypt(iv, data.as_ref(), &auth_vec[..], &auth_tag)
+            .decrypt(iv, data.as_ref(), auth_vec, &auth_tag)
             .map_err(|_| FromWireError::InvalidExpressData);
 
         let plain_text = match plain_text {
@@ -386,7 +427,7 @@ impl ExpresslaneData {
             Err(e) => {
                 if let Some(prev) = &mut self.prev_peer {
                     prev.cipher
-                        .decrypt(iv, data.as_ref(), &auth_vec[..], &auth_tag)
+                        .decrypt(iv, data.as_ref(), auth_vec, &auth_tag)
                         .inspect_err(metrics::expresslane_decrypt_failed)
                         .map_err(|_| e)?
                 } else {
@@ -394,6 +435,11 @@ impl ExpresslaneData {
                 }
             }
         };
+
+        // AEAD verification succeeded - commit the wire counter
+        if !self.replay_window.commit(wire_counter) {
+            return Err(FromWireError::ReplayedExpressData);
+        }
 
         Ok((plain_text, is_encoded))
     }
@@ -416,16 +462,16 @@ impl ExpresslaneData {
 
         self.wire_counter = self.wire_counter.wrapping_add(1);
 
-        let mut auth_vec: [u8; 16] = [0; 16];
-        auth_vec[..8].copy_from_slice(&session_id.0[..]);
-        auth_vec[8..].copy_from_slice(&self.wire_counter.to_be_bytes()[..]);
+        let flags = Flags::new().with_encoded(is_encoded);
+
+        let (auth_vec_buf, auth_vec_len) =
+            build_aad(self.version, &session_id, self.wire_counter, flags);
+        let auth_vec = &auth_vec_buf[..auth_vec_len];
 
         let (cipher_text, auth_tag) = current
             .cipher
-            .encrypt(iv, plain_text.as_ref(), &auth_vec)
+            .encrypt(iv, plain_text.as_ref(), auth_vec)
             .expect("Encrypt failed");
-
-        let flags = Flags::new().with_encoded(is_encoded);
 
         buf.put_u64(self.wire_counter);
         buf.put(iv.as_ref());
@@ -700,7 +746,7 @@ mod tests {
     #[test]
     fn replay_window_accepts_first_packet() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
+        assert!(window.commit(100));
         assert_eq!(window.max_counter, 100);
         assert_eq!(window.packets_received, 1);
     }
@@ -708,18 +754,18 @@ mod tests {
     #[test]
     fn replay_window_detects_exact_replay() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
+        assert!(window.commit(100));
         // Replaying the same counter should be rejected
-        assert!(!window.check_and_update(100));
+        assert!(!window.commit(100));
         assert_eq!(window.packets_received, 1);
     }
 
     #[test]
     fn replay_window_accepts_newer_packets() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
-        assert!(window.check_and_update(101));
-        assert!(window.check_and_update(102));
+        assert!(window.commit(100));
+        assert!(window.commit(101));
+        assert!(window.commit(102));
         assert_eq!(window.max_counter, 102);
         assert_eq!(window.packets_received, 3);
     }
@@ -727,10 +773,10 @@ mod tests {
     #[test]
     fn replay_window_accepts_out_of_order_within_window() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
-        assert!(window.check_and_update(105));
-        assert!(window.check_and_update(103)); // Out of order, but within window
-        assert!(window.check_and_update(102)); // Out of order, but within window
+        assert!(window.commit(100));
+        assert!(window.commit(105));
+        assert!(window.commit(103)); // Out of order, but within window
+        assert!(window.commit(102)); // Out of order, but within window
         assert_eq!(window.max_counter, 105);
         assert_eq!(window.packets_received, 4);
     }
@@ -738,36 +784,36 @@ mod tests {
     #[test]
     fn replay_window_rejects_replayed_out_of_order_packet() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
-        assert!(window.check_and_update(105));
-        assert!(window.check_and_update(103));
+        assert!(window.commit(100));
+        assert!(window.commit(105));
+        assert!(window.commit(103));
         // Replaying 103 should be rejected
-        assert!(!window.check_and_update(103));
+        assert!(!window.commit(103));
         assert_eq!(window.packets_received, 3);
     }
 
     #[test]
     fn replay_window_rejects_too_old_packets() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
-        assert!(window.check_and_update(3000)); // Advance window past 2048
+        assert!(window.commit(100));
+        assert!(window.commit(3000)); // Advance window past 2048
         // Packet 100 is now outside the window (3000 - 2048 = 952)
-        assert!(!window.check_and_update(100));
-        assert!(!window.check_and_update(951));
+        assert!(!window.commit(100));
+        assert!(!window.commit(951));
         // But packets within window should work
-        assert!(window.check_and_update(953));
+        assert!(window.commit(953));
         assert_eq!(window.packets_received, 3);
     }
 
     #[test]
     fn replay_window_handles_large_jumps() {
         let mut window = ReplayWindow::default();
-        assert!(window.check_and_update(100));
+        assert!(window.commit(100));
         // Jump way ahead (> window size)
-        assert!(window.check_and_update(3000));
+        assert!(window.commit(3000));
         assert_eq!(window.max_counter, 3000);
         // Old packets should be rejected
-        assert!(!window.check_and_update(100));
+        assert!(!window.commit(100));
         assert_eq!(window.packets_received, 2);
     }
 
@@ -777,24 +823,24 @@ mod tests {
 
         // Receive packets 1-10 in order
         for i in 1..=10 {
-            assert!(window.check_and_update(i), "Failed to accept packet {}", i);
+            assert!(window.commit(i), "Failed to accept packet {}", i);
         }
 
         // Receive some out-of-order packets
-        assert!(window.check_and_update(15));
-        assert!(window.check_and_update(13));
-        assert!(window.check_and_update(11));
-        assert!(window.check_and_update(12));
-        assert!(window.check_and_update(14));
+        assert!(window.commit(15));
+        assert!(window.commit(13));
+        assert!(window.commit(11));
+        assert!(window.commit(12));
+        assert!(window.commit(14));
 
         // Try to replay some packets
-        assert!(!window.check_and_update(10));
-        assert!(!window.check_and_update(13));
-        assert!(!window.check_and_update(15));
+        assert!(!window.commit(10));
+        assert!(!window.commit(13));
+        assert!(!window.commit(15));
 
         // Continue with new packets
-        assert!(window.check_and_update(16));
-        assert!(window.check_and_update(17));
+        assert!(window.commit(16));
+        assert!(window.commit(17));
 
         // Verify total packets received: 10 + 5 + 2 = 17
         assert_eq!(window.packets_received, 17);
@@ -900,5 +946,200 @@ mod tests {
             result.err().unwrap(),
             FromWireError::ReplayedExpressData
         ));
+    }
+
+    /// V1 sender ↔ V1 receiver roundtrip succeeds without flags-in-AAD.
+    /// Proves the downgrade path still interoperates with legacy V1
+    /// peers (which compute AAD over session_id||counter only).
+    #[test]
+    fn v1_roundtrip_without_flags_in_aad() {
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"v1 payload";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        let mut borrowed = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let (decrypted, _) = receiver.try_from_wire(&mut borrowed, session_id).unwrap();
+        assert_eq!(decrypted.as_ref(), plain_text);
+    }
+
+    /// V1 sender ↔ V2 receiver must fail: AAD layouts differ (V1 omits
+    /// flags, V2 includes them) so AEAD verification cannot match. This
+    /// is intentional - version negotiation should have downgraded the
+    /// receiver to V1 long before this point.
+    #[test]
+    fn cross_version_v1_to_v2_fails() {
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version1,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"v1 to v2";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        let mut borrowed = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let result = receiver.try_from_wire(&mut borrowed, session_id);
+        assert!(matches!(result, Err(FromWireError::InvalidExpressData)));
+    }
+
+    /// On-path attacker flips the encoded flag on the wire. AEAD must reject
+    /// the packet because the flags field is bound into the auth tag via AAD.
+    /// Only applies to V2 - V1 keeps the original AAD layout (no flags) for
+    /// backwards compatibility with old V1 peers.
+    #[test]
+    fn tampered_flags_rejected_by_aead() {
+        let mut sender = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
+        let mut receiver = ExpresslaneData {
+            version: ExpresslaneVersion::Version2,
+            ..Default::default()
+        };
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"sensitive payload";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+
+        // Flags occupy bytes 38..40 (after counter[0..8], iv[8..20],
+        // auth_tag[20..36], data_len[36..38]). Encoded is the MSB of the
+        // u16 in MSB bit ordering, so 0x80 in byte 38 flips it.
+        assert_eq!(buf[38] & 0x80, 0, "precondition: encoded flag is clear");
+        buf[38] |= 0x80;
+
+        let mut borrowed_buf = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        let result = receiver.try_from_wire(&mut borrowed_buf, session_id);
+        assert!(
+            matches!(result, Err(FromWireError::InvalidExpressData)),
+            "tampered flags should fail AEAD auth, got {:?}",
+            result.as_ref().map(|_| "Ok")
+        );
+    }
+
+    /// `would_reject` must NOT mutate window state - it only previews
+    /// the decision so AEAD work can be skipped for obvious garbage.
+    #[test]
+    fn would_reject_is_non_mutating() {
+        let mut window = ReplayWindow::default();
+        // Empty window: would_reject says no, state untouched
+        assert!(!window.would_reject(100));
+        assert!(!window.initialized);
+        assert_eq!(window.packets_received, 0);
+
+        assert!(window.commit(100));
+        // would_reject on replay: says yes, state still untouched
+        assert!(window.would_reject(100));
+        assert_eq!(window.max_counter, 100);
+        assert_eq!(window.packets_received, 1);
+
+        // Future counter not yet seen: would_reject says no (still future)
+        assert!(!window.would_reject(u64::MAX));
+        assert_eq!(window.max_counter, 100);
+        assert_eq!(window.packets_received, 1);
+    }
+
+    /// On-path attacker forges a packet with a huge wire_counter and a
+    /// bogus auth tag (no key). Prior implementation slid the window
+    /// forward before AEAD verify, poisoning state so every subsequent
+    /// valid packet was rejected as "too old". Verify the window is
+    /// untouched by the forgery and the next valid packet still goes
+    /// through.
+    #[test]
+    fn forged_packet_does_not_poison_replay_window() {
+        let mut sender = ExpresslaneData::default();
+        let mut receiver = ExpresslaneData::default();
+
+        let test_key = ExpresslaneKey([42u8; EXPRESSLANE_KEY_SIZE]);
+        sender.update_next_self_key(test_key).unwrap();
+        sender.update_self_key();
+        receiver.update_peer_key(test_key).unwrap();
+
+        let session_id = SessionId([1u8, 2, 3, 4, 5, 6, 7, 8]);
+        let plain_text = b"hello expresslane";
+        let iv = [9u8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+
+        // 1) Real packet from the legitimate sender (counter=1) goes
+        // through and advances the window to 1.
+        let mut buf = BytesMut::new();
+        sender.append_to_wire(&mut buf, session_id, plain_text, iv, false);
+        let mut borrowed = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf);
+        receiver.try_from_wire(&mut borrowed, session_id).unwrap();
+        assert_eq!(receiver.replay_window.max_counter, 1);
+        assert_eq!(receiver.replay_window.packets_received, 1);
+
+        // 2) On-path attacker forges a packet with an enormous
+        // wire_counter and random ciphertext+tag (no key).
+        let mut forged = BytesMut::new();
+        forged.put_u64(u64::MAX - 1); // huge counter
+        forged.put(&[0u8; 12][..]); // iv
+        forged.put(&[0u8; 16][..]); // bogus auth tag
+        forged.put_u16(plain_text.len() as u16); // data_len
+        forged.put_u16(0); // flags
+        forged.put(&vec![0u8; plain_text.len()][..]); // bogus ciphertext
+
+        let mut borrowed_forged = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut forged);
+        let result = receiver.try_from_wire(&mut borrowed_forged, session_id);
+        assert!(
+            matches!(result, Err(FromWireError::InvalidExpressData)),
+            "forged packet must fail AEAD auth, got {:?}",
+            result.as_ref().map(|_| "Ok")
+        );
+
+        // Window state must be untouched by the forgery.
+        assert_eq!(
+            receiver.replay_window.max_counter, 1,
+            "forgery poisoned max_counter"
+        );
+        assert_eq!(
+            receiver.replay_window.packets_received, 1,
+            "forgery poisoned packets_received"
+        );
+
+        // 3) Next valid packet from the real sender (counter=2) must
+        // still be accepted - proving the DoS is gone.
+        let mut buf2 = BytesMut::new();
+        sender.append_to_wire(&mut buf2, session_id, plain_text, iv, false);
+        let mut borrowed2 = crate::borrowed_bytesmut::BorrowedBytesMut::from(&mut buf2);
+        let (decrypted, _) = receiver.try_from_wire(&mut borrowed2, session_id).unwrap();
+        assert_eq!(decrypted.as_ref(), plain_text);
+        assert_eq!(receiver.replay_window.max_counter, 2);
+        assert_eq!(receiver.replay_window.packets_received, 2);
     }
 }

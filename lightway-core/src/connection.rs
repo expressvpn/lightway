@@ -229,10 +229,6 @@ pub enum ConnectionError {
     /// A Packet Codec error occurred
     #[error("Packet Codec error: {0}")]
     PacketCodecError(Box<dyn std::error::Error + Sync + Send>),
-
-    /// Encoding Request Retransmit CB does not exist
-    #[error("Schedule Encoding Request Retransmit Cb Does Not Exist")]
-    EncodingReqRetransmitCbDoesNotExist,
 }
 
 impl ConnectionError {
@@ -249,7 +245,6 @@ impl ConnectionError {
                 match self {
                     TimedOut => true,
                     Unauthorized => true,
-                    InvalidProtocolVersion => true,
                     InvalidMode => true,
                     InvalidConnectionType => true,
                     NoAvailableClientIp => true,
@@ -259,7 +254,6 @@ impl ConnectionError {
                     PacketCodecDoesNotExist => true,
                     PacketCodecError(_) => true,
                     Disconnected => true,
-                    EncodingReqRetransmitCbDoesNotExist => true,
                     PathMtuDiscoveryRequired { .. } => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
@@ -270,8 +264,10 @@ impl ConnectionError {
                     WireError(wire::FromWireError::InsufficientData) => false,
                     WireError(wire::FromWireError::InvalidExpressData) => false,
                     WireError(wire::FromWireError::ReplayedExpressData) => false,
+                    WireError(wire::FromWireError::InvalidProtocolVersion(..)) => false,
                     WireError(_) => true,
 
+                    InvalidProtocolVersion => false,
                     InvalidState => false, // Can be due to out of order or repeated messages
                     InvalidInsideIo => false, // Can be used for test only test control plane
                     UnknownSessionID => false,
@@ -465,6 +461,7 @@ struct NewConnectionArgs<AppState> {
     expresslane: bool,
     expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<expresslane::ExpresslaneMetricsType>,
+    expresslane_keys_rotation_interval: std::time::Duration,
 }
 
 impl<AppState: Send> Connection<AppState> {
@@ -528,6 +525,7 @@ impl<AppState: Send> Connection<AppState> {
                 expresslane_state,
                 args.expresslane_cb,
                 args.expresslane_metrics,
+                args.expresslane_keys_rotation_interval,
             ),
         };
 
@@ -1703,8 +1701,15 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        if config.version != self.expresslane.data.version {
-            return Err(ConnectionError::ExpresslaneVersionMismatch);
+        let neg_version = ExpresslaneVersion::negotiate(config.version);
+        if neg_version != self.expresslane.data.version {
+            info!(
+                "Negotiated expresslane version: {:?} [max:{:?} peer:{:?}]",
+                neg_version,
+                ExpresslaneVersion::MAX,
+                config.version,
+            );
+            self.expresslane.data.version = neg_version;
         }
 
         // Handle acknowledgement from peer
@@ -1754,9 +1759,10 @@ impl<AppState: Send> Connection<AppState> {
             self.set_expresslane_state(ExpresslaneState::Inactive);
         }
 
-        // Send acknowledgement
+        // Send acknowledgement with the negotiated version
         let mut config = config;
         config.ack = true;
+        config.version = self.expresslane.data.version;
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_drop(msg);
 
@@ -1790,11 +1796,18 @@ impl<AppState: Send> Connection<AppState> {
         // If updating key failed, send disabled to peer
         let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
 
+        // Outgoing version: if we have already negotiated a version
+        // with the peer, use that. Otherwise advertise our local max
+        let version = match self.expresslane.data.version {
+            ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
+            v => v,
+        };
+
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled,
             key,
-            version: ExpresslaneVersion::Version1,
+            version,
             ack: false,
             counter: self.expresslane.config_counter,
         };
@@ -1820,11 +1833,16 @@ impl<AppState: Send> Connection<AppState> {
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.data.update_next_self_key(key);
 
+        let version = match self.expresslane.data.version {
+            ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
+            v => v,
+        };
+
         self.expresslane.config_counter += 1;
         let config = wire::ExpresslaneConfig {
             enabled: false,
             key,
-            version: ExpresslaneVersion::Version1,
+            version,
             ack: false,
             counter: self.expresslane.config_counter,
         };

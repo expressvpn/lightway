@@ -81,7 +81,7 @@ struct OutsideIOBuilder {
     server_sockaddr: SocketAddr,
 }
 
-impl<'a> OutsideIOBuilder {
+impl OutsideIOBuilder {
     fn new(socket: OutsideSocket, server_sockaddr: SocketAddr) -> Self {
         Self {
             socket,
@@ -220,6 +220,9 @@ pub(crate) async fn async_lightway_start(
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
+                    expresslane_keys_rotation_interval: config
+                        .expresslane_keys_rotation_interval
+                        .into(),
                     online_signal_sender: online_signal_sender.clone(),
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
@@ -406,7 +409,7 @@ pub(crate) async fn async_lightway_start(
             match result {
                 Ok(Ok(client_result)) => {
                     info!("network change task result: {client_result:?}");
-                    Ok(client_result.into())
+                    Ok(client_result)
                 },
                 Ok(Err(e)) => {
                     Err(anyhow!("error during network change: {e:?}"))
@@ -557,6 +560,7 @@ struct LightwayClientConnectArgs {
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
+    expresslane_keys_rotation_interval: std::time::Duration,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
     external_event_handler: Arc<dyn RustEventHandlers>,
@@ -571,6 +575,7 @@ async fn lightway_client_connect(
         socket,
         enable_keepalive,
         enable_expresslane,
+        expresslane_keys_rotation_interval,
         online_signal_sender,
         event_stream_handler,
         external_event_handler,
@@ -630,7 +635,7 @@ async fn lightway_client_connect(
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(connection_type.is_datagram() && enable_expresslane, |b| {
-        b.with_expresslane()
+        b.with_expresslane(expresslane_keys_rotation_interval)
     })
     .build()
     .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
@@ -798,10 +803,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
             Event::ExpresslaneStateChanged(state) => {
                 if let Some(tx) = expresslane_event_tx.as_ref()
                     && let Ok(state) = (*state).try_into()
+                    && let Err(e) = tx.try_send(state)
                 {
-                    if let Err(e) = tx.try_send(state) {
-                        warn!("Unable to send Expresslane state change event: {:?}", e);
-                    }
+                    warn!("Unable to send Expresslane state change event: {:?}", e);
                 }
                 continue;
             }

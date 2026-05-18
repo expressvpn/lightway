@@ -43,8 +43,8 @@ use crate::route_manager::{RouteManager, RouteMode};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
-    AuthMethod, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, PluginFactoryError, PluginFactoryList,
-    RootCertificate, Version,
+    AuthMethod, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU,
+    PluginFactoryError, PluginFactoryList, RootCertificate, Version,
 };
 #[cfg(feature = "debug")]
 // re-export so client app does not need to depend on lightway-core
@@ -211,6 +211,9 @@ pub struct ClientConfig<'cert, ExtAppState: Send + Sync> {
 
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
+
+    /// Interval between Expresslane key rotations
+    pub expresslane_keys_rotation_interval: std::time::Duration,
 
     /// Callback for expresslane key updates
     #[educe(Debug(ignore))]
@@ -871,7 +874,9 @@ pub async fn connect<
     .with_cipher(server_config.cipher.into())?
     .with_inside_plugins(server_config.inside_plugins)
     .with_outside_plugins(server_config.outside_plugins)
-    .when(config.enable_expresslane, |b| b.with_expresslane())
+    .when(config.enable_expresslane, |b| {
+        b.with_expresslane(config.expresslane_keys_rotation_interval)
+    })
     .when(config.expresslane_cb.is_some(), |b| {
         b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
     })

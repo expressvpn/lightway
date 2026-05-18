@@ -214,7 +214,7 @@ sequenceDiagram
             end
         end
 
-        loop Key Rotation (Every 60 seconds)
+        loop Key Rotation (every expresslane_keys_rotation_interval; default 15 min, configurable)
             T->>S: Key Rotation Timer
             S->>S: Generate new key K2, increment counter
             S->>C: ExpresslaneConfig(enabled=true, ack=false, counter=N, key=K2)
@@ -280,8 +280,13 @@ sequenceDiagram
 - **Auth Tag**: 128 bits (16 bytes)
 
 #### Authentication Vector
-- Combines session ID (8 bytes) + packet counter (8 bytes)
-- Provides replay protection and session binding
+- AES-GCM Additional Authenticated Data (AAD), 18 bytes total:
+  session ID (8 bytes) + packet counter (8 bytes) + flags (2 bytes)
+- Binds the in-clear flags field into the auth tag so an on-path attacker
+  cannot flip the `Encoded` bit (or any reserved bit) without invalidating
+  the tag. Tampered packets are rejected with `InvalidExpressData`.
+- Provides replay protection and session binding via the counter, and
+  cross-session isolation via the session ID.
 
 #### Fallback Mechanism
 - Always attempts current key first

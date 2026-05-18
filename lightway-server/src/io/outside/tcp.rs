@@ -122,14 +122,12 @@ async fn handle_connection(
         return;
     };
 
+    let age_expiration_interval: Duration = conn_manager.connection_age_expiration_interval();
+
     // We no longer need to hold this reference.
     drop(conn_manager);
 
     let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
-    let age_expiration_interval: Duration =
-        crate::connection_manager::CONNECTION_AGE_EXPIRATION_INTERVAL
-            .try_into()
-            .unwrap();
     let err: anyhow::Error = loop {
         tokio::select! {
             res = sock.readable() => {
