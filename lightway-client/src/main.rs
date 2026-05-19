@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     }
 
     let config_reload_signal =
-        spawn_sighup_reload_handler(&config, config_file.clone(), env_patch, cli_patch);
+        spawn_reload_event_handler(&config, config_file.clone(), env_patch, cli_patch);
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
 
@@ -291,7 +291,7 @@ async fn main() -> Result<()> {
     client(config, ctrlc_rx, conn_confs).await.map(|_| ())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn reload_config(
     path: &PathBuf,
     env_patch: &ConfigPatch,
@@ -312,7 +312,7 @@ async fn reload_config(
     Some(config)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn warn_non_reloadable_changes(old: &Config, new: &Config) {
     /// Mask reloadable fields so only non-reloadable differences remain.
     /// Clone old, overwrite listed fields with new's values, then compare to new.
@@ -347,7 +347,7 @@ impl From<&Config> for ReloadableClientConfig {
 }
 
 #[cfg(unix)]
-fn spawn_sighup_reload_handler(
+fn spawn_reload_event_handler(
     config: &Config,
     config_file: PathBuf,
     env_patch: ConfigPatch,
@@ -391,8 +391,107 @@ fn spawn_sighup_reload_handler(
     Some(rx)
 }
 
-#[cfg(not(unix))]
-fn spawn_sighup_reload_handler(
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn spawn_reload_event_handler(
+    config: &Config,
+    config_file: PathBuf,
+    env_patch: ConfigPatch,
+    cli_patch: ConfigPatch,
+) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{CreateEventW, INFINITE, WaitForSingleObject},
+    };
+
+    const EVENT_NAME: &str = "Global\\LightwayConfigReload";
+
+    let wide_name: Vec<u16> = EVENT_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: CreateEventW with valid null-terminated wide string.
+    let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, wide_name.as_ptr()) };
+    if handle.is_null() {
+        tracing::error!("Failed to create reload event");
+        return None;
+    }
+
+    let initial = config.clone();
+    let (tx, rx) = mpsc::channel(1);
+
+    #[derive(Clone, Copy)]
+    struct SendHandle(windows_sys::Win32::Foundation::HANDLE);
+
+    impl SendHandle {
+        fn raw(self) -> windows_sys::Win32::Foundation::HANDLE {
+            self.0
+        }
+    }
+
+    // SAFETY: The handle is only used from one thread at a time (the blocking thread).
+    unsafe impl Send for SendHandle {}
+
+    let send_handle = SendHandle(handle);
+
+    tokio::spawn(async move {
+        let mut prev = ReloadableClientConfig::from(&initial);
+        let mut prev_config = initial;
+
+        loop {
+            let h = send_handle;
+            let wait_result = tokio::task::spawn_blocking(move || {
+                // SAFETY: handle was created above, is valid
+                unsafe { WaitForSingleObject(h.raw(), INFINITE) }
+            })
+            .await;
+
+            match wait_result {
+                Ok(WAIT_OBJECT_0) => {}
+                Ok(code) => {
+                    tracing::error!("WaitForSingleObject returned unexpected code: {code}");
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!("spawn_blocking panicked: {e}");
+                    break;
+                }
+            }
+
+            tracing::info!("Reload event signaled, reloading config");
+
+            let Some(new_config) = reload_config(&config_file, &env_patch, &cli_patch).await else {
+                continue;
+            };
+
+            warn_non_reloadable_changes(&prev_config, &new_config);
+
+            let current = ReloadableClientConfig::from(&new_config);
+            prev_config = new_config;
+
+            if current == prev {
+                tracing::info!("Config unchanged, skipping reload");
+                continue;
+            }
+
+            let delta = current.delta(&prev);
+            prev = current;
+
+            if tx.send(delta).await.is_err() {
+                break;
+            }
+        }
+
+        // SAFETY: handle was created above, owned by us
+        unsafe { CloseHandle(send_handle.raw()) };
+    });
+
+    Some(rx)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_reload_event_handler(
     _config: &Config,
     _config_file: PathBuf,
     _env_patch: ConfigPatch,
