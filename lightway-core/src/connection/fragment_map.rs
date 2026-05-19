@@ -20,7 +20,7 @@ pub(crate) enum FragmentMapResult {
 pub(crate) struct FragmentMap(LruCache<u16, FragmentedPacket>);
 
 impl FragmentMap {
-    pub(crate) const DEFAULT_MAX_ENTRIES: NonZeroU16 = NonZeroU16::MAX;
+    pub(crate) const DEFAULT_MAX_ENTRIES: NonZeroU16 = NonZeroU16::new(4096).unwrap();
 
     pub(crate) fn new(max_capacity: NonZeroU16) -> Self {
         Self(LruCache::new(max_capacity.into()))
