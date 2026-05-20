@@ -199,64 +199,67 @@ impl TunConfig {
             None => {}
         };
 
-        let mut builder = DeviceBuilder::new();
-        if let Some(name) = self.tun_name.as_ref() {
-            builder = builder.name(name);
-        }
-        #[cfg(windows)]
+        #[cfg(desktop)]
         {
-            if let Some(wintun_file) = self.wintun_file.as_ref() {
-                builder = builder.wintun_file(wintun_file.clone());
+            let mut builder = DeviceBuilder::new();
+            if let Some(name) = self.tun_name.as_ref() {
+                builder = builder.name(name);
             }
-            if let Some(ring_capacity) = self.ring_capacity {
-                builder = builder.with(|opt| {
-                    opt.ring_capacity(ring_capacity);
-                });
+            #[cfg(windows)]
+            {
+                if let Some(wintun_file) = self.wintun_file.as_ref() {
+                    builder = builder.wintun_file(wintun_file.clone());
+                }
+                if let Some(ring_capacity) = self.ring_capacity {
+                    builder = builder.with(|opt| {
+                        opt.ring_capacity(ring_capacity);
+                    });
+                }
             }
-        }
-        #[cfg(windows)]
-        if let Some(guid) = self.device_guid {
-            builder = builder.device_guid(guid);
-        }
-        #[cfg(macos)]
-        {
-            builder = builder.associate_route(false);
-        }
-        let device = builder.build_async()?;
+            #[cfg(windows)]
+            if let Some(guid) = self.device_guid {
+                builder = builder.device_guid(guid);
+            }
+            #[cfg(macos)]
+            {
+                builder = builder.associate_route(false);
+            }
+            let device = builder.build_async()?;
 
-        if let Some(mtu) = self.mtu {
-            device.set_mtu(mtu)?;
-        }
+            if let Some(mtu) = self.mtu {
+                device.set_mtu(mtu)?;
+            }
 
-        device.enabled(self.enabled)?;
+            device.enabled(self.enabled)?;
 
-        if let Some(address) = self.address {
-            match address {
-                IpAddr::V4(ipv4_addr) => {
-                    let netmask = self
-                        .prefix
-                        .map(|x| x.min(Ipv4Addr::BITS as u8))
-                        .unwrap_or(Ipv4Addr::BITS as u8);
-                    // Windows if destination provided create a default route with
-                    // high priority
-                    if cfg!(windows) {
-                        device.add_address_v4(ipv4_addr, netmask)?;
-                    } else {
-                        device.set_network_address(ipv4_addr, netmask, self.destination)?;
+            if let Some(address) = self.address {
+                match address {
+                    IpAddr::V4(ipv4_addr) => {
+                        let netmask = self
+                            .prefix
+                            .map(|x| x.min(Ipv4Addr::BITS as u8))
+                            .unwrap_or(Ipv4Addr::BITS as u8);
+                        // Windows if destination provided create a default route with
+                        // high priority
+                        if cfg!(windows) {
+                            device.add_address_v4(ipv4_addr, netmask)?;
+                        } else {
+                            device.set_network_address(ipv4_addr, netmask, self.destination)?;
+                        }
+                    }
+                    IpAddr::V6(ipv6_addr) => {
+                        use std::net::Ipv6Addr;
+
+                        let netmask = self
+                            .prefix
+                            .map(|x| x.min(Ipv6Addr::BITS as u8))
+                            .unwrap_or(Ipv6Addr::BITS as u8);
+                        device.add_address_v6(ipv6_addr, netmask)?;
                     }
                 }
-                IpAddr::V6(ipv6_addr) => {
-                    use std::net::Ipv6Addr;
-
-                    let netmask = self
-                        .prefix
-                        .map(|x| x.min(Ipv6Addr::BITS as u8))
-                        .unwrap_or(Ipv6Addr::BITS as u8);
-                    device.add_address_v6(ipv6_addr, netmask)?;
-                }
             }
+            Ok(device)
         }
-        Ok(device)
     }
 }
 
