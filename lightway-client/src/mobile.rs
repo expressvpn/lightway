@@ -3,6 +3,7 @@ pub(crate) mod lightway;
 pub(crate) mod tracing_utils;
 
 use std::sync::{Arc, OnceLock};
+use struct_patch::Patch;
 use tracing::info;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,7 +36,7 @@ impl TryFrom<lightway_core::ExpresslaneState> for ExpresslaneState {
 
 #[cfg_attr(not(feature = "mobile-test"), uniffi::export(with_foreign))]
 #[cfg_attr(test, mockall::automock)]
-pub trait RustEventHandlers: Send + Sync {
+pub trait EventHandlers: Send + Sync {
     /// Handles VPN connection status changes from the native Lightway client.
     /// State values: 2=Connecting, 6=LinkUp, 5=Authenticating, 7=Online, 4=Disconnecting, 1=Disconnected (from lightway-core)
     ///
@@ -144,33 +145,32 @@ impl RustVpnConnection {
     /// `LightwayError` for proper error handling.
     fn parallel_connect(
         &self,
-        endpoints: Vec<crate::config::MobileConnectionConfig>,
-        event_handler: Arc<dyn RustEventHandlers>,
+        event_handler: Arc<dyn EventHandlers>,
         raw_tun_fd: i32,
-        mobile_config: crate::config::MobileConfig,
+        config_content: String,
     ) -> Result<crate::ClientResult, LightwayError> {
         info!("start parallel Lightway connections");
         let mut config = crate::config::Config::default();
-        config.apply_mobile_config(mobile_config);
 
-        info!("Received {} endpoints", endpoints.len());
-        if endpoints.is_empty() {
+        config.apply(serde_saphyr::from_str(&config_content)?);
+        config.servers.push(crate::config::ConnectionConfig {
+            server: config.server.clone(),
+            mode: config.mode,
+            server_dn: config.server_dn.take(),
+            cipher: config.cipher,
+            outside_mtu: config.outside_mtu,
+            user: config.user.take(),
+            password: config.password.take(),
+            token: config.token.take(),
+            ca_cert: Some(config.ca_cert.clone()),
+        });
+
+        info!("Received {} endpoints", config.servers.len());
+        if config.servers.is_empty() {
             return Err(LightwayError::EmptyEndpointsError);
         }
 
-        for endpoint in &endpoints {
-            info!(
-                "Endpoint {}:{} with {}",
-                endpoint.server_ip,
-                endpoint.port,
-                if endpoint.use_tcp {
-                    "lightway_tcp"
-                } else {
-                    "lightway_udp"
-                },
-            );
-        }
-        config.apply_mobile_connect_configs(endpoints);
+        tracing::debug!("Config:\n{config:#?}");
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder

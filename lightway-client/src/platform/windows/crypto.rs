@@ -19,14 +19,14 @@ mod tests {
     #[derive(Debug, Serialize, PartialEq)]
     struct TestConfig {
         server: String,
-        username: String,
+        user: String,
         password: String,
     }
 
     fn generate_mock_config() -> String {
         let config = TestConfig {
             server: "vpn.example.com".to_string(),
-            username: "user1".to_string(),
+            user: "user1".to_string(),
             password: "securepassword".to_string(),
         };
         serde_saphyr::to_string(&config).unwrap()
