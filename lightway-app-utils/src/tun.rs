@@ -12,7 +12,7 @@ use std::{
     net::{IpAddr, Ipv4Addr},
 };
 
-#[cfg(mobile)]
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
 #[cfg(feature = "io-uring")]
 use std::sync::Arc;
@@ -42,7 +42,7 @@ pub struct TunConfig {
     pub mtu: Option<u16>,
     /// Whether the interface should be brought up after creation
     pub enabled: bool,
-    /// File Descriptor of the Tunnel
+    /// File Descriptor of the Tunnel. If this is set, it will not create a TUN device from scratch.
     #[cfg(unix)]
     pub fd: Option<RawFd>,
     /// Whether to close the file descriptor when the TUN device is dropped
@@ -135,7 +135,7 @@ impl TunConfig {
         self
     }
 
-    /// Set the file descriptor
+    /// Set the file descriptor. If this is set, it will not create a TUN device from scratch.
     #[cfg(unix)]
     pub fn raw_fd(&mut self, fd: RawFd) -> &mut Self {
         self.fd = Some(fd);
@@ -181,8 +181,24 @@ impl TunConfig {
     }
 
     /// Creates an async device based on TunConfig
-    #[cfg(desktop)]
     pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
+        // If a fd was provided (e.g. Apple Network Extension), wrap it directly
+        // instead of creating a new TUN device, which would require elevated privileges.
+        #[cfg(unix)]
+        match self.fd {
+            Some(fd) => {
+                // SAFETY: The caller must ensure `fd` is a valid TUN device file descriptor
+                // and transfer exclusive ownership to this function. The AsyncDevice will
+                // properly close the fd when dropped (unless close_fd_on_drop is false).
+                #[allow(unsafe_code)]
+                return Ok(unsafe { tun_rs::AsyncDevice::from_raw_fd(fd) });
+            }
+            #[cfg(mobile)]
+            None => return Err(std::io::Error::other("Unable to create device without fd")),
+            #[cfg(not(mobile))]
+            None => {}
+        };
+
         let mut builder = DeviceBuilder::new();
         if let Some(name) = self.tun_name.as_ref() {
             builder = builder.name(name);
@@ -240,25 +256,6 @@ impl TunConfig {
                 }
             }
         }
-        Ok(device)
-    }
-
-    /// Creates an async device based on TunConfig
-    #[allow(unsafe_code)]
-    #[cfg(mobile)]
-    pub fn create_as_async(&self) -> std::io::Result<AsyncDevice> {
-        let device = match self.fd {
-            Some(fd) => {
-                // SAFETY: The caller must ensure `fd` is a valid TUN device file descriptor
-                // and transfer exclusive ownership to this function. The AsyncDevice will
-                // properly close the fd when dropped.
-                unsafe { tun_rs::AsyncDevice::from_raw_fd(fd) }
-            }
-            None => {
-                return Err(std::io::Error::other("Unable to create device without fd"));
-            }
-        };
-
         Ok(device)
     }
 }
