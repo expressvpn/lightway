@@ -9,7 +9,7 @@ use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
 };
-use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, RootCertificate};
+use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
@@ -46,7 +46,7 @@ pub struct Config {
     #[serde(default)]
     #[serde(skip_serializing)]
     #[schemars(skip)]
-    pub servers: Vec<ConnectionConfig>,
+    servers: Vec<ConnectionConfig>,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
@@ -314,30 +314,68 @@ pub struct Config {
 }
 
 impl Config {
-    /// Try build auth from config
-    pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
-        take_auth(self.token.take(), self.user.take(), self.password.take())
-    }
-
-    /// Try build CA from ca_crt
-    pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-        load_ca(&self.ca_cert)
-    }
-
-    /// Try build CA from ca_crt file
-    /// If input ca_path is none, will take ca_cert field as path and pass to SSL
-    pub fn load_ca_file<'a>(
-        &self,
-        ca_path: &'a mut Option<PathBuf>,
-    ) -> lightway_core::tls::RootCertificate<'a> {
-        if ca_path.is_none() {
-            *ca_path = Some(PathBuf::from(&self.ca_cert));
+    /// The number of servers
+    pub fn len(&self) -> usize {
+        if self.server.is_empty() {
+            self.servers.len()
+        } else {
+            self.servers.len() + 1
         }
-        RootCertificate::PemFileOrDirectory(
-            ca_path
-                .as_ref()
-                .expect("the path already initialized if it is none"),
-        )
+    }
+
+    /// Check if there is any server setting
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty() & self.server.is_empty()
+    }
+
+    /// Take out configures for servers
+    /// and normalize the auth and ca of ConnectionConfig of servers
+    pub fn take_servers(&mut self) -> Result<Vec<ConnectionConfig>, Error> {
+        if self.servers.is_empty() {
+            self.servers = vec![ConnectionConfig {
+                server: self.server.clone(),
+                mode: self.mode,
+                server_dn: self.server_dn.take(),
+                cipher: self.cipher,
+                outside_mtu: self.outside_mtu,
+                ..Default::default()
+            }];
+        }
+        let ca_content = if check_cert_header(&self.ca_cert) {
+            Some(self.ca_cert.clone())
+        } else {
+            // NOTE: we support a path input on desktop
+            if cfg!(desktop) {
+                std::fs::read_to_string(&self.ca_cert).ok()
+            } else {
+                None
+            }
+        };
+        for server in self.servers.iter_mut() {
+            if server.user.is_none() && server.password.is_none() && server.token.is_none() {
+                server.user = self.user.clone();
+                server.password = self.password.clone();
+                server.token = self.token.clone();
+            }
+
+            if let Some(ref mut ca_cert) = server.ca_cert {
+                if !check_cert_header(&ca_cert) {
+                    // NOTE: we support a path input on desktop
+                    if cfg!(desktop) {
+                        *ca_cert = std::fs::read_to_string(&mut *ca_cert)
+                            .map_err(|_| Error::CaFileNotFound)?;
+                    } else {
+                        return Err(Error::InvalidCertificate);
+                    }
+                }
+            } else {
+                if ca_content.is_none() {
+                    return Err(Error::CaFileNotFound);
+                }
+                server.ca_cert = ca_content.clone();
+            }
+        }
+        Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
     }
 }
 
@@ -450,7 +488,6 @@ pub struct ConnectionConfig {
 
 impl ConnectionConfig {
     /// Try build auth from config
-    #[cfg(feature = "mobile")]
     pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
         take_auth(self.token.take(), self.user.take(), self.password.take())
     }
@@ -460,7 +497,15 @@ impl ConnectionConfig {
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
-            .map(load_ca)
+            .map(|ca| {
+                if check_cert_header(ca) {
+                    Ok(lightway_core::tls::RootCertificate::PemBuffer(
+                        ca.as_bytes(),
+                    ))
+                } else {
+                    Err(Error::InvalidCertificate)
+                }
+            })
             .ok_or(Error::InvalidCertificate)?
     }
 
@@ -496,6 +541,10 @@ pub enum Error {
     /// Lack information to Authentication
     #[error("Insufficient information for Authentication")]
     InsufficientAuth,
+
+    /// No such Ca file from user's input
+    #[error("Ca file is absent")]
+    CaFileNotFound,
 }
 
 fn take_auth(
@@ -510,12 +559,8 @@ fn take_auth(
     }
 }
 
-fn load_ca(ca: &String) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-    if ca.starts_with("-----BEGIN CERTIFICATE-----") {
-        Ok(RootCertificate::PemBuffer(ca.as_bytes()))
-    } else {
-        Err(Error::InvalidCertificate)
-    }
+fn check_cert_header<T: AsRef<str>>(content: T) -> bool {
+    content.as_ref().starts_with("-----BEGIN CERTIFICATE-----")
 }
 
 fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
