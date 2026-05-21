@@ -9,6 +9,8 @@ mod connection;
 mod context;
 mod encoding_request_states;
 mod features;
+#[cfg(target_os = "linux")]
+pub mod gso;
 mod io;
 #[cfg(feature = "postquantum")]
 mod keyshare;

@@ -175,6 +175,8 @@ async fn main() -> Result<()> {
         expresslane_metrics: None,
         event_cb: None,
         enable_pqc: config.enable_pqc,
+        #[cfg(target_os = "linux")]
+        enable_tun_offload: config.enable_tun_offload,
         #[cfg(feature = "io-uring")]
         enable_tun_iouring: config.enable_tun_iouring,
         #[cfg(feature = "io-uring")]

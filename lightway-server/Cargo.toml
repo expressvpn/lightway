@@ -46,6 +46,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 thiserror.workspace = true
 time = "0.3.29"
 tokio.workspace = true
+tun-rs.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-log = "0.2.0"
