@@ -318,7 +318,7 @@ impl Tun {
 
     /// Raw read from `Tun`, returning the full virtio frame (header + payload).
     #[cfg(target_os = "linux")]
-    pub async fn recv_gso(&self, buf: &mut [u8]) -> IOCallbackResult<usize> {
+    pub async fn recv_gso(&self, buf: &mut [std::mem::MaybeUninit<u8>]) -> IOCallbackResult<usize> {
         match self {
             Tun::Direct(t) => t.recv_gso(buf).await,
             #[cfg(feature = "io-uring")]
@@ -433,9 +433,22 @@ impl TunDirect {
 
     /// Raw read from Tun, returning the full virtio frame (header + payload).
     #[cfg(target_os = "linux")]
-    pub async fn recv_gso(&self, buf: &mut [u8]) -> IOCallbackResult<usize> {
+    pub async fn recv_gso(&self, buf: &mut [std::mem::MaybeUninit<u8>]) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
-        match tun.recv(buf).await {
+
+        // SAFETY: `tun_rs::AsyncDevice::recv` takes `&mut [u8]` and forwards
+        // to `libc::read(2)`. The kernel only writes — it never dereferences
+        // userspace memory for reading — so handing it our uninitialized slab
+        // is sound at the syscall boundary. The unsoundness lives in *Rust*:
+        // constructing a `&mut [u8]` over uninitialized bytes is UB per strict
+        // aliasing rules, even if no one reads them. This cast is the only
+        // place we paper over that gap. Delete it (and revert this signature)
+        // once `tun-rs` exposes a `MaybeUninit`-aware recv.
+        #[allow(unsafe_code)]
+        let raw =
+            unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len()) };
+
+        match tun.recv(raw).await {
             Ok(0) => IOCallbackResult::WouldBlock,
             Ok(n) => IOCallbackResult::Ok(n),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {

@@ -54,7 +54,7 @@ impl InsideIORecv for Tun {
     }
 
     #[cfg(target_os = "linux")]
-    async fn recv_gso(&self, buf: &mut [u8]) -> IOCallbackResult<usize> {
+    async fn recv_gso(&self, buf: &mut [std::mem::MaybeUninit<u8>]) -> IOCallbackResult<usize> {
         match self.0.recv_gso(buf).await {
             IOCallbackResult::Ok(n) => {
                 metrics::tun_to_client(n);

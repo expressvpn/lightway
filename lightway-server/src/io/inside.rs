@@ -13,7 +13,7 @@ pub trait InsideIORecv: Sync + Send {
 
     /// Raw read from inside IO, returning the full virtio frame (header + payload).
     #[cfg(target_os = "linux")]
-    async fn recv_gso(&self, buf: &mut [u8]) -> IOCallbackResult<usize>;
+    async fn recv_gso(&self, buf: &mut [std::mem::MaybeUninit<u8>]) -> IOCallbackResult<usize>;
 
     fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState>;
 }

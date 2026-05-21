@@ -324,40 +324,30 @@ async fn inside_io_loop_gso(
     };
 
     // Receive buffer reused across iterations. Allocate once and
-    // recv directly into it (no per-packet `BytesMut::from(&...)`
-    // copy + alloc).
+    // recv directly into the spare capacity (no per-packet alloc, no
+    // zero-init pass — the kernel writes into uninitialized memory
+    // and we only ever expose the prefix it filled).
     //
     // Mental model: `BytesMut` is a (ptr, len, cap) *window* into a
     // backing slab. `cap` is the distance from `ptr` to the end of
     // the slab — NOT the slab size. Every `advance(N)` below slides
     // `ptr += N` and shrinks `cap -= N`; the slab itself doesn't
-    // change. Without intervention, the window crawls toward the
-    // end of the slab and `cap` decays.
+    // change. Without intervention, the window crawls toward the end
+    // of the slab and `cap` decays.
     //
-    // `pkt.reserve(initial_cap)` below is the "slide back" call: if
-    // the window can already hold `initial_cap` more bytes after
-    // `len`, it's a free no-op; otherwise BytesMut compacts the
-    // window back to the start of the slab (with `len = 0` after
-    // `clear()`, this is just a pointer reset — no memcpy).
+    // `clear()` + `reserve(initial_cap)` at the top of the loop is
+    // the "slide back" call: `clear` sets `len = 0`, then `reserve`
+    // compacts the window back to the start of the slab. With
+    // `len = 0` this is a pointer reset — no memcpy.
     let initial_cap = VIRTIO_NET_HDR_LEN + 65535;
-    let mut pkt = bytes::BytesMut::zeroed(initial_cap);
+    let mut pkt = bytes::BytesMut::with_capacity(initial_cap);
 
     loop {
-        // Reset the window to start of slab (cheap; no-op while still
-        // at slab start, pointer-only reset after `advance()` has
-        // drifted us).
+        // Reset len and undo pkt.advance(). See above.
+        pkt.clear();
         pkt.reserve(initial_cap);
 
-        // Expose the full slab to `recv_gso` as `&mut [u8]`.
-        // SAFETY: every byte of the slab was zero-initialized at
-        // construction; subsequent iters only ever shrunk `len` or
-        // overwrote bytes. We never hand out uninitialized memory.
-        #[allow(unsafe_code)]
-        unsafe {
-            pkt.set_len(pkt.capacity());
-        }
-
-        let len = match inside_io.recv_gso(pkt.as_mut()).await {
+        let len = match inside_io.recv_gso(pkt.spare_capacity_mut()).await {
             IOCallbackResult::Ok(n) => n,
             IOCallbackResult::WouldBlock => continue,
             IOCallbackResult::Err(err) => {
@@ -365,7 +355,10 @@ async fn inside_io_loop_gso(
             }
         };
 
-        // SAFETY: `recv_gso` wrote `len` bytes; `len ≤ pkt.capacity()`.
+        // SAFETY: `recv_gso` wrote `len` bytes into the spare capacity
+        // starting at slab offset 0 (the window was just compacted back
+        // there). `len ≤ pkt.capacity()` because the kernel wrote into
+        // a slice of exactly that length.
         #[allow(unsafe_code)]
         unsafe {
             pkt.set_len(len);
