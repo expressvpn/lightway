@@ -62,6 +62,63 @@ flowchart TB
     6 ==> connectFn
 ```
 
+As shown, `Config` is the single source of truth for all clients — all user inputs, whether from a UI or a file,
+flow through it. JSON schema generation from the CLI is designed to be a general-purpose mechanism for all client tooling.
+The major clients are already implemented. When JSON schema support is needed for a new client,
+the Android implementation serves as a practical reference to follow,
+even though the broader approach to consuming JSON schema remains an open question in the [discussion](https://github.com/expressvpn/lightway/pull/411#discussion_r3166422937).
+
+To add a platform-specific field, a feature gate is required — e.g. `#[cfg(feature = "...")]`
+— with platform intent communicated via x-cfg and format attributes in the JSON schema.
+This makes it easy to tailor the schema on the client side while still being generatable from the CLI.
+That said, introducing more feature gates alongside existing target gates risks making the repo harder to follow.
+To keep things clean, the practical approach with the least friction is:
+
+1. Feature gates belong on **fields** of the `Config` struct.
+2. `cfg` target attributes belong on **functions**.
+
+Following this pattern, the feature gate lives only in `Config` and is handed off to the target gate in the function layer.
+A further benefit is that functions sharing the same signature with `#[cfg(target)]` selection at compile time means a Windows developer and an Android developer work in almost the same domain language:
+
+```rust
+struct Config {
+   #[cfg(feature="windows")]
+   #[schemars(extend("x-cfg" = "windows"))]
+   win_only_field: usize,
+   
+   #[cfg(feature="android")]
+   #[schemars(extend("x-cfg" = "android"))]
+   android_only_field: usize,
+   // ...
+}
+
+fn main () {
+   let config = Config::load();
+   connect(config)
+}
+
+#[cfg(window)]
+fn connect(config: Config) {
+     let Config {
+       win_only_field,
+       ..
+     } = config;
+    
+    if win_only_filed > 256 {
+       // ...
+    }
+}
+
+#[cfg(android)]
+fn connect(config: Config) {
+     let Config {
+       android_only_field,
+       ..
+     } = config;
+    let tun = Tun::new(android_only_field);
+}
+```
+
 ## lightway-server
 
 lightway-server is a Linux implementation for a fully working Lightway server with both TCP and UDP support.
