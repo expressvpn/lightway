@@ -16,7 +16,51 @@ desktop or an iPhone.
 
 ## lightway-client
 
-lightway-client is a Linux implementation for a fully working Lightway client with both TCP and UDP support.
+lightway-client is a fully working Lightway client implementation with TCP and UDP support across multiple platforms, including Windows, Linux, macOS, and mobile devices.
+
+All client settings are centralized in a single [Config struct](/lightway-client/src/config.rs), designed to cover multiple use cases simultaneously. `Config` derives both `ConfigPatch` and JsonSchema file.
+
+**Desktop client flow (steps 0, 1, 2, 3, 4, 5, 6):**
+
+Starting from default values (0), the config evolves through each step along the bold lines. Meanwhile, ConfigPatch plays a central role along the dot lines, generating patches by deserializing from a file, environment variables, and CLI options — each applied as a layered override in sequence.
+
+**Mobile client flow (steps 0, 1, 2, 6):**
+
+Mobile takes a shorter path along the solid lines, joining into 2.ConfigContent of the flow chart. Rather than reading from a file, config content comes from a Dynamic UI. The Dynamic UI itself is driven by a JSON schema file generated at compile time from the same `Config` struct via the CLI client.
+This means both desktop and mobile ultimately share the same `Config` source of truth, with the mobile flow being a streamlined subset of the desktop flow.
+
+```mermaid
+flowchart TB
+    connectFn("connect(config)")
+    0.2@{ shape: paper-tape, label: "SchemaFile" } --> A0
+    0 -. "JsonSchema (via cli)" .-> 0.2
+
+    subgraph "android (foreign)"
+      A0@{ shape: manual-input, label: "Dynamic UI"}
+    end
+
+    A0 --> 2
+
+    subgraph main.rs or mobile.rs
+      1("1: Config::default()") ==> 2
+      2("2: ConfigContent") ==> 3
+      3("3:Envars(LW_CLIENT_*)") ==> 4
+      2 --> 6
+      4("4: CLI Option") ==> 5
+      5("5: Special Envars(LW_CLIENT_RUST_LOG)") ==> 6
+      6("6: Config (determined)")
+    end
+    
+    subgraph config.rs
+      0@{ shape: braces, label: "0: Config struct" } == "Default" ==>1
+      0 -. "Patch" .-> 0.1
+      0.1 -. "Deserialize" .-> 2
+      0.1 -. "Deserialize" .-> 3
+      0.1@{ shape: braces, label: "ConfigPatch" } -. "Parser" .-> 4
+    end
+
+    6 ==> connectFn
+```
 
 ## lightway-server
 
