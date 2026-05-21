@@ -42,6 +42,9 @@ pub trait ServerAuth<T> {
                 self.authorize_user_password(user, password, app_state)
             }
             wire::AuthMethod::Token { token } => self.authorize_token(token, app_state),
+            wire::AuthMethod::VersionedToken { token, .. } => {
+                self.authorize_token(token, app_state)
+            }
             wire::AuthMethod::CustomCallback { data } => self.authorize_cb_data(data, app_state),
         }
     }

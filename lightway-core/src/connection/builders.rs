@@ -137,6 +137,18 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         self.with_auth(auth_method)
     }
 
+    /// Setup authentication using a token plus the client's lightway
+    /// protocol [`Version`]. The server learns the client's version
+    /// even on transports without a wire header (e.g. TCP).
+    pub fn with_auth_versioned_token(self, token: &str, version: Version) -> Self {
+        let auth_method = AuthMethod::VersionedToken {
+            version,
+            token: token.to_string(),
+        };
+
+        self.with_auth(auth_method)
+    }
+
     /// Setup authentication using the callback method
     pub fn with_auth_cb_data(self, data: Bytes) -> Self {
         let auth_method = AuthMethod::CustomCallback { data };

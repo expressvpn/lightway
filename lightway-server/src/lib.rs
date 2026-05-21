@@ -74,6 +74,7 @@ pub struct AuthState<'a> {
     pub local_addr: &'a SocketAddr,
     pub peer_addr: &'a SocketAddr,
     pub internal_ip: &'a Option<Ipv4Addr>,
+    pub tunnel_protocol_version: Option<Version>,
 }
 
 struct AuthAdapter<SA: for<'a> ServerAuth<AuthState<'a>>>(SA);
@@ -86,10 +87,15 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerAuth<connection::ConnectionSta
         method: &AuthMethod,
         app_state: &mut connection::ConnectionState,
     ) -> ServerAuthResult {
+        let tunnel_protocol_version = match method {
+            AuthMethod::VersionedToken { version, .. } => Some(*version),
+            _ => None,
+        };
         let mut auth_state = AuthState {
             local_addr: &app_state.local_addr,
             peer_addr: &app_state.peer_addr,
             internal_ip: &app_state.internal_ip,
+            tunnel_protocol_version,
         };
         let authorized = self.0.authorize(method, &mut auth_state);
         if matches!(authorized, ServerAuthResult::Denied) {

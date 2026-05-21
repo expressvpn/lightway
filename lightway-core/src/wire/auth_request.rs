@@ -1,4 +1,4 @@
-use crate::borrowed_bytesmut::BorrowedBytesMut;
+use crate::{Version, borrowed_bytesmut::BorrowedBytesMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use more_asserts::*;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -14,6 +14,8 @@ pub(crate) enum AuthMethodKind {
     UserPass = 1,
     /// Authenticate with token
     Token = 2,
+    /// Authenticate with token and lightway version
+    VersionedToken = 3,
     /// Authenticate with custom callback
     CustomCallback = 23,
 }
@@ -25,6 +27,7 @@ mod test_auth_method_kind {
 
     #[test_case(AuthMethodKind::UserPass => 1)]
     #[test_case(AuthMethodKind::Token => 2)]
+    #[test_case(AuthMethodKind::VersionedToken => 3)]
     #[test_case(AuthMethodKind::CustomCallback => 23)]
     fn into_primitive(ty: AuthMethodKind) -> u8 {
         ty.into()
@@ -32,6 +35,7 @@ mod test_auth_method_kind {
 
     #[test_case( 1 => AuthMethodKind::UserPass)]
     #[test_case( 2 => AuthMethodKind::Token)]
+    #[test_case( 3 => AuthMethodKind::VersionedToken)]
     #[test_case(23 => AuthMethodKind::CustomCallback)]
     fn try_from_primitive(b: u8) -> AuthMethodKind {
         AuthMethodKind::try_from(b).unwrap()
@@ -39,7 +43,7 @@ mod test_auth_method_kind {
 
     #[test]
     fn try_from_primitive_out_of_range() {
-        for b in 3..23 {
+        for b in 4..23 {
             assert!(AuthMethodKind::try_from(b).is_err())
         }
         for b in 24..=255 {
@@ -111,6 +115,30 @@ pub enum AuthMethod {
         token: String,
     },
 
+    /// Authenticate with token and Lightway protocol version
+    ///
+    /// Wire format (variable length):
+    ///
+    /// ```text
+    ///  0                   1                   2                   3
+    ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |       3       |     major     |     minor     | token_length..|
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |..token_length | ... token
+    /// +-+-+-+-+-+-+-+-+
+    /// ```
+    VersionedToken {
+        /// Lightway version
+        version: Version,
+        /// The authentication token
+        ///
+        /// It's recommended to use a signed JSON Web Token (JWT - RFC
+        /// 7519) as the auth token, but implementations might choose
+        /// to use other formats.
+        token: String,
+    },
+
     /// Authenticate with custom callback
     ///
     /// Wire format (variable length):
@@ -137,6 +165,15 @@ impl AuthMethod {
     const MAX_TOKEN_BYTES: usize =
         1350 - std::mem::size_of::<AuthMethodKind>() - std::mem::size_of::<u16>();
 
+    /// The maximum size of the token in [`AuthMethodKind::VersionedToken`].
+    ///
+    /// Must fit within an MTU, including [`AuthMethodKind`], 2 bytes of version
+    /// (major + minor) and 2 bytes of length.
+    const MAX_VERSIONED_TOKEN_BYTES: usize = 1350
+        - std::mem::size_of::<AuthMethodKind>()
+        - std::mem::size_of::<Version>()
+        - std::mem::size_of::<u16>();
+
     /// The maximum size of the data in [`AuthMethodKind::CustomCallback`].
     ///
     /// Must fit within an MTU, including [`AuthMethodKind`] and including 2 bytes of length.
@@ -147,6 +184,7 @@ impl AuthMethod {
         match self {
             AuthMethod::UserPass { .. } => AuthMethodKind::UserPass,
             AuthMethod::Token { .. } => AuthMethodKind::Token,
+            AuthMethod::VersionedToken { .. } => AuthMethodKind::VersionedToken,
             AuthMethod::CustomCallback { .. } => AuthMethodKind::CustomCallback,
         }
     }
@@ -206,6 +244,34 @@ impl AuthMethod {
                 Ok(AuthMethod::Token { token })
             }
 
+            AuthMethodKind::VersionedToken => {
+                if buf.len() < 4 {
+                    return Err(FromWireError::InsufficientData);
+                }
+
+                let major = buf.get_u8();
+                let minor = buf.get_u8();
+                let Some(version) = Version::try_new(major, minor) else {
+                    return Err(FromWireError::InvalidProtocolVersion(major, minor));
+                };
+
+                let token_len = buf.get_u16() as usize;
+
+                if token_len > Self::MAX_VERSIONED_TOKEN_BYTES {
+                    return Err(FromWireError::FieldTooLarge);
+                }
+
+                if buf.len() < token_len {
+                    return Err(FromWireError::InsufficientData);
+                }
+
+                let token = String::from_utf8(buf[..token_len].to_vec())
+                    .map_err(|_| FromWireError::InvalidStringEncoding)?;
+                buf.advance(token_len);
+
+                Ok(AuthMethod::VersionedToken { version, token })
+            }
+
             AuthMethodKind::CustomCallback => {
                 if buf.len() < 2 {
                     return Err(FromWireError::InsufficientData);
@@ -256,6 +322,18 @@ impl AuthMethod {
                 // A u16 length + token
                 buf.reserve(2 + token.len());
 
+                buf.put_u16(token.len() as u16);
+                buf.put(token.as_bytes());
+            }
+
+            AuthMethod::VersionedToken { version, token } => {
+                debug_assert_le!(token.len(), Self::MAX_VERSIONED_TOKEN_BYTES);
+
+                // 2 bytes of version + u16 length + token
+                buf.reserve(2 + 2 + token.len());
+
+                buf.put_u8(version.major());
+                buf.put_u8(version.minor());
                 buf.put_u16(token.len() as u16);
                 buf.put(token.as_bytes());
             }
@@ -490,6 +568,108 @@ mod tests {
                     token: "t".repeat(AuthMethod::MAX_TOKEN_BYTES),
                 }
             );
+        }
+    }
+
+    mod versioned_token {
+        use super::*;
+        use test_case::test_case;
+
+        #[test_case(&[0x3] ; "just kind")]
+        #[test_case(&[0x3, 0x01] ; "just one byte of version")]
+        #[test_case(&[0x3, 0x01, 0x03] ; "no length")]
+        #[test_case(&[0x3, 0x01, 0x03, 0x00] ; "just one byte of length")]
+        #[test_case(&[0x3, 0x01, 0x03, 0x02, 0x00, 0xff] ; "fewer bytes than length says")]
+        fn try_from_wire_too_short(buf: &'static [u8]) {
+            let mut buf = ImmutableBytesMut::from(buf);
+            let mut buf = buf.as_borrowed_bytesmut();
+
+            assert!(matches!(
+                AuthRequest::try_from_wire(&mut buf).err().unwrap(),
+                FromWireError::InsufficientData
+            ));
+        }
+
+        #[test]
+        fn try_from_wire_invalid_version() {
+            // major=2, minor=0 is outside the supported Version range.
+            let mut buf = ImmutableBytesMut::from(&b"\x03\x02\x00\x00\x05token"[..]);
+            let mut buf = buf.as_borrowed_bytesmut();
+            assert!(matches!(
+                AuthRequest::try_from_wire(&mut buf).err().unwrap(),
+                FromWireError::InvalidProtocolVersion(2, 0)
+            ));
+        }
+
+        #[test]
+        fn try_from_wire_too_long() {
+            let mut buf = BytesMut::with_capacity(5 + AuthMethod::MAX_VERSIONED_TOKEN_BYTES + 1);
+            // kind | major | minor | u16 len (big-endian) = MAX + 1
+            let len = (AuthMethod::MAX_VERSIONED_TOKEN_BYTES + 1) as u16;
+            buf.extend_from_slice(&[0x03, 0x01, 0x03]);
+            buf.extend_from_slice(&len.to_be_bytes());
+            buf.extend_from_slice(&vec![0x74; AuthMethod::MAX_VERSIONED_TOKEN_BYTES + 1]);
+            let mut buf = ImmutableBytesMut::from(buf.freeze());
+            let mut buf = buf.as_borrowed_bytesmut();
+            assert!(matches!(
+                AuthRequest::try_from_wire(&mut buf).err().unwrap(),
+                FromWireError::FieldTooLarge
+            ));
+        }
+
+        #[test]
+        fn try_from_wire_invalid_utf8() {
+            let mut buf = ImmutableBytesMut::from(&b"\x03\x01\x03\x00\x02\xc3\x28"[..]);
+            let mut buf = buf.as_borrowed_bytesmut();
+            assert!(matches!(
+                AuthRequest::try_from_wire(&mut buf).err().unwrap(),
+                FromWireError::InvalidStringEncoding
+            ));
+        }
+
+        #[test]
+        fn round_trip_to_wire() {
+            let am = AuthMethod::VersionedToken {
+                version: Version::MAXIMUM,
+                token: "token".to_string(),
+            };
+
+            let mut buf = BytesMut::new();
+            am.append_to_wire(&mut buf);
+
+            assert_eq!(&b"\x03\x01\x03\x00\x05token"[..], &buf[..]);
+        }
+
+        #[test]
+        fn round_trip_from_wire() {
+            let mut buf = ImmutableBytesMut::from(&b"\x03\x01\x03\x00\x05token"[..]);
+            let mut buf = buf.as_borrowed_bytesmut();
+            let am = AuthMethod::try_from_wire(&mut buf).unwrap();
+
+            assert_eq!(
+                am,
+                AuthMethod::VersionedToken {
+                    version: Version::MAXIMUM,
+                    token: "token".to_string(),
+                }
+            );
+        }
+
+        #[test]
+        fn max_length_round_trip() {
+            let am = AuthMethod::VersionedToken {
+                version: Version::MAXIMUM,
+                token: "t".repeat(AuthMethod::MAX_VERSIONED_TOKEN_BYTES),
+            };
+
+            let mut buf = BytesMut::new();
+            am.append_to_wire(&mut buf);
+
+            let mut imm = ImmutableBytesMut::from(buf.freeze());
+            let mut bb = imm.as_borrowed_bytesmut();
+            let decoded = AuthMethod::try_from_wire(&mut bb).unwrap();
+
+            assert_eq!(am, decoded);
         }
     }
 
