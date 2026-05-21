@@ -29,8 +29,9 @@ pub use builder_predicates::BuilderPredicates;
 pub use cipher::Cipher;
 pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
-    ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg, ExpresslaneState,
-    ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer, expresslane::*,
+    ConnectionError, ConnectionResult, DataPathMode, Event, EventCallback, EventCallbackArg,
+    ExpresslaneState, ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer,
+    expresslane::*,
 };
 pub use context::{
     ClientContext, ClientContextBuilder, ConnectionType, ContextError, ScheduleTickCb, ServerAuth,

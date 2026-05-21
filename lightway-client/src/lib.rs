@@ -423,6 +423,9 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
             Event::EncodingStateChanged { enabled } => {
                 info!("Encoding state changed to {enabled}");
             }
+            Event::DataPathModeChanged(mode) => {
+                info!(?mode, "Data path mode changed");
+            }
 
             // Server only events
             Event::SessionIdRotationStarted { .. }
