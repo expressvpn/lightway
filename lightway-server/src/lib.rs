@@ -6,8 +6,6 @@ mod ip_manager;
 pub mod metrics;
 mod statistics;
 
-#[cfg(target_os = "linux")]
-use bytes::Buf;
 // re-export so server app does not need to depend on lightway-core
 pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
 pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
@@ -332,70 +330,34 @@ async fn inside_io_loop_gso(
         VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN, gso_none_checksum,
     };
 
-    // Receive buffer reused across iterations. Allocate once and
-    // recv directly into it (no per-packet `BytesMut::from(&...)`
-    // copy + alloc).
+    // Receive buffer reused across iterations. `recv_gso` writes
+    // directly into `pkt.spare_capacity_mut()` (a `&mut
+    // [MaybeUninit<u8>]`), so there's no zero-init pass on the hot
+    // path. On success it has already done `set_len` + parsed the
+    // virtio header + `advance(VIRTIO_NET_HDR_LEN)`, so `pkt` holds
+    // exactly the IP packet on return.
     //
     // Mental model: `BytesMut` is a (ptr, len, cap) *window* into a
     // backing slab. `cap` is the distance from `ptr` to the end of
-    // the slab — NOT the slab size. Every `advance(N)` below slides
+    // the slab — NOT the slab size. Every `advance(N)` slides
     // `ptr += N` and shrinks `cap -= N`; the slab itself doesn't
-    // change. Without intervention, the window crawls toward the
-    // end of the slab and `cap` decays.
-    //
-    // `pkt.reserve(initial_cap)` below is the "slide back" call: if
-    // the window can already hold `initial_cap` more bytes after
-    // `len`, it's a free no-op; otherwise BytesMut compacts the
-    // window back to the start of the slab (with `len = 0` after
-    // `clear()`, this is just a pointer reset — no memcpy).
+    // change. `clear()` + `reserve(initial_cap)` at the top of the
+    // loop compacts the window back to the start of the slab (with
+    // `len = 0`, the reserve is a pointer reset — no memcpy).
     let initial_cap = VIRTIO_NET_HDR_LEN + 65535;
-    let mut pkt = bytes::BytesMut::zeroed(initial_cap);
+    let mut pkt = bytes::BytesMut::with_capacity(initial_cap);
 
     loop {
-        // Reset the window to start of slab (cheap; no-op while still
-        // at slab start, pointer-only reset after `advance()` has
-        // drifted us).
+        pkt.clear();
         pkt.reserve(initial_cap);
 
-        // Expose the full slab to `recv_gso` as `&mut [u8]`.
-        // SAFETY: every byte of the slab was zero-initialized at
-        // construction; subsequent iters only ever shrunk `len` or
-        // overwrote bytes. We never hand out uninitialized memory.
-        #[allow(unsafe_code)]
-        unsafe {
-            pkt.set_len(pkt.capacity());
-        }
-
-        let len = match inside_io.recv_gso(pkt.as_mut()).await {
-            IOCallbackResult::Ok(n) => n,
+        let (_, hdr) = match inside_io.recv_gso(&mut pkt).await {
+            IOCallbackResult::Ok(pair) => pair,
             IOCallbackResult::WouldBlock => continue,
             IOCallbackResult::Err(err) => {
                 break Err(anyhow!(err).context("InsideIO recv gso error"));
             }
         };
-
-        // SAFETY: `recv_gso` wrote `len` bytes; `len ≤ pkt.capacity()`.
-        #[allow(unsafe_code)]
-        unsafe {
-            pkt.set_len(len);
-        }
-
-        if len <= VIRTIO_NET_HDR_LEN {
-            tracing::warn!("TUN read too short ({len} <= {VIRTIO_NET_HDR_LEN})");
-            pkt.clear();
-            continue;
-        }
-
-        let hdr = match VirtioNetHdr::from_bytes(&pkt[..VIRTIO_NET_HDR_LEN]) {
-            Ok(hdr) => *hdr,
-            Err(err) => {
-                tracing::warn!("Failed to decode virtio header: {err}");
-                pkt.clear();
-                continue;
-            }
-        };
-        // Strip the virtio header — `pkt` is now the IP payload.
-        pkt.advance(VIRTIO_NET_HDR_LEN);
 
         if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
             gso_none_checksum(pkt.as_mut(), hdr.csum_start, hdr.csum_offset);

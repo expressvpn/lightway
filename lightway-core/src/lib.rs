@@ -41,6 +41,8 @@ pub use context::{
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
 pub use features::LightwayFeature;
+#[cfg(any(target_os = "linux", test))]
+pub use gso::VirtioNetHdr;
 pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, OutsideIOSendCallback,
     OutsideIOSendCallbackArg,

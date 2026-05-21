@@ -37,7 +37,7 @@ pub use network_change_monitor::NetworkChangeMonitor;
 pub use tun::TunIoUring;
 pub use tun::{Tun, TunConfig, TunDirect};
 
-#[cfg(feature = "io-uring")]
+#[cfg(any(feature = "io-uring", target_os = "linux"))]
 mod metrics;
 mod utils;
 pub use utils::{Validate, validate_configuration_file_path};
