@@ -79,6 +79,11 @@ impl OutsideIO for Tcp {
         let handle = self.0.as_raw_socket();
         OutsideSocket::Tcp(handle)
     }
+
+    #[cfg(macos)]
+    async fn network_changed(&self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl OutsideIOSendCallback for Tcp {
