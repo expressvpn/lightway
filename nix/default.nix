@@ -42,6 +42,12 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
+    outputHashes = {
+      # madsmtm/objc2 rev 0fa974523cdec3856be95d3655957fd77cf11843
+      # Covers block2, dispatch2, objc2, objc2-encode, objc2-core-foundation,
+      # objc2-network — all pinned to the same git rev in Cargo.lock.
+      "block2-0.6.2" = "sha256-0tHXLu/sks+/t4+/y0zspd+OIt3voHe27vKE31j+K9Q=";
+    };
   };
 
   buildFeatures = features;
