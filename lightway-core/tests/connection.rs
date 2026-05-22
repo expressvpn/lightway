@@ -28,9 +28,33 @@ const CA_CERT: &[u8] = &include!("data/ca_cert_der_2048");
 const SERVER_CERT: &[u8] = &include!("data/server_cert_der_2048");
 const SERVER_KEY: &[u8] = &include!("data/server_key_der_2048");
 
-struct TestAuth;
+#[derive(Default)]
+struct TestAuth {
+    /// Captures the last [`AuthMethod`] seen by [`ServerAuth::authorize`]
+    /// so integration tests can assert which auth variant the server
+    /// actually received.
+    last_method: Arc<Mutex<Option<AuthMethod>>>,
+}
+
+impl TestAuth {
+    fn new() -> (Arc<Self>, Arc<Mutex<Option<AuthMethod>>>) {
+        let auth = Arc::new(Self::default());
+        let last_method = auth.last_method.clone();
+        (auth, last_method)
+    }
+}
 
 impl ServerAuth<ConnectionTicker> for TestAuth {
+    fn authorize(&self, method: &AuthMethod, app_state: &mut ConnectionTicker) -> ServerAuthResult {
+        *self.last_method.lock().unwrap() = Some(method.clone());
+        match method {
+            AuthMethod::Token { token } | AuthMethod::VersionedToken { token, .. } => {
+                self.authorize_token(token, app_state)
+            }
+            _ => ServerAuthResult::Denied,
+        }
+    }
+
     fn authorize_token(&self, _token: &str, _app_state: &mut ConnectionTicker) -> ServerAuthResult {
         ServerAuthResult::Granted {
             handle: Some(Box::new(TestAuthHandle)),
@@ -199,10 +223,14 @@ impl OutsideIOSendCallback for TestStreamSock {
     }
 }
 
-async fn server<S: TestSock>(sock: Arc<S>, pqc: PQCrypto, enable_expresslane: bool) {
+async fn server<S: TestSock>(
+    sock: Arc<S>,
+    auth: Arc<TestAuth>,
+    pqc: PQCrypto,
+    enable_expresslane: bool,
+) {
     let server_key = Secret::Asn1Buffer(SERVER_KEY);
     let server_cert = Secret::Asn1Buffer(SERVER_CERT);
-    let auth = Arc::new(TestAuth);
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -389,6 +417,7 @@ async fn client<S: TestSock>(
     server_dn: Option<&str>,
     enable_codec: bool,
     enable_expresslane: bool,
+    use_versioned_token: bool,
 ) {
     let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -425,7 +454,10 @@ async fn client<S: TestSock>(
     .build()
     .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
     .unwrap()
-    .with_auth_token("LET ME IN")
+    .when(use_versioned_token, |b| {
+        b.with_auth_versioned_token("LET ME IN", Version::MAXIMUM)
+    })
+    .when(!use_versioned_token, |b| b.with_auth_token("LET ME IN"))
     .with_event_cb(Box::new(event_cb))
     .with_inside_pkt_codec(packet_codec);
 
@@ -698,9 +730,9 @@ async fn run_test_tcp<S: TestSock>(
     pqc: PQCrypto,
     server_sock: Arc<S>,
     client_sock: Arc<S>,
-) {
+) -> Arc<Mutex<Option<AuthMethod>>> {
     // Inside packet codec is only supported by Lightway UDP
-    run_test(cipher, pqc, server_sock, client_sock, false, false).await;
+    run_test(cipher, pqc, server_sock, client_sock, false, false, false).await
 }
 
 async fn run_test<S: TestSock>(
@@ -710,17 +742,21 @@ async fn run_test<S: TestSock>(
     client_sock: Arc<S>,
     enable_codec: bool,
     enable_expresslane: bool,
-) {
+    use_versioned_token: bool,
+) -> Arc<Mutex<Option<AuthMethod>>> {
+    let (auth, last_method) = TestAuth::new();
+
     let test = async move {
         tokio::join!(
-            server(server_sock, pqc, enable_expresslane),
+            server(server_sock, auth, pqc, enable_expresslane),
             client(
                 client_sock,
                 cipher,
                 pqc,
                 None,
                 enable_codec,
-                enable_expresslane
+                enable_expresslane,
+                use_versioned_token,
             )
         )
     };
@@ -728,6 +764,8 @@ async fn run_test<S: TestSock>(
     tokio::time::timeout(std::time::Duration::from_millis(get_test_timeout()), test)
         .await
         .expect("Timed out");
+
+    last_method
 }
 
 #[cfg_attr(feature = "postquantum",
@@ -770,6 +808,7 @@ async fn test_datagram_connection(
         client_sock,
         enable_codec,
         enable_expresslane,
+        false,
     )
     .await;
 }
@@ -800,6 +839,83 @@ async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
     run_test_tcp(cipher, pqc, server_sock, client_sock).await;
 }
 
+/// Drive an end-to-end UDP connection that uses
+/// [`ClientConnectionBuilder::with_auth_versioned_token`] and assert
+/// the server received an [`AuthMethod::VersionedToken`] carrying the
+/// client's [`Version::MAXIMUM`].
+#[tokio::test]
+async fn test_datagram_connection_versioned_token() {
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let socket = socket2::SockRef::from(&client_sock);
+    socket.set_recv_buffer_size(1024 * 256).unwrap();
+    let socket = socket2::SockRef::from(&server_sock);
+    socket.set_recv_buffer_size(1024 * 256).unwrap();
+
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+    let last_method = run_test(
+        None,
+        pqc,
+        server_sock,
+        client_sock,
+        false,
+        false,
+        true, // use_versioned_token
+    )
+    .await;
+
+    let method = last_method.lock().unwrap().clone().expect("Auth seen");
+    assert_eq!(
+        method,
+        AuthMethod::VersionedToken {
+            version: Version::MAXIMUM,
+            token: "LET ME IN".to_string(),
+        }
+    );
+}
+
+/// Drive an end-to-end TCP connection that uses
+/// [`ClientConnectionBuilder::with_auth_versioned_token`] and assert
+/// the server received an [`AuthMethod::VersionedToken`] carrying the
+/// client's [`Version::MAXIMUM`].
+#[tokio::test]
+async fn test_stream_connection_versioned_token() {
+    let (client_sock, server_sock) = UnixStream::pair().expect("UnixStream");
+    let server_sock = Arc::new(TestStreamSock(server_sock));
+    let client_sock = Arc::new(TestStreamSock(client_sock));
+
+    let _ = client_sock.writable().await;
+
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+    let last_method = run_test(
+        None,
+        pqc,
+        server_sock,
+        client_sock,
+        false,
+        false,
+        true, // use_versioned_token
+    )
+    .await;
+
+    let method = last_method.lock().unwrap().clone().expect("Auth seen");
+    assert_eq!(
+        method,
+        AuthMethod::VersionedToken {
+            version: Version::MAXIMUM,
+            token: "LET ME IN".to_string(),
+        }
+    );
+}
+
 #[test_case(None; "No server domain name")]
 #[test_case(Some("example.com"); "Valid server domain name")]
 #[test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name")]
@@ -814,10 +930,11 @@ async fn test_server_dn(server_dn: Option<&str>) {
     // started, else we'll get a `WouldBlock`.
     let _ = client_sock.writable().await;
 
+    let auth = Arc::new(TestAuth::default());
     let test = async move {
         tokio::join!(
-            server(server_sock, pqc, false),
-            client(client_sock, None, pqc, server_dn, false, false)
+            server(server_sock, auth, pqc, false),
+            client(client_sock, None, pqc, server_dn, false, false, false)
         )
     };
 
