@@ -18,6 +18,8 @@ desktop or an iPhone.
 
 lightway-client is a Linux implementation for a fully working Lightway client with both TCP and UDP support.
 
+All clients possible work with mulitple server connections with different auth settings, and it still possible to set one auth for all connection, please refer [Connection Setting.](/docs/connection_setting.md)
+
 ## lightway-server
 
 lightway-server is a Linux implementation for a fully working Lightway server with both TCP and UDP support.
