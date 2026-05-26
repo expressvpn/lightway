@@ -5,8 +5,6 @@
 //! preferences.
 
 use super::CurveGroup;
-#[cfg(feature = "debug")]
-use crate::debug::Tls13SecretCallbacksArg;
 
 /// Configuration for creating a session
 pub struct SessionConfig<IOCB> {
@@ -26,15 +24,6 @@ pub struct SessionConfig<IOCB> {
     /// or classical groups, which negotiate normally through the
     /// supported_groups extension.
     pub keyshare_group: Option<CurveGroup>,
-    /// Per-session key logger callback for debugging TLS.
-    ///
-    /// On wolfSSL, the callback is wired into the session's keylog hook
-    /// directly. On BoringSSL this field is a no-op: the library only
-    /// exposes a context-level keylog callback. To get key logging with
-    /// the BoringSSL backend, register the callback at the context level
-    /// via ContextBuilder::with_key_logger.
-    #[cfg(feature = "debug")]
-    pub key_logger: Option<Tls13SecretCallbacksArg>,
 }
 
 impl<IOCB> SessionConfig<IOCB> {
@@ -46,8 +35,6 @@ impl<IOCB> SessionConfig<IOCB> {
             checked_domain_name: None,
             server_name_indication: None,
             keyshare_group: None,
-            #[cfg(feature = "debug")]
-            key_logger: None,
         }
     }
 
@@ -97,13 +84,6 @@ impl<IOCB> SessionConfig<IOCB> {
     /// classical groups are a no-op here; they negotiate via `supported_groups`.
     pub fn with_keyshare_group(mut self, group: CurveGroup) -> Self {
         self.keyshare_group = Some(group);
-        self
-    }
-
-    /// Set key logger callback
-    #[cfg(feature = "debug")]
-    pub fn with_key_logger(mut self, callback: Tls13SecretCallbacksArg) -> Self {
-        self.key_logger = Some(callback);
         self
     }
 

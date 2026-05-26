@@ -1214,6 +1214,13 @@ pub async fn connect<
     #[cfg(all(feature = "boringssl", feature = "postquantum"))]
     let ctx_builder = ctx_builder.with_pq_crypto()?;
 
+    // Register the TLS key logger once on the context; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let ctx_builder = ctx_builder.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
     let conn_builder = ctx_builder
         .build()
         .start_connect(
@@ -1233,11 +1240,6 @@ pub async fn connect<
 
     #[cfg(feature = "postquantum")]
     let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
-
-    #[cfg(feature = "debug")]
-    let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
-    });
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
