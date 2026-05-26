@@ -164,11 +164,8 @@ where
             }
         }
 
-        #[cfg(feature = "debug")]
-        if let Some(ref _key_logger) = config.key_logger {
-            // BoringSSL key logging can be configured via SSL_CTX_set_keylog_callback
-            // For now, this is a placeholder
-        }
+        // No per-session keylog hook: BoringSSL only exposes keylog at the
+        // SSL_CTX level, wired via ContextBuilder::with_key_logger.
 
         // Create BIO adapter and SSL stream
         let bio_adapter = BioAdapter { io: config.io };
