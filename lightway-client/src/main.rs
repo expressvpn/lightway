@@ -35,8 +35,9 @@ impl EventCallback for EventHandler {
 }
 
 async fn make_client_connection_config(
-    config: ConnectionConfig,
+    mut config: ConnectionConfig,
 ) -> Result<ClientConnectionConfig<EventHandler>> {
+    let auth = config.take_auth()?;
     tracing::info!("Resolving server address: {}", &config.server);
 
     let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
@@ -54,6 +55,10 @@ async fn make_client_connection_config(
         cipher: config.cipher,
         server_dn: config.server_dn,
         server: server_addr,
+        auth,
+        cert_content: config
+            .ca_cert
+            .expect("Should exist, because it is normalized after take_servers()"),
         inside_plugins: Default::default(),
         outside_plugins: Default::default(),
         inside_pkt_codec: None,
@@ -209,22 +214,8 @@ async fn main() -> Result<()> {
         spawn_reload_event_handler(&config, config_file.clone(), env_patch, cli_patch);
 
     let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
-
-    if config.servers.is_empty() {
-        config.servers = vec![ConnectionConfig {
-            server: config.server.clone(),
-            mode: config.mode,
-            server_dn: config.server_dn.clone(),
-            cipher: config.cipher,
-            ..Default::default()
-        }];
-    }
-
-    let conn_confs = join_all(
-        std::mem::take::<Vec<ConnectionConfig>>(&mut config.servers)
-            .into_iter()
-            .map(make_client_connection_config),
-    );
+    let servers = config.take_servers()?;
+    let conn_confs = join_all(servers.into_iter().map(make_client_connection_config));
     let conn_confs = tokio::select! {
         results = conn_confs => {
             results.into_iter()
@@ -241,10 +232,6 @@ async fn main() -> Result<()> {
     };
 
     let config = ClientConfig {
-        auth: config.take_auth()?,
-        root_ca_cert: config
-            .load_ca()
-            .unwrap_or(config.load_ca_file(&mut _root_ca_cert_path)),
         outside_mtu: config.outside_mtu,
         inside_io,
         tun_config,
