@@ -286,6 +286,7 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     pub auth: AuthMethod,
 
     /// Content of CA certificate
+    #[educe(Debug(ignore))]
     pub cert_content: String,
 
     /// Inside plugins to use
