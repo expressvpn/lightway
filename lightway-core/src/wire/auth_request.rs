@@ -2,6 +2,7 @@ use crate::{Version, borrowed_bytesmut::BorrowedBytesMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use more_asserts::*;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use std::fmt;
 
 use super::{FromWireError, FromWireResult};
 
@@ -57,7 +58,7 @@ mod test_auth_method_kind {
 /// The auth method to use.
 ///
 /// See [`AuthRequest`] for the containing wire format.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub enum AuthMethod {
     /// Authenticate with username and password
     ///
@@ -153,6 +154,37 @@ pub enum AuthMethod {
         /// Application defined data buffer with authentication data
         data: Bytes,
     },
+}
+
+/// Manual `Debug` to avoid leaking credentials, tokens, or opaque callback
+/// payloads into logs. Variant kind and non-sensitive metadata (username,
+/// version, byte lengths) are shown; secret is redacted.
+impl fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuthMethod::UserPass { user, password } => f
+                .debug_struct("UserPass")
+                .field("user", user)
+                .field(
+                    "password",
+                    &format_args!("<redacted {} length>", password.len()),
+                )
+                .finish(),
+            AuthMethod::Token { token } => f
+                .debug_struct("Token")
+                .field("token", &format_args!("<redacted {} length>", token.len()))
+                .finish(),
+            AuthMethod::VersionedToken { version, token } => f
+                .debug_struct("VersionedToken")
+                .field("version", version)
+                .field("token", &format_args!("<redacted {} length>", token.len()))
+                .finish(),
+            AuthMethod::CustomCallback { data } => f
+                .debug_struct("CustomCallback")
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+        }
+    }
 }
 
 impl AuthMethod {
