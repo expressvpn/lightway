@@ -19,6 +19,7 @@ use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
+use io::outside::OutsideIO;
 use keepalive::Keepalive;
 #[cfg(feature = "postquantum")]
 use lightway_app_utils::args::KeyShare;
@@ -835,6 +836,8 @@ pub async fn connect<
                     sock.enable_batch_receive();
                 }
 
+                sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+                sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
@@ -842,12 +845,20 @@ pub async fn connect<
                     .await
                     .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
                     .context("Outside IO TCP")?;
+
+                // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
+                // autotuning, capping the bandwidth-delay product and throttling
+                // high-RTT links to single-digit Mbps. UDP has no autotuning so it
+                // still needs explicit sizing above.
+                // macOS benefits from explicit buffers in real-world testing.
+                #[cfg(target_os = "macos")]
+                {
+                    sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+                    sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+                }
                 (ConnectionType::Stream, Arc::new(sock))
             }
         };
-
-    outside_io.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
-    outside_io.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
