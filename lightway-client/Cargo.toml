@@ -64,7 +64,7 @@ test-case.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 mockall = "0.14.0"
 regex.workspace = true
-serial_test = "3.2.0"
+serial_test.workspace = true
 tempfile = "3.24.0"
 tun-rs.workspace = true
 

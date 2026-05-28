@@ -57,3 +57,4 @@ ctrlc.workspace = true
 [dev-dependencies]
 more-asserts.workspace = true
 test-case.workspace = true
+serial_test.workspace = true
