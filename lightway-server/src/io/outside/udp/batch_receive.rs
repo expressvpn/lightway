@@ -5,6 +5,7 @@
 //!   control messages (e.g. `IP_PKTINFO` on a server socket bound to
 //!   `0.0.0.0`). Fills source address and a caller-provided control buffer in
 //!   addition to the data.
+#![cfg(batch_receive)]
 
 use crate::io::outside::udp::cmsg;
 use crate::io::outside::udp::cmsg::LibcControlLen;
@@ -122,10 +123,10 @@ impl<const CONTROL_SIZE: usize> BatchRecvSlot<CONTROL_SIZE> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(macos)]
 type PlatformBatchRecv = apple::RecvmsgX;
 
-#[cfg(any(target_os = "linux"))]
+#[cfg(linux)]
 type PlatformBatchRecv = linux::Recvmmsg;
 
 /// Receive up to `max_batch_size` packets from `fd` into `slots`, filling each
@@ -149,7 +150,7 @@ pub(crate) fn recv_multiple_with_metadata<const CONTROL_SIZE: usize>(
     PlatformBatchRecv::recv_multiple_with_metadata(fd, slots, max_batch_size)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(macos)]
 mod apple {
     use crate::io::outside::udp::cmsg::LibcControlLen;
     use lightway_app_utils::recvmsg_x::{msghdr_x, recvmsg_x};
@@ -227,7 +228,7 @@ mod apple {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 mod linux {
     use crate::io::outside::udp::cmsg::LibcControlLen;
     use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};

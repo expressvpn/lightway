@@ -54,6 +54,9 @@ tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
 [target.'cfg(windows)'.dependencies]
 ctrlc.workspace = true
 
+[build-dependencies]
+cfg_aliases.workspace = true
+
 [dev-dependencies]
 more-asserts.workspace = true
 test-case.workspace = true
