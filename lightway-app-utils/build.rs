@@ -14,5 +14,7 @@ fn main() {
         // Backends
         desktop: { any(windows, linux, macos) },
         mobile: { any(android, ios, tvos) },
+        // Apple platform
+        apple: { any(macos, ios, tvos) },
     }
 }
