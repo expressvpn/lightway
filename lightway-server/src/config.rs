@@ -8,7 +8,7 @@ use clap::Parser;
 use ipnet::Ipv4Net;
 use serde::Deserialize;
 use std::time::Duration as StdDuration;
-use struct_patch::Patch;
+use struct_patch::{Patch, Substrate};
 
 use lightway_app_utils::args::{
     ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration,
@@ -19,7 +19,7 @@ use lightway_app_utils::args::{
 // Patch derive, do NOT set defualts in the clap macros, and let all default
 // values follow the Rust convention in default trait, such that we are able
 // to serialized out any kind of configure from the Config::default()
-#[derive(Debug, Deserialize, Patch)]
+#[derive(Debug, Deserialize, Patch, Substrate)]
 #[patch(attribute(derive(Deserialize, Parser)))]
 #[patch(attribute(clap(about = "A lightway server")))]
 pub struct Config {
@@ -183,13 +183,13 @@ impl Default for Config {
             lightway_dns_ip: Ipv4Addr::new(10, 125, 0, 1),
             enable_expresslane: false,
             expresslane_keys_rotation_interval: Duration::from_std_duration(
-                lightway_server::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+                crate::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
             ),
             connection_age_expiration_interval: Duration::from_std_duration(
-                lightway_server::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
+                crate::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
             ),
             statistics_reporting_interval: Duration::from_std_duration(
-                lightway_server::DEFAULT_STATISTICS_REPORTING_INTERVAL,
+                crate::DEFAULT_STATISTICS_REPORTING_INTERVAL,
             ),
             enable_pqc: false,
             enable_tun_iouring: false,
