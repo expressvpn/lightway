@@ -1,4 +1,9 @@
-# General Config
+# General Config Design Rationale
+
+## Introduction 
+
+The config generation is unified on all clients and server.  For the server part, it is quite simple as it only supports native builds on top of Linux.  
+For the client side, we need to consider much more in real-world usage.  This document is not meant to set rules to restrict the development, but to address development pain points ahead of time by providing guides that help you leverage what we currently have.
 
 
 ## Current flow with mobile feature
@@ -11,6 +16,10 @@ Starting from default values (0), the config evolves through each step along the
 
 Mobile takes a shorter path, skipping the steps after **2.ConfigContent** in the flow chart. Rather than reading from a file, config content comes from a Dynamic UI. The Dynamic UI itself is driven by a JSON schema file generated at compile time from the same `Config` struct via the CLI client.
 This means both desktop and mobile ultimately share the same `Config` source of truth, with the mobile flow being a streamlined subset of the desktop flow.
+
+**Server flow (steps 0, 1, 2, 3, 4, 5, 6):**
+
+The flow is exactly the same as the CLI client, but all parameters use SERVER keywords, e.g.: `LW_CLIENT_*` will be `LW_SERVER_*`.
 
 ```mermaid
 flowchart TB

@@ -26,6 +26,8 @@ All clients possible work with mulitple server connections with different auth s
 
 lightway-server is a Linux implementation for a fully working Lightway server with both TCP and UDP support.
 
+All server settings are centralized in a single Config struct, please refer [General Config Design Rationale](/docs/general_config.md)
+
 # Terminology
 
 Some people may prefer to see these terms in context, see [What does it actually do?](#what-does-it-actually-do)
