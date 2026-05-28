@@ -116,6 +116,8 @@ pub(crate) struct UdpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
+    #[cfg(batch_receive)]
+    batch_receive_enabled: bool,
 }
 
 impl UdpServer {
@@ -123,6 +125,7 @@ impl UdpServer {
         conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
         udp_buffer_size: ByteSize,
+        #[cfg(batch_receive)] enable_batch_receive: bool,
         sock: Option<tokio::net::UdpSocket>,
     ) -> Result<UdpServer> {
         let sock = match sock {
@@ -160,10 +163,36 @@ impl UdpServer {
             socket_enable_pktinfo(&sock)?;
         }
 
+        #[cfg(batch_receive)]
+        let batch_receive_enabled = if enable_batch_receive {
+            cfg_select! {
+                macos => {
+                    if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
+                        info!("Using batch receiver");
+                        true
+                    } else {
+                        warn!(
+                            "batch receive (recvmsg_x) not available on this system, batch receive disabled"
+                        );
+                        false
+                    }
+                }
+                linux => {
+                    info!("Using batch receiver");
+                    true
+                }
+                _ => false
+            }
+        } else {
+            false
+        };
+
         Ok(Self {
             conn_manager,
             sock,
             bind_mode,
+            #[cfg(batch_receive)]
+            batch_receive_enabled,
         })
     }
 
