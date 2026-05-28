@@ -343,7 +343,7 @@ fn read_from_socket(
         metrics::udp_recv_truncated();
     }
 
-    let control_len = msg.control_len() as self::cmsg::LibcControlLen;
+    let control_len = msg.control_len();
 
     // SAFETY: We rely on recv_from giving us the correct size
     #[allow(unsafe_code)]
