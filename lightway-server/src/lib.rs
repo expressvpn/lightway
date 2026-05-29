@@ -1,3 +1,4 @@
+pub mod config;
 mod connection;
 mod connection_manager;
 mod io;
