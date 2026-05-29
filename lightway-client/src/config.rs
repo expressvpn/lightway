@@ -170,14 +170,20 @@ pub struct Config {
     pub preferred_connection_wait_interval: Duration,
 
     #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Socket send buffer size"))]
+    #[patch(attribute(doc = r#"Socket send buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
     #[schemars(extend("x-cfg" = "desktop"))]
     #[schemars(schema_with = "byte_size_schema")]
     /// ex: 1.5 MiB
     pub sndbuf: ByteSize,
 
     #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Socket receive buffer size"))]
+    #[patch(attribute(doc = r#"Socket receive buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
     #[schemars(extend("x-cfg" = "desktop"))]
     #[schemars(schema_with = "byte_size_schema")]
     /// ex: 1.5 MiB
