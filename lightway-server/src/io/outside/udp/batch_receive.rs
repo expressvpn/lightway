@@ -423,6 +423,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
     async fn recv_multiple_with_metadata_single_packet() {
         let (sender, receiver) = make_socket_pair().await;
 
@@ -447,6 +451,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
     async fn recv_multiple_with_metadata_populates_peer_addr() {
         // Unconnected server-side socket: accepts from any peer.
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -537,6 +545,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
     async fn recv_multiple_with_metadata_populates_control_length() {
         // Unconnected server socket with IP_PKTINFO enabled so the kernel
         // writes a cmsg into our control buffer for each received packet.
