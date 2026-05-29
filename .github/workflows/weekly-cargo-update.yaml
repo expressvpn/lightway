@@ -29,7 +29,7 @@ jobs:
         cargo update 2>&1 | tee /tmp/cargo-update.log
 
     - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v21
+      uses: DeterminateSystems/nix-installer-action@v22
 
     # Update flake.lock after cargo update so nix sees the new Cargo.lock.
     - name: Update nix flake inputs
