@@ -503,7 +503,7 @@ fn read_multiple_from_socket<const N: usize>(
             metrics::udp_recv_truncated();
         }
 
-        let Some(peer_addr) = slot.peer_addr() else {
+        let Some(peer_addr) = slot.take_peer_addr() else {
             // Since we only bind to IP sockets this shouldn't happen.
             metrics::udp_recv_invalid_addr();
             return Err(std::io::Error::new(

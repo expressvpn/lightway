@@ -49,14 +49,14 @@ pub struct BatchRecvSlot<const CONTROL_SIZE: usize> {
     /// Out: source-address storage written by the kernel. `SockAddrStorage`
     /// is `#[repr(transparent)]` over `libc::sockaddr_storage`, so it can be
     /// handed to a raw recvmsg-style syscall and afterwards decoded via
-    /// [`BatchRecvSlot::peer_addr`].
-    pub peer_addr_storage: socket2::SockAddrStorage,
-    /// In/Out: buffer length for the source address. Pre-filled with
-    /// [`socket2::SockAddrStorage::size_of`] before each call so the kernel
+    /// [`BatchRecvSlot::take_peer_addr`].
+    peer_addr_storage: socket2::SockAddrStorage,
+    /// Buffer length for the source address. Pre-filled with
+    /// [`socket2::SockAddrStorage::size_of`] when we call reset() so the kernel
     /// knows how much room it has; the syscall replaces it with the actual
     /// number of bytes it wrote (typically `sizeof(sockaddr_in)` for IPv4 or
     /// `sizeof(sockaddr_in6)` for IPv6).
-    pub peer_addr_len: libc::socklen_t,
+    peer_addr_len: libc::socklen_t,
     /// Out: `true` if the kernel set `MSG_TRUNC` in `msg_flags` for this
     /// packet, meaning the datagram was larger than the buffer we supplied and
     /// the tail was discarded. Callers should treat the payload as incomplete.
@@ -69,7 +69,7 @@ impl<const CONTROL_SIZE: usize> BatchRecvSlot<CONTROL_SIZE> {
     pub fn new() -> Self {
         let peer_addr_storage = socket2::SockAddrStorage::zeroed();
         let peer_addr_len = peer_addr_storage.size_of();
-        let slot = Self {
+        Self {
             buf: BytesMut::with_capacity(lightway_core::MAX_OUTSIDE_MTU),
             control: if CONTROL_SIZE > 0 {
                 Some(cmsg::Buffer::<CONTROL_SIZE>::new())
@@ -80,13 +80,15 @@ impl<const CONTROL_SIZE: usize> BatchRecvSlot<CONTROL_SIZE> {
             peer_addr_storage,
             peer_addr_len,
             truncated: false,
-        };
-        slot
+        }
     }
 
     /// Reset the slot for a new batch receive without releasing any
-    /// allocations: clears buffer lengths (preserving capacity) and rezeros
-    /// the source-address storage.
+    /// allocations: clears the buffer length (preserving capacity) and restores
+    /// the source-address length bound so the kernel knows how much room the
+    /// storage has. The address storage itself is not touched here — it is left
+    /// zeroed by [`take_peer_addr`](Self::take_peer_addr) and overwritten by the
+    /// kernel on the next receive.
     pub fn reset(&mut self) {
         self.buf.clear();
         self.buf.reserve(lightway_core::MAX_OUTSIDE_MTU);
@@ -94,30 +96,29 @@ impl<const CONTROL_SIZE: usize> BatchRecvSlot<CONTROL_SIZE> {
             control.reset();
         }
         self.control_length = None;
-        self.peer_addr_storage = socket2::SockAddrStorage::zeroed();
         self.peer_addr_len = self.peer_addr_storage.size_of();
         self.truncated = false;
     }
 
-    /// Convert the slot's source-address storage into a [`SocketAddr`].
+    /// Convert the slot's source-address storage into a [`SocketAddr`], taking
+    /// the stored address (the slot's storage is left zeroed afterwards).
     ///
     /// Returns `None` if the address family is not `AF_INET` or `AF_INET6`,
     /// which should not happen for a UDP/IP socket.
-    pub fn peer_addr(&self) -> Option<SocketAddr> {
-        // `SockAddr::new` consumes the storage by value, so make a fresh copy
-        // of the kernel-populated bytes via the `view_as` pattern documented
-        // on `SockAddrStorage`. The length is what the syscall returned for
-        // this packet (typically `sizeof(sockaddr_in)` or `sizeof(sockaddr_in6)`).
-        let mut storage = socket2::SockAddrStorage::zeroed();
+    pub fn take_peer_addr(&mut self) -> Option<SocketAddr> {
+        // `SockAddr::new` consumes the storage by value, so move the
+        // kernel-populated bytes out of the slot (leaving a zeroed storage in
+        // their place) rather than copying them. The length is what the
+        // syscall returned for this packet (typically `sizeof(sockaddr_in)`
+        // for IPv4 or `sizeof(sockaddr_in6)` for IPv6).
+        let storage = std::mem::replace(
+            &mut self.peer_addr_storage,
+            socket2::SockAddrStorage::zeroed(),
+        );
+        // SAFETY: `storage` holds the source address the kernel wrote and
+        // `peer_addr_len` is the length the syscall reported for it.
         #[allow(unsafe_code)]
-        // SAFETY: `SockAddrStorage` is `#[repr(transparent)]` over
-        // `sockaddr_storage`, so `view_as::<sockaddr_storage>` yields a
-        // pointer to the same bytes in `storage`, and a const cast of
-        // `&self.peer_addr_storage` likewise points at its bytes.
         unsafe {
-            let src = &self.peer_addr_storage as *const socket2::SockAddrStorage
-                as *const libc::sockaddr_storage;
-            *storage.view_as::<libc::sockaddr_storage>() = *src;
             socket2::SockAddr::new(storage, self.peer_addr_len).as_socket()
         }
     }
@@ -136,7 +137,7 @@ type PlatformBatchRecv = linux::Recvmmsg;
 /// - `slots[i].buf.len()` is set to the bytes received,
 /// - `slots[i].control.len()` is set to the cmsg bytes received,
 /// - `slots[i].peer_addr_storage` holds the source address (use
-///   [`BatchRecvSlot::peer_addr`] to decode).
+///   [`BatchRecvSlot::take_peer_addr`] to decode).
 ///
 /// Callers must call [`BatchRecvSlot::reset`] on each slot before invoking this
 /// again, otherwise the data and control lengths from the previous call leak
@@ -168,8 +169,9 @@ mod apple {
             slots: &mut [super::BatchRecvSlot<CONTROL_SIZE>; MAX_IO_BATCH_SIZE],
             msg_count: usize,
         ) -> io::Result<usize> {
-            // SAFETY: zeroed iovec / msghdr_x are valid (null pointers + zero lengths).
+            // SAFETY: zeroed iovec are valid (null pointers + zero lengths).
             let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
+            // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
             let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; MAX_IO_BATCH_SIZE]>() };
             for (i, slot) in slots.iter_mut().take(msg_count).enumerate() {
                 debug_assert!(
@@ -329,24 +331,13 @@ mod tests {
             .expect("CONTROL_CAP > 0 should allocate a control buffer")
             .capacity();
 
-        // Dirty every output field as a kernel write would.
+        // Dirty every output field as a kernel write would. The address
+        // storage itself is owned by `take_peer_addr` (see its own test), so
+        // `reset` only has to restore the length bound here.
         slot.buf.extend_from_slice(b"junk payload");
         slot.control_length = Some(32);
         slot.truncated = true;
         slot.peer_addr_len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-        #[allow(unsafe_code)]
-        // SAFETY: `SockAddrStorage` is `#[repr(transparent)]` over
-        // `sockaddr_storage`, large enough for any sockaddr. Setting
-        // `ss_family = AF_INET` makes `peer_addr()` decode it as an IPv4
-        // socket address (with zero bytes for ip/port).
-        unsafe {
-            let storage = slot.peer_addr_storage.view_as::<libc::sockaddr_storage>();
-            (*storage).ss_family = libc::AF_INET as _;
-        }
-        assert!(
-            slot.peer_addr().is_some(),
-            "sanity: dirtied storage should decode to a peer addr"
-        );
 
         slot.reset();
 
@@ -370,11 +361,34 @@ mod tests {
             slot.peer_addr_len, initial_peer_addr_len,
             "reset must restore peer_addr_len to the storage bound",
         );
-        assert!(
-            slot.peer_addr().is_none(),
-            "reset must zero peer_addr_storage (AF_UNSPEC -> None)",
-        );
         assert!(!slot.truncated, "reset must clear the truncated flag");
+    }
+
+    #[test]
+    fn take_peer_addr_consumes_the_stored_address() {
+        const CONTROL_CAP: usize = 64;
+        let mut slot: BatchRecvSlot<CONTROL_CAP> = BatchRecvSlot::new();
+
+        // Simulate a kernel write of an IPv4 source address.
+        slot.peer_addr_len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        #[allow(unsafe_code)]
+        // SAFETY: `SockAddrStorage` is `#[repr(transparent)]` over
+        // `sockaddr_storage`, large enough for any sockaddr. Setting
+        // `ss_family = AF_INET` makes `take_peer_addr` decode it as an IPv4
+        // socket address (with zero bytes for ip/port).
+        unsafe {
+            let storage = slot.peer_addr_storage.view_as::<libc::sockaddr_storage>();
+            storage.ss_family = libc::AF_INET as _;
+        }
+
+        assert!(
+            slot.take_peer_addr().is_some(),
+            "first take must decode the kernel-written AF_INET address",
+        );
+        assert!(
+            slot.take_peer_addr().is_none(),
+            "take_peer_addr must leave the storage zeroed (AF_UNSPEC -> None)",
+        );
     }
 
     #[test]
@@ -480,8 +494,8 @@ mod tests {
         // recvmmsg/recvmsg_x ordering across distinct peers isn't guaranteed,
         // so check that both senders appear among the received slots.
         let received: Vec<(std::net::SocketAddr, Vec<u8>)> = slots[..count]
-            .iter()
-            .map(|s| (s.peer_addr().expect("AF_INET peer"), s.buf.to_vec()))
+            .iter_mut()
+            .map(|s| (s.take_peer_addr().expect("AF_INET peer"), s.buf.to_vec()))
             .collect();
         assert!(
             received.contains(&(addr_a, b"alpha".to_vec())),
@@ -507,7 +521,7 @@ mod tests {
         for slot in &mut slots {
             slot.reset();
         }
-        for (i, slot) in slots.iter().enumerate() {
+        for (i, slot) in slots.iter_mut().enumerate() {
             assert_eq!(slot.buf.len(), 0, "slot {i}: reset must clear buf len");
             assert_eq!(
                 slot.buf.capacity(),
@@ -517,10 +531,6 @@ mod tests {
             assert_eq!(
                 slot.peer_addr_len, storage_size_of,
                 "slot {i}: reset must restore peer_addr_len to the buffer bound",
-            );
-            assert!(
-                slot.peer_addr().is_none(),
-                "slot {i}: zeroed storage has AF_UNSPEC, peer_addr() should be None",
             );
         }
     }
