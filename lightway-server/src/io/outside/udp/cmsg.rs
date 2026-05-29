@@ -39,6 +39,9 @@ impl<const N: usize> Buffer<N> {
     pub(crate) unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_, N> {
         // SAFETY: The outer function here has enforced this requirement already
         unsafe {
+            // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
+            // apple/musl, so the cast is a no-op on some targets only.
+            #[cfg_attr(linux, allow(clippy::unnecessary_cast))]
             self.0.set_len(control_len as usize);
         }
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
