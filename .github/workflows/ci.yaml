@@ -223,7 +223,7 @@ jobs:
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v21
     - name: Setup Nix cache
-      uses: DeterminateSystems/magic-nix-cache-action@v13
+      uses: DeterminateSystems/magic-nix-cache-action@v14
       with:
         use-flakehub: false
     - name: Check with mobile
@@ -266,7 +266,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v21
 
       - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
           use-flakehub: false
 
@@ -314,7 +314,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v21
 
       - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
           use-flakehub: false
 
