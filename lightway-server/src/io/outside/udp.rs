@@ -165,23 +165,20 @@ impl UdpServer {
 
         #[cfg(batch_receive)]
         let batch_receive_enabled = if enable_batch_receive {
-            cfg_select! {
-                macos => {
-                    if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
-                        info!("Using batch receiver");
-                        true
-                    } else {
-                        warn!(
-                            "batch receive (recvmsg_x) not available on this system, batch receive disabled"
-                        );
-                        false
-                    }
-                }
-                linux => {
-                    info!("Using batch receiver");
-                    true
-                }
-                _ => false
+            #[cfg(macos)]
+            if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
+                info!("Using batch receiver");
+                true
+            } else {
+                warn!(
+                    "batch receive (recvmsg_x) not available on this system, batch receive disabled"
+                );
+                false
+            }
+            #[cfg(linux)]
+            {
+                info!("Using batch receiver");
+                true
             }
         } else {
             false
