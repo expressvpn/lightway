@@ -9,7 +9,7 @@ use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
 };
-use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU};
+use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, Version};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
@@ -560,7 +560,10 @@ fn take_auth(
     password: Option<String>,
 ) -> Result<AuthMethod, Error> {
     match (token, user, password) {
-        (Some(token), _, _) => Ok(AuthMethod::Token { token }),
+        (Some(token), _, _) => Ok(AuthMethod::VersionedToken {
+            version: Version::MAXIMUM,
+            token,
+        }),
         (_, Some(user), Some(password)) => Ok(AuthMethod::UserPass { user, password }),
         _ => Err(Error::InsufficientAuth),
     }

@@ -128,18 +128,18 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         self.with_auth(auth_method)
     }
 
-    /// Setup authentication using a token
+    /// Setup authentication using a token. The client's maximum
+    /// supported lightway protocol [`Version`] is sent alongside the
+    /// token via [`AuthMethod::VersionedToken`] so the server can
+    /// determine the client's version even on transports without a
+    /// wire header (e.g. TCP).
     pub fn with_auth_token(self, token: &str) -> Self {
-        let auth_method = AuthMethod::Token {
-            token: token.to_string(),
-        };
-
-        self.with_auth(auth_method)
+        self.with_auth_versioned_token(token, Version::MAXIMUM)
     }
 
-    /// Setup authentication using a token plus the client's lightway
-    /// protocol [`Version`]. The server learns the client's version
-    /// even on transports without a wire header (e.g. TCP).
+    /// Setup authentication using a token plus an explicit lightway
+    /// protocol [`Version`]. Prefer [`Self::with_auth_token`] which
+    /// auto-fills the client's maximum supported version.
     pub fn with_auth_versioned_token(self, token: &str, version: Version) -> Self {
         let auth_method = AuthMethod::VersionedToken {
             version,
