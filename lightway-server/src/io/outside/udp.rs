@@ -330,7 +330,7 @@ impl UdpServer {
         let mut buf_slots: [BatchRecvSlot<SIZE>; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BatchRecvSlot::new());
         loop {
-            let (n, pkt_metadata) = self
+            let pkt_metadata = self
                 .sock
                 .async_io(Interest::READABLE, || {
                     read_multiple_from_socket(
@@ -341,10 +341,10 @@ impl UdpServer {
                     )
                 })
                 .await?;
-            for (slot, (peer_addr, local_addr, reply_pktinfo)) in
-                buf_slots.iter_mut().take(n).zip(pkt_metadata)
-            {
-                self.data_received(peer_addr, local_addr, reply_pktinfo, &mut slot.buf);
+            // `zip` stops at the shorter iterator, so this processes exactly the
+            // slots that batch receive filled (one metadata entry per slot).
+            for (slot, meta) in buf_slots.iter_mut().zip(pkt_metadata) {
+                self.data_received(meta.peer, meta.local, meta.reply_pktinfo, &mut slot.buf);
                 // Recover full capacity
                 slot.reset();
             }
@@ -482,15 +482,22 @@ fn read_single_from_socket(
     Ok((peer_addr, local_addr, reply_pktinfo))
 }
 
+/// Per-packet metadata produced by batched receive.
+struct BatchRecvMetadata {
+    /// The peer (remote) address the packet was received from.
+    peer: SocketAddr,
+    /// The resolved local address the packet was received on.
+    local: SocketAddr,
+    /// The `in_pktinfo` to echo back on replies, when the bind mode needs it.
+    reply_pktinfo: Option<libc::in_pktinfo>,
+}
+
 fn read_multiple_from_socket<const N: usize>(
     sock: &Arc<tokio::net::UdpSocket>,
     buf_slots: &mut [BatchRecvSlot<N>; MAX_IO_BATCH_SIZE],
     max_batch_size: usize,
     bind_mode: &BindMode,
-) -> std::io::Result<(
-    usize,
-    Vec<(SocketAddr, SocketAddr, Option<libc::in_pktinfo>)>,
-)> {
+) -> std::io::Result<Vec<BatchRecvMetadata>> {
     let sock = SockRef::from(sock.as_ref());
 
     let fd = sock.as_raw_fd();
@@ -540,8 +547,12 @@ fn read_multiple_from_socket<const N: usize>(
             BindMode::SpecificAddress { local_addr } => (local_addr, None),
         };
 
-        metadata.push((peer_addr, local_addr, reply_pktinfo));
+        metadata.push(BatchRecvMetadata {
+            peer: peer_addr,
+            local: local_addr,
+            reply_pktinfo,
+        });
     }
 
-    Ok((n, metadata))
+    Ok(metadata)
 }
