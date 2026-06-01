@@ -163,22 +163,17 @@ impl UdpServer {
             socket_enable_pktinfo(&sock)?;
         }
 
-        #[cfg(batch_receive)]
+        #[cfg(linux)]
+        let batch_receive_enabled = enable_batch_receive;
+        #[cfg(macos)]
         let batch_receive_enabled = if enable_batch_receive {
-            #[cfg(macos)]
             if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
-                info!("Using batch receiver");
                 true
             } else {
                 warn!(
                     "batch receive (recvmsg_x) not available on this system, batch receive disabled"
                 );
                 false
-            }
-            #[cfg(linux)]
-            {
-                info!("Using batch receiver");
-                true
             }
         } else {
             false
@@ -356,7 +351,7 @@ impl Server for UdpServer {
 
         #[cfg(batch_receive)]
         if self.batch_receive_enabled {
-            info!("Using batch receiver");
+            info!("Using batch receive");
             return self.run_batch().await;
         }
 
