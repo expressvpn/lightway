@@ -186,7 +186,7 @@ impl DnsSetup for DnsManager {
             let primary_service_path = Self::get_primary_service_path(service_id);
 
             if !SCDynamicStore::remove_value(Some(&self.store), &primary_service_path) {
-                return Err(DnsManagerError::FailedToRemoveDnsConfig);
+                return Err(DnsManagerError::FailedToRemoveDnsConfig("".to_string()));
             }
             self.service_id = None;
         }

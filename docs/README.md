@@ -23,3 +23,7 @@
 
 * [Wireshark lightway plugin](wireshark.md)
 
+# Platform specific info
+
+* [Windows](./windows.md)
+

@@ -24,9 +24,9 @@ pub enum DnsManagerError {
     #[error("Failed to set DNS configuration: {0}")]
     #[cfg(desktop)]
     FailedToSetDnsConfig(String),
-    #[error("Failed to remove DNS configuration")]
-    #[cfg(macos)]
-    FailedToRemoveDnsConfig,
+    #[error("Failed to remove DNS configuration: {0}")]
+    #[cfg(any(macos, windows))]
+    FailedToRemoveDnsConfig(String),
     #[error("DNS cache flush failed: {0}")]
     #[cfg(macos)]
     CacheFlushFailed(String),
@@ -43,7 +43,7 @@ pub enum DnsManagerError {
     #[cfg(linux)]
     FailedToRestoreDnsConfig(String),
     #[error("DNS has already been configured")]
-    #[cfg(linux)]
+    #[cfg(any(linux, windows))]
     DnsAlreadyConfigured,
 }
 
