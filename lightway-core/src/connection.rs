@@ -1867,6 +1867,7 @@ impl<AppState: Send> Connection<AppState> {
                 self_key,
                 peer_key,
                 peer_sockaddr: self.peer_addr(),
+                version: self.expresslane.data.version,
             };
             xp_config_cb.update(self.session_id, data, &self.app_state);
         }
