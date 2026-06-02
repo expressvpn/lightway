@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::SessionId;
-use crate::wire::{ExpresslaneData, ExpresslaneKey};
+use crate::wire::{ExpresslaneData, ExpresslaneKey, ExpresslaneVersion};
 
 /// Data published when expresslane keys are updated.
 #[derive(Debug)]
@@ -14,6 +14,8 @@ pub struct ExpresslaneCbData {
     pub peer_key: ExpresslaneKey,
     /// Peer socket address
     pub peer_sockaddr: SocketAddr,
+    /// Negotiated expresslane wire version
+    pub version: ExpresslaneVersion,
 }
 
 /// Callback trait for expresslane key updates.
