@@ -144,7 +144,6 @@ pub struct Config {
     #[patch(attribute(doc = "Set UDP buffer size. Default value is 15 MiB."))]
     pub udp_buffer_size: ByteSize,
 
-    #[cfg(batch_receive)]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -211,7 +210,6 @@ impl Default for Config {
             bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 27690),
             proxy_protocol: false,
             udp_buffer_size: ByteSize::mib(15),
-            #[cfg(batch_receive)]
             enable_batch_receive: false,
             #[cfg(feature = "debug")]
             tls_debug: false,

@@ -7,7 +7,5 @@ fn main() {
         linux: { target_os = "linux" },
         macos: { target_os = "macos" },
         // windows - supported natively
-        // Feature that is supported on specific platforms
-        batch_receive: { any(linux, macos) },
     }
 }

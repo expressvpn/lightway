@@ -5,7 +5,6 @@
 //!   control messages (e.g. `IP_PKTINFO` on a server socket bound to
 //!   `0.0.0.0`). Fills source address and a caller-provided control buffer in
 //!   addition to the data.
-#![cfg(batch_receive)]
 
 use crate::io::outside::udp::cmsg;
 use crate::io::outside::udp::cmsg::LibcControlLen;

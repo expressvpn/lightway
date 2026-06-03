@@ -249,7 +249,6 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     pub udp_buffer_size: ByteSize,
 
     /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux)
-    #[cfg(batch_receive)]
     pub enable_batch_receive: bool,
 
     /// Disable IP pool randomization
@@ -387,7 +386,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 conn_manager.clone(),
                 config.bind_address,
                 config.udp_buffer_size,
-                #[cfg(batch_receive)]
                 config.enable_batch_receive,
                 may_be_sock,
             )

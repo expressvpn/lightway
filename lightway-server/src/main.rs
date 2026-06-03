@@ -190,7 +190,6 @@ async fn main() -> Result<()> {
         bind_address: config.bind_address,
         proxy_protocol: config.proxy_protocol,
         udp_buffer_size: config.udp_buffer_size,
-        #[cfg(batch_receive)]
         enable_batch_receive: config.enable_batch_receive,
         #[cfg(feature = "debug")]
         randomize_ippool: config.randomize_ippool,

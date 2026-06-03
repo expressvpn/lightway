@@ -116,7 +116,6 @@ pub(crate) struct UdpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
-    #[cfg(batch_receive)]
     batch_receive_enabled: bool,
 }
 
@@ -125,7 +124,7 @@ impl UdpServer {
         conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
         udp_buffer_size: ByteSize,
-        #[cfg(batch_receive)] enable_batch_receive: bool,
+        enable_batch_receive: bool,
         sock: Option<tokio::net::UdpSocket>,
     ) -> Result<UdpServer> {
         let sock = match sock {
@@ -183,7 +182,6 @@ impl UdpServer {
             conn_manager,
             sock,
             bind_mode,
-            #[cfg(batch_receive)]
             batch_receive_enabled,
         })
     }
@@ -316,7 +314,6 @@ impl UdpServer {
 
     /// Receive and process packets in batches using the platform batch-receive
     /// syscall (`recvmmsg` on Linux, `recvmsg_x` on macOS).
-    #[cfg(batch_receive)]
     async fn run_batch(&mut self) -> Result<()> {
         const SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
         let mut buf_slots: [BatchRecvSlot<SIZE>; MAX_IO_BATCH_SIZE] =
@@ -349,7 +346,6 @@ impl Server for UdpServer {
     async fn run(&mut self) -> Result<()> {
         info!("Accepting traffic on {}", self.bind_mode);
 
-        #[cfg(batch_receive)]
         if self.batch_receive_enabled {
             info!("Using batch receive");
             return self.run_batch().await;
