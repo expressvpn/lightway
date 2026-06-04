@@ -48,7 +48,7 @@ tun-rs.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
 
 [build-dependencies]
-cfg_aliases = "0.2.1"
+cfg_aliases.workspace = true
 
 [[example]]
 name = "udprelay"

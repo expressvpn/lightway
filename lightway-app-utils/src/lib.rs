@@ -2,6 +2,8 @@
 #![warn(missing_docs)]
 
 pub mod args;
+#[cfg(apple)]
+pub mod recvmsg_x;
 pub mod sockopt;
 
 #[cfg(feature = "tokio")]

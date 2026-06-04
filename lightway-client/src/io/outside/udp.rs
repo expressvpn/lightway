@@ -1,6 +1,4 @@
 use super::{OutsideIO, OutsideSocket};
-#[cfg(batch_receive)]
-use crate::io::outside::udp_batch_receiver;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use lightway_app_utils::sockopt;
@@ -10,6 +8,9 @@ use std::{
     sync::Arc,
 };
 use tokio::net::UdpSocket;
+
+#[cfg(batch_receive)]
+mod batch_receive;
 
 pub struct Udp {
     sock: Arc<tokio::net::UdpSocket>,
@@ -53,7 +54,7 @@ impl Udp {
     #[cfg(batch_receive)]
     pub fn enable_batch_receive(&mut self) {
         #[cfg(apple)]
-        if !crate::io::outside::udp_batch_receiver::is_batch_receive_available() {
+        if !lightway_app_utils::recvmsg_x::is_batch_receive_available() {
             tracing::warn!(
                 "batch receive function is not available on this system, batch receive disabled"
             );
@@ -119,7 +120,7 @@ impl OutsideIO for Udp {
 
         loop {
             match self.sock.try_io(tokio::io::Interest::READABLE, || {
-                udp_batch_receiver::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
+                batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
             }) {
                 Ok(n) => return IOCallbackResult::Ok(n),
                 // try_io may return WouldBlock even if the socket isn't actually

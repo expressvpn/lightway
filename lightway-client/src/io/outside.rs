@@ -1,7 +1,5 @@
 pub mod tcp;
 pub mod udp;
-#[cfg(batch_receive)]
-mod udp_batch_receiver;
 
 pub use tcp::Tcp;
 pub use udp::Udp;

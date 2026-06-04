@@ -64,7 +64,7 @@ test-case.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 mockall = "0.14.0"
 regex.workspace = true
-serial_test = "3.2.0"
+serial_test.workspace = true
 tempfile = "3.24.0"
 tun-rs.workspace = true
 
@@ -72,7 +72,7 @@ tun-rs.workspace = true
 tracing-android = "0.2.0"
 
 [build-dependencies]
-cfg_aliases = "0.2.1"
+cfg_aliases.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 route_manager = { version = "0.2.6", features = ["async"] }

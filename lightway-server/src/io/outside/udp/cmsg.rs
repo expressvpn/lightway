@@ -1,6 +1,8 @@
 //! Encapsulates the control message apis used with `recvmsg(2)`.
 #![allow(unsafe_code)]
 
+use bytes::BytesMut;
+
 #[cfg(target_vendor = "apple")]
 pub(crate) type LibcControlLen = libc::socklen_t;
 
@@ -10,22 +12,38 @@ pub(crate) type LibcControlLen = libc::socklen_t;
 #[cfg(all(not(target_vendor = "apple"), not(target_env = "musl")))]
 pub(crate) type LibcControlLen = libc::size_t;
 
-pub(crate) struct Buffer<const N: usize>([std::mem::MaybeUninit<u8>; N]);
+pub(crate) struct Buffer<const N: usize>(BytesMut);
 
 impl<const N: usize> Buffer<N> {
     pub(crate) fn new() -> Self {
-        Self([std::mem::MaybeUninit::<u8>::uninit(); N])
+        Self(BytesMut::with_capacity(N))
     }
 
     pub(crate) fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
-        &mut self.0
+        self.0.spare_capacity_mut()
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.0.clear();
+        self.0.reserve(N);
     }
 
     /// # Safety
     ///
     /// `control_len` must have been set to the number of bytes of the
     /// buffer which have been initialized.
-    pub(crate) unsafe fn iter(&self, control_len: LibcControlLen) -> Iter<'_, N> {
+    pub(crate) unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_, N> {
+        // SAFETY: The outer function here has enforced this requirement already
+        unsafe {
+            // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
+            // apple/musl, so the cast is a no-op on some targets only.
+            #[cfg_attr(linux, allow(clippy::unnecessary_cast))]
+            self.0.set_len(control_len as usize);
+        }
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.

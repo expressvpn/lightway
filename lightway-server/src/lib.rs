@@ -6,11 +6,11 @@ mod ip_manager;
 pub mod metrics;
 mod statistics;
 
-use bytesize::ByteSize;
-use connection::Connection;
 // re-export so server app does not need to depend on lightway-core
 pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
 pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
+use bytesize::ByteSize;
+use connection::Connection;
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
@@ -249,6 +249,9 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// UDP Buffer size for the server
     pub udp_buffer_size: ByteSize,
 
+    /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux)
+    pub enable_batch_receive: bool,
+
     /// Disable IP pool randomization
     /// Should be used for debugging only
     #[cfg(feature = "debug")]
@@ -384,6 +387,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 conn_manager.clone(),
                 config.bind_address,
                 config.udp_buffer_size,
+                config.enable_batch_receive,
                 may_be_sock,
             )
             .await?,
