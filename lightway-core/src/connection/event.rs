@@ -1,13 +1,19 @@
 use crate::connection::ExpresslaneState;
 use crate::{SessionId, State};
+use std::time::Duration;
 
 /// A lightway event
 #[derive(Debug)]
 pub enum Event {
     /// The connection state has changed
     StateChanged(State),
-    /// A reply was received after a [`crate::Connection::keepalive()`]
-    KeepaliveReply,
+    /// A reply was received after a [`crate::Connection::keepalive()`].
+    KeepaliveReply {
+        /// Measured round-trip time for the matched keepalive packet.
+        /// The connection retains at most one outstanding send timestamp,
+        /// which avoids stale-timestamp drift if pings are dropped.
+        rtt: Option<Duration>,
+    },
     /// A new session id has been generated and will be used in
     /// outgoing packets. The old session id is still active until
     /// the peer acknowledges the new one.

@@ -416,6 +416,11 @@ pub struct Connection<AppState: Send = ()> {
     /// PMTU discovery state ([`ConnectionType::Datagram`] only)
     pmtud: Option<dplpmtud::Dplpmtud<AppState>>,
 
+    /// Timestamp of the most recent keepalive send awaiting a reply. If a packet is dropped, the
+    /// next keepalive will overwrite this field so we don't measure against a stale entry.
+    /// Consumed on reply to attach RTT to [`Event::KeepaliveReply`].
+    last_keepalive_sent: Option<Instant>,
+
     /// Counter to use for `wire::DataFrag`
     fragment_counter: std::num::Wrapping<u16>,
 
@@ -515,6 +520,7 @@ impl<AppState: Send> Connection<AppState> {
                     )
                 }),
             },
+            last_keepalive_sent: None,
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,
             inside_pkt_encoder,
@@ -1092,7 +1098,11 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::Ping(ping);
 
-        self.send_frame_or_drop(msg)
+        let result = self.send_frame_or_drop(msg);
+        if result.is_ok() {
+            self.last_keepalive_sent = Some(Instant::now());
+        }
+        result
     }
 
     /// Disconnect this connection
@@ -1489,7 +1499,8 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         if pong.id == wire::Ping::KEEPALIVE_ID {
-            self.event(Event::KeepaliveReply);
+            let rtt = self.last_keepalive_sent.take().map(|sent| sent.elapsed());
+            self.event(Event::KeepaliveReply { rtt });
             self.check_expresslane_health(&pong.payload)?;
         }
 

@@ -793,7 +793,7 @@ async fn handle_events<A: 'static + Send + EventCallback>(
                     };
                 }
             }
-            Event::KeepaliveReply => {
+            Event::KeepaliveReply { .. } => {
                 notify_keepalive_reply.notify_waiters();
                 keepalive.reply_received().await
             }

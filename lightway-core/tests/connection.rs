@@ -498,7 +498,7 @@ async fn client<S: TestSock>(
                     );
                 }
                 Event::StateChanged(state) => eprintln!("Connection change to {state:?}"),
-                Event::KeepaliveReply => eprintln!("Got keepalive reply"),
+                Event::KeepaliveReply { .. } => eprintln!("Got keepalive reply"),
                 Event::SessionIdRotationStarted { .. } => {
                     eprintln!("Got SessionIdRotationStarted")
                 }

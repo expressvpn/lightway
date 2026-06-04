@@ -413,7 +413,7 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
                     let _ = disconnected_tx.send(());
                 }
             }
-            Event::KeepaliveReply => keepalive.reply_received().await,
+            Event::KeepaliveReply { .. } => keepalive.reply_received().await,
             Event::FirstPacketReceived => {
                 info!("First outside packet received");
             }
