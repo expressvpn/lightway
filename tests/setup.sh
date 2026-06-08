@@ -23,6 +23,9 @@ setup_ns() {
     ip netns exec "${ns}" ip link set lo up
     mkdir /etc/netns/"${ns}" -p
 
+    ip netns exec "${ns}" sysctl -q net.ipv4.conf.all.arp_ignore=0
+    ip netns exec "${ns}" sysctl -q net.ipv4.conf.all.arp_announce=0
+
     # Setup TUN interface
     if [[ -n $tunname ]]; then
         ip netns exec "${ns}" ip tuntap add mode tun dev "${tunname}"
