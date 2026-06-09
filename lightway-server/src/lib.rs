@@ -601,7 +601,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .when(config.expresslane_metrics.is_some(), |b| {
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
     })
-    .try_when(config.enable_pqc, |b| b.with_pq_crypto())?
+    .try_when(config.enable_pqc, |b| b.enable_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
     .build()?;
