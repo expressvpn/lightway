@@ -86,15 +86,7 @@ async fn main() -> Result<()> {
     config.apply(serde_env::from_env_with_prefix("LW_SERVER")?);
     config.apply(options);
 
-    validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)
-        .with_context(|| format!("Invalid server key file {}", config.server_key.display()))?;
-    validate_configuration_file_path(&config.server_cert, Validate::AllowWorldRead)
-        .with_context(|| format!("Invalid server cert file {}", config.server_cert.display()))?;
-
-    if let Some(user_db) = &config.user_db {
-        validate_configuration_file_path(user_db, Validate::OwnerOnly)
-            .with_context(|| format!("Invalid user db file {}", user_db.display()))?;
-    }
+    config.validate()?;
 
     #[cfg(feature = "debug")]
     if config.tls_debug {
