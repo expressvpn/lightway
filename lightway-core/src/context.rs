@@ -248,12 +248,17 @@ impl<AppState> ClientContextBuilder<AppState> {
     }
 
     /// Enable post-quantum cryptography by configuring PQC curve groups.
+    ///
+    /// On BoringSSL this adds the PQ groups to the context's supported_groups
+    /// so a per-connection PQ key share can be offered. On wolfSSL it is a
+    /// no-op: PQ groups are configured per session instead.
     #[cfg(feature = "postquantum")]
-    pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
-        Ok(Self {
-            tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,
-            ..self
-        })
+    pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
+        #[cfg(boringssl)]
+        let tls_ctx = self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?;
+        #[cfg(wolfssl)]
+        let tls_ctx = self.tls_ctx;
+        Ok(Self { tls_ctx, ..self })
     }
 
     /// Register a TLS key logger on the context.
@@ -553,7 +558,7 @@ impl<AppState> ServerContextBuilder<AppState> {
 
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
-    pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
+    pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
         Ok(Self {
             tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,
             ..self

@@ -268,7 +268,7 @@ async fn server<S: TestSock>(
     .unwrap();
 
     #[cfg(feature = "postquantum")]
-    let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.with_pq_crypto().unwrap());
+    let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.enable_pq_crypto().unwrap());
 
     let server_ctx = server_ctx
         .when(enable_expresslane, |s| {
@@ -461,7 +461,7 @@ async fn client<S: TestSock>(
     });
 
     #[cfg(feature = "postquantum")]
-    let client = client.with_pq_crypto().unwrap();
+    let client = client.enable_pq_crypto().unwrap();
 
     let client = client
         .build()

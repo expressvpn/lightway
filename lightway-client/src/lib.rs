@@ -1064,14 +1064,12 @@ pub async fn connect<
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
     });
 
-    // BoringSSL requires PQC groups to be registered on the SSL_CTX (via
-    // SSL_CTX_set1_group_ids) before any session can offer them as a key
-    // share. Without this, the per-connection with_pq_crypto below would
-    // announce a group that isn't in `supported_groups` and the handshake
-    // would fail. wolfSSL configures PQ groups per-session only, so this
-    // ctx-level call is skipped on that backend.
-    #[cfg(all(feature = "boringssl", feature = "postquantum"))]
-    let ctx_builder = ctx_builder.with_pq_crypto()?;
+    // Ensures any per-connection PQ key share is also offered in the context's
+    // supported_groups. The backend difference lives in enable_pq_crypto: it
+    // registers the groups on the SSL_CTX for BoringSSL and is a no-op on
+    // wolfSSL, which configures PQ groups per session.
+    #[cfg(feature = "postquantum")]
+    let ctx_builder = ctx_builder.enable_pq_crypto()?;
 
     // Register the TLS key logger once on the context; core applies it at the
     // correct layer for the active TLS backend (SSL_CTX vs per session).
