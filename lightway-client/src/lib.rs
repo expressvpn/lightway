@@ -64,7 +64,7 @@ use std::{
 };
 use tokio::{
     net::{TcpStream, UdpSocket},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 use tokio_stream::{StreamExt, StreamMap};
@@ -248,7 +248,7 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// network change being defined as a change in
     /// wifi networks or a change of network interfaces
     #[educe(Debug(ignore))]
-    pub network_change_signal: Option<mpsc::Receiver<()>>,
+    pub network_change_signal: Option<watch::Receiver<()>>,
 
     /// Signal for triggering a runtime config reload.
     /// Each received value is applied to the running connection.
@@ -1325,10 +1325,10 @@ pub async fn client<
         let _ = conn.stop_signal.take().unwrap().send(());
     }
 
-    if let Some(mut network_change_signal) = config.network_change_signal.take() {
+    if let Some(mut network_change_signal) = config.network_change_signal.clone() {
         let connection_network_change_signal = connection.network_change_signal.clone();
         tokio::spawn(async move {
-            while network_change_signal.recv().await.is_some() {
+            while network_change_signal.changed().await.is_ok() {
                 if let Err(e) = connection_network_change_signal.send(()).await {
                     tracing::error!("Failed to send network_change_signal: {e}");
                 }
