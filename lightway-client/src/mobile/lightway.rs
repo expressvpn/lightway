@@ -805,7 +805,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
                 }
                 continue;
             }
-            Event::FirstPacketReceived | Event::EncodingStateChanged { .. } => (), // will be handled by handle_global_events
+            Event::FirstPacketReceived
+            | Event::EncodingStateChanged { .. }
+            | Event::DataPathModeChanged(_) => (), // will be handled by handle_global_events
 
             // Server-only events
             Event::SessionIdRotationAcknowledged { .. }

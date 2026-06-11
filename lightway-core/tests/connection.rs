@@ -520,6 +520,9 @@ async fn client<S: TestSock>(
                 Event::EncodingStateChanged { enabled } => {
                     println!("Encoding state change to {enabled}")
                 }
+                Event::DataPathModeChanged(mode) => {
+                    println!("Data path mode change to {mode:?}")
+                }
             }
         }
     });

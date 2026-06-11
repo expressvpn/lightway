@@ -198,6 +198,9 @@ async fn handle_events(
             Event::ExpresslaneStateChanged(s) => {
                 info!("Setting expresslane state to {:?}", s);
             }
+            Event::DataPathModeChanged(mode) => {
+                info!("Setting data path mode to {:?}", mode);
+            }
             Event::FirstPacketReceived => {
                 unreachable!("client only event received");
             }
