@@ -10,7 +10,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use lightway_core::LightwayFeature;
 use pwhash::unix;
 
-use lightway_server::{ServerAuth, ServerAuthHandle, ServerAuthResult};
+use crate::{ServerAuth, ServerAuthHandle, ServerAuthResult};
 
 pub struct Auth {
     user_db: Option<HashMap<String, String>>,
