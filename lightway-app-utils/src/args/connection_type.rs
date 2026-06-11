@@ -19,7 +19,7 @@ pub enum ConnectionType {
 }
 
 impl ConnectionType {
-    /// A helper function easier to use especially in mobile
+    /// A helper to check tcp
     pub fn is_tcp(&self) -> bool {
         *self == ConnectionType::Tcp
     }
