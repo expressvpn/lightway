@@ -244,6 +244,10 @@ impl Config {
                 .with_context(|| format!("Invalid user db file {}", user_db.display()))?;
         }
 
+        if self.enable_expresslane && !skips.contains(&"enable_expresslane") {
+            anyhow::ensure!(self.mode.is_udp(), "Expresslane only work in udp mode")
+        }
+
         Ok(())
     }
 
@@ -266,6 +270,18 @@ mod tests {
             config
                 .validate_without(&["server_key", "server_cert", "user_db"])
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_enable_expresslane() {
+        let mut config = Config::default();
+        config.mode = ConnectionType::Tcp;
+        config.enable_expresslane = true;
+        assert!(
+            config
+                .validate_without(&["server_key", "server_cert", "user_db"])
+                .is_err()
         );
     }
 }
