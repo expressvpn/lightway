@@ -744,6 +744,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         route_mode: RouteMode,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        network_change_rx: Option<watch::Receiver<()>>,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -758,7 +759,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         );
         let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
-        route_manager.start().await?;
+        route_manager.start(network_change_rx).await?;
 
         self.route_manager = Some(route_manager);
         info!("Routes configured");
@@ -1363,13 +1364,16 @@ pub async fn client<
     connection.set_connection_inside_io();
 
     #[cfg(desktop)]
-    connection
-        .initialize_routes(
-            config.route_mode,
-            config.tun_peer_ip.into(),
-            config.tun_dns_ip.into(),
-        )
-        .await?;
+    {
+        connection
+            .initialize_routes(
+                config.route_mode,
+                config.tun_peer_ip.into(),
+                config.tun_dns_ip.into(),
+                config.network_change_signal.clone(),
+            )
+            .await?;
+    }
 
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
