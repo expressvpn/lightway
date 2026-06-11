@@ -21,6 +21,8 @@ use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
+#[cfg(desktop)]
+use lightway_app_utils::NetworkChangeMonitor;
 #[cfg(feature = "postquantum")]
 use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::{
@@ -1364,13 +1366,24 @@ pub async fn client<
     connection.set_connection_inside_io();
 
     #[cfg(desktop)]
+    let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
+    #[cfg(desktop)]
     {
+        let rx = if let Some(ref rx) = config.network_change_signal {
+            rx.clone()
+        } else {
+            let monitor = NetworkChangeMonitor::spawn()?;
+            let rx = monitor.subscribe();
+            network_change_monitor = Some(monitor);
+            rx
+        };
+
         connection
             .initialize_routes(
                 config.route_mode,
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
-                config.network_change_signal.clone(),
+                Some(rx),
             )
             .await?;
     }
@@ -1384,6 +1397,10 @@ pub async fn client<
     if let Some(mut route_manager) = connection.route_manager {
         let _ = route_manager.stop().await;
     }
+
+    // Dropping the monitor aborts its background task.
+    #[cfg(desktop)]
+    drop(network_change_monitor);
 
     result
 }

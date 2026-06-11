@@ -1,10 +1,7 @@
 #![allow(unsafe_code)]
 use anyhow::Result;
-use futures::Stream;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -15,17 +12,14 @@ use windows_sys::Win32::{
     System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject},
 };
 
-/// Represents different types of address changes that can be monitored
+/// Represents an address change detected by the monitor.
+///
+/// The Windows `NotifyAddrChange` API does not report the specific kind of
+/// change, so a single generic event is emitted for any address change.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddrChangeEvent {
-    /// An address was added to an interface
-    AddressAdded,
-    /// An address was removed from an interface
-    AddressRemoved,
     /// An address configuration changed
     AddressChanged,
-    /// Network interface state changed (up/down)
-    InterfaceStateChanged,
 }
 
 /// Async stream for monitoring Windows address changes
@@ -244,34 +238,14 @@ impl Drop for AsyncAddrListener {
     }
 }
 
-impl Stream for AsyncAddrListener {
-    type Item = AddrChangeEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.receiver).poll_recv(cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn test_addr_listener_creation() {
         // Test that we can create the listener without panic
         let result = AsyncAddrListener::new();
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_addr_listener_as_stream() {
-        let listener = AsyncAddrListener::new().unwrap();
-        let stream = listener.take(1); // Take only 1 event for test
-
-        // This test would hang waiting for actual address changes, so we just verify
-        // that we can create the stream without error
-        // To properly test, you'd need to trigger an address change during the test
-        drop(stream);
     }
 }

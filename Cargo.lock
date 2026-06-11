@@ -1579,6 +1579,7 @@ dependencies = [
  "metrics",
  "pnet_packet",
  "regex",
+ "route_manager",
  "schemars 1.2.1",
  "serde",
  "serde_with",
