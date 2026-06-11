@@ -66,6 +66,7 @@ mockall = "0.14.0"
 regex.workspace = true
 serial_test.workspace = true
 tempfile = "3.24.0"
+tracing-test = "0.2.6"
 tun-rs.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]

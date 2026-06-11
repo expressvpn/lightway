@@ -79,6 +79,11 @@ mod apple {
                     "recvmsg_x returned more packets than requested",
                 ));
             }
+            // Note: current XNU does not set MSG_TRUNC in the per-message
+            // msg_flags of recvmsg_x (only MSG_CTRUNC is reported there), so
+            // this count stays zero on Apple platforms today. The check is
+            // kept in case the kernel gains support.
+            let mut truncated = 0usize;
             for i in 0..count {
                 let hdr = &hdrs[i];
                 // For recvmsg_x(), the size of the data received is given by the field msg_datalen.
@@ -91,7 +96,15 @@ mod apple {
                 unsafe {
                     recv_buf.set_len(new_len);
                 }
+                if hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                    truncated += 1;
                 }
+            }
+            if truncated > 0 {
+                tracing::warn!(
+                    "{truncated} datagram(s) truncated to receive buffer capacity; \
+                     the configured outside_mtu may be too small"
+                );
             }
 
             Ok(count)
@@ -155,6 +168,7 @@ mod linux {
                     "recvmmsg returned more packets than requested",
                 ));
             }
+            let mut truncated = 0usize;
             for i in 0..count {
                 let hdr = &hdrs[i];
                 // recvmmsg sets msg_len to the number of bytes received per message.
@@ -167,7 +181,15 @@ mod linux {
                 unsafe {
                     recv_buf.set_len(new_len);
                 }
+                if hdr.msg_hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                    truncated += 1;
                 }
+            }
+            if truncated > 0 {
+                tracing::warn!(
+                    "{truncated} datagram(s) truncated to receive buffer capacity; \
+                     the configured outside_mtu may be too small"
+                );
             }
 
             Ok(count)
@@ -240,6 +262,65 @@ mod tests {
         assert_eq!(&bufs[0][..], &payload[..capacity]);
     }
 
+    /// Linux/Android only: current XNU never copies MSG_TRUNC into
+    /// recvmsg_x's per-message msg_flags, so the warning cannot fire on
+    /// Apple platforms.
+    #[cfg(any(linux, android))]
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn recv_multiple_warns_when_datagrams_are_truncated() {
+        let (sender, receiver) = make_socket_pair().await;
+
+        const SMALL_CAPACITY: usize = 16;
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(SMALL_CAPACITY));
+        let capacity = bufs[0].capacity();
+
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+
+        // A datagram that fits must not produce a truncation warning.
+        sender.send(&vec![0u8; capacity / 2]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        assert_eq!(count, 1);
+        assert!(
+            !logs_contain("truncated"),
+            "no warning expected for a datagram that fits",
+        );
+
+        for buf in &mut bufs {
+            buf.clear();
+        }
+
+        // A datagram larger than the buffer capacity must produce a single
+        // truncation warning for the batch. Use a fresh socket pair: the raw
+        // recv above bypassed tokio, leaving the first receiver's readiness
+        // cached, so another readable().await on it would not actually wait
+        // for this datagram to arrive.
+        let (sender, receiver) = make_socket_pair().await;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        sender.send(&vec![0xa5u8; capacity * 4]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        assert_eq!(count, 1);
+        logs_assert(|lines: &[&str]| {
+            match lines
+                .iter()
+                .inspect(|f| eprintln!("{}", f))
+                .filter(|line| line.contains("WARN") && line.contains("truncated"))
+                .count()
+            {
+                1 => Ok(()),
+                n => Err(format!("expected exactly one truncation warning, got {n}")),
+            }
+        });
+    }
 
     #[tokio::test]
     async fn recv_multiple_multiple_packets() {
