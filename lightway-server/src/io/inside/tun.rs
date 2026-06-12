@@ -8,6 +8,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
+#[cfg(target_os = "linux")]
+use lightway_core::VirtioNetHdr;
 use lightway_core::{
     IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, ipv4_update_source,
 };
@@ -50,6 +52,20 @@ impl InsideIORecv for Tun {
                 IOCallbackResult::Ok(n)
             }
             e => e,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn recv_gso(&self, buf: &mut BytesMut) -> IOCallbackResult<(usize, VirtioNetHdr)> {
+        match self.0.recv_gso(buf).await {
+            IOCallbackResult::Ok((n, hdr)) => {
+                // Note: payload bytes (post-virtio-strip), not raw kernel
+                // bytes — see metrics::tun_to_client doc.
+                metrics::tun_to_client(n);
+                IOCallbackResult::Ok((n, hdr))
+            }
+            IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
         }
     }
 

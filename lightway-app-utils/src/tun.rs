@@ -49,6 +49,11 @@ pub struct TunConfig {
     #[cfg(unix)]
     #[educe(Default = true)]
     pub close_fd_on_drop: bool,
+    /// Enable TUN offload (`IFF_VNET_HDR`) so reads/writes carry a
+    /// `virtio_net_hdr` and the kernel performs GRO/GSO across the
+    /// device. Required for the GSO inside-IO path.
+    #[cfg(target_os = "linux")]
+    pub offload: bool,
     #[cfg(windows)]
     /// Optional wintun file path for Windows TUN interfaces
     pub wintun_file: Option<String>,
@@ -224,6 +229,10 @@ impl TunConfig {
             {
                 builder = builder.associate_route(false);
             }
+            #[cfg(target_os = "linux")]
+            if self.offload {
+                builder = builder.offload(true);
+            }
             let device = builder.build_async()?;
 
             if let Some(mtu) = self.mtu {
@@ -307,6 +316,69 @@ impl Tun {
         }
     }
 
+    /// Recv a GSO frame from `Tun` into `buf`, stripping and decoding the
+    /// leading `virtio_net_hdr`.
+    ///
+    /// On success `buf` holds the IP payload (header already advanced past)
+    /// and the returned tuple is `(buf.len(), hdr)`. Short reads and headers
+    /// that fail to decode are reported as [`IOCallbackResult::WouldBlock`] so
+    /// the caller's recv loop retries instead of treating them as hard errors.
+    #[cfg(target_os = "linux")]
+    pub async fn recv_gso(
+        &self,
+        buf: &mut BytesMut,
+    ) -> IOCallbackResult<(usize, lightway_core::VirtioNetHdr)> {
+        use bytes::Buf;
+        use lightway_core::gso::VIRTIO_NET_HDR_LEN;
+
+        // Read directly into the spare capacity. BytesMut's
+        // spare_capacity_mut returns &mut [MaybeUninit<u8>] so there's
+        // no zero-init pass on the hot path.
+        let raw = match self {
+            Tun::Direct(t) => t.recv_gso(buf.spare_capacity_mut()).await,
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => {
+                IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        };
+        let n = match raw {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+        };
+
+        if n <= VIRTIO_NET_HDR_LEN {
+            tracing::warn!(n, "tun recv_gso: read shorter than virtio header");
+            crate::metrics::tun_recv_gso_short_read();
+            // Discard the partial read (buf is untouched — no set_len)
+            // and return WouldBlock so the caller's recv loop retries
+            // immediately instead of treating this as a hard error.
+            return IOCallbackResult::WouldBlock;
+        }
+
+        // SAFETY: TunDirect::recv_gso wrote exactly `n` bytes into the spare
+        // slab; n <= buf.capacity() because the kernel wrote into a slice of
+        // that length.
+        #[allow(unsafe_code)]
+        unsafe {
+            buf.set_len(n);
+        }
+
+        // SAFETY for VirtioNetHdr::from_bytes: BytesMut is heap-backed
+        // and 8-byte aligned; `n > VIRTIO_NET_HDR_LEN` was just checked.
+        let hdr = match lightway_core::VirtioNetHdr::from_bytes(&buf[..VIRTIO_NET_HDR_LEN]) {
+            Ok(h) => *h,
+            Err(e) => {
+                tracing::warn!(?e, "tun recv_gso: virtio header decode failed");
+                buf.clear();
+                return IOCallbackResult::WouldBlock;
+            }
+        };
+        buf.advance(VIRTIO_NET_HDR_LEN);
+
+        IOCallbackResult::Ok((buf.len(), hdr))
+    }
+
     /// Send a packet to `Tun`
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         match self {
@@ -363,6 +435,10 @@ pub struct TunDirect {
     fd: RawFd,
     #[cfg(unix)]
     close_fd_on_drop: bool,
+    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 12-byte
+    /// `virtio_net_hdr`, reads include it.
+    #[cfg(target_os = "linux")]
+    vnet_hdr: bool,
 }
 
 impl TunDirect {
@@ -385,6 +461,8 @@ impl TunDirect {
             fd,
             #[cfg(unix)]
             close_fd_on_drop: config.close_fd_on_drop,
+            #[cfg(target_os = "linux")]
+            vnet_hdr: config.offload,
         })
     }
 
@@ -406,10 +484,51 @@ impl TunDirect {
         }
     }
 
+    /// Raw read from Tun, returning the full virtio frame (header + payload).
+    #[cfg(target_os = "linux")]
+    pub async fn recv_gso(&self, buf: &mut [std::mem::MaybeUninit<u8>]) -> IOCallbackResult<usize> {
+        let tun = self.tun.as_ref().unwrap();
+
+        // SAFETY: `tun_rs::AsyncDevice::recv` takes `&mut [u8]` and forwards
+        // to `libc::read(2)`. The kernel only writes — it never dereferences
+        // userspace memory for reading — so handing it our uninitialized slab
+        // is sound at the syscall boundary. The unsoundness lives in *Rust*:
+        // constructing a `&mut [u8]` over uninitialized bytes is UB per strict
+        // aliasing rules, even if no one reads them. This cast is the only
+        // place we paper over that gap. Delete it (and revert this signature)
+        // once `tun-rs` exposes a `MaybeUninit`-aware recv.
+        #[allow(unsafe_code)]
+        let raw =
+            unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len()) };
+
+        match tun.recv(raw).await {
+            Ok(0) => IOCallbackResult::WouldBlock,
+            Ok(n) => IOCallbackResult::Ok(n),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
-        match tun.try_send(&buf[..]) {
+        #[cfg(target_os = "linux")]
+        let res = if self.vnet_hdr {
+            // IFF_VNET_HDR requires a zeroed `virtio_net_hdr` prefix
+            // on every write (NEEDS_CSUM=0, GSO_NONE).
+            let hdr_len = tun_rs::VIRTIO_NET_HDR_LEN;
+            let mut prefixed = bytes::BytesMut::zeroed(hdr_len);
+            prefixed.extend_from_slice(&buf[..]);
+            tun.try_send(&prefixed[..])
+                .map(|n| n.saturating_sub(hdr_len))
+        } else {
+            tun.try_send(&buf[..])
+        };
+        #[cfg(not(target_os = "linux"))]
+        let res = tun.try_send(&buf[..]);
+        match res {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock

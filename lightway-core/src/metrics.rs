@@ -28,6 +28,29 @@ static METRIC_EXPRESSLANE_DECRYPT_NO_KEY: LazyLock<Counter> =
 static METRIC_EXPRESSLANE_DECRYPT_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("expresslane_decrypt_failed"));
 
+#[cfg(target_os = "linux")]
+const METRIC_GSO_DROPPED_INVALID_HDR_LEN: &str = "gso_dropped_invalid_hdr_len";
+#[cfg(target_os = "linux")]
+const GSO_HDR_REASON_LABEL: &str = "reason";
+#[cfg(target_os = "linux")]
+static METRIC_GSO_DROPPED_ZERO_GSO_SIZE: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_dropped_zero_gso_size"));
+#[cfg(target_os = "linux")]
+static METRIC_GSO_DROPPED_OVERSIZED_SEGMENT: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_dropped_oversized_segment"));
+#[cfg(target_os = "linux")]
+static METRIC_GSO_SEND_FAILED: LazyLock<Counter> = LazyLock::new(|| counter!("gso_send_failed"));
+#[cfg(target_os = "linux")]
+const METRIC_GSO_BUILD_SEGMENT_FAILED: &str = "gso_build_segment_failed";
+#[cfg(target_os = "linux")]
+const GSO_BUILD_REASON_LABEL: &str = "reason";
+#[cfg(any(target_os = "linux", test))]
+static METRIC_GSO_NONE_CHECKSUM_SKIPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_none_checksum_skipped"));
+#[cfg(target_os = "linux")]
+static METRIC_GSO_DROPPED_IOV_OVERFLOW: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_dropped_iov_overflow"));
+
 /// [`crate::Connection`] has allocated its [`crate::Connection::fragment_map`]
 pub(crate) fn connection_alloc_frag_map() {
     METRIC_CONNECTION_ALLOC_FRAG_MAP.increment(1);
@@ -89,4 +112,60 @@ pub(crate) fn expresslane_decrypt_no_key() {
 pub(crate) fn expresslane_decrypt_failed(err: &Aes256GcmError) {
     warn!("Prev key failed: {err:?}");
     METRIC_EXPRESSLANE_DECRYPT_FAILED.increment(1);
+}
+
+/// Server dropped a GSO superpacket because the protocol header
+/// length could not be parsed. `reason` is one of the
+/// [`crate::gso::GsoHdrError::metric_reason`] labels.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_dropped_invalid_hdr_len(reason: &'static str) {
+    counter!(METRIC_GSO_DROPPED_INVALID_HDR_LEN, GSO_HDR_REASON_LABEL => reason).increment(1);
+}
+
+/// Server dropped a GSO superpacket whose kernel-reported `gso_size`
+/// was zero.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_dropped_zero_gso_size() {
+    METRIC_GSO_DROPPED_ZERO_GSO_SIZE.increment(1);
+}
+
+/// Server dropped a GSO superpacket because a header-wrapped segment
+/// would exceed the tunnel MTU.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_dropped_oversized_segment() {
+    METRIC_GSO_DROPPED_OVERSIZED_SEGMENT.increment(1);
+}
+
+/// `sendmsg(UDP_SEGMENT)` of the GSO batch failed.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_send_failed() {
+    METRIC_GSO_SEND_FAILED.increment(1);
+}
+
+/// `build_segment` could not parse the per-segment header (kernel
+/// supplied a virtio_net_hdr with csum_start/hdr_len that disagree
+/// with the actual packet bytes, or the packet was truncated mid-
+/// header). `reason` is one of:
+/// `empty` | `ipv4_parse` | `ipv6_parse` | `tcp_parse` | `udp_parse`.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_build_segment_failed(reason: &'static str) {
+    counter!(METRIC_GSO_BUILD_SEGMENT_FAILED, GSO_BUILD_REASON_LABEL => reason).increment(1);
+}
+
+/// `gso_none_checksum` was called with `csum_start`/`csum_offset`
+/// pointing outside the packet buffer — no checksum is written and
+/// the packet is forwarded with whatever value the kernel left in
+/// place. Indicates a malformed virtio_net_hdr from the TUN.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn gso_none_checksum_skipped() {
+    METRIC_GSO_NONE_CHECKSUM_SKIPPED.increment(1);
+}
+
+/// Server dropped a GSO superpacket whose segment count exceeds the
+/// `IOV_MAX`-derived cap. Each segment contributes 2 iovecs to the
+/// outbound `sendmsg`, so the cap protects against `EMSGSIZE` /
+/// `EINVAL` from the kernel under malformed virtio_net_hdr input.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_dropped_iov_overflow() {
+    METRIC_GSO_DROPPED_IOV_OVERFLOW.increment(1);
 }

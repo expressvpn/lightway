@@ -339,6 +339,10 @@ pub fn tun_from_client(sz: usize) {
 }
 
 /// Bytes received from TUN device (destined for client).
+///
+/// Note: when GSO TUN offload is enabled, this counts the IP-payload
+/// bytes (post-virtio-header strip), not the raw kernel read length.
+/// The difference is one virtio header (12 bytes) per recv.
 pub fn tun_to_client(sz: usize) {
     METRIC_TUN_TO_CLIENT.increment(sz as u64);
 }
