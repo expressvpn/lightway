@@ -42,6 +42,11 @@ impl Udp {
         // successfuly in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
 
+        // Connect the socket so that `try_send` can be used in the hot send
+        // path. On macOS platform this brings surprising benefits
+        #[cfg(macos)]
+        sock.connect(peer_addr).await?;
+
         Ok(Self {
             sock: Arc::new(sock),
             peer_addr,
@@ -155,11 +160,24 @@ impl OutsideIO for Udp {
         let handle = self.sock.as_raw_socket();
         OutsideSocket::Udp(handle)
     }
+
+    /// Re-`connect` the socket to the peer address so the kernel re-binds the
+    /// outgoing source address / route after the host network has changed
+    /// (e.g. Wi-Fi → cellular). Without this the connected socket would keep
+    /// trying to send from the stale source address.
+    #[cfg(macos)]
+    async fn network_changed(&self) -> std::io::Result<()> {
+        self.sock.connect(self.peer_addr).await
+    }
 }
 
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
+        #[cfg(macos)]
+        let result = self.sock.try_send(buf);
+        #[cfg(not(macos))]
+        let result = self.sock.try_send_to(buf, self.peer_addr);
+        match result {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock

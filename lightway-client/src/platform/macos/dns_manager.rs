@@ -29,8 +29,7 @@ impl DnsManager {
         // SAFETY: We're passing None for the callback and null_mut for the context,
         // which is valid when we don't need asynchronous notifications
         let store = unsafe {
-            SCDynamicStore::new(None, &name, None, std::ptr::null_mut())
-                .expect("Failed to create SCDynamicStore")
+            SCDynamicStore::new(None, &name, None, None).expect("Failed to create SCDynamicStore")
         };
         Self {
             service_id: None,

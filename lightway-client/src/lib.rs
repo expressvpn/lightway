@@ -584,6 +584,7 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
     weak: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
+    #[cfg(macos)] outside_io: Weak<dyn io::outside::OutsideIO>,
 ) -> ClientResult {
     while (network_change_signal.recv().await).is_some() {
         let Some(conn) = weak.upgrade() else {
@@ -592,6 +593,15 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         let conn_type = conn.lock().unwrap().connection_type();
         match conn_type {
             ConnectionType::Datagram => {
+                #[cfg(macos)]
+                if let Some(outside_io) = outside_io.upgrade() {
+                    if let Err(e) = outside_io.network_changed().await {
+                        tracing::warn!("Outside IO network_changed failed: {e:?}");
+                    }
+                } else {
+                    tracing::warn!("Outside IO not available, cannot handle network change");
+                    return ClientResult::UserDisconnect;
+                }
                 info!("sending keepalives due to network change ..");
                 keepalive.network_changed().await;
             }
@@ -726,6 +736,10 @@ pub struct ClientConnection<T: Send + Sync> {
     route_manager: Option<RouteManager>,
     #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
+    /// Held to keep the macOS NWPathMonitor alive for the duration of the
+    /// connection. Cancelled on drop.
+    #[cfg(macos)]
+    _network_monitor: crate::platform::macos::network_monitor::NetworkChangeMonitor,
 }
 
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
@@ -982,7 +996,16 @@ pub async fn connect<
         keepalive,
         network_change_rx,
         Arc::downgrade(&conn),
+        #[cfg(macos)]
+        Arc::downgrade(&outside_io),
     ));
+
+    // On macOS we spawn an NWPathMonitor that feeds the same channel so the
+    // existing `handle_network_change` task picks up host-level interface /
+    // path changes and re-`connect`s the UDP socket.
+    #[cfg(macos)]
+    let _network_monitor =
+        platform::macos::network_monitor::NetworkChangeMonitor::new(network_change_tx.clone());
 
     let mut encoded_pkt_send_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(
         handle_encoded_pkt_send(Arc::downgrade(&conn), encoded_pkt_receiver),
@@ -1060,6 +1083,8 @@ pub async fn connect<
         route_manager: None,
         #[cfg(desktop)]
         dns_manager: None,
+        #[cfg(macos)]
+        _network_monitor,
     })
 }
 
