@@ -33,9 +33,11 @@ trait ServerBatchRecvSyscall {
 pub struct BatchRecvSlot<const CONTROL_SIZE: usize> {
     /// Data buffer for the packet payload.
     ///
-    /// Spare capacity must be at least [`lightway_core::MAX_OUTSIDE_MTU`]
-    /// before each batch call; the syscall sets the length to the number of
-    /// bytes actually received.
+    /// Spare capacity should be at least [`lightway_core::MAX_OUTSIDE_MTU`]
+    /// before each batch call. The syscall advertises at most the spare capacity
+    /// to the kernel, so an undersized buffer results in truncated datagrams
+    /// rather than an out-of-bounds write. The syscall sets the length to the
+    /// number of bytes actually received.
     pub buf: BytesMut,
     /// Control message buffer.
     ///
@@ -59,6 +61,10 @@ pub struct BatchRecvSlot<const CONTROL_SIZE: usize> {
     /// Out: `true` if the kernel set `MSG_TRUNC` in `msg_flags` for this
     /// packet, meaning the datagram was larger than the buffer we supplied and
     /// the tail was discarded. Callers should treat the payload as incomplete.
+    ///
+    /// Note: on Apple platforms this stays `false` — current XNU does not set
+    /// `MSG_TRUNC` in the per-message `msg_flags` of `recvmsg_x` (only
+    /// `MSG_CTRUNC` is reported there).
     pub truncated: bool,
 }
 
@@ -173,25 +179,30 @@ mod apple {
             // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
             let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; MAX_IO_BATCH_SIZE]>() };
             for (i, slot) in slots.iter_mut().take(msg_count).enumerate() {
+                let spare = slot.buf.spare_capacity_mut();
                 debug_assert!(
-                    slot.buf.capacity() - slot.buf.len() >= MAX_OUTSIDE_MTU,
+                    spare.len() >= MAX_OUTSIDE_MTU,
                     "slot {i}: buf spare capacity ({}) < MAX_OUTSIDE_MTU ({MAX_OUTSIDE_MTU})",
-                    slot.buf.capacity() - slot.buf.len(),
+                    spare.len(),
                 );
 
-                iovecs[i].iov_base =
-                    slot.buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
-                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
-                hdrs[i].msg_iov = &mut iovecs[i];
-                hdrs[i].msg_iovlen = 1;
+                let iovec = &mut iovecs[i];
+                let hdr = &mut hdrs[i];
+                // Bound the iovec by the spare capacity actually available so
+                // the kernel can never write past the allocation, even if a
+                // caller violates the spare-capacity contract above.
+                iovec.iov_base = spare.as_mut_ptr() as *mut libc::c_void;
+                iovec.iov_len = spare.len().min(MAX_OUTSIDE_MTU);
+                hdr.msg_iov = iovec;
+                hdr.msg_iovlen = 1;
 
-                hdrs[i].msg_name = &mut slot.peer_addr_storage as *mut socket2::SockAddrStorage
+                hdr.msg_name = &mut slot.peer_addr_storage as *mut socket2::SockAddrStorage
                     as *mut libc::c_void;
-                hdrs[i].msg_namelen = slot.peer_addr_len;
+                hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdrs[i].msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
-                    hdrs[i].msg_controllen = control.capacity() as LibcControlLen;
+                    hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }
 
@@ -211,16 +222,23 @@ mod apple {
                 ));
             }
             for (slot, hdr) in slots.iter_mut().take(count).zip(hdrs) {
+                // For recvmsg_x(), the size of the data received is given by the field msg_datalen.
                 let len = hdr.msg_datalen;
-                // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
-                // and we have early returned already if we have received no packets from the kernel.
+                let new_len = slot.buf.len() + len;
+                // SAFETY: the kernel wrote `len` bytes into the spare capacity
+                // advertised via the iovec, which was bounded by that spare
+                // capacity, so `new_len <= capacity()`.
                 unsafe {
-                    slot.buf.set_len(len);
+                    slot.buf.set_len(new_len);
                 }
                 slot.peer_addr_len = hdr.msg_namelen;
                 if slot.control.is_some() {
                     slot.control_length = Some(hdr.msg_controllen);
                 }
+                // Note: current XNU does not set MSG_TRUNC in the per-message
+                // msg_flags of recvmsg_x (only MSG_CTRUNC is reported there),
+                // so this stays false today. The check is kept in case the
+                // kernel gains support.
                 slot.truncated = hdr.msg_flags & libc::MSG_TRUNC != 0;
             }
 
@@ -251,21 +269,30 @@ mod linux {
             // SAFETY: zeroed hdrs are valid (null pointers + zero lengths).
             let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; MAX_IO_BATCH_SIZE]>() };
             for (i, slot) in slots.iter_mut().take(msg_count).enumerate() {
-                iovecs[i].iov_base =
-                    slot.buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
-                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
-                hdrs[i].msg_hdr.msg_iov = &mut iovecs[i];
-                hdrs[i].msg_hdr.msg_iovlen = 1;
+                let spare = slot.buf.spare_capacity_mut();
+                debug_assert!(
+                    spare.len() >= MAX_OUTSIDE_MTU,
+                    "slot {i}: buf spare capacity ({}) < MAX_OUTSIDE_MTU ({MAX_OUTSIDE_MTU})",
+                    spare.len(),
+                );
 
-                hdrs[i].msg_hdr.msg_name = &mut slot.peer_addr_storage
-                    as *mut socket2::SockAddrStorage
+                let iovec = &mut iovecs[i];
+                let hdr = &mut hdrs[i];
+                // Bound the iovec by the spare capacity actually available so
+                // the kernel can never write past the allocation, even if a
+                // caller violates the spare-capacity contract above.
+                iovec.iov_base = spare.as_mut_ptr() as *mut libc::c_void;
+                iovec.iov_len = spare.len().min(MAX_OUTSIDE_MTU);
+                hdr.msg_hdr.msg_iov = iovec;
+                hdr.msg_hdr.msg_iovlen = 1;
+
+                hdr.msg_hdr.msg_name = &mut slot.peer_addr_storage as *mut socket2::SockAddrStorage
                     as *mut libc::c_void;
-                hdrs[i].msg_hdr.msg_namelen = slot.peer_addr_len;
+                hdr.msg_hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdrs[i].msg_hdr.msg_control =
-                        control.as_mut().as_mut_ptr() as *mut libc::c_void;
-                    hdrs[i].msg_hdr.msg_controllen = control.capacity() as LibcControlLen;
+                    hdr.msg_hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }
 
@@ -293,11 +320,14 @@ mod linux {
                 ));
             }
             for (slot, hdr) in slots.iter_mut().take(count).zip(hdrs) {
+                // recvmmsg sets msg_len to the number of bytes received per message.
                 let len = hdr.msg_len as usize;
-
-                // SAFETY: kernel wrote `len` bytes of payload into the spare capacity.
+                let new_len = slot.buf.len() + len;
+                // SAFETY: the kernel wrote `len` bytes into the spare capacity
+                // advertised via the iovec, which was bounded by that spare
+                // capacity, so `new_len <= capacity()`.
                 unsafe {
-                    slot.buf.set_len(len);
+                    slot.buf.set_len(new_len);
                 }
                 slot.peer_addr_len = hdr.msg_hdr.msg_namelen;
                 if slot.control.is_some() {
@@ -446,6 +476,48 @@ mod tests {
                 .unwrap();
         assert!(count >= 1);
         assert_eq!(&slots[0].buf[..], b"hello");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn recv_multiple_with_metadata_truncates_oversized_datagram() {
+        let (sender, receiver) = make_socket_pair().await;
+
+        // A datagram larger than MAX_OUTSIDE_MTU must be truncated to the
+        // iovec we advertised and never written past the buffer's allocation.
+        // On Linux it is additionally reported via the truncated flag.
+        let payload = vec![0xa5u8; lightway_core::MAX_OUTSIDE_MTU + 500];
+        sender.send(&payload).await.unwrap();
+
+        let mut slots: [BatchRecvSlot<0>; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| BatchRecvSlot::new());
+
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        let count =
+            PlatformBatchRecv::recv_multiple_with_metadata(fd, &mut slots, MAX_IO_BATCH_SIZE)
+                .unwrap();
+        assert_eq!(count, 1);
+
+        let slot = &slots[0];
+        assert_eq!(slot.buf.len(), lightway_core::MAX_OUTSIDE_MTU);
+        assert_eq!(&slot.buf[..], &payload[..lightway_core::MAX_OUTSIDE_MTU]);
+        // recvmsg_x on Apple platforms does not report MSG_TRUNC in the
+        // per-message msg_flags, so the truncated flag can only be asserted
+        // where recvmmsg provides it.
+        #[cfg(linux)]
+        assert!(
+            slot.truncated,
+            "MSG_TRUNC must be reported for oversized datagrams",
+        );
     }
 
     #[tokio::test]

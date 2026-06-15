@@ -34,7 +34,7 @@ pub(crate) fn recv_multiple(
 mod apple {
     use bytes::BytesMut;
     use lightway_app_utils::recvmsg_x::{msghdr_x, recvmsg_x};
-    use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
+    use lightway_core::MAX_IO_BATCH_SIZE;
     use std::{io, mem};
 
     pub(crate) struct RecvmsgX;
@@ -53,11 +53,16 @@ mod apple {
             // SAFETY: zeroed msghdr_x is valid (null pointers + zero lengths).
             let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; MAX_IO_BATCH_SIZE]>() };
             for i in 0..msg_count {
-                iovecs[i].iov_base =
-                    recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
-                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
-                hdrs[i].msg_iov = &mut iovecs[i];
-                hdrs[i].msg_iovlen = 1;
+                // Advertise only the buffer's spare capacity to the kernel so
+                // it can never write past the allocation; oversized datagrams
+                // are truncated, matching the non-batch recv path.
+                let spare = recv_bufs[i].spare_capacity_mut();
+                let iovec = &mut iovecs[i];
+                let hdr = &mut hdrs[i];
+                iovec.iov_base = spare.as_mut_ptr() as *mut libc::c_void;
+                iovec.iov_len = spare.len();
+                hdr.msg_iov = iovec;
+                hdr.msg_iovlen = 1;
             }
 
             // SAFETY: hdrs and iovecs are valid for msg_count entries, fd is a valid and borrowed socket.
@@ -74,13 +79,32 @@ mod apple {
                     "recvmsg_x returned more packets than requested",
                 ));
             }
+            // Note: current XNU does not set MSG_TRUNC in the per-message
+            // msg_flags of recvmsg_x (only MSG_CTRUNC is reported there), so
+            // this count stays zero on Apple platforms today. The check is
+            // kept in case the kernel gains support.
+            let mut truncated = 0usize;
             for i in 0..count {
-                let len = hdrs[i].msg_datalen;
-                // SAFETY: For recvmsg_x(), the size of the data received is given by the field msg_datalen,
-                // and we have early returned already if we have received no packets from the kernel.
+                let hdr = &hdrs[i];
+                // For recvmsg_x(), the size of the data received is given by the field msg_datalen.
+                let len = hdr.msg_datalen;
+                let recv_buf = &mut recv_bufs[i];
+                let new_len = recv_buf.len() + len;
+                // SAFETY: the kernel wrote `len` bytes into the spare capacity
+                // advertised via the iovec, which was bounded by that spare
+                // capacity, so `new_len <= capacity()`.
                 unsafe {
-                    recv_bufs[i].set_len(len);
+                    recv_buf.set_len(new_len);
                 }
+                if hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                    truncated += 1;
+                }
+            }
+            if truncated > 0 {
+                tracing::warn!(
+                    "{truncated} datagram(s) truncated to receive buffer capacity; \
+                     the configured outside_mtu may be too small"
+                );
             }
 
             Ok(count)
@@ -91,7 +115,7 @@ mod apple {
 #[cfg(any(linux, android))]
 mod linux {
     use bytes::BytesMut;
-    use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
+    use lightway_core::MAX_IO_BATCH_SIZE;
     use std::{io, mem};
 
     pub(crate) struct Recvmmsg;
@@ -110,11 +134,16 @@ mod linux {
             // SAFETY: zeroed mmsghdr is valid (null pointers + zero lengths).
             let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; MAX_IO_BATCH_SIZE]>() };
             for i in 0..msg_count {
-                iovecs[i].iov_base =
-                    recv_bufs[i].spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
-                iovecs[i].iov_len = MAX_OUTSIDE_MTU;
-                hdrs[i].msg_hdr.msg_iov = &mut iovecs[i];
-                hdrs[i].msg_hdr.msg_iovlen = 1;
+                // Advertise only the buffer's spare capacity to the kernel so
+                // it can never write past the allocation; oversized datagrams
+                // are truncated, matching the non-batch recv path.
+                let spare = recv_bufs[i].spare_capacity_mut();
+                let iovec = &mut iovecs[i];
+                let hdr = &mut hdrs[i];
+                iovec.iov_base = spare.as_mut_ptr() as *mut libc::c_void;
+                iovec.iov_len = spare.len();
+                hdr.msg_hdr.msg_iov = iovec;
+                hdr.msg_hdr.msg_iovlen = 1;
             }
 
             // SAFETY: hdrs and iovecs are valid for msg_count entries, fd is a valid and borrowed socket.
@@ -139,13 +168,28 @@ mod linux {
                     "recvmmsg returned more packets than requested",
                 ));
             }
+            let mut truncated = 0usize;
             for i in 0..count {
-                let len = hdrs[i].msg_len as usize;
-                // SAFETY: recvmmsg sets msg_len to the number of bytes received per message,
-                // and we have early returned already if we have received no packets from the kernel.
+                let hdr = &hdrs[i];
+                // recvmmsg sets msg_len to the number of bytes received per message.
+                let len = hdr.msg_len as usize;
+                let recv_buf = &mut recv_bufs[i];
+                let new_len = recv_buf.len() + len;
+                // SAFETY: the kernel wrote `len` bytes into the spare capacity
+                // advertised via the iovec, which was bounded by that spare
+                // capacity, so `new_len <= capacity()`.
                 unsafe {
-                    recv_bufs[i].set_len(len);
+                    recv_buf.set_len(new_len);
                 }
+                if hdr.msg_hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                    truncated += 1;
+                }
+            }
+            if truncated > 0 {
+                tracing::warn!(
+                    "{truncated} datagram(s) truncated to receive buffer capacity; \
+                     the configured outside_mtu may be too small"
+                );
             }
 
             Ok(count)
@@ -189,6 +233,93 @@ mod tests {
         let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
         assert!(count >= 1);
         assert_eq!(&bufs[0][..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn recv_multiple_truncates_datagram_larger_than_buffer_capacity() {
+        let (sender, receiver) = make_socket_pair().await;
+
+        // A datagram larger than the buffer's capacity (e.g. a configured
+        // outside_mtu smaller than the received packet) must be truncated by
+        // the kernel rather than written past the allocation
+        const SMALL_CAPACITY: usize = 16;
+        let payload = [0xa5u8; SMALL_CAPACITY * 4];
+        sender.send(&payload).await.unwrap();
+
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(SMALL_CAPACITY));
+        let capacity = bufs[0].capacity();
+
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bufs[0].len(), capacity);
+        assert_eq!(&bufs[0][..], &payload[..capacity]);
+    }
+
+    /// Linux/Android only: current XNU never copies MSG_TRUNC into
+    /// recvmsg_x's per-message msg_flags, so the warning cannot fire on
+    /// Apple platforms.
+    #[cfg(any(linux, android))]
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn recv_multiple_warns_when_datagrams_are_truncated() {
+        let (sender, receiver) = make_socket_pair().await;
+
+        const SMALL_CAPACITY: usize = 16;
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(SMALL_CAPACITY));
+        let capacity = bufs[0].capacity();
+
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+
+        // A datagram that fits must not produce a truncation warning.
+        sender.send(&vec![0u8; capacity / 2]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        assert_eq!(count, 1);
+        assert!(
+            !logs_contain("truncated"),
+            "no warning expected for a datagram that fits",
+        );
+
+        for buf in &mut bufs {
+            buf.clear();
+        }
+
+        // A datagram larger than the buffer capacity must produce a single
+        // truncation warning for the batch. Use a fresh socket pair: the raw
+        // recv above bypassed tokio, leaving the first receiver's readiness
+        // cached, so another readable().await on it would not actually wait
+        // for this datagram to arrive.
+        let (sender, receiver) = make_socket_pair().await;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
+        sender.send(&vec![0xa5u8; capacity * 4]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), receiver.readable())
+            .await
+            .unwrap()
+            .unwrap();
+        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        assert_eq!(count, 1);
+        logs_assert(|lines: &[&str]| {
+            match lines
+                .iter()
+                .inspect(|f| eprintln!("{}", f))
+                .filter(|line| line.contains("WARN") && line.contains("truncated"))
+                .count()
+            {
+                1 => Ok(()),
+                n => Err(format!("expected exactly one truncation warning, got {n}")),
+            }
+        });
     }
 
     #[tokio::test]
