@@ -1,19 +1,16 @@
 use anyhow::Result;
-use route_manager::{
-    AsyncRouteListener, AsyncRouteManager, Route, RouteManager as SyncRouteManager,
-};
+use route_manager::{AsyncRouteManager, Route, RouteManager as SyncRouteManager};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{trace, warn};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
 
-#[cfg(windows)]
-use crate::platform::windows::addr_monitor::AsyncAddrListener;
 #[cfg(windows)]
 use crate::platform::windows::utils;
 
@@ -150,12 +147,15 @@ impl RouteManager {
         Ok(Self { inner, task: None })
     }
 
-    pub async fn start(&mut self) -> Result<(), RoutingTableError> {
+    pub async fn start(
+        &mut self,
+        network_change_rx: Option<watch::Receiver<()>>,
+    ) -> Result<(), RoutingTableError> {
         let Some(inner) = self.inner.take() else {
             return Err(RoutingTableError::InsufficientPermissions);
         };
 
-        self.task = inner.start().await?;
+        self.task = inner.start(network_change_rx).await?;
         Ok(())
     }
 
@@ -476,103 +476,36 @@ impl RouteManagerInner {
 
     /// Install routes required to use tunnel and start monitoring route changes
     /// to update the routes if needed (mostly during connection floating)
-    async fn start(mut self) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
+    async fn start(
+        mut self,
+        network_change_rx: Option<watch::Receiver<()>>,
+    ) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
         if self.routing_mode == RouteMode::NoExec {
             return Ok(None);
         }
 
-        // Install all th required routes
+        // Install all the required routes
         self.install_routes().await?;
 
-        // Spawn async task to monitor route changes using AsyncRouteListener
-        let monitor_task = tokio::spawn(async move {
-            // Create AsyncRouteListener
-            let mut route_listener = match AsyncRouteListener::new() {
-                Ok(listener) => listener,
-                Err(e) => {
-                    tracing::error!("Failed to create AsyncRouteListener: {}", e);
-                    return;
+        let task = tokio::spawn(async move {
+            let mut inner = self;
+            match network_change_rx {
+                Some(mut rx) => {
+                    tracing::info!("Reacting to network changes for route updates...");
+                    while rx.changed().await.is_ok() {
+                        if let Err(e) = inner.check_and_update_server_route().await {
+                            tracing::warn!("Updating server route failed: {:?}", e);
+                        }
+                    }
                 }
-            };
-
-            // On Windows, also create address change listener as a fallback
-            // since Windows doesn't always publish route changes on network down
-            #[cfg(windows)]
-            let mut addr_listener = match AsyncAddrListener::new() {
-                Ok(listener) => {
-                    tracing::info!("Started address change monitoring (Windows)...");
-                    Some(listener)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create AsyncAddrListener: {}", e);
-                    None
-                }
-            };
-
-            #[cfg(not(windows))]
-            let (_sender, addr_listener) = tokio::sync::mpsc::unbounded_channel::<()>();
-            #[cfg(not(windows))]
-            let mut addr_listener = Some(addr_listener);
-
-            tracing::info!("Started monitoring route/intf...");
-            // Listen for changes in a loop
-            loop {
-                tokio::select! {
-                   // Handle route changes
-                   route_result = route_listener.listen() => {
-                       match route_result {
-                           Ok(route_change) => {
-                               tracing::debug!("Route change detected: {:?}", route_change);
-                               match route_change {
-                                   route_manager::RouteChange::Add(route)
-                                   | route_manager::RouteChange::Delete(route)
-                                   | route_manager::RouteChange::Change(route) => {
-                                       // Only process route updates that match server IP family
-                                       // If server is IPv4, only monitor IPv4 routes; if IPv6, only IPv6
-                                       if !same_ip_family(&self.server_ip, &route.destination()) {
-                                           // Different IP families - skip
-                                           continue;
-                                       }
-
-                                       // Update only the /0 prefix route i.e default route
-                                       if route.prefix() != 0 {
-                                           continue;
-                                       }
-                                       if route.gateway().is_none_or(|a| a.is_unspecified()) {
-                                           continue;
-                                       }
-                                       if let Err(e) = self.check_and_update_server_route().await {
-                                           tracing::warn!("Updating server route failed: {:?}", e);
-                                       }
-                                   }
-                               }
-                           }
-                       Err(e) => {
-                           // Continue monitoring even on transient errors
-                           tracing::debug!("Error listening for route changes: {}", e);
-                           tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                       }
-                   }}
-
-                   // On address/intf changes, check and update server route
-                   // This helps catch network transitions that don't trigger route changes
-                   _ = async {
-                       if let Some(listener) = &mut addr_listener {
-                           listener.recv().await
-                       } else {
-                           std::future::pending().await
-                       }
-                   } => {
-                       tracing::debug!("Address change detected");
-                       if let Err(e) = self.check_and_update_server_route().await {
-                           tracing::warn!("Updating server route after address change failed: {:?}", e);
-                       }
-                   }
+                None => {
+                    // No monitor: keep routes installed until stop()/abort.
+                    std::future::pending::<()>().await;
                 }
             }
         });
 
-        Ok(Some(monitor_task))
+        Ok(Some(task))
     }
 
     /// Check if server route needs updating due to network changes
@@ -1046,7 +979,7 @@ mod tests {
             RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
 
         // Test that we can start the route manager
-        let start_result = route_manager.start().await;
+        let start_result = route_manager.start(None).await;
         if route_mode == RouteMode::NoExec {
             // NoExec mode should succeed but not actually do anything
             assert!(start_result.is_ok());
@@ -1096,10 +1029,10 @@ mod tests {
         .unwrap();
 
         // First start should succeed
-        assert!(route_manager.start().await.is_ok());
+        assert!(route_manager.start(None).await.is_ok());
 
         // Second start should fail since inner is already taken
-        let second_start_result = route_manager.start().await;
+        let second_start_result = route_manager.start(None).await;
         assert!(second_start_result.is_err());
         assert!(matches!(
             second_start_result.unwrap_err(),
@@ -1150,7 +1083,7 @@ mod tests {
         .unwrap();
 
         // NoExec mode should return None (no monitoring task)
-        let monitor_task = inner.start().await;
+        let monitor_task = inner.start(None).await;
         assert!(monitor_task.is_ok());
         assert!(monitor_task.unwrap().is_none());
     }
