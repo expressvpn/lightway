@@ -21,6 +21,8 @@ use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
+#[cfg(desktop)]
+use lightway_app_utils::NetworkChangeMonitor;
 #[cfg(feature = "postquantum")]
 use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::{
@@ -64,7 +66,7 @@ use std::{
 };
 use tokio::{
     net::{TcpStream, UdpSocket},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 use tokio_stream::{StreamExt, StreamMap};
@@ -248,7 +250,7 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// network change being defined as a change in
     /// wifi networks or a change of network interfaces
     #[educe(Debug(ignore))]
-    pub network_change_signal: Option<mpsc::Receiver<()>>,
+    pub network_change_signal: Option<watch::Receiver<()>>,
 
     /// Signal for triggering a runtime config reload.
     /// Each received value is applied to the running connection.
@@ -744,6 +746,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         route_mode: RouteMode,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        network_change_rx: Option<watch::Receiver<()>>,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -758,7 +761,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         );
         let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
-        route_manager.start().await?;
+        route_manager.start(network_change_rx).await?;
 
         self.route_manager = Some(route_manager);
         info!("Routes configured");
@@ -1325,10 +1328,10 @@ pub async fn client<
         let _ = conn.stop_signal.take().unwrap().send(());
     }
 
-    if let Some(mut network_change_signal) = config.network_change_signal.take() {
+    if let Some(mut network_change_signal) = config.network_change_signal.clone() {
         let connection_network_change_signal = connection.network_change_signal.clone();
         tokio::spawn(async move {
-            while network_change_signal.recv().await.is_some() {
+            while network_change_signal.changed().await.is_ok() {
                 if let Err(e) = connection_network_change_signal.send(()).await {
                     tracing::error!("Failed to send network_change_signal: {e}");
                 }
@@ -1363,13 +1366,27 @@ pub async fn client<
     connection.set_connection_inside_io();
 
     #[cfg(desktop)]
-    connection
-        .initialize_routes(
-            config.route_mode,
-            config.tun_peer_ip.into(),
-            config.tun_dns_ip.into(),
-        )
-        .await?;
+    let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
+    #[cfg(desktop)]
+    {
+        let rx = if let Some(ref rx) = config.network_change_signal {
+            rx.clone()
+        } else {
+            let monitor = NetworkChangeMonitor::spawn()?;
+            let rx = monitor.subscribe();
+            network_change_monitor = Some(monitor);
+            rx
+        };
+
+        connection
+            .initialize_routes(
+                config.route_mode,
+                config.tun_peer_ip.into(),
+                config.tun_dns_ip.into(),
+                Some(rx),
+            )
+            .await?;
+    }
 
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
@@ -1380,6 +1397,10 @@ pub async fn client<
     if let Some(mut route_manager) = connection.route_manager {
         let _ = route_manager.stop().await;
     }
+
+    // Dropping the monitor aborts its background task.
+    #[cfg(desktop)]
+    drop(network_change_monitor);
 
     result
 }

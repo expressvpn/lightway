@@ -14,6 +14,8 @@ mod dplpmtud_timer;
 mod event_stream;
 #[cfg(feature = "io-uring")]
 mod iouring;
+#[cfg(all(feature = "tokio", desktop))]
+mod network_change_monitor;
 mod tun;
 
 #[cfg(feature = "tokio")]
@@ -27,6 +29,9 @@ pub use event_stream::{EventStream, EventStreamCallback};
 
 #[cfg(feature = "io-uring")]
 pub use iouring::IOUring;
+
+#[cfg(all(feature = "tokio", desktop))]
+pub use network_change_monitor::NetworkChangeMonitor;
 
 #[cfg(feature = "io-uring")]
 pub use tun::TunIoUring;
