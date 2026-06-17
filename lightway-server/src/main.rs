@@ -1,5 +1,4 @@
 mod auth;
-mod config;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
@@ -10,10 +9,10 @@ use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 
-use config::{Config, ConfigPatch};
-use lightway_app_utils::{TunConfig, Validate, validate_configuration_file_path};
+use lightway_app_utils::{Validate, validate_configuration_file_path};
 #[cfg(feature = "debug")]
 use lightway_core::set_logging_callback;
+use lightway_server::config::{Config, ConfigPatch};
 use lightway_server::*;
 
 async fn metrics_debug() {
@@ -140,62 +139,12 @@ async fn main() -> Result<()> {
         }
     });
 
-    let auth = auth::Auth::new(
-        config.user_db.as_ref().map(AsRef::as_ref),
-        config.token_rsa_pub_key_pem.as_ref().map(AsRef::as_ref),
-    )?;
-
-    let mut tun_config = TunConfig::default();
-    if let Some(tun_name) = config.tun_name {
-        tun_config.tun_name(tun_name);
-    }
-    tun_config.up();
-    let mode = match config.mode {
-        lightway_app_utils::args::ConnectionType::Udp => ServerConnectionMode::Datagram(None),
-        lightway_app_utils::args::ConnectionType::Tcp => ServerConnectionMode::Stream(None),
-    };
-
-    let config = ServerConfig {
-        mode,
-        auth,
-        server_cert: config.server_cert,
-        server_key: config.server_key,
-        tun_config,
-        ip_pool: config.ip_pool,
-        ip_map: config.ip_map.unwrap_or_default().try_into()?,
-        inside_io: None,
-        tun_ip: config.tun_ip,
-        lightway_server_ip: config.lightway_server_ip,
-        lightway_client_ip: config.lightway_client_ip,
-        lightway_dns_ip: config.lightway_dns_ip,
-        use_dynamic_client_ip: false,
-        enable_expresslane: config.enable_expresslane,
-        expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
-        expresslane_cb: None,
-        expresslane_metrics: None,
-        event_cb: None,
-        enable_pqc: config.enable_pqc,
-        #[cfg(target_os = "linux")]
-        enable_tun_offload: config.enable_tun_offload,
-        #[cfg(feature = "io-uring")]
-        enable_tun_iouring: config.enable_tun_iouring,
-        #[cfg(feature = "io-uring")]
-        iouring_entry_count: config.iouring_entry_count,
-        #[cfg(feature = "io-uring")]
-        iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        key_update_interval: config.key_update_interval.into(),
-        connection_age_expiration_interval: config.connection_age_expiration_interval.into(),
-        statistics_reporting_interval: config.statistics_reporting_interval.into(),
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
-        bind_address: config.bind_address,
-        proxy_protocol: config.proxy_protocol,
-        udp_buffer_size: config.udp_buffer_size,
-        enable_batch_receive: config.enable_batch_receive,
-        #[cfg(feature = "debug")]
-        randomize_ippool: config.randomize_ippool,
-    };
-
-    server(config).await
+    server(crate::ServerConfig::try_from_auth_and_config(
+        crate::auth::Auth::new(
+            config.user_db.as_ref().map(AsRef::as_ref),
+            config.token_rsa_pub_key_pem.as_ref().map(AsRef::as_ref),
+        )?,
+        config,
+    )?)
+    .await
 }
