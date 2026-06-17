@@ -229,6 +229,10 @@ impl Default for Config {
 impl Config {
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.enable_expresslane {
+            anyhow::ensure!(self.mode.is_udp(), "Expresslane only work in udp mode")
+        }
+
         Ok(())
     }
 }
@@ -243,5 +247,13 @@ mod tests {
     fn validate_default_config() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_enable_expresslane() {
+        let mut config = Config::default();
+        config.mode = ConnectionType::Tcp;
+        config.enable_expresslane = true;
+        assert!(config.validate().is_err());
     }
 }
