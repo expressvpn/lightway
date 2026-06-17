@@ -4289,9 +4289,9 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "4.2.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21e111a09d1e768467559779ece0600de13e1d35082d7b38e9b033a67f75aeab"
+checksum = "6b48547937d9e3ac557ff9838c0a06d0eac700512485b07e791a27b2978d450c"
 dependencies = [
  "autotools",
  "bindgen",
