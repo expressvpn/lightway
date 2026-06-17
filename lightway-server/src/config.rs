@@ -233,6 +233,13 @@ impl Config {
             anyhow::ensure!(self.mode.is_udp(), "Expresslane only work in udp mode")
         }
 
+        if self.proxy_protocol {
+            anyhow::ensure!(
+                self.mode.is_tcp(),
+                "Proxy protocol only support with tcp mode"
+            )
+        }
+
         Ok(())
     }
 }
@@ -254,6 +261,14 @@ mod tests {
         let mut config = Config::default();
         config.mode = ConnectionType::Tcp;
         config.enable_expresslane = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_proxy_protocol() {
+        let mut config = Config::default();
+        config.mode = ConnectionType::Udp;
+        config.proxy_protocol = true;
         assert!(config.validate().is_err());
     }
 }
