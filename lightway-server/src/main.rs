@@ -97,7 +97,6 @@ async fn main() -> Result<()> {
         validate_configuration_file_path(user_db, Validate::OwnerOnly)
             .with_context(|| format!("Invalid user db file {}", user_db.display()))?;
     }
-    config.validate()?;
 
     #[cfg(feature = "debug")]
     if config.tls_debug {
@@ -115,6 +114,13 @@ async fn main() -> Result<()> {
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     config.log_format.init_with_env_filter(fmt);
+    let server_config = crate::ServerConfig::try_from_auth_and_config(
+        crate::auth::Auth::new(
+            config.user_db.as_ref().map(AsRef::as_ref),
+            config.token_rsa_pub_key_pem.as_ref().map(AsRef::as_ref),
+        )?,
+        config,
+    )?;
 
     tokio::spawn(metrics_debug());
 
@@ -140,12 +146,5 @@ async fn main() -> Result<()> {
         }
     });
 
-    server(crate::ServerConfig::try_from_auth_and_config(
-        crate::auth::Auth::new(
-            config.user_db.as_ref().map(AsRef::as_ref),
-            config.token_rsa_pub_key_pem.as_ref().map(AsRef::as_ref),
-        )?,
-        config,
-    )?)
-    .await
+    server(server_config).await
 }

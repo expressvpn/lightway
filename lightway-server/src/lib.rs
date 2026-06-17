@@ -264,6 +264,8 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 
 impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
     pub fn try_from_auth_and_config(auth: SA, config: config::Config) -> Result<Self> {
+        config.validate()?;
+
         let mut tun_config = lightway_app_utils::TunConfig::default();
         if let Some(tun_name) = config.tun_name {
             tun_config.tun_name(tun_name);
