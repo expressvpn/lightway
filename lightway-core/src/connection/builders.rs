@@ -88,6 +88,8 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             io: outside_io,
             session_id: SessionId::EMPTY,
             outside_plugins: outside_plugins.clone(),
+            #[cfg(target_os = "linux")]
+            gso_buf: super::io_adapter::GsoBuffer::default(),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
@@ -323,6 +325,8 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             io: outside_io,
             session_id,
             outside_plugins: outside_plugins.clone(),
+            #[cfg(target_os = "linux")]
+            gso_buf: super::io_adapter::GsoBuffer::default(),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {

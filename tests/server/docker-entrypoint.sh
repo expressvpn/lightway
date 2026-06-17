@@ -14,6 +14,10 @@ echo "====================================================================="
 
 ip tuntap add mode tun dev "${tunname}"
 ip link set dev "${tunname}" mtu 1350
+# Cap GSO superpacket intake. The default 65536 plus Lightway + TLS/expresslane
+# headers per segment can exceed what sendmsg(UDP_SEGMENT) accepts, causing the
+# kernel to return EMSGSIZE ("Message too long") on the outside socket.
+ip link set dev "${tunname}" gso_max_size 60300
 ip link set dev "${tunname}" up
 ip addr replace "${tun_local_ip}" dev "${tunname}"
 

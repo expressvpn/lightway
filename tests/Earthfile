@@ -90,6 +90,10 @@ run-udp-pmtud-test:
 run-udp-iouring-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
 
+# run-udp-tun-offload-test runs e2e test using UDP with server TUN offload (GSO/GRO) enabled
+run-udp-tun-offload-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-offload"
+
 # run-udp-client-batch-receive-test runs e2e test using UDP with batch receive enabled
 run-udp-client-batch-receive-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive"
@@ -164,6 +168,7 @@ run-all-tests:
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
+    BUILD +run-udp-tun-offload-test
     BUILD +run-udp-client-batch-receive-test
     BUILD +run-udp-server-batch-receive-test
     BUILD +run-udp-both-batch-receive-test
