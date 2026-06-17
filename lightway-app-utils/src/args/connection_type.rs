@@ -23,6 +23,11 @@ impl ConnectionType {
     pub fn is_tcp(&self) -> bool {
         *self == ConnectionType::Tcp
     }
+
+    #[allow(missing_docs)]
+    pub fn is_udp(&self) -> bool {
+        *self == ConnectionType::Udp
+    }
 }
 
 impl From<ConnectionType> for LWConnectionType {
