@@ -97,6 +97,7 @@ async fn main() -> Result<()> {
         validate_configuration_file_path(user_db, Validate::OwnerOnly)
             .with_context(|| format!("Invalid user db file {}", user_db.display()))?;
     }
+    config.validate()?;
 
     #[cfg(feature = "debug")]
     if config.tls_debug {

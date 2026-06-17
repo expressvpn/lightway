@@ -225,3 +225,23 @@ impl Default for Config {
         }
     }
 }
+
+impl Config {
+    /// Ensure the config is validated, and alerted when there's a conflict in the settings.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// Note it easier to see what is different from default in each testcase
+#[allow(clippy::field_reassign_with_default)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_default_config() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+}
