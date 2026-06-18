@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::{net::SocketAddr, path::PathBuf};
+use std::path::PathBuf;
 use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
@@ -10,12 +10,12 @@ use tokio::sync::mpsc;
 
 use lightway_app_utils::{
     Validate,
-    args::{ConfigFormat, ConnectionType, LogFormat},
+    args::{ConfigFormat, LogFormat},
     validate_configuration_file_path,
 };
 use lightway_client::*;
 
-use lightway_client::config::{Config, ConfigPatch, ConnectionConfig};
+use lightway_client::config::{Config, ConfigPatch};
 
 struct EventHandler;
 
@@ -31,38 +31,6 @@ impl EventCallback for EventHandler {
             _ => {}
         }
     }
-}
-
-async fn make_client_connection_config(
-    mut config: ConnectionConfig,
-) -> Result<ClientConnectionConfig<EventHandler>> {
-    let auth = config.take_auth()?;
-    tracing::info!("Resolving server address: {}", &config.server);
-
-    let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow!("No addresses resolved"))?;
-
-    let mode = match config.mode {
-        ConnectionType::Tcp => ClientConnectionMode::Stream(None),
-        ConnectionType::Udp => ClientConnectionMode::Datagram(None),
-    };
-
-    Ok(ClientConnectionConfig {
-        mode,
-        cipher: config.cipher,
-        server_dn: config.server_dn,
-        server: server_addr,
-        auth,
-        cert_content: config
-            .ca_cert
-            .expect("Should exist, because it is normalized after take_servers()"),
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
-        event_handler: Some(EventHandler),
-    })
 }
 
 #[cfg(windows)]
@@ -185,9 +153,14 @@ async fn main() -> Result<()> {
 
     let servers = config.take_servers()?;
 
-    let client_config = lightway_client::ClientConfig::<()>::try_from_reload_sig_and_config(config_reload_signal, config)?;
+    let client_config = lightway_client::ClientConfig::<()>::try_from_reload_sig_and_config(
+        config_reload_signal,
+        config,
+    )?;
 
-    let conn_confs = join_all(servers.into_iter().map(make_client_connection_config));
+    let conn_confs = join_all(servers.into_iter().map(|c| {
+        ClientConnectionConfig::try_from_event_handler_and_connection_config(Some(EventHandler), c)
+    }));
     let conn_confs = tokio::select! {
         results = conn_confs => {
             results.into_iter()
@@ -203,7 +176,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    client(client_config, ctrlc_rx, conn_confs).await.map(|_| ())
+    client(client_config, ctrlc_rx, conn_confs)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(any(unix, windows))]
