@@ -413,6 +413,12 @@ impl Config {
                 "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
             );
         }
+        if self.enable_pmtud {
+            anyhow::ensure!(
+                !self.mode.is_tcp(),
+                "enable_pmtud is only supported for UDP connections"
+            );
+        }
         Ok(())
     }
 }
@@ -772,6 +778,14 @@ mod tests {
         config.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
         assert!(config.validate().is_ok());
         config.device_guid = Some("not-a-valid-uuid".to_string());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_pmtud_on_tcp_mode() {
+        let mut config = Config::default();
+        config.enable_pmtud = true;
+        config.mode = ConnectionType::Tcp;
         assert!(config.validate().is_err());
     }
 }
