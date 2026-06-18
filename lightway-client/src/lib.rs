@@ -391,6 +391,41 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     pub event_handler: Option<EventHandler>,
 }
 
+impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventHandler> {
+    pub async fn try_from_event_handler_and_connection_config(
+        event_handler: Option<EventHandler>,
+        mut config: config::ConnectionConfig,
+    ) -> Result<ClientConnectionConfig<EventHandler>> {
+        let auth = config.take_auth()?;
+        tracing::info!("Resolving server address: {}", &config.server);
+
+        let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow!("No addresses resolved"))?;
+
+        let mode = match config.mode {
+            lightway_app_utils::args::ConnectionType::Tcp => ClientConnectionMode::Stream(None),
+            lightway_app_utils::args::ConnectionType::Udp => ClientConnectionMode::Datagram(None),
+        };
+
+        Ok(ClientConnectionConfig {
+            mode,
+            cipher: config.cipher,
+            server_dn: config.server_dn,
+            server: server_addr,
+            auth,
+            cert_content: config.ca_cert.ok_or(anyhow!(
+                "ca_cert missing; ensure Config::take_servers() was called first"
+            ))?,
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            inside_pkt_codec: None,
+            event_handler,
+        })
+    }
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientInsidePacketCodecConfig {
