@@ -42,7 +42,7 @@ use crate::debug::WiresharkKeyLogger;
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
-use crate::route_manager::{RouteManager, RouteMode};
+use crate::route_manager::{NetworkChangeCallback, RouteManager, RouteMode};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
@@ -761,7 +761,33 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         );
         let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
-        route_manager.start(network_change_rx).await?;
+
+        // On macOS the outside UDP socket is connected for upload throughput, so
+        // its cached route must be refreshed whenever the network changes. Run it
+        // after the route table is updated so the reconnect resolves the new path.
+        // A weak ref keeps the route manager task from extending the socket's
+        // lifetime. (NoExec mode does no route management; that path's reconnect
+        // is driven off the network change signal directly - see `connect`.)
+        let on_network_change: Option<NetworkChangeCallback> = {
+            #[cfg(macos)]
+            {
+                let outside_io = Arc::downgrade(&self.outside_io);
+                let cb: NetworkChangeCallback = Arc::new(move || {
+                    if let Some(io) = outside_io.upgrade() {
+                        io.reconnect();
+                    }
+                });
+                Some(cb)
+            }
+            #[cfg(not(macos))]
+            {
+                None
+            }
+        };
+
+        route_manager
+            .start(network_change_rx, on_network_change)
+            .await?;
 
         self.route_manager = Some(route_manager);
         info!("Routes configured");
@@ -841,6 +867,21 @@ pub async fn connect<
 
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+
+                // On macOS a connected UDP socket lets `send` skip the per-packet
+                // route lookup, improving upload throughput. Only safe when a
+                // network change will re-connect the socket: the route manager
+                // does so after updating the server route (non-NoExec), or a
+                // client-supplied `network_change_signal` drives it directly.
+                // Otherwise fall back to `send_to`.
+                #[cfg(macos)]
+                if (config.route_mode != RouteMode::NoExec
+                    || config.network_change_signal.is_some())
+                    && let Err(e) = sock.enable_connected_send()
+                {
+                    tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
+                }
+
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
@@ -1386,6 +1427,25 @@ pub async fn client<
                 Some(rx),
             )
             .await?;
+
+        // In NoExec mode the route manager performs no route operations and so
+        // never refreshes the connected outside socket. When connected-send is in
+        // use (macOS) and the embedder supplied a network change signal, drive the
+        // reconnect off that signal directly instead.
+        #[cfg(macos)]
+        if config.route_mode == RouteMode::NoExec
+            && let Some(mut signal) = config.network_change_signal.clone()
+        {
+            let outside_io = Arc::downgrade(&connection.outside_io);
+            tokio::spawn(async move {
+                while signal.changed().await.is_ok() {
+                    let Some(io) = outside_io.upgrade() else {
+                        break;
+                    };
+                    io.reconnect();
+                }
+            });
+        }
     }
 
     #[cfg(desktop)]
