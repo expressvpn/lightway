@@ -419,6 +419,13 @@ impl Config {
                 "enable_pmtud is only supported for UDP connections"
             );
         }
+        #[cfg(windows)]
+        anyhow::ensure!(
+            self.wintun_ring_capacity.0.is_power_of_two()
+                && self.wintun_ring_capacity >= ByteSize::kib(128)
+                && self.wintun_ring_capacity <= ByteSize::mib(64),
+            "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
+        );
         Ok(())
     }
 }
@@ -786,6 +793,14 @@ mod tests {
         let mut config = Config::default();
         config.enable_pmtud = true;
         config.mode = ConnectionType::Tcp;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_wintun_ring_capacity() {
+        let mut config = Config::default();
+        config.wintun_ring_capacity = ByteSize::mib(3);
         assert!(config.validate().is_err());
     }
 }
