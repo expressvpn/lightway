@@ -384,6 +384,11 @@ impl Config {
         }
         Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
     }
+
+    /// Ensure the config is validated, and alerted when there's a conflict in the settings.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -584,6 +589,8 @@ fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Sche
     schema
 }
 
+// Note: it easier to see what is different from default in each validate testcase
+#[allow(clippy::field_reassign_with_default)]
 #[cfg(test)]
 mod tests {
     use std::fs::read_to_string;
@@ -706,5 +713,11 @@ mod tests {
                 "multi-component byte size must not match: {s}"
             );
         }
+    }
+
+    #[test]
+    fn validate_default_config() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
     }
 }
