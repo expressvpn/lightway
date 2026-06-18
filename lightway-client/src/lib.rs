@@ -268,6 +268,87 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub keylog: Option<PathBuf>,
 }
 
+impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
+    pub fn try_from_reload_sig_and_config(
+        config_reload_signal: Option<mpsc::Receiver<ReloadableClientConfig>>,
+        config: config::Config) -> Result<ClientConfig<ExtAppState>> {
+        config.validate()?;
+
+        let mut tun_config = TunConfig::default();
+
+        if let Some(ref tun_name) = config.tun_name {
+            tun_config.tun_name(tun_name.clone());
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(ref wintun_file) = config.wintun_file {
+                tun_config.wintun_file(wintun_file);
+            }
+            tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
+        }
+
+        #[cfg(windows)]
+        if let Some(ref device_guid) = config.device_guid {
+            let parsed = uuid::Uuid::parse_str(device_guid)
+                .with_context(|| format!("invalid device GUID: {device_guid}"))?;
+            tracing::info!(device_guid = %parsed, "Setting device GUID");
+            tun_config.device_guid(parsed.as_u128());
+        }
+
+        // TODO: Fix in future PR
+        tun_config
+            .mtu(1350)
+            .address(config.tun_local_ip.into())
+            .destination(config.tun_peer_ip)
+            .up();
+
+        Ok(ClientConfig {
+            outside_mtu: config.outside_mtu,
+            inside_io: None,
+            tun_config,
+            tun_local_ip: config.tun_local_ip,
+            tun_peer_ip: config.tun_peer_ip,
+            tun_dns_ip: config.tun_dns_ip,
+            #[cfg(feature = "postquantum")]
+            keyshare: config.keyshare,
+            enable_expresslane: config.enable_expresslane,
+            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            expresslane_cb: None,
+            expresslane_metrics: None,
+            keepalive_interval: config.keepalive_interval.into(),
+            keepalive_timeout: config.keepalive_timeout.into(),
+            continuous_keepalive: config.keepalive_continuous,
+            tracer_packet_timeout: config.tracer_packet_timeout.into(),
+            preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
+            sndbuf: config.sndbuf,
+            rcvbuf: config.rcvbuf,
+            #[cfg(batch_receive)]
+            enable_batch_receive: config.enable_batch_receive,
+            #[cfg(desktop)]
+            route_mode: config.route_mode,
+            #[cfg(desktop)]
+            dns_config_mode: config.dns_config_mode,
+            enable_pmtud: config.enable_pmtud,
+            pmtud_base_mtu: config.pmtud_base_mtu,
+            #[cfg(feature = "io-uring")]
+            enable_tun_iouring: config.enable_tun_iouring,
+            #[cfg(feature = "io-uring")]
+            iouring_entry_count: config.iouring_entry_count,
+            #[cfg(feature = "io-uring")]
+            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            inside_pkt_codec_config: None,
+            config_reload_signal,
+            network_change_signal: None,
+            best_connection_selected_signal: None,
+            #[cfg(feature = "debug")]
+            tls_debug: config.tls_debug,
+            #[cfg(feature = "debug")]
+            keylog: config.keylog.clone(),
+        })
+    }
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> {
@@ -323,6 +404,14 @@ pub struct ClientInsidePacketCodecConfig {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReloadableClientConfig {
     pub enable_inside_pkt_encoding: Option<bool>,
+}
+
+impl From<&config::Config> for ReloadableClientConfig {
+    fn from(config: &config::Config) -> Self {
+        Self {
+            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
+        }
+    }
 }
 
 impl ReloadableClientConfig {
