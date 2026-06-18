@@ -271,7 +271,8 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
 impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
     pub fn try_from_reload_sig_and_config(
         config_reload_signal: Option<mpsc::Receiver<ReloadableClientConfig>>,
-        config: config::Config) -> Result<ClientConfig<ExtAppState>> {
+        config: config::Config,
+    ) -> Result<ClientConfig<ExtAppState>> {
         config.validate()?;
 
         let mut tun_config = TunConfig::default();
@@ -386,6 +387,41 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     /// Allow injection of a custom handler for event callback
     #[educe(Debug(ignore))]
     pub event_handler: Option<EventHandler>,
+}
+
+impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventHandler> {
+    pub async fn try_from_event_handler_and_connection_config(
+        event_handler: Option<EventHandler>,
+        mut config: config::ConnectionConfig,
+    ) -> Result<ClientConnectionConfig<EventHandler>> {
+        let auth = config.take_auth()?;
+        tracing::info!("Resolving server address: {}", &config.server);
+
+        let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow!("No addresses resolved"))?;
+
+        let mode = match config.mode {
+            lightway_app_utils::args::ConnectionType::Tcp => ClientConnectionMode::Stream(None),
+            lightway_app_utils::args::ConnectionType::Udp => ClientConnectionMode::Datagram(None),
+        };
+
+        Ok(ClientConnectionConfig {
+            mode,
+            cipher: config.cipher,
+            server_dn: config.server_dn,
+            server: server_addr,
+            auth,
+            cert_content: config
+                .ca_cert
+                .expect("Should exist, because it is normalized after take_servers()"),
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            inside_pkt_codec: None,
+            event_handler,
+        })
+    }
 }
 
 #[derive(educe::Educe)]
