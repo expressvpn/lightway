@@ -404,6 +404,13 @@ impl Config {
                 "Cannot be applied rcvbuf; this is preserved in the kernel for autotuning purposes."
             )
         }
+        #[cfg(windows)]
+        if let Some(guid) = &self.device_guid {
+            anyhow::ensure!(
+                uuid::Uuid::parse_str(guid).is_ok(),
+                "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
+            );
+        }
         Ok(())
     }
 }
@@ -753,6 +760,16 @@ mod tests {
         let mut config = Config::default();
         config.mode = ConnectionType::Tcp;
         config.rcvbuf = ByteSize::mib(16);
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_device_guid() {
+        let mut config = Config::default();
+        config.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
+        assert!(config.validate().is_ok());
+        config.device_guid = Some("not-a-valid-uuid".to_string());
         assert!(config.validate().is_err());
     }
 }
