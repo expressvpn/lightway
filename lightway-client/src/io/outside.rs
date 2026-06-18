@@ -67,6 +67,16 @@ pub trait OutsideIO: Sync + Send {
 
     fn peer_addr(&self) -> SocketAddr;
 
+    /// Re-establish the socket's connected route after a network change.
+    ///
+    /// On macOS the outside UDP socket is `connect()`-ed so each send can skip
+    /// the per-packet route lookup. When the network changes the cached route
+    /// and bound source address go stale, so the association has to be
+    /// refreshed. Default is a no-op for transports that don't use a connected
+    /// socket.
+    #[cfg(macos)]
+    fn reconnect(&self) {}
+
     /// Returns the underlying socket tagged with its transport type.
     fn socket(&self) -> OutsideSocket;
 }

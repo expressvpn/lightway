@@ -16,6 +16,11 @@ pub struct Udp {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: SocketAddr,
     default_ip_pmtudisc: sockopt::IpPmtudisc,
+    /// Whether the socket has been `connect()`-ed to `peer_addr` so that `send`
+    /// can be used in place of `send_to`. macOS only; see
+    /// [`Udp::enable_connected_send`].
+    #[cfg(macos)]
+    connected: bool,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
 }
@@ -46,9 +51,34 @@ impl Udp {
             sock: Arc::new(sock),
             peer_addr,
             default_ip_pmtudisc,
+            #[cfg(macos)]
+            connected: false,
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
         })
+    }
+
+    /// `connect()` the underlying socket to `peer_addr`.
+    ///
+    /// On a connected UDP socket the kernel resolves the route once, at connect
+    /// time, so each subsequent `send` skips the per-packet route lookup that
+    /// `send_to` performs.
+    #[cfg(macos)]
+    fn connect_socket(&self) -> std::io::Result<()> {
+        socket2::SockRef::from(&self.sock).connect(&self.peer_addr.into())
+    }
+
+    /// Switch this socket to connected-send mode for upload throughput on macOS.
+    ///
+    /// The cached route is bound to the current egress interface, so the caller
+    /// MUST invoke [`OutsideIO::reconnect`] on every network change — otherwise
+    /// a network change strands the socket on a dead route/source address.
+    #[cfg(macos)]
+    pub fn enable_connected_send(&mut self) -> std::io::Result<()> {
+        self.connect_socket()?;
+        self.connected = true;
+        tracing::info!("Outside UDP socket connected; using connected send");
+        Ok(())
     }
 
     #[cfg(batch_receive)]
@@ -144,6 +174,18 @@ impl OutsideIO for Udp {
         self.peer_addr()
     }
 
+    #[cfg(macos)]
+    fn reconnect(&self) {
+        // Only refresh the route if connected-send mode is actually in use.
+        if !self.connected {
+            return;
+        }
+        match self.connect_socket() {
+            Ok(()) => tracing::debug!("Reconnected outside UDP socket after network change"),
+            Err(e) => tracing::warn!("Failed to reconnect outside UDP socket: {e}"),
+        }
+    }
+
     fn socket(&self) -> OutsideSocket {
         #[cfg(unix)]
         use std::os::fd::AsRawFd;
@@ -159,7 +201,21 @@ impl OutsideIO for Udp {
 
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
+        // On a connected socket the destination is already known, so `send`
+        // skips the per-packet route lookup that `send_to` performs - a
+        // measurable upload throughput win on macOS. Falls back to `send_to`
+        // when the socket isn't connected (e.g. no network change monitoring to
+        // refresh the cached route after a network change).
+        #[cfg(macos)]
+        let result = if self.connected {
+            self.sock.try_send(buf)
+        } else {
+            self.sock.try_send_to(buf, self.peer_addr)
+        };
+        #[cfg(not(macos))]
+        let result = self.sock.try_send_to(buf, self.peer_addr);
+
+        match result {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
@@ -198,6 +254,17 @@ impl OutsideIOSendCallback for Udp {
                 // It should eventually recover by itself after a while.
                 // If the user has disconnected from the internet, keepalive should fail
                 // due to missed reply (`keepalive_timeout`).
+                IOCallbackResult::Ok(buf.len())
+            }
+            #[cfg(macos)]
+            Err(err)
+                if self.connected && matches!(err.kind(), std::io::ErrorKind::HostUnreachable) =>
+            {
+                // A connected socket can surface "no route to host" the moment a
+                // network change tears down the cached route. The reconnect on
+                // network change refreshes it; swallow so TLS does not enter an
+                // error state in the meantime. Only relevant when we explicitly
+                // use `send`; `send_to` should surface this error as before.
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) => {
