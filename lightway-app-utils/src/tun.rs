@@ -251,6 +251,9 @@ impl TunConfig {
                         // Windows if destination provided create a default route with
                         // high priority
                         if cfg!(windows) {
+                            // remove address before adding it to prevent error
+                            // when address is already present
+                            let _ = device.remove_address(address);
                             device.add_address_v4(ipv4_addr, netmask)?;
                         } else {
                             device.set_network_address(ipv4_addr, netmask, self.destination)?;
@@ -587,6 +590,16 @@ impl Drop for TunDirect {
         if !self.close_fd_on_drop {
             let tun = self.tun.take().unwrap();
             let _ = tun.into_raw_fd();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TunDirect {
+    fn drop(&mut self) {
+        let tun = self.tun.as_ref().unwrap();
+        for address in tun.addresses().unwrap() {
+            let _ = tun.remove_address(address);
         }
     }
 }
