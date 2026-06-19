@@ -65,7 +65,7 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"Server domain name
     Only used if `servers` is empty"#))]
-    pub server_dn: Option<String>,
+    pub server_dn: String,
 
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"Cipher to use for encryption
@@ -344,7 +344,8 @@ impl Config {
             self.servers = vec![ConnectionConfig {
                 server: self.server.clone(),
                 mode: self.mode,
-                server_dn: self.server_dn.take(),
+                server_dn: (!self.server_dn.is_empty())
+                    .then(|| std::mem::take(&mut self.server_dn)),
                 cipher: self.cipher,
                 outside_mtu: self.outside_mtu,
                 ..Default::default()
@@ -438,7 +439,7 @@ impl Default for Config {
             servers: Vec::default(),
             server: String::default(),
             mode: ConnectionType::Tcp,
-            server_dn: None,
+            server_dn: String::new(),
             cipher: Cipher::Aes256,
             token: None,
             user: None,
