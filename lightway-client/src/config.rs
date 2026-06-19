@@ -16,7 +16,6 @@ use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::{Patch, Substrate};
 
-#[cfg(not(macos))]
 const DEFAULT_SNDBUF: ByteSize = ByteSize::mib(8);
 
 // NOTE
@@ -437,7 +436,6 @@ impl Default for Config {
             preferred_connection_wait_interval: Duration::from_std_duration(
                 StdDuration::from_secs(0),
             ),
-            #[cfg(not(macos))]
             sndbuf: DEFAULT_SNDBUF,
             rcvbuf: ByteSize::mib(8),
             #[cfg(batch_receive)]
