@@ -591,6 +591,16 @@ impl Drop for TunDirect {
     }
 }
 
+#[cfg(windows)]
+impl Drop for TunDirect {
+    fn drop(&mut self) {
+        let tun = self.tun.as_ref().unwrap();
+        for address in tun.addresses().unwrap() {
+            let _ = tun.remove_address(address);
+        }
+    }
+}
+
 /// TunIoUring struct
 #[cfg(feature = "io-uring")]
 pub struct TunIoUring {
