@@ -1372,7 +1372,7 @@ pub async fn client<
         let rx = if let Some(ref rx) = config.network_change_signal {
             rx.clone()
         } else {
-            let monitor = NetworkChangeMonitor::spawn()?;
+            let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
             let rx = monitor.subscribe();
             network_change_monitor = Some(monitor);
             rx

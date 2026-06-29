@@ -1,16 +1,70 @@
 #![allow(unsafe_code)]
 use anyhow::Result;
+use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
+use super::relevant_addrs;
 use windows_sys::Win32::{
-    Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
-    NetworkManagement::IpHelper::NotifyAddrChange,
+    Foundation::{HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    NetworkManagement::IpHelper::{
+        FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW,
+        MIB_UNICASTIPADDRESS_TABLE, NotifyAddrChange,
+    },
+    Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
     System::IO::OVERLAPPED,
     System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject},
 };
+
+/// Read the current system-wide unicast IP addresses via `GetUnicastIpAddressTable`.
+///
+/// Returns an empty vector on failure; callers treat that as "no relevant
+/// addresses", which is safe because a genuine change will still differ from
+/// the previous non-empty snapshot.
+fn current_unicast_addrs() -> Vec<IpAddr> {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    // SAFETY: GetUnicastIpAddressTable allocates the table and writes the
+    // pointer through `table`; we free it with FreeMibTable below.
+    let ret = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut table) };
+    if ret != NO_ERROR || table.is_null() {
+        return Vec::new();
+    }
+
+    // SAFETY: `table` is non-null and stays valid until the matching FreeMibTable.
+    let count = unsafe { (*table).NumEntries } as usize;
+    // SAFETY: `Table` is the flexible-array member of the valid `table`; form a
+    // pointer to its first row without creating an intermediate reference.
+    let first = unsafe { std::ptr::addr_of!((*table).Table) } as *const MIB_UNICASTIPADDRESS_ROW;
+    // SAFETY: `first` points to `count` contiguous, initialised rows owned by the
+    // live table.
+    let rows = unsafe { std::slice::from_raw_parts(first, count) };
+
+    let mut out = Vec::new();
+    for row in rows {
+        // SAFETY: `si_family` is valid to read for any SOCKADDR_INET.
+        let family = unsafe { row.Address.si_family };
+        if family == AF_INET {
+            // SAFETY: family == AF_INET, so the Ipv4 variant is active.
+            let v4 = unsafe { row.Address.Ipv4 };
+            // SAFETY: S_addr is the active union member; it is in network byte
+            // order, so its in-memory bytes are the address octets.
+            let octets = unsafe { v4.sin_addr.S_un.S_addr }.to_ne_bytes();
+            out.push(IpAddr::V4(Ipv4Addr::from(octets)));
+        } else if family == AF_INET6 {
+            // SAFETY: family == AF_INET6, so the Ipv6 variant is active.
+            let v6 = unsafe { row.Address.Ipv6 };
+            // SAFETY: the unioned in6-addr bytes are always valid to read.
+            let bytes = unsafe { v6.sin6_addr.u.Byte };
+            out.push(IpAddr::V6(Ipv6Addr::from(bytes)));
+        }
+    }
+    // SAFETY: `table` was allocated by GetUnicastIpAddressTable and is freed once.
+    unsafe { FreeMibTable(table as *const core::ffi::c_void) };
+    out
+}
 
 /// Represents an address change detected by the monitor.
 ///
@@ -30,14 +84,17 @@ pub struct AsyncAddrListener {
 }
 
 impl AsyncAddrListener {
-    /// Creates a new AsyncAddrListener for monitoring address changes
-    pub fn new() -> Result<Self> {
+    /// Creates a new AsyncAddrListener for monitoring address changes.
+    ///
+    /// `ignore` lists local addresses (the tunnel's own address) whose
+    /// appearance/disappearance must not be reported as a network change.
+    pub fn new(ignore: Vec<IpAddr>) -> Result<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
 
         let join_handle = tokio::task::spawn_blocking(move || {
-            if let Err(e) = Self::monitor_address_changes(sender, shutdown_clone) {
+            if let Err(e) = Self::monitor_address_changes(sender, shutdown_clone, ignore) {
                 error!("Address monitoring task failed: {}", e);
             }
         });
@@ -53,6 +110,7 @@ impl AsyncAddrListener {
     fn monitor_address_changes(
         sender: mpsc::UnboundedSender<AddrChangeEvent>,
         shutdown: Arc<AtomicBool>,
+        ignore: Vec<IpAddr>,
     ) -> Result<()> {
         // RAII wrapper for Windows event handle
         struct EventHandle(HANDLE);
@@ -93,6 +151,12 @@ impl AsyncAddrListener {
         // Create event handle once for the entire monitoring session
         let event_handle = EventHandle::new()?;
 
+        // Baseline snapshot of the relevant (non-tunnel, non-noise) addresses.
+        // `NotifyAddrChange` reports any address change without detail — including
+        // the client's own TUN interface coming up — so we only signal when this
+        // filtered set actually changes between notifications.
+        let mut prev: BTreeSet<IpAddr> = relevant_addrs(current_unicast_addrs(), &ignore);
+
         loop {
             // Check if we should shutdown
             if shutdown.load(Ordering::Relaxed) {
@@ -105,6 +169,15 @@ impl AsyncAddrListener {
 
             match monitoring_result {
                 Ok(()) => {
+                    let now = relevant_addrs(current_unicast_addrs(), &ignore);
+                    if now == prev {
+                        // Change was confined to ignored/tunnel addresses or
+                        // noise — not a real path change, so don't signal.
+                        debug!("Address change ignored (no relevant address delta)");
+                        continue;
+                    }
+                    prev = now;
+
                     tracing::info!("Address change detected!");
                     // Send notification - we use a general event since Windows API
                     // doesn't provide specific details about the type of change
@@ -245,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn test_addr_listener_creation() {
         // Test that we can create the listener without panic
-        let result = AsyncAddrListener::new();
+        let result = AsyncAddrListener::new(vec![]);
         assert!(result.is_ok());
     }
 }
