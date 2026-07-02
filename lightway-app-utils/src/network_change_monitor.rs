@@ -25,10 +25,18 @@ pub struct NetworkChangeMonitor {
 impl NetworkChangeMonitor {
     /// Spawn the monitor. The route/address listeners are created inside the
     /// spawned task.
-    pub fn spawn() -> Result<Self> {
+    ///
+    /// `ignore_ips` lists local addresses (the tunnel's own address) that must
+    /// not be treated as network changes. On Windows the address listener uses
+    /// it to filter out the client's own TUN interface coming up; on other
+    /// platforms it is unused.
+    pub fn spawn(ignore_ips: Vec<std::net::IpAddr>) -> Result<Self> {
         let (tx, rx) = watch::channel(());
 
         let task = tokio::spawn(async move {
+            #[cfg(not(windows))]
+            let _ = ignore_ips;
+
             let mut route_listener = match AsyncRouteListener::new() {
                 Ok(listener) => listener,
                 Err(e) => {
@@ -40,7 +48,7 @@ impl NetworkChangeMonitor {
             // On Windows, also create address change listener as a fallback
             // since Windows doesn't always publish route changes on network down
             #[cfg(windows)]
-            let mut addr_listener = match AsyncAddrListener::new() {
+            let mut addr_listener = match AsyncAddrListener::new(ignore_ips) {
                 Ok(listener) => {
                     tracing::info!("Started address change monitoring (Windows)...");
                     Some(listener)
@@ -112,5 +120,82 @@ impl NetworkChangeMonitor {
 impl Drop for NetworkChangeMonitor {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Reduce the system's unicast addresses to those whose appearance or
+/// disappearance constitutes a real network change.
+///
+/// Loopback, link-local and unspecified addresses are configuration noise.
+/// `ignore` carries the local tunnel address(es) so the VPN's own interface
+/// coming up — which the Windows `NotifyAddrChange` API reports just like any
+/// other address change — is not mistaken for a path change. Comparing
+/// successive snapshots of this set lets the monitor signal only on genuine
+/// changes.
+#[cfg(any(windows, test))]
+pub(crate) fn relevant_addrs(
+    addrs: impl IntoIterator<Item = std::net::IpAddr>,
+    ignore: &[std::net::IpAddr],
+) -> std::collections::BTreeSet<std::net::IpAddr> {
+    addrs
+        .into_iter()
+        .filter(|ip| {
+            !ip.is_loopback() && !ip.is_unspecified() && !is_link_local(ip) && !ignore.contains(ip)
+        })
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn is_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        // Ipv6Addr::is_unicast_link_local is unstable; match fe80::/10 directly.
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn tunnel_bringup_is_not_a_network_change() {
+        let tun = ip("100.64.0.6");
+        let nic = ip("192.168.1.5");
+        // Before the tunnel comes up only the physical NIC is present; after
+        // bring-up the system also reports the tunnel's own address. With the
+        // tunnel address ignored, both snapshots must be identical so the
+        // monitor does not mistake its own interface for a path change.
+        let before = relevant_addrs([nic], &[tun]);
+        let after = relevant_addrs([nic, tun], &[tun]);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn physical_address_change_is_detected() {
+        let tun = ip("100.64.0.6");
+        let wifi = ip("192.168.1.5");
+        let eth = ip("10.0.0.5");
+        let before = relevant_addrs([wifi, tun], &[tun]);
+        let after = relevant_addrs([eth, tun], &[tun]);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn noise_addresses_are_filtered() {
+        let loopback = ip("127.0.0.1");
+        let link_local = ip("169.254.1.1");
+        let v6_link_local = ip("fe80::1");
+        let nic = ip("192.168.1.5");
+        assert_eq!(
+            relevant_addrs([loopback, link_local, v6_link_local, nic], &[]),
+            BTreeSet::from([nic])
+        );
     }
 }
