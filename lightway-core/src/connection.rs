@@ -413,14 +413,6 @@ pub struct Connection<AppState: Send = ()> {
     /// not yet been handed to the TLS library.
     tls_pending_queue: VecDeque<BytesMut>,
 
-    /// Total bytes currently held in `tls_pending_queue`
-    tls_pending_queue_bytes: usize,
-
-    /// Byte capacity of `tls_pending_queue`. When exceeded, new frames are
-    /// dropped. 0 means only the in-flight head buffer is retained (legacy
-    /// single-pending-packet behaviour).
-    tls_pending_queue_capacity: usize,
-
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
 
@@ -512,8 +504,6 @@ impl<AppState: Send> Connection<AppState> {
             },
             tls_tick_interval: None,
             tls_pending_queue: VecDeque::new(),
-            tls_pending_queue_bytes: 0,
-            tls_pending_queue_capacity: 0,
             fragment_map: once_cell::unsync::Lazy::new(Box::new(move || {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
@@ -1041,7 +1031,7 @@ impl<AppState: Send> Connection<AppState> {
         } else {
             wire::Frame::Data(inside_pkt)
         };
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     fn next_fragment_id(&mut self) -> u16 {
@@ -1081,7 +1071,7 @@ impl<AppState: Send> Connection<AppState> {
                 wire::Frame::DataFrag(frag)
             };
 
-            self.send_frame_or_drop(msg)?;
+            self.send_frame_or_queue(msg)?;
             offset += mps;
         }
         Ok(())
@@ -1105,7 +1095,7 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::Ping(ping);
 
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     /// Disconnect this connection
@@ -1128,7 +1118,7 @@ impl<AppState: Send> Connection<AppState> {
         let msg = wire::Frame::Goodbye;
 
         // here, goodbye + shutdown are just a courtesy.
-        let _ = self.send_frame_or_drop(msg);
+        let _ = self.send_frame_or_queue(msg);
         let _ = self.session.try_shutdown();
 
         self.set_state(State::Disconnected)?;
@@ -1144,47 +1134,17 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    /// Set the byte capacity of the pending send queue.
-    ///
-    /// Frames which cannot be written because the underlying I/O would
-    /// block are queued up to this many bytes; beyond that new frames
-    /// are dropped. Intended to be driven by the kernel's ideal send
-    /// backlog (e.g. `SIO_IDEAL_SEND_BACKLOG_QUERY` on Windows TCP) so
-    /// the queue provides headroom on top of the socket send buffer
-    /// without bufferbloat.
-    pub fn set_pending_send_queue_capacity(&mut self, bytes: usize) {
-        self.tls_pending_queue_capacity = bytes;
-    }
-
     /// Try to send a frame.
     /// In case I/O would block, queue the frame inside `ConnectionState`
-    /// (up to `tls_pending_queue_capacity` bytes) and retry on the next call.
-    fn send_frame_or_drop(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
+    /// and retry on the next call. The queue is unbounded.
+    fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
         let mut buf = BytesMut::new();
         frame.append_to_wire(&mut buf);
-
-        // Always accept when the queue is empty: the head buffer must be
-        // retained anyway to satisfy the TLS retry-with-same-buffer rule.
-        if self.tls_pending_queue.is_empty()
-            || self.tls_pending_queue_bytes + buf.len() <= self.tls_pending_queue_capacity
-        {
-            self.tls_pending_queue_bytes += buf.len();
-            self.tls_pending_queue.push_back(buf);
-        } else {
-            warn!(
-                dropped_frame = ?frame.kind(),
-                queued_bytes = self.tls_pending_queue_bytes,
-                capacity = self.tls_pending_queue_capacity,
-                "Dropping frame: pending send queue is full"
-            );
-            metrics::tls_frame_dropped();
-        }
+        self.tls_pending_queue.push_back(buf);
 
         while let Some(mut head) = self.tls_pending_queue.pop_front() {
-            self.tls_pending_queue_bytes -= head.len();
             match self.session.try_write(&mut head)? {
                 crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
-                    self.tls_pending_queue_bytes += head.len();
                     self.tls_pending_queue.push_front(head);
                     return Ok(());
                 }
@@ -1192,7 +1152,6 @@ impl<AppState: Send> Connection<AppState> {
                 // written; keep any partially written remainder at the head.
                 crate::tls::Poll::Ready(_) => {
                     if !head.is_empty() {
-                        self.tls_pending_queue_bytes += head.len();
                         self.tls_pending_queue.push_front(head);
                         return Ok(());
                     }
@@ -1255,7 +1214,7 @@ impl<AppState: Send> Connection<AppState> {
                 let msg = wire::Frame::Ping(ping);
 
                 self.session.io_cb().enable_pmtud_probe();
-                let res = self.send_frame_or_drop(msg);
+                let res = self.send_frame_or_queue(msg);
                 self.session.io_cb().disable_pmtud_probe();
                 res
             }
@@ -1325,7 +1284,7 @@ impl<AppState: Send> Connection<AppState> {
         self.set_state(State::Authenticating)?;
 
         let msg = wire::Frame::AuthRequest(wire::AuthRequest { auth_method });
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     // Trigger a periodic key update for TLS/DTLS 1.3 server
@@ -1521,7 +1480,7 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::Pong(pong);
 
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     fn handle_pong(&mut self, pong: wire::Pong) -> ConnectionResult<()> {
@@ -1640,7 +1599,7 @@ impl<AppState: Send> Connection<AppState> {
     fn send_auth_failure(&mut self) {
         let msg = wire::Frame::AuthFailure(wire::AuthFailure);
 
-        let _ = self.send_frame_or_drop(msg);
+        let _ = self.send_frame_or_queue(msg);
         let _ = self.disconnect();
     }
 
@@ -1694,7 +1653,7 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         let msg = wire::Frame::ExpresslaneConfig(last_config);
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     fn expresslane_supported(&self) -> bool {
@@ -1811,7 +1770,7 @@ impl<AppState: Send> Connection<AppState> {
         config.ack = true;
         config.version = self.expresslane.data.version;
         let msg = wire::Frame::ExpresslaneConfig(config);
-        let _ = self.send_frame_or_drop(msg);
+        let _ = self.send_frame_or_queue(msg);
 
         // Send our own key share so the peer can set our peer key.
         // No-op if we already have a pending key.
@@ -1860,7 +1819,7 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         let msg = wire::Frame::ExpresslaneConfig(config);
-        let _ = self.send_frame_or_drop(msg);
+        let _ = self.send_frame_or_queue(msg);
 
         self.expresslane.last_key_rotation = Some(Instant::now());
 
@@ -1895,7 +1854,7 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         let msg = wire::Frame::ExpresslaneConfig(config);
-        let _ = self.send_frame_or_drop(msg);
+        let _ = self.send_frame_or_queue(msg);
 
         // Callback to schedule re-transmission if required
         // reuses same retry logic as key rotation
@@ -2003,7 +1962,7 @@ impl<AppState: Send> Connection<AppState> {
 
                 *auth_handle = handle;
 
-                self.send_frame_or_drop(msg)?;
+                self.send_frame_or_queue(msg)?;
 
                 if let Some(v) = tunnel_protocol_version {
                     self.set_tunnel_protocol_version(v)?
@@ -2176,7 +2135,7 @@ impl<AppState: Send> Connection<AppState> {
                 id: er.id,
                 enable: false,
             });
-            return self.send_frame_or_drop(msg);
+            return self.send_frame_or_queue(msg);
         }
 
         if !matches!(self.state, State::Online) {
@@ -2224,7 +2183,7 @@ impl<AppState: Send> Connection<AppState> {
             id: er.id,
             enable: er.enable,
         });
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     /// Process an EncodingResponse packet (Client only)
@@ -2332,7 +2291,7 @@ impl<AppState: Send> Connection<AppState> {
             self.encoding_request_states.id_counter
         );
 
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 
     /// Attempts to retransmit the currently pending encoding request packet. (Client only)
@@ -2402,6 +2361,6 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());
-        self.send_frame_or_drop(msg)
+        self.send_frame_or_queue(msg)
     }
 }

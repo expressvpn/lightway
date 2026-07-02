@@ -2,8 +2,6 @@ pub mod config;
 mod debug;
 #[cfg(desktop)]
 pub mod dns_manager;
-#[cfg(windows)]
-mod ideal_send_backlog;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
@@ -964,16 +962,6 @@ pub async fn connect<
 
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
-
-    // Size the pending send queue from the kernel's ideal send backlog
-    // (Windows TCP only)
-    #[cfg(windows)]
-    if connection_type.is_stream() {
-        tokio::spawn(ideal_send_backlog::monitor_task(
-            Arc::downgrade(&conn),
-            outside_io.clone(),
-        ));
-    }
 
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),

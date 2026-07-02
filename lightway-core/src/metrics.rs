@@ -10,8 +10,6 @@ static METRIC_INSIDE_IO_SEND_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("inside_io_send_failed"));
 static METRIC_SESSION_ID_MISMATCH: LazyLock<Counter> =
     LazyLock::new(|| counter!("session_id_mismatch"));
-static METRIC_TLS_FRAME_DROPPED: LazyLock<Counter> =
-    LazyLock::new(|| counter!("tls_frame_dropped"));
 static METRIC_RECEIVED_ENCODING_REQ_NO_AUTHORIZATION: LazyLock<Counter> =
     LazyLock::new(|| counter!("received_encoding_req_no_authorization"));
 static METRIC_RECEIVED_ENCODING_REQ_NON_ONLINE: LazyLock<Counter> =
@@ -50,11 +48,6 @@ pub(crate) fn inside_io_send_failed(err: std::io::Error) {
 /// Server has received a mismatched session_id in the header after the packet content has been validated
 pub(crate) fn session_id_mismatch() {
     METRIC_SESSION_ID_MISMATCH.increment(1);
-}
-
-/// A frame was dropped because the pending send queue was full
-pub(crate) fn tls_frame_dropped() {
-    METRIC_TLS_FRAME_DROPPED.increment(1);
 }
 
 /// Server received an encoding request when the client does not have authorization to use inside packet encoding
