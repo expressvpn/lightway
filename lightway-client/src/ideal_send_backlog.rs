@@ -30,6 +30,7 @@ fn query_ideal_send_backlog(socket: RawSocket) -> std::io::Result<u32> {
     let mut bytes_returned: u32 = 0;
     // SAFETY: `isb` and `bytes_returned` are live for the duration of the
     // call; no input buffer and no overlapped I/O are used.
+    #[allow(unsafe_code)]
     let ret = unsafe {
         WSAIoctl(
             socket as usize,
