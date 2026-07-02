@@ -3,6 +3,7 @@ use route_manager::{AsyncRouteManager, Route, RouteManager as SyncRouteManager};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -111,6 +112,12 @@ fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
     )
 }
 
+/// Hook invoked after the server route has been refreshed in response to a
+/// network change. Currently used (on macOS) to re-`connect()` the outside UDP
+/// socket so its cached route stays valid; it runs after the routing table
+/// update so the reconnect resolves via the new path.
+pub type NetworkChangeCallback = Arc<dyn Fn() + Send + Sync>;
+
 pub struct RouteManager {
     inner: Option<RouteManagerInner>,
     task: Option<JoinHandle<()>>,
@@ -150,12 +157,13 @@ impl RouteManager {
     pub async fn start(
         &mut self,
         network_change_rx: Option<watch::Receiver<()>>,
+        on_network_change: Option<NetworkChangeCallback>,
     ) -> Result<(), RoutingTableError> {
         let Some(inner) = self.inner.take() else {
             return Err(RoutingTableError::InsufficientPermissions);
         };
 
-        self.task = inner.start(network_change_rx).await?;
+        self.task = inner.start(network_change_rx, on_network_change).await?;
         Ok(())
     }
 
@@ -479,6 +487,7 @@ impl RouteManagerInner {
     async fn start(
         mut self,
         network_change_rx: Option<watch::Receiver<()>>,
+        on_network_change: Option<NetworkChangeCallback>,
     ) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
         if self.routing_mode == RouteMode::NoExec {
             return Ok(None);
@@ -495,6 +504,12 @@ impl RouteManagerInner {
                     while rx.changed().await.is_ok() {
                         if let Err(e) = inner.check_and_update_server_route().await {
                             tracing::warn!("Updating server route failed: {:?}", e);
+                        }
+                        // Refresh anything bound to the previous route (e.g. a
+                        // connected outside socket) now that the routing table
+                        // is up to date.
+                        if let Some(cb) = &on_network_change {
+                            cb();
                         }
                     }
                 }
@@ -979,7 +994,7 @@ mod tests {
             RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
 
         // Test that we can start the route manager
-        let start_result = route_manager.start(None).await;
+        let start_result = route_manager.start(None, None).await;
         if route_mode == RouteMode::NoExec {
             // NoExec mode should succeed but not actually do anything
             assert!(start_result.is_ok());
@@ -1029,10 +1044,10 @@ mod tests {
         .unwrap();
 
         // First start should succeed
-        assert!(route_manager.start(None).await.is_ok());
+        assert!(route_manager.start(None, None).await.is_ok());
 
         // Second start should fail since inner is already taken
-        let second_start_result = route_manager.start(None).await;
+        let second_start_result = route_manager.start(None, None).await;
         assert!(second_start_result.is_err());
         assert!(matches!(
             second_start_result.unwrap_err(),
@@ -1083,7 +1098,7 @@ mod tests {
         .unwrap();
 
         // NoExec mode should return None (no monitoring task)
-        let monitor_task = inner.start(None).await;
+        let monitor_task = inner.start(None, None).await;
         assert!(monitor_task.is_ok());
         assert!(monitor_task.unwrap().is_none());
     }
