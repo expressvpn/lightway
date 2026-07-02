@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
@@ -9,14 +9,13 @@ use tokio::fs::read_to_string;
 use tokio::sync::mpsc;
 
 use lightway_app_utils::{
-    TunConfig, Validate,
-    args::{ConfigFormat, ConnectionType, LogFormat},
+    Validate,
+    args::{ConfigFormat, LogFormat},
     validate_configuration_file_path,
 };
-use lightway_client::{io::inside::InsideIO, *};
+use lightway_client::*;
 
-mod config;
-use config::{Config, ConfigPatch, ConnectionConfig};
+use lightway_client::config::{Config, ConfigPatch};
 
 struct EventHandler;
 
@@ -32,38 +31,6 @@ impl EventCallback for EventHandler {
             _ => {}
         }
     }
-}
-
-async fn make_client_connection_config(
-    mut config: ConnectionConfig,
-) -> Result<ClientConnectionConfig<EventHandler>> {
-    let auth = config.take_auth()?;
-    tracing::info!("Resolving server address: {}", &config.server);
-
-    let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow!("No addresses resolved"))?;
-
-    let mode = match config.mode {
-        ConnectionType::Tcp => ClientConnectionMode::Stream(None),
-        ConnectionType::Udp => ClientConnectionMode::Datagram(None),
-    };
-
-    Ok(ClientConnectionConfig {
-        mode,
-        cipher: config.cipher,
-        server_dn: config.server_dn,
-        server: server_addr,
-        auth,
-        cert_content: config
-            .ca_cert
-            .expect("Should exist, because it is normalized after take_servers()"),
-        inside_plugins: Default::default(),
-        outside_plugins: Default::default(),
-        inside_pkt_codec: None,
-        event_handler: Some(EventHandler),
-    })
 }
 
 #[cfg(windows)]
@@ -152,35 +119,6 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
-    let mut tun_config = TunConfig::default();
-
-    if let Some(ref tun_name) = config.tun_name {
-        tun_config.tun_name(tun_name.clone());
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(ref wintun_file) = config.wintun_file {
-            tun_config.wintun_file(wintun_file);
-        }
-        tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
-    }
-
-    #[cfg(windows)]
-    if let Some(ref device_guid) = config.device_guid {
-        let parsed = uuid::Uuid::parse_str(device_guid)
-            .with_context(|| format!("invalid device GUID: {device_guid}"))?;
-        tracing::info!(device_guid = %parsed, "Setting device GUID");
-        tun_config.device_guid(parsed.as_u128());
-    }
-
-    // TODO: Fix in future PR
-    tun_config
-        .mtu(1350)
-        .address(config.tun_local_ip.into())
-        .destination(config.tun_peer_ip)
-        .up();
-
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
 
     #[cfg(unix)]
@@ -213,9 +151,16 @@ async fn main() -> Result<()> {
     let config_reload_signal =
         spawn_reload_event_handler(&config, config_file.clone(), env_patch, cli_patch);
 
-    let inside_io: Option<Arc<dyn InsideIO<()>>> = None;
     let servers = config.take_servers()?;
-    let conn_confs = join_all(servers.into_iter().map(make_client_connection_config));
+
+    let client_config = lightway_client::ClientConfig::<()>::try_from_reload_sig_and_config(
+        config_reload_signal,
+        config,
+    )?;
+
+    let conn_confs = join_all(servers.into_iter().map(|c| {
+        ClientConnectionConfig::try_from_event_handler_and_connection_config(Some(EventHandler), c)
+    }));
     let conn_confs = tokio::select! {
         results = conn_confs => {
             results.into_iter()
@@ -231,51 +176,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    let config = ClientConfig {
-        outside_mtu: config.outside_mtu,
-        inside_io,
-        tun_config,
-        tun_local_ip: config.tun_local_ip,
-        tun_peer_ip: config.tun_peer_ip,
-        tun_dns_ip: config.tun_dns_ip,
-        #[cfg(feature = "postquantum")]
-        keyshare: config.keyshare,
-        enable_expresslane: config.enable_expresslane,
-        expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
-        expresslane_cb: None,
-        expresslane_metrics: None,
-        keepalive_interval: config.keepalive_interval.into(),
-        keepalive_timeout: config.keepalive_timeout.into(),
-        continuous_keepalive: config.keepalive_continuous,
-        tracer_packet_timeout: config.tracer_packet_timeout.into(),
-        preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
-        sndbuf: config.sndbuf,
-        rcvbuf: config.rcvbuf,
-        #[cfg(batch_receive)]
-        enable_batch_receive: config.enable_batch_receive,
-        #[cfg(desktop)]
-        route_mode: config.route_mode,
-        #[cfg(desktop)]
-        dns_config_mode: config.dns_config_mode,
-        enable_pmtud: config.enable_pmtud,
-        pmtud_base_mtu: config.pmtud_base_mtu,
-        #[cfg(feature = "io-uring")]
-        enable_tun_iouring: config.enable_tun_iouring,
-        #[cfg(feature = "io-uring")]
-        iouring_entry_count: config.iouring_entry_count,
-        #[cfg(feature = "io-uring")]
-        iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-        inside_pkt_codec_config: None,
-        config_reload_signal,
-        network_change_signal: None,
-        best_connection_selected_signal: None,
-        #[cfg(feature = "debug")]
-        tls_debug: config.tls_debug,
-        #[cfg(feature = "debug")]
-        keylog: config.keylog.clone(),
-    };
-
-    client(config, ctrlc_rx, conn_confs).await.map(|_| ())
+    client(client_config, ctrlc_rx, conn_confs)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(any(unix, windows))]
@@ -322,14 +225,6 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 
     if masked != *new {
         tracing::warn!("Non-reloadable config fields changed (requires restart to take effect)");
-    }
-}
-
-impl From<&Config> for ReloadableClientConfig {
-    fn from(config: &Config) -> Self {
-        Self {
-            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
-        }
     }
 }
 

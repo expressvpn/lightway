@@ -133,7 +133,7 @@ run-udp-single-threaded-test:
 
 # run-tcp-single-threaded-test runs e2e test of TCP with server and client using a single Tokio worker thread
 run-tcp-single-threaded-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_TOKIO_WORKER_THREADS=1 --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-pmtud"
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_TOKIO_WORKER_THREADS=1 --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s"
 
 # run-tcp-parallel-connect-test runs e2e test of client connecting to multiple wrong servers and one TCP server
 run-tcp-parallel-connect-test:
