@@ -73,6 +73,15 @@ const TLS_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 
 const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 
+/// Maximum number of frames held in the pending send queue when the
+/// outside I/O would block ([`ConnectionType::Datagram`] only).
+///
+/// ~192 KiB at a 1500 byte MTU, on top of the socket send buffer.
+/// Enough to absorb line-rate bursts while a saturating transfer
+/// (e.g. an Ookla speedtest) ramps up without tail-drop, small
+/// enough to drain quickly and avoid bufferbloat.
+const MAX_TLS_PENDING_QUEUE_PACKETS: usize = 128;
+
 /// Maximum number of retransmissions attempts for lightway frames
 const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 
@@ -1138,18 +1147,24 @@ impl<AppState: Send> Connection<AppState> {
     /// In case I/O would block, queue the frame inside `ConnectionState`
     /// and retry on the next call.
     ///
-    /// Datagram (UDP): the queue is unbounded — there is no transport
-    /// level retransmission, so dropping here would lose the frame.
+    /// Datagram (UDP): up to [`MAX_TLS_PENDING_QUEUE_PACKETS`] frames are
+    /// queued — there is no transport level retransmission, so dropping
+    /// here would lose the frame.
     ///
     /// Stream (TCP): only the in-flight head buffer is retained (the TLS
     /// library requires retrying a blocked write with the same buffer);
     /// further frames are dropped, since the payloads they carry will be
     /// retransmitted by the inner protocols anyway.
     fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
-        if self.connection_type.is_stream() && !self.tls_pending_queue.is_empty() {
+        let queue_limit = match self.connection_type {
+            ConnectionType::Stream => 1,
+            ConnectionType::Datagram => MAX_TLS_PENDING_QUEUE_PACKETS,
+        };
+        if self.tls_pending_queue.len() >= queue_limit {
             warn!(
                 dropped_frame = ?frame.kind(),
-                "Dropping frame: pending packet from previous blocked write takes priority"
+                queued = self.tls_pending_queue.len(),
+                "Dropping frame: pending send queue is full"
             );
         } else {
             let mut buf = BytesMut::new();
