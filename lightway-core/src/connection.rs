@@ -11,6 +11,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
 use rand::distr::{Distribution, StandardUniform};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::net::AddrParseError;
 use std::num::{NonZeroU16, Wrapping};
 use std::{
@@ -404,11 +405,21 @@ pub struct Connection<AppState: Send = ()> {
     /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
     tls_tick_interval: Option<Duration>,
 
-    /// Pending packet to write to the TLS library
+    /// Pending packets to write to the TLS library.
     /// In nonblocking I/O mode, if the underlying I/O could not satisfy the
     /// needs of the TLS write to continue, the api will return WANT_WRITE.
     /// In that case, application has to call the api with same buffer again.
-    tls_pending_pkt: Option<BytesMut>,
+    /// The head of the queue is that in-flight buffer; frames behind it have
+    /// not yet been handed to the TLS library.
+    tls_pending_queue: VecDeque<BytesMut>,
+
+    /// Total bytes currently held in `tls_pending_queue`
+    tls_pending_queue_bytes: usize,
+
+    /// Byte capacity of `tls_pending_queue`. When exceeded, new frames are
+    /// dropped. 0 means only the in-flight head buffer is retained (legacy
+    /// single-pending-packet behaviour).
+    tls_pending_queue_capacity: usize,
 
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
@@ -500,7 +511,9 @@ impl<AppState: Send> Connection<AppState> {
                 last_outside_data_received: now,
             },
             tls_tick_interval: None,
-            tls_pending_pkt: None,
+            tls_pending_queue: VecDeque::new(),
+            tls_pending_queue_bytes: 0,
+            tls_pending_queue_capacity: 0,
             fragment_map: once_cell::unsync::Lazy::new(Box::new(move || {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
@@ -1131,37 +1144,65 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    /// Try to send a frame.
-    /// In case I/O would block, save the frame inside `ConnectionState` .
-    /// and send the frame in next call.
-    fn send_frame_or_drop(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
-        // If there is a packet pending, send it first and drop the current one
-        let mut buf = match self.tls_pending_pkt.take() {
-            None => {
-                let mut buf = BytesMut::new();
-                frame.append_to_wire(&mut buf);
-                buf
-            }
-            Some(buf) => {
-                warn!(
-                    dropped_frame = ?frame.kind(),
-                    "Dropping frame: pending packet from previous blocked write takes priority"
-                );
-                buf
-            }
-        };
+    /// Set the byte capacity of the pending send queue.
+    ///
+    /// Frames which cannot be written because the underlying I/O would
+    /// block are queued up to this many bytes; beyond that new frames
+    /// are dropped. Intended to be driven by the kernel's ideal send
+    /// backlog (e.g. `SIO_IDEAL_SEND_BACKLOG_QUERY` on Windows TCP) so
+    /// the queue provides headroom on top of the socket send buffer
+    /// without bufferbloat.
+    pub fn set_pending_send_queue_capacity(&mut self, bytes: usize) {
+        self.tls_pending_queue_capacity = bytes;
+    }
 
-        match self.session.try_write(&mut buf)? {
-            crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
-                self.tls_pending_pkt = Some(buf);
-                Ok(())
-            }
-            crate::tls::Poll::Ready(_) => Ok(()),
-            crate::tls::Poll::AppData(_) => {
-                metrics::tls_appdata(&self.tls_protocol_version());
-                Ok(())
+    /// Try to send a frame.
+    /// In case I/O would block, queue the frame inside `ConnectionState`
+    /// (up to `tls_pending_queue_capacity` bytes) and retry on the next call.
+    fn send_frame_or_drop(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
+        let mut buf = BytesMut::new();
+        frame.append_to_wire(&mut buf);
+
+        // Always accept when the queue is empty: the head buffer must be
+        // retained anyway to satisfy the TLS retry-with-same-buffer rule.
+        if self.tls_pending_queue.is_empty()
+            || self.tls_pending_queue_bytes + buf.len() <= self.tls_pending_queue_capacity
+        {
+            self.tls_pending_queue_bytes += buf.len();
+            self.tls_pending_queue.push_back(buf);
+        } else {
+            warn!(
+                dropped_frame = ?frame.kind(),
+                queued_bytes = self.tls_pending_queue_bytes,
+                capacity = self.tls_pending_queue_capacity,
+                "Dropping frame: pending send queue is full"
+            );
+            metrics::tls_frame_dropped();
+        }
+
+        while let Some(mut head) = self.tls_pending_queue.pop_front() {
+            self.tls_pending_queue_bytes -= head.len();
+            match self.session.try_write(&mut head)? {
+                crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
+                    self.tls_pending_queue_bytes += head.len();
+                    self.tls_pending_queue.push_front(head);
+                    return Ok(());
+                }
+                // try_write advances the buffer by the number of bytes
+                // written; keep any partially written remainder at the head.
+                crate::tls::Poll::Ready(_) => {
+                    if !head.is_empty() {
+                        self.tls_pending_queue_bytes += head.len();
+                        self.tls_pending_queue.push_front(head);
+                        return Ok(());
+                    }
+                }
+                crate::tls::Poll::AppData(_) => {
+                    metrics::tls_appdata(&self.tls_protocol_version());
+                }
             }
         }
+        Ok(())
     }
 
     /// Start a session ID rotation, returning the pending session id.
