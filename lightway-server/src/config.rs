@@ -1,3 +1,4 @@
+//! Please refer [General Config Design Rationale](/docs/general_config.md)
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
