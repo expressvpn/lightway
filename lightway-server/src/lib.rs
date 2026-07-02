@@ -262,6 +262,67 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     pub randomize_ippool: bool,
 }
 
+impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
+    pub fn try_from_auth_and_config(auth: SA, config: config::Config) -> Result<Self> {
+        config.validate()?;
+
+        let mut tun_config = lightway_app_utils::TunConfig::default();
+        if let Some(tun_name) = config.tun_name {
+            tun_config.tun_name(tun_name);
+        }
+        tun_config.up();
+
+        Ok(crate::ServerConfig {
+            mode: match config.mode {
+                lightway_app_utils::args::ConnectionType::Udp => {
+                    crate::ServerConnectionMode::Datagram(None)
+                }
+                lightway_app_utils::args::ConnectionType::Tcp => {
+                    crate::ServerConnectionMode::Stream(None)
+                }
+            },
+            auth,
+            server_cert: config.server_cert,
+            server_key: config.server_key,
+            tun_config,
+            ip_pool: config.ip_pool,
+            ip_map: config.ip_map.unwrap_or_default().try_into()?,
+            inside_io: None,
+            tun_ip: config.tun_ip,
+            lightway_server_ip: config.lightway_server_ip,
+            lightway_client_ip: config.lightway_client_ip,
+            lightway_dns_ip: config.lightway_dns_ip,
+            use_dynamic_client_ip: false,
+            enable_expresslane: config.enable_expresslane,
+            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            expresslane_cb: None,
+            expresslane_metrics: None,
+            event_cb: None,
+            enable_pqc: config.enable_pqc,
+            #[cfg(target_os = "linux")]
+            enable_tun_offload: config.enable_tun_offload,
+            #[cfg(feature = "io-uring")]
+            enable_tun_iouring: config.enable_tun_iouring,
+            #[cfg(feature = "io-uring")]
+            iouring_entry_count: config.iouring_entry_count,
+            #[cfg(feature = "io-uring")]
+            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            key_update_interval: config.key_update_interval.into(),
+            connection_age_expiration_interval: config.connection_age_expiration_interval.into(),
+            statistics_reporting_interval: config.statistics_reporting_interval.into(),
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            inside_pkt_codec: None,
+            bind_address: config.bind_address,
+            proxy_protocol: config.proxy_protocol,
+            udp_buffer_size: config.udp_buffer_size,
+            enable_batch_receive: config.enable_batch_receive,
+            #[cfg(feature = "debug")]
+            randomize_ippool: config.randomize_ippool,
+        })
+    }
+}
+
 pub(crate) fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionResult<()>) {
     match result {
         Ok(()) => {}

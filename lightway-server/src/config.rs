@@ -225,3 +225,50 @@ impl Default for Config {
         }
     }
 }
+
+impl Config {
+    /// Ensure the config is validated, and alerted when there's a conflict in the settings.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.enable_expresslane {
+            anyhow::ensure!(self.mode.is_udp(), "Expresslane only work in udp mode")
+        }
+
+        if self.proxy_protocol {
+            anyhow::ensure!(
+                self.mode.is_tcp(),
+                "Proxy protocol only support with tcp mode"
+            )
+        }
+
+        Ok(())
+    }
+}
+
+// Note it easier to see what is different from default in each testcase
+#[allow(clippy::field_reassign_with_default)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_default_config() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_enable_expresslane() {
+        let mut config = Config::default();
+        config.mode = ConnectionType::Tcp;
+        config.enable_expresslane = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_proxy_protocol() {
+        let mut config = Config::default();
+        config.mode = ConnectionType::Udp;
+        config.proxy_protocol = true;
+        assert!(config.validate().is_err());
+    }
+}
