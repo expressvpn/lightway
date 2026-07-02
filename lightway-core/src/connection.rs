@@ -1136,11 +1136,26 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Try to send a frame.
     /// In case I/O would block, queue the frame inside `ConnectionState`
-    /// and retry on the next call. The queue is unbounded.
+    /// and retry on the next call.
+    ///
+    /// Datagram (UDP): the queue is unbounded — there is no transport
+    /// level retransmission, so dropping here would lose the frame.
+    ///
+    /// Stream (TCP): only the in-flight head buffer is retained (the TLS
+    /// library requires retrying a blocked write with the same buffer);
+    /// further frames are dropped, since the payloads they carry will be
+    /// retransmitted by the inner protocols anyway.
     fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
-        let mut buf = BytesMut::new();
-        frame.append_to_wire(&mut buf);
-        self.tls_pending_queue.push_back(buf);
+        if self.connection_type.is_stream() && !self.tls_pending_queue.is_empty() {
+            warn!(
+                dropped_frame = ?frame.kind(),
+                "Dropping frame: pending packet from previous blocked write takes priority"
+            );
+        } else {
+            let mut buf = BytesMut::new();
+            frame.append_to_wire(&mut buf);
+            self.tls_pending_queue.push_back(buf);
+        }
 
         while let Some(mut head) = self.tls_pending_queue.pop_front() {
             match self.session.try_write(&mut head)? {
