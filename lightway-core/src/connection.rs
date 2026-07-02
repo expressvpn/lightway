@@ -1142,7 +1142,13 @@ impl<AppState: Send> Connection<AppState> {
                 frame.append_to_wire(&mut buf);
                 buf
             }
-            Some(buf) => buf,
+            Some(buf) => {
+                warn!(
+                    dropped_frame = ?frame.kind(),
+                    "Dropping frame: pending packet from previous blocked write takes priority"
+                );
+                buf
+            }
         };
 
         match self.session.try_write(&mut buf)? {
