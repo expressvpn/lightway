@@ -32,7 +32,7 @@ use crate::{
     metrics,
     packet_codec::{CodecStatus, PacketDecoderType, PacketEncoderType},
     plugin::PluginList,
-    utils::tcp_clamp_mss,
+    utils::{ipv4_is_tcp, tcp_clamp_mss},
     wire::{self, AuthMethod},
 };
 use crate::{
@@ -74,7 +74,7 @@ const TLS_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 
 /// Maximum number of frames held in the pending send queue when the
-/// outside I/O would block ([`ConnectionType::Datagram`] only).
+/// outside I/O would block (frames not carrying inner TCP packets).
 ///
 /// ~192 KiB at a 1500 byte MTU, on top of the socket send buffer.
 /// Enough to absorb line-rate bursts while a saturating transfer
@@ -1147,18 +1147,19 @@ impl<AppState: Send> Connection<AppState> {
     /// In case I/O would block, queue the frame inside `ConnectionState`
     /// and retry on the next call.
     ///
-    /// Datagram (UDP): up to [`MAX_TLS_PENDING_QUEUE_PACKETS`] frames are
-    /// queued — there is no transport level retransmission, so dropping
-    /// here would lose the frame.
+    /// Frames carrying an inner TCP packet: only the in-flight head
+    /// buffer is retained (the TLS library requires retrying a blocked
+    /// write with the same buffer); further frames are dropped, since
+    /// the inner TCP will retransmit the payloads anyway.
     ///
-    /// Stream (TCP): only the in-flight head buffer is retained (the TLS
-    /// library requires retrying a blocked write with the same buffer);
-    /// further frames are dropped, since the payloads they carry will be
-    /// retransmitted by the inner protocols anyway.
+    /// Everything else (inner UDP packets, control frames): up to
+    /// [`MAX_TLS_PENDING_QUEUE_PACKETS`] frames are queued — nothing
+    /// retransmits these, so dropping here would lose the frame.
     fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
-        let queue_limit = match self.connection_type {
-            ConnectionType::Stream => 1,
-            ConnectionType::Datagram => MAX_TLS_PENDING_QUEUE_PACKETS,
+        let queue_limit = match &frame {
+            wire::Frame::Data(d) if ipv4_is_tcp(d.data.as_ref()) => 1,
+            wire::Frame::DataFrag(f) if f.offset == 0 && ipv4_is_tcp(f.data.as_ref()) => 1,
+            _ => MAX_TLS_PENDING_QUEUE_PACKETS,
         };
         if self.tls_pending_queue.len() >= queue_limit {
             warn!(
