@@ -9,6 +9,11 @@ use std::net::Ipv4Addr;
 use std::ops;
 use tracing::warn;
 
+pub(crate) fn ipv4_is_tcp(buf: &[u8]) -> bool {
+    pnet_packet::ipv4::Ipv4Packet::new(buf)
+        .is_some_and(|p| p.get_next_level_protocol() == IpNextHeaderProtocols::Tcp)
+}
+
 pub(crate) fn ipv4_is_valid_packet(buf: &[u8]) -> bool {
     if buf.is_empty() {
         return false;
