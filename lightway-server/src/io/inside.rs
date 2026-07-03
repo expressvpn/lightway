@@ -15,6 +15,10 @@ pub trait InsideIORecv: Sync + Send {
 
     /// Receive a GSO superpacket into `buf`.
     ///
+    /// The default implementation returns `Unsupported`, for inside
+    /// IO backends that don't provide GSO reads. Backends that do
+    /// must uphold the contract below.
+    ///
     /// Implementations write into `buf.spare_capacity_mut()` so the
     /// caller can reuse one allocation across iterations with no
     /// zero-init cost. On `Ok((n, hdr))`, the virtio header has been
@@ -28,7 +32,12 @@ pub trait InsideIORecv: Sync + Send {
     /// itself fails to decode (each cause is logged + metered
     /// inside the impl). Returns `Err` on IO errors.
     #[cfg(target_os = "linux")]
-    async fn recv_gso(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<(usize, VirtioNetHdr)>;
+    async fn recv_gso(
+        &self,
+        _buf: &mut bytes::BytesMut,
+    ) -> IOCallbackResult<(usize, VirtioNetHdr)> {
+        IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
 
     fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState>;
 }
