@@ -85,11 +85,14 @@ fn send_to_socket(
             }
         }
 
-        // If cmsg_len is 0, the kernel will never read cmsg.
-        let msghdr = MsgHdr::new()
-            .with_addr(peer_addr)
-            .with_buffers(bufs)
-            .with_control(&cmsg.as_ref()[..cmsg_len]);
+        // Only attach control data when present: macOS rejects a
+        // non-null msg_control paired with msg_controllen == 0.
+        let msghdr = MsgHdr::new().with_addr(peer_addr).with_buffers(bufs);
+        let msghdr = if cmsg_len > 0 {
+            msghdr.with_control(&cmsg.as_ref()[..cmsg_len])
+        } else {
+            msghdr
+        };
 
         sock.sendmsg(&msghdr, 0)
     });
