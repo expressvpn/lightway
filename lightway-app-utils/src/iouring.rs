@@ -104,9 +104,13 @@ impl<T: AsRawFd> IOUring<T> {
     /// to `out`. Waits only when the rx queue is empty; when packets
     /// are already queued it returns what is immediately available.
     pub async fn recv_many(&self, out: &mut Vec<BytesMut>, max: usize) -> IOUringResult<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
         let n = self.rx_queue.lock().await.recv_many(out, max).await;
         if n == 0 {
-            // recv_many returns 0 only when the channel is closed.
+            // With max > 0, recv_many returns 0 only when the channel
+            // is closed.
             return Err(IOUringError::RecvError);
         }
         Ok(n)
