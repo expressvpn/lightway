@@ -1,9 +1,10 @@
+use crate::connection::ConnectionState;
+#[cfg(linux)]
+use crate::io::inside::InsideIORecvGso;
 use crate::{
     io::inside::{InsideIO, InsideIORecv},
     metrics,
 };
-
-use crate::connection::ConnectionState;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -55,7 +56,23 @@ impl InsideIORecv for Tun {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(linux)]
+    fn as_gso(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvGso>> {
+        if self.0.supports_gso() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+        self
+    }
+}
+
+#[cfg(linux)]
+#[async_trait]
+impl InsideIORecvGso for Tun {
     async fn recv_gso(&self, buf: &mut BytesMut) -> IOCallbackResult<(usize, VirtioNetHdr)> {
         match self.0.recv_gso(buf).await {
             IOCallbackResult::Ok((n, hdr)) => {
@@ -67,10 +84,6 @@ impl InsideIORecv for Tun {
             IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
             IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
         }
-    }
-
-    fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
-        self
     }
 }
 
