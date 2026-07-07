@@ -170,6 +170,13 @@ impl<const N: usize> BufferMut<N> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Mutable view of the raw buffer, for passing to `msg_control` in
+    /// syscalls that need a mutable pointer.
+    #[cfg(linux)]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
 }
 
 impl<const N: usize> AsRef<[u8]> for BufferMut<N> {

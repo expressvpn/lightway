@@ -1,5 +1,6 @@
 mod batch_receive;
 mod cmsg;
+pub(crate) mod send_queue;
 
 use anyhow::Result;
 use async_trait::async_trait;

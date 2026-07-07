@@ -57,6 +57,12 @@ static METRIC_UDP_RECV_INVALID_ADDR: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_recv_invalid_addr"));
 static METRIC_UDP_RECV_MISSING_PKTINFO: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_recv_missing_pktinfo"));
+static METRIC_UDP_SEND_BATCH_SIZE: LazyLock<Histogram> =
+    LazyLock::new(|| histogram!("udp_send_batch_size"));
+static METRIC_UDP_SEND_BATCH_DROPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_dropped"));
+static METRIC_UDP_SEND_BATCH_BLOCKED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_blocked"));
 
 // Connection performance
 static METRIC_TO_LINK_UP_TIME: LazyLock<Histogram> =
@@ -289,6 +295,23 @@ pub(crate) fn udp_recv_invalid_addr() {
 
 pub(crate) fn udp_recv_missing_pktinfo() {
     METRIC_UDP_RECV_MISSING_PKTINFO.increment(1);
+}
+
+/// Number of datagrams flushed by one send-batch window. Windows that
+/// queued nothing are not recorded.
+pub(crate) fn udp_send_batch_flush(sz: usize) {
+    METRIC_UDP_SEND_BATCH_SIZE.record(sz as f64);
+}
+
+/// Datagrams dropped because a batched flush could not send them.
+pub(crate) fn udp_send_batch_dropped(count: usize) {
+    METRIC_UDP_SEND_BATCH_DROPPED.increment(count as u64);
+}
+
+/// A batched flush found the socket send buffer full and waited for
+/// writability before continuing.
+pub(crate) fn udp_send_batch_blocked() {
+    METRIC_UDP_SEND_BATCH_BLOCKED.increment(1);
 }
 
 /// Fatal TLS error for [`lightway_core::Connection`].
