@@ -46,6 +46,8 @@ use tokio::{
 use tracing::info;
 
 pub use crate::connection::ConnectionState;
+#[cfg(linux)]
+pub use crate::io::inside::InsideIORecvGso;
 pub use crate::io::inside::{InsideIO, InsideIORecv};
 
 use crate::ip_manager::IpManager;
@@ -383,7 +385,7 @@ async fn inside_io_loop_default(
 
 #[cfg(target_os = "linux")]
 async fn inside_io_loop_gso(
-    inside_io: Arc<dyn InsideIO>,
+    inside_io: Arc<dyn crate::io::inside::InsideIORecvGso>,
     ip_manager: Arc<IpManager<Arc<Connection>>>,
     lightway_client_ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
@@ -584,8 +586,11 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         if gso {
             #[cfg(target_os = "linux")]
             {
+                let gso_io = inside_io.clone().as_gso().context(
+                    "enable_tun_offload is set but the inside IO backend does not support GSO offload",
+                )?;
                 tokio::spawn(inside_io_loop_gso(
-                    inside_io,
+                    gso_io,
                     ip_manager.clone(),
                     config.lightway_client_ip,
                 ))
