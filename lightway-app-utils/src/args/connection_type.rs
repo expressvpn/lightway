@@ -19,9 +19,14 @@ pub enum ConnectionType {
 }
 
 impl ConnectionType {
-    /// A helper function easier to use especially in mobile
+    #[allow(missing_docs)]
     pub fn is_tcp(&self) -> bool {
         *self == ConnectionType::Tcp
+    }
+
+    #[allow(missing_docs)]
+    pub fn is_udp(&self) -> bool {
+        *self == ConnectionType::Udp
     }
 }
 
