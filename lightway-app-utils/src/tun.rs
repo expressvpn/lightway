@@ -337,6 +337,17 @@ impl Tun {
         }
     }
 
+    /// Whether this Tun supports GSO reads/writes. Only the direct
+    /// backend, opened with [`TunConfig::offload`], does.
+    #[cfg(linux)]
+    pub fn supports_gso(&self) -> bool {
+        match self {
+            Tun::Direct(t) => t.supports_gso(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => false,
+        }
+    }
+
     /// Send a packet to `Tun`
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         match self {
@@ -540,6 +551,13 @@ impl TunDirect {
     /// MTU of Tun
     pub fn mtu(&self) -> usize {
         self.mtu as usize
+    }
+
+    /// Whether this device was opened with offload (`IFF_VNET_HDR`), so
+    /// reads and writes carry a `virtio_net_hdr`.
+    #[cfg(linux)]
+    pub fn supports_gso(&self) -> bool {
+        self.vnet_hdr
     }
 
     /// Interface index of Tun
