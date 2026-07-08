@@ -391,19 +391,36 @@ impl Config {
 
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
     pub fn validate(&self) -> anyhow::Result<()> {
+        let mut all_servers: Vec<(&str, ConnectionType)> = self
+            .servers
+            .iter()
+            .map(|s| (s.server.as_str(), s.mode))
+            .collect();
+        if !self.server.is_empty() {
+            all_servers.push((self.server.as_str(), self.mode));
+        }
+
         #[cfg(not(macos))]
         if self.sndbuf != DEFAULT_SNDBUF {
-            anyhow::ensure!(
-                self.mode.is_udp(),
-                "Cannot be applied sndbuf; this is preserved in the kernel for autotuning purposes."
-            )
+            for (server, mode) in &all_servers {
+                if mode.is_tcp() {
+                    tracing::warn!(
+                        server,
+                        "sndbuf is set but cannot be applied to this TCP connections"
+                    );
+                }
+            }
         }
         #[cfg(not(macos))]
         if self.rcvbuf != DEFAULT_RCVBUF {
-            anyhow::ensure!(
-                self.mode.is_udp(),
-                "Cannot be applied rcvbuf; this is preserved in the kernel for autotuning purposes."
-            )
+            for (server, mode) in &all_servers {
+                if mode.is_tcp() {
+                    tracing::warn!(
+                        server,
+                        "rcvbuf is set but cannot be applied to this TCP connections"
+                    );
+                }
+            }
         }
         #[cfg(windows)]
         if let Some(guid) = &self.device_guid {
@@ -413,10 +430,14 @@ impl Config {
             );
         }
         if self.enable_pmtud {
-            anyhow::ensure!(
-                self.mode.is_udp(),
-                "enable_pmtud is only supported for UDP connections"
-            );
+            for (server, mode) in &all_servers {
+                if mode.is_tcp() {
+                    tracing::warn!(
+                        server,
+                        "enable_pmtud is set but cannot be applied to this TCP connections"
+                    );
+                }
+            }
         }
         #[cfg(windows)]
         anyhow::ensure!(
@@ -760,21 +781,33 @@ mod tests {
     }
 
     #[cfg(not(macos))]
+    #[tracing_test::traced_test]
     #[test]
-    fn validate_sndbuf_on_tcp_mode() {
+    fn validate_sndbuf_on_tcp_server() {
         let mut config = Config::default();
+        config.server = "127.0.0.1:27690".to_string();
         config.mode = ConnectionType::Tcp;
         config.sndbuf = ByteSize::mib(16);
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
+        assert!(logs_contain(
+            "sndbuf is set but cannot be applied to this TCP connections"
+        ));
+        assert!(logs_contain("127.0.0.1:27690"));
     }
 
     #[cfg(not(macos))]
+    #[tracing_test::traced_test]
     #[test]
-    fn validate_rcvbuf_on_tcp_mode() {
+    fn validate_rcvbuf_on_tcp_server() {
         let mut config = Config::default();
+        config.server = "127.0.0.1:27690".to_string();
         config.mode = ConnectionType::Tcp;
         config.rcvbuf = ByteSize::mib(16);
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
+        assert!(logs_contain(
+            "rcvbuf is set but cannot be applied to this TCP connections"
+        ));
+        assert!(logs_contain("127.0.0.1:27690"));
     }
 
     #[cfg(windows)]
@@ -787,12 +820,18 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[tracing_test::traced_test]
     #[test]
-    fn validate_pmtud_on_tcp_mode() {
+    fn validate_pmtud_on_tcp_server() {
         let mut config = Config::default();
+        config.server = "127.0.0.1:27690".to_string();
         config.enable_pmtud = true;
         config.mode = ConnectionType::Tcp;
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
+        assert!(logs_contain(
+            "enable_pmtud is set but cannot be applied to this TCP connections"
+        ));
+        assert!(logs_contain("127.0.0.1:27690"));
     }
 
     #[cfg(windows)]
