@@ -1914,7 +1914,9 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn expresslane_ready(&self) -> bool {
-        self.expresslane_supported() && matches!(self.expresslane.state, ExpresslaneState::Active)
+        self.expresslane_supported()
+            && matches!(self.expresslane.state, ExpresslaneState::Active)
+            && self.expresslane.data.has_valid_keys()
     }
 
     /// Set the expresslane state and emit the event if the state has changed.
