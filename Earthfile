@@ -166,4 +166,4 @@ lint:
 # check-dependencies lints our dependencies via `cargo deny`
 check-dependencies:
     FROM +source
-    DO lib-rust+CARGO --args="deny --all-features check --deny warnings bans license sources"
+    DO lib-rust+CARGO --args="deny --all-features check --deny warnings bans licenses sources"
