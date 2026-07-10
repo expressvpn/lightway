@@ -15,7 +15,6 @@ pub struct SessionConfig<IOCB> {
     /// CN/SAN does not match this domain name. This is critical for security.
     pub checked_domain_name: Option<String>,
     /// SNI (Server Name Indication) sent to server.
-    /// If not set but checked_domain_name is set, SNI will default to checked_domain_name.
     pub server_name_indication: Option<String>,
     /// Per-session client key share group preference. If set on a client
     /// session and the group is post-quantum, registers a precomputed key
@@ -63,8 +62,7 @@ impl<IOCB> SessionConfig<IOCB> {
     /// (`X509_VERIFY_PARAM_set1_host`); the handshake fails if the cert's
     /// SAN/CN doesn't match. This is the hostname-verification control: without
     /// it the chain is still verified but any valid cert from any host is
-    /// accepted, which is a security downgrade for a client. SNI defaults to
-    /// this domain when `with_sni` is unset.
+    /// accepted, which is a security downgrade for a client.
     pub fn with_checked_domain_name(mut self, domain: &str) -> Self {
         self.checked_domain_name = Some(domain.to_string());
         self
