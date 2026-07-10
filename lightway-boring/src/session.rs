@@ -133,10 +133,6 @@ where
         // Set SNI (Server Name Indication) separately from verification
         if let Some(ref sni) = config.server_name_indication {
             ssl.set_hostname(sni)?;
-        } else if let Some(ref domain) = config.checked_domain_name {
-            // If no explicit SNI is set but we have a domain to verify,
-            // send that domain as SNI as well (common practice)
-            ssl.set_hostname(domain)?;
         }
 
         // Configure key share group if specified
@@ -474,9 +470,12 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::mock::{
-        MockIOAdapter, UdpIOCallbacks, make_connected_dtls_pair, make_connected_tls_pair,
+        MockIOAdapter, TcpIOCallbacks, UdpIOCallbacks, make_connected_dtls_pair,
+        make_connected_tls_pair,
     };
-    use crate::{ContextBuilder, CurveGroup, Method, Poll, SessionConfig};
+    use crate::{
+        ContextBuilder, CurveGroup, IOCallbackResult, IOCallbacks, Method, Poll, SessionConfig,
+    };
     use std::time::Duration;
 
     #[test]
@@ -794,5 +793,48 @@ mod tests {
                     .unwrap_or_else(|e| panic!("Session creation failed for {:?}: {}", group, e));
             }
         }
+    }
+
+    /// Check that the SNI should remain empty even if domain name is given.
+    /// In other words, do not default the SNI to domain name even if the SNI is not explictly given.
+    ///
+    /// This is done to match wolfssl's default behaviour. Not matching the 2 lib behaviour would allow
+    /// a easier detection of wolfssl and boringssl backends.
+    #[test]
+    fn test_domain_name_is_not_sent_as_sni() {
+        // Build a client session with the given config and capture the raw
+        // ClientHello bytes it emits on the first negotiate step.
+        let capture_client_hello =
+            |config_fn: &dyn Fn(SessionConfig<TcpIOCallbacks>) -> SessionConfig<TcpIOCallbacks>| {
+                let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+                let (client_io, mut peer_io) = TcpIOCallbacks::pair();
+                let mut session = ctx
+                    .new_session(config_fn(SessionConfig::new(client_io)))
+                    .unwrap();
+                let _ = session.try_negotiate();
+
+                let mut wire = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let IOCallbackResult::Ok(n) = peer_io.recv(&mut buf) {
+                    wire.extend_from_slice(&buf[..n]);
+                }
+                assert!(!wire.is_empty(), "no ClientHello captured");
+                wire
+            };
+
+        let domain = b"example.com";
+        let contains = |wire: &[u8]| wire.windows(domain.len()).any(|w| w == domain);
+
+        let wire = capture_client_hello(&|c| c.with_sni("example.com"));
+        assert!(
+            contains(&wire),
+            "explicitly configured SNI missing from the ClientHello"
+        );
+
+        let wire = capture_client_hello(&|c| c.with_checked_domain_name("example.com"));
+        assert!(
+            !contains(&wire),
+            "checked_domain_name leaked into the ClientHello as SNI"
+        );
     }
 }
