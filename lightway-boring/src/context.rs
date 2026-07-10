@@ -20,6 +20,7 @@ use boring::pkey::PKey;
 use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
+use zeroize::Zeroizing;
 
 use super::config::SessionConfig;
 use super::session::Session;
@@ -146,13 +147,15 @@ impl ContextBuilder {
 
     /// Load a private key into the SSL context immediately.
     pub fn with_private_key(mut self, key: Secret) -> Result<Self> {
-        let data = read_secret(key)?;
-
-        // Try DER first, fallback to PEM
-        let pkey = match PKey::private_key_from_der(&data) {
-            Ok(k) => k,
-            Err(_) => PKey::private_key_from_pem(&data).map_err(TlsError::BoringSSL)?,
+        let pkey = {
+            let data = read_secret(key)?;
+            // Try DER first, fallback to PEM
+            match PKey::private_key_from_der(&data) {
+                Ok(k) => k,
+                Err(_) => PKey::private_key_from_pem(&data).map_err(TlsError::BoringSSL)?,
+            }
         };
+
         self.builder
             .set_private_key(&pkey)
             .map_err(TlsError::BoringSSL)?;
@@ -162,13 +165,15 @@ impl ContextBuilder {
 
     /// Load a certificate into the SSL context immediately.
     pub fn with_certificate(mut self, cert: Secret) -> Result<Self> {
-        let data = read_secret(cert)?;
-
-        // Try DER first, fallback to PEM
-        let x509 = match X509::from_der(&data) {
-            Ok(c) => c,
-            Err(_) => X509::from_pem(&data).map_err(TlsError::BoringSSL)?,
+        let x509 = {
+            let data = read_secret(cert)?;
+            // Try DER first, fallback to PEM
+            match X509::from_der(&data) {
+                Ok(c) => c,
+                Err(_) => X509::from_pem(&data).map_err(TlsError::BoringSSL)?,
+            }
         };
+
         self.builder
             .set_certificate(&x509)
             .map_err(TlsError::BoringSSL)?;
@@ -248,10 +253,12 @@ impl ContextBuilder {
 }
 
 /// Read bytes from a Secret enum variant.
-fn read_secret(secret: Secret) -> std::result::Result<Vec<u8>, TlsError> {
+fn read_secret(secret: Secret) -> std::result::Result<Zeroizing<Vec<u8>>, TlsError> {
     match secret {
-        Secret::Asn1Buffer(buf) | Secret::PemBuffer(buf) => Ok(buf.to_vec()),
-        Secret::Asn1File(path) | Secret::PemFile(path) => std::fs::read(path).map_err(TlsError::Io),
+        Secret::Asn1Buffer(buf) | Secret::PemBuffer(buf) => Ok(Zeroizing::new(buf.to_vec())),
+        Secret::Asn1File(path) | Secret::PemFile(path) => std::fs::read(path)
+            .map(Zeroizing::new)
+            .map_err(TlsError::Io),
     }
 }
 

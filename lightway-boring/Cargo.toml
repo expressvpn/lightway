@@ -18,3 +18,4 @@ foreign-types = "0.5"
 libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+zeroize = "1.9.0"
