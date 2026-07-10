@@ -360,8 +360,10 @@ impl ExpresslaneData {
     }
 
     pub(crate) fn update_self_key(&mut self) {
-        self.current_self = self.next_self.take();
-        debug!("Updating expresslane self keys: {:?}", self);
+        if let Some(next) = self.next_self.take() {
+            self.current_self = Some(next);
+            debug!("Updating expresslane self keys: {:?}", self);
+        }
     }
 
     pub(crate) fn update_peer_key(&mut self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
