@@ -32,7 +32,7 @@ Identical to the CLI client flow, but all parameters use `SERVER` keywords — e
 
 ```mermaid
 flowchart TB
-    clientFn("client(config)")
+    clientFn("client(ClientConfig,...)")
     E0@{ shape: paper-tape, label: "SchemaFile" } --> A0
     0 -. "JsonSchema" .-> E0
     0 -. "Serialize" .-> E1
@@ -62,7 +62,7 @@ flowchart TB
     end
 
     0.1 -. "Deserialize" .-> 2
-    6 ==> clientFn
+    6 == "Config Lifecycle Methods" ==> clientFn
 ```
 
 ### Design Principles
@@ -107,6 +107,34 @@ fn client(config: Config) {
     let tun = Tun::new(android_only_field);
 }
 ```
+
+### Config Lifecycle Methods
+
+After the config is fully determined (step 6), three methods bridge it into the client runtime. `validate()` and `take_servers()` are methods on `Config`; `try_from_reload_sig_and_config()` is a constructor on `ClientConfig`.
+
+Typical call site order in `main.rs`:
+
+```rust
+config.validate()?;                             // fail fast before logging or other setup
+let servers = config.take_servers()?;           // normalize servers, transfer ownership
+let client_config = ClientConfig::<()>::try_from_reload_sig_and_config(
+    config_reload_signal,
+    config,
+)?;
+// servers and client_config are then used independently
+```
+
+#### `validate()`
+
+Checks the fully determined `Config` for conflicts and invalid values (mismatched socket-buffer or PMTUD settings on TCP, invalid Windows TUN parameters). Called independently in `main.rs` as the first step after config is determined, so validation fails fast before any further setup (logging, server normalization, runtime construction).
+
+#### `take_servers()`
+
+Must be called **before** constructing `ClientConfig`. It normalizes the config's flexible server representation — promoting single-server top-level fields, resolving CA certificates, and propagating auth credentials — and transfers ownership of the resulting `Vec<ConnectionConfig>` out of `Config`. All downstream consumers work against a uniform server list regardless of how the original config was expressed.
+
+#### `try_from_reload_sig_and_config()`
+
+The canonical constructor for `ClientConfig`. It consumes `config` (after `validate()` and `take_servers()` have been called), builds `TunConfig`, and wires up the optional `config_reload_signal` for hot-reload support.
 
 ---
 
