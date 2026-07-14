@@ -143,6 +143,8 @@ pub struct BestConnectionInfo {
     pub index: usize,
     /// Details about the established outside connection (socket type + peer).
     pub connection: ConnectionInfo,
+    /// Inside IP configuration assigned by the server to the selected connection
+    pub ip_config: InsideIpConfig,
 }
 
 #[derive(educe::Educe)]
@@ -1438,15 +1440,24 @@ pub async fn client<
         .unwrap();
     let (_, mut connection) = connections.swap_remove(pos);
 
-    if let Some(signal) = config.best_connection_selected_signal.take()
-        && signal
+    if let Some(signal) = config.best_connection_selected_signal.take() {
+        let ip_config = connection
+            .conn
+            .lock()
+            .unwrap()
+            .app_state()
+            .ip_config
+            .expect("selected connection is Online, so ip_config is set");
+        if signal
             .send(BestConnectionInfo {
                 index: best_connection_index,
                 connection: connection.outside_connection_info(),
+                ip_config,
             })
             .is_err()
-    {
-        tracing::error!("Failed to send best_connection_selected_signal");
+        {
+            tracing::error!("Failed to send best_connection_selected_signal");
+        }
     }
 
     for (_, conn) in connections.iter_mut() {
