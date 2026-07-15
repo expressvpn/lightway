@@ -841,7 +841,7 @@ async fn config_reload_task(
 }
 
 /// Represents a connection to a server. When dropped, the route table will be removed.
-pub struct ClientConnection<T: Send + Sync> {
+pub struct CliConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
@@ -857,7 +857,7 @@ pub struct ClientConnection<T: Send + Sync> {
     dns_manager: Option<DnsManager>,
 }
 
-impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
+impl<ExtAppState: Send + Sync> CliConnection<ExtAppState> {
     /// Returns details about the established outside connection.
     #[cfg(desktop)]
     pub fn outside_connection_info(&self) -> ConnectionInfo {
@@ -937,7 +937,7 @@ pub async fn connect<
     config: &ClientConfig<ExtAppState>,
     server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
-) -> Result<ClientConnection<ExtAppState>> {
+) -> Result<CliConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
     let ClientConnectionConfig {
         mode,
@@ -1176,7 +1176,7 @@ pub async fn connect<
         result
     });
 
-    Ok(ClientConnection {
+    Ok(CliConnection {
         task,
         conn,
         inside_io,
