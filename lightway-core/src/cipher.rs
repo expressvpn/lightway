@@ -149,4 +149,109 @@ mod tests {
             ]
         );
     }
+
+    fn parse_client_hello_supported_groups(wire: &[u8]) -> Option<Vec<u16>> {
+        if wire.len() < 5 || wire[0] != 22 {
+            return None;
+        }
+        let ch = wire.get(9..)?; // skip record(5) + handshake(4) headers
+
+        // Walk to the extensions block.
+        let mut off = 2 + 32; // legacy_version + random
+        let sid_len = *ch.get(off)? as usize;
+        off += 1 + sid_len;
+        let cs_len = ((*ch.get(off)? as usize) << 8) | (*ch.get(off + 1)? as usize);
+        off += 2 + cs_len;
+        let comp_len = *ch.get(off)? as usize;
+        off += 1 + comp_len;
+        let ext_total = ((*ch.get(off)? as usize) << 8) | (*ch.get(off + 1)? as usize);
+        off += 2;
+        let ext_end = off + ext_total;
+        while off + 4 <= ext_end {
+            let ext_type = ((*ch.get(off)? as usize) << 8) | (*ch.get(off + 1)? as usize);
+            let ext_len = ((*ch.get(off + 2)? as usize) << 8) | (*ch.get(off + 3)? as usize);
+            let data = ch.get(off + 4..off + 4 + ext_len)?;
+            if ext_type == 0x000a {
+                // supported_groups: 2-byte list length prefix, then 2-byte ids.
+                return Some(
+                    data.get(2..)?
+                        .chunks_exact(2)
+                        .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
+                        .collect(),
+                );
+            }
+            off += 4 + ext_len;
+        }
+        None
+    }
+
+    #[test]
+    fn ensure_supported_group_list() {
+        let ctx = crate::tls::ContextBuilder::new(crate::tls::Method::TlsClientV1_3)
+            .unwrap()
+            .build();
+        let mut session = ctx
+            .new_session(crate::tls::SessionConfig::new(CaptureIO {
+                sent: Vec::new(),
+            }))
+            .unwrap();
+        let _ = session.try_negotiate();
+        let wire = &session.io_cb().sent;
+        let groups = parse_client_hello_supported_groups(wire)
+            .expect("captured bytes were not a well-formed ClientHello");
+
+        // Classical list can be found here:
+        // https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml
+
+        // Notice that the supported groups mapping is expressed in base-10 in the docs for classical algo,
+        // we will also use that here.
+
+        // PQ List can be found here:
+        // https://github.com/open-quantum-safe/oqs-provider/blob/main/ALGORITHMS.md
+
+        // The PQ list mapping is expressed in base-16, we will use base-16 for PQ algo here.
+
+        #[cfg(boringssl)]
+        assert_eq!(
+            groups,
+            vec![
+                0x11ec, // X25519MLKEM768
+                0xfe32, // X25519Kyber768Draft00 (legacy hybrid, boring default)
+                0x001d, // x25519
+                0x0017, // secp256r1
+                0x0018, // secp384r1
+            ]
+        );
+
+        #[cfg(wolfssl)]
+        assert_eq!(
+            groups,
+            vec![
+                4588,   // X25519MLKEM768
+                4589,   // SecP384r1MLKEM1024
+                4587,   // SecP256r1MLKEM768
+                25,     // secp521r1
+                24,     // secp384r1
+                23,     // secp256r1
+                29,     // x25519
+                21,     // secp224r1
+                0x2f4d, // p521_mlkem1024
+                0x2f49, // Unknown
+                0x2f4c, // p384_mlkem768
+                0x2f48, // Unknown
+                0x2f4b, // p256_mlkem512
+                0x2f47, // Unknown
+                0x2fb6, // x25519_mlkem512
+                0x023d, // kyber1024
+                0x2f3d, // p521_kyber1024
+                0x023c, // kyber768 (from wireshark)
+                0x2f3c, // p38_kyber1024 (from wireshark)
+                0x639a, // SecP256r1Kyber768Draft00 (from wireshark)
+                0x6399, // X25519Kyber768Draft00 (from wireshark)
+                0x023a, // kyber512 (from wireshark)
+                0x2f3a, // p256_kyber512 (from wireshark)
+                0x2f39, // Unknown
+            ]
+        );
+    }
 }
