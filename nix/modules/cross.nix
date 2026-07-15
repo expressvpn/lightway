@@ -4,6 +4,7 @@
     {
       lib,
       pkgs,
+      pkgsDarwinX64,
       system,
       rustLatest,
       ...
@@ -58,9 +59,11 @@
         };
       }
       // lib.optionalAttrs (system == "aarch64-darwin") {
-        # Cross-compile from Apple Silicon to Intel Mac
+        # Cross-compile from Apple Silicon to Intel Mac.
+        # nixpkgs 26.11 dropped x86_64-darwin, so this target sources pkgsCross from
+        # the pinned 26.05 darwin nixpkgs (pkgsDarwinX64) instead of the main pkgs.
         x86_64-darwin = {
-          pkgsCross = pkgs.pkgsCross.x86_64-darwin;
+          pkgsCross = pkgsDarwinX64.pkgsCross.x86_64-darwin;
           rustTarget = "x86_64-apple-darwin";
           isStatic = false;
           arch = "x86_64";
