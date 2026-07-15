@@ -1,14 +1,14 @@
 use crate::config::{Config, ConnectionConfig};
 use crate::io::outside::OutsideIO;
-use crate::keepalive::{Keepalive, KeepaliveResult};
+use crate::keepalive::Keepalive;
 use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
-    ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
+    ClientIpConfigCb, ClientResult, ConnectionState, MobileConnection, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,
 };
 use futures::StreamExt;
-use futures::future::{FutureExt, OptionFuture, select_all};
+use futures::future::{FutureExt, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
 use lightway_app_utils::{
     ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
@@ -537,17 +537,6 @@ async fn cleanup_connections(
     info!("Cleaned up unused connections");
 }
 
-struct MobileConnection {
-    conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    outside_io_task: JoinHandle<uniffi::Result<()>>,
-    new_outside_io_sender: MpscSender<()>,
-    keepalive: Keepalive,
-    keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
-    keepalive_config: KeepaliveConfig,
-    join_set: JoinSet<()>,
-    instance_id: usize,
-    expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
-}
 
 struct LightwayClientConnectArgs {
     instance_id: usize,

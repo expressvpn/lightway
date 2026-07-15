@@ -45,6 +45,10 @@ use crate::keepalive::Config as KeepaliveConfig;
 use crate::route_manager::{RouteManager, RouteMode};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
+#[cfg(feature = "mobile")]
+use futures::future::OptionFuture;
+#[cfg(feature = "mobile")]
+use keepalive::KeepaliveResult;
 pub use lightway_core::{
     AuthMethod, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU,
     PluginFactoryError, PluginFactoryList, RootCertificate, Version,
@@ -919,6 +923,19 @@ impl<ExtAppState: Send + Sync> CliConnection<ExtAppState> {
             self.inside_io.clone().into_io_send_callback();
         self.conn.lock().unwrap().inside_io(inside_io);
     }
+}
+
+#[cfg(feature = "mobile")]
+pub(crate) struct MobileConnection {
+    pub(crate) conn: Arc<Mutex<Connection<ConnectionState<Option<Arc<io::inside::Tun>>>>>>,
+    pub(crate) outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub(crate) new_outside_io_sender: mpsc::Sender<()>,
+    pub(crate) keepalive: Keepalive,
+    pub(crate) keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub(crate) keepalive_config: KeepaliveConfig,
+    pub(crate) join_set: JoinSet<()>,
+    pub(crate) instance_id: usize,
+    pub(crate) expresslane_event_rx: Option<mpsc::Receiver<mobile::ExpresslaneState>>,
 }
 
 #[tracing::instrument(
