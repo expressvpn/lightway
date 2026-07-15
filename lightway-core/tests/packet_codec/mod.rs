@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub(crate) struct TestPacketCodecFactory {}
 
 impl PacketCodecFactory for TestPacketCodecFactory {
