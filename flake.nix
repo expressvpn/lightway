@@ -3,6 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    # nixpkgs 26.11 dropped x86_64-darwin (Intel Mac) support. Pin the 26.05 stable
+    # darwin branch and use it only for the x86_64-darwin cross target (see cross.nix).
+    nixpkgs-darwin-x64.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay.url = "github:oxalica/rust-overlay";
     treefmt-nix.url = "github:numtide/treefmt-nix";
@@ -44,6 +47,13 @@
             ];
             config.allowUnfree = true;
             config.android_sdk.accept_license = true;
+          };
+
+          # nixpkgs pinned to 26.05 for the x86_64-darwin cross target only.
+          # Lazily evaluated - only forced by cross.nix when building on aarch64-darwin.
+          _module.args.pkgsDarwinX64 = import inputs.nixpkgs-darwin-x64 {
+            inherit system;
+            config.allowUnfree = true;
           };
 
           # Convenience aliases for native packages
