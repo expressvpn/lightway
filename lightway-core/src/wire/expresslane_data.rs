@@ -136,7 +136,7 @@ type ExpresslaneResult<T> = Result<T, ExpresslaneError>;
 ///
 /// Tracks received packet counters to detect and prevent replay attacks
 /// while handling out-of-order packet delivery typical in UDP.
-/// Uses a 2048-bit bitmap (32 x u64) to tolerate significant packet
+/// Uses an 8192-bit bitmap (128 x u64) to tolerate significant packet
 /// reordering under high-throughput conditions.
 #[derive(Debug, Clone)]
 struct ReplayWindow {
@@ -165,8 +165,8 @@ impl Default for ReplayWindow {
 
 impl ReplayWindow {
     /// Number of u64 blocks in the bitmap
-    const NUM_BLOCKS: usize = 32;
-    /// Window size in packets (32 * 64 = 2048)
+    const NUM_BLOCKS: usize = 128;
+    /// Window size in packets (128 * 64 = 8192)
     const WINDOW_SIZE: u64 = (Self::NUM_BLOCKS as u64) * 64;
 
     /// Set a bit at the given position in the bitmap
@@ -798,12 +798,12 @@ mod tests {
     fn replay_window_rejects_too_old_packets() {
         let mut window = ReplayWindow::default();
         assert!(window.commit(100));
-        assert!(window.commit(3000)); // Advance window past 2048
-        // Packet 100 is now outside the window (3000 - 2048 = 952)
+        assert!(window.commit(10000)); // Advance window past 8192
+        // Packet 100 is now outside the window (10000 - 8192 = 1808)
         assert!(!window.commit(100));
-        assert!(!window.commit(951));
+        assert!(!window.commit(1808));
         // But packets within window should work
-        assert!(window.commit(953));
+        assert!(window.commit(1809));
         assert_eq!(window.packets_received, 3);
     }
 
@@ -812,8 +812,8 @@ mod tests {
         let mut window = ReplayWindow::default();
         assert!(window.commit(100));
         // Jump way ahead (> window size)
-        assert!(window.commit(3000));
-        assert_eq!(window.max_counter, 3000);
+        assert!(window.commit(10000));
+        assert_eq!(window.max_counter, 10000);
         // Old packets should be rejected
         assert!(!window.commit(100));
         assert_eq!(window.packets_received, 2);
