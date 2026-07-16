@@ -4,19 +4,16 @@ use crate::keepalive::Keepalive;
 use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
-    ClientIpConfigCb, ClientResult, ConnectionState, MobileConnection, inside_io_task, io,
+    ClientResult, ConnectionState, Connect, MobileConnection, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,
 };
 use futures::StreamExt;
 use futures::future::{FutureExt, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
-use lightway_app_utils::{
-    ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
-    connection_ticker_cb,
-};
+use lightway_app_utils::{EventStream, EventStreamCallback, TunConfig};
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType, Event,
-    EventCallback, IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
+    BuilderPredicates, Connection, ConnectionError, ConnectionType, Event, EventCallback,
+    IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -584,62 +581,16 @@ async fn lightway_client_connect(
         builder.build(&mut outside_plugins).await?
     };
 
+    // Copy fields before borrowing connect_conf for the CA cert.
+    let cipher = connect_conf.cipher;
+    let outside_mtu = connect_conf.outside_mtu;
+    let mode = connect_conf.mode;
     let root_ca_cert = connect_conf.load_ca()?;
 
-    let inside_io = MobileInsideIo {
-        mtu: INTERNAL_MTU as usize,
-    };
     let inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync> =
-        Arc::new(inside_io);
-
-    let (event_cb, event_stream) = EventStreamCallback::new();
-
-    let (ticker, ticker_task) = ConnectionTicker::new();
-    let state: ConnectionState<TunnelState> = ConnectionState {
-        ticker,
-        ip_config: None,
-        extended: None,
-    };
-    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
-
-    let ConnectionConfig {
-        cipher,
-        outside_mtu,
-        mode,
-        ..
-    } = connect_conf;
-
-    let conn_builder = ClientContextBuilder::new(
-        connection_type,
-        root_ca_cert,
-        Some(inside_io),
-        Arc::new(ClientIpConfigCb),
-        connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
-    .with_inside_plugins(inside_plugins)
-    .with_outside_plugins(outside_plugins)
-    .when(connection_type.is_datagram() && enable_expresslane, |b| {
-        b.with_expresslane(expresslane_keys_rotation_interval)
-    })
-    .build()
-    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
-    .with_auth(auth)
-    .with_event_cb(Box::new(event_cb))
-    .when(server_dn.is_some(), |b| {
-        b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
-    })
-    .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
-    .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
-        b.with_pmtud_timer(pmtud_timer)
-    });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(true, |b| {
-        b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
-    });
-
-    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
+        Arc::new(MobileInsideIo {
+            mtu: INTERNAL_MTU as usize,
+        });
 
     let keepalive_config = KeepaliveConfig {
         interval: Duration::new(2, 0),
@@ -647,8 +598,43 @@ async fn lightway_client_connect(
         continuous: enable_keepalive,
         tracer_trigger_timeout: Some(Duration::from_secs(10)),
     };
-    let (keepalive, keepalive_task) =
-        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    let Connect {
+        conn,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        event_stream,
+        ticker_task,
+        pmtud_timer_task,
+    } = crate::establish(
+        connection_type,
+        outside_io.clone(),
+        root_ca_cert,
+        Some(inside_io),
+        cipher,
+        inside_plugins,
+        outside_plugins,
+        auth,
+        outside_mtu,
+        server_dn,
+        ENABLE_PMTUD,
+        keepalive_config,
+        |ctx| {
+            ctx.when(connection_type.is_datagram() && enable_expresslane, |b| {
+                b.with_expresslane(expresslane_keys_rotation_interval)
+            })
+        },
+        |conn_builder| {
+            let conn_builder =
+                conn_builder.when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header));
+            #[cfg(feature = "postquantum")]
+            let conn_builder = conn_builder.when(true, |b| {
+                b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
+            });
+            conn_builder
+        },
+    )?;
 
     let notify_keepalive_reply = Arc::new(Notify::new());
     let (expresslane_event_tx, expresslane_event_rx) = if enable_expresslane && !mode.is_tcp() {
