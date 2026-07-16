@@ -1164,6 +1164,16 @@ pub async fn connect<
             let _ = disconnected_rx.await;
         } else {
             tracing::warn!("Connection task ended:\n{:?}", result);
+            // On fatal errors (e.g. keepalive timeout) the connection is torn
+            // down without going through the user-initiated stop path, so
+            // event handlers would never observe a terminal state. Disconnect
+            // explicitly — goodbye/shutdown inside disconnect() are
+            // best-effort on a dead link — and wait for the Disconnected
+            // event to flush through the event stream before aborting tasks.
+            let disconnected = stop_conn.lock().unwrap().disconnect().is_ok();
+            if disconnected {
+                let _ = disconnected_rx.await;
+            }
         }
 
         outside_io_loop.abort();
