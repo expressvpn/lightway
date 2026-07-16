@@ -4,7 +4,7 @@ use crate::keepalive::Keepalive;
 use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
-    ClientResult, ConnectionState, Connect, MobileConnection, inside_io_task, io,
+    ClientResult, ClientConnection, ConnectionState, Connect, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,
 };
 use futures::StreamExt;
@@ -220,7 +220,7 @@ pub(crate) async fn async_lightway_start(
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
                 })
-                .instrument(info_span!("MobileConnection", instance_id = instance_id)),
+                .instrument(info_span!("ClientConnection", instance_id = instance_id)),
             );
             (task.abort_handle(), task)
         })
@@ -241,8 +241,8 @@ pub(crate) async fn async_lightway_start(
     // Drop the last sender
     drop(online_signal_sender);
 
-    let mut non_preferred_connections: Vec<(usize, MobileConnection)> = Vec::new();
-    let mut pending_online_connections: HashMap<usize, MobileConnection> =
+    let mut non_preferred_connections: Vec<(usize, ClientConnection)> = Vec::new();
+    let mut pending_online_connections: HashMap<usize, ClientConnection> =
         HashMap::with_capacity(server_len);
     let mut failed_connections = 0usize;
     let mut connection_error_to_return = None;
@@ -251,7 +251,7 @@ pub(crate) async fn async_lightway_start(
     let active_connection = loop {
         tokio::select! {
             // Prioritise management commands over other branches, also make sure we add
-            // MobileConnection to HashMap first to make sure when it goes online,
+            // ClientConnection to HashMap first to make sure when it goes online,
             // we can remove it from the HashMap and break the loop.
             biased;
             _ = futures::future::ready(()), if failed_connections == server_len => {
@@ -307,7 +307,7 @@ pub(crate) async fn async_lightway_start(
                     info!("Deferring connection {}", instance_id);
                     non_preferred_connections.push((instance_id, connection));
                 } else {
-                    warn!(?instance_id, "Cannot find MobileConnection");
+                    warn!(?instance_id, "Cannot find ClientConnection");
                 }
             },
 
@@ -355,7 +355,7 @@ pub(crate) async fn async_lightway_start(
             .collect(),
     ));
 
-    let MobileConnection {
+    let ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,
@@ -496,7 +496,7 @@ async fn restartable_outside_io_task(
 }
 
 fn first_outside_io_exit(
-    connections: &mut HashMap<usize, MobileConnection>,
+    connections: &mut HashMap<usize, ClientConnection>,
 ) -> impl Future<Output = (usize, Result<uniffi::Result<()>, tokio::task::JoinError>)> + '_ {
     if connections.is_empty() {
         return futures::future::Either::Left(std::future::pending());
@@ -513,7 +513,7 @@ fn first_outside_io_exit(
 
 async fn cleanup_connections(
     in_progress_connections_abort_handle: Vec<AbortHandle>,
-    completed_connections: Vec<MobileConnection>,
+    completed_connections: Vec<ClientConnection>,
 ) {
     for conn in in_progress_connections_abort_handle {
         if !conn.is_finished() {
@@ -562,7 +562,7 @@ async fn lightway_client_connect(
         event_stream_handler,
         external_event_handler,
     }: LightwayClientConnectArgs,
-) -> uniffi::Result<MobileConnection> {
+) -> uniffi::Result<ClientConnection> {
     let mut join_set = JoinSet::new();
 
     // TODO: Should be strong type error
@@ -675,7 +675,7 @@ async fn lightway_client_connect(
         .in_current_span(),
     );
 
-    Ok(MobileConnection {
+    Ok(ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,

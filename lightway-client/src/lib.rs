@@ -935,8 +935,63 @@ where
     })
 }
 
+#[cfg(not(feature = "mobile"))]
+impl<T: Default + Send + Sync + 'static> Connect<T> {
+    pub(crate) fn into_client_connect(
+        self,
+        task: JoinHandle<anyhow::Result<ClientResult>>,
+        inside_io: Arc<dyn io::inside::InsideIO<T>>,
+        #[cfg(desktop)] outside_io: Arc<dyn io::outside::OutsideIO>,
+        connected_signal: Option<oneshot::Receiver<()>>,
+        stop_signal: Option<oneshot::Sender<()>>,
+        network_change_signal: mpsc::Sender<()>,
+        encoding_request_signal: mpsc::Sender<bool>,
+    ) -> ClientConnection<T> {
+        ClientConnection {
+            task,
+            conn: self.conn,
+            inside_io,
+            #[cfg(desktop)]
+            outside_io,
+            connected_signal,
+            stop_signal,
+            network_change_signal,
+            encoding_request_signal,
+            #[cfg(desktop)]
+            route_manager: None,
+            #[cfg(desktop)]
+            dns_manager: None,
+        }
+    }
+}
+
+#[cfg(feature = "mobile")]
+impl Connect<Option<Arc<io::inside::Tun>>> {
+    pub(crate) fn into_client_connect(
+        self,
+        outside_io_task: JoinHandle<uniffi::Result<()>>,
+        new_outside_io_sender: mpsc::Sender<()>,
+        join_set: JoinSet<()>,
+        instance_id: usize,
+        expresslane_event_rx: Option<mpsc::Receiver<mobile::ExpresslaneState>>,
+    ) -> ClientConnection {
+        ClientConnection {
+            conn: self.conn,
+            outside_io_task,
+            new_outside_io_sender,
+            keepalive: self.keepalive,
+            keepalive_task: self.keepalive_task,
+            keepalive_config: self.keepalive_config,
+            join_set,
+            instance_id,
+            expresslane_event_rx,
+        }
+    }
+}
+
 /// Represents a connection to a server. When dropped, the route table will be removed.
-pub struct CliConnection<T: Send + Sync> {
+#[cfg(not(feature = "mobile"))]
+pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
     inside_io: Arc<dyn io::inside::InsideIO<T>>,
@@ -952,7 +1007,8 @@ pub struct CliConnection<T: Send + Sync> {
     dns_manager: Option<DnsManager>,
 }
 
-impl<ExtAppState: Send + Sync> CliConnection<ExtAppState> {
+#[cfg(not(feature = "mobile"))]
+impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     /// Returns details about the established outside connection.
     #[cfg(desktop)]
     pub fn outside_connection_info(&self) -> ConnectionInfo {
@@ -1017,7 +1073,7 @@ impl<ExtAppState: Send + Sync> CliConnection<ExtAppState> {
 }
 
 #[cfg(feature = "mobile")]
-pub(crate) struct MobileConnection {
+pub(crate) struct ClientConnection {
     pub(crate) conn: Arc<Mutex<Connection<ConnectionState<Option<Arc<io::inside::Tun>>>>>>,
     pub(crate) outside_io_task: JoinHandle<uniffi::Result<()>>,
     pub(crate) new_outside_io_sender: mpsc::Sender<()>,
@@ -1045,7 +1101,7 @@ pub async fn connect<
     config: &ClientConfig<ExtAppState>,
     server_config: ClientConnectionConfig<EventHandler>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
-) -> Result<CliConnection<ExtAppState>> {
+) -> Result<ClientConnection<ExtAppState>> {
     let mut join_set = JoinSet::new();
     let ClientConnectionConfig {
         mode,
@@ -1272,7 +1328,7 @@ pub async fn connect<
         result
     });
 
-    Ok(CliConnection {
+    Ok(ClientConnection {
         task,
         conn,
         inside_io,
