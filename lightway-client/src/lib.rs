@@ -1164,6 +1164,17 @@ pub async fn connect<
             let _ = disconnected_rx.await;
         } else {
             tracing::warn!("Connection task ended:\n{:?}", result);
+            // Teardown on an error exit (keepalive timeout, I/O loop exit,
+            // ticker stop, ...) must still tear down the connection the same
+            // way a user-initiated stop does: drive the state machine to
+            // Disconnected (emitting StateChanged events) and make a
+            // best-effort attempt to notify the peer with a Goodbye frame.
+            // Without this the connection task just aborts its I/O tasks,
+            // leaving no Disconnecting/Disconnected transition. `disconnect()`
+            // is a no-op if the connection never reached a connected state.
+            if let Ok(mut conn) = stop_conn.lock() {
+                let _ = conn.disconnect();
+            }
         }
 
         outside_io_loop.abort();
