@@ -2,6 +2,8 @@
 #![warn(missing_docs)]
 
 pub mod args;
+#[cfg(unix)]
+pub mod cmsg;
 #[cfg(apple)]
 pub mod recvmsg_x;
 pub mod sockopt;

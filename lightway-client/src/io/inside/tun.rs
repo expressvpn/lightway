@@ -8,11 +8,15 @@ use bytes::BytesMut;
 use pnet_packet::ipv4::Ipv4Packet;
 
 use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
+#[cfg(linux)]
+use lightway_core::VirtioNetHdr;
 use lightway_core::{
     IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, InsideIpConfig,
     ipv4_update_destination, ipv4_update_source,
 };
 
+#[cfg(linux)]
+use crate::io::inside::InsideIORecvGso;
 use crate::{ConnectionState, io::inside::InsideIORecv};
 
 pub struct Tun {
@@ -78,10 +82,27 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         self.tun.mtu()
     }
 
+    #[cfg(linux)]
+    fn as_gso(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvGso<ExtAppState>>> {
+        if self.tun.supports_gso() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn into_io_send_callback(
         self: Arc<Self>,
     ) -> InsideIOSendCallbackArg<ConnectionState<ExtAppState>> {
         self
+    }
+}
+
+#[cfg(linux)]
+#[async_trait]
+impl<ExtAppState: Send + Sync> InsideIORecvGso<ExtAppState> for Tun {
+    async fn recv_gso(&self, buf: &mut BytesMut) -> IOCallbackResult<(usize, VirtioNetHdr)> {
+        self.tun.recv_gso(buf).await
     }
 }
 

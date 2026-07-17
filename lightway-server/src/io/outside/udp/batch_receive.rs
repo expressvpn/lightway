@@ -6,8 +6,8 @@
 //!   `0.0.0.0`). Fills source address and a caller-provided control buffer in
 //!   addition to the data.
 
-use crate::io::outside::udp::cmsg;
-use crate::io::outside::udp::cmsg::LibcControlLen;
+use lightway_app_utils::cmsg;
+use lightway_app_utils::cmsg::LibcControlLen;
 use bytes::BytesMut;
 use lightway_core::MAX_IO_BATCH_SIZE;
 use std::io;
@@ -158,7 +158,7 @@ pub(crate) fn recv_multiple_with_metadata<const CONTROL_SIZE: usize>(
 
 #[cfg(macos)]
 mod apple {
-    use crate::io::outside::udp::cmsg::LibcControlLen;
+    use lightway_app_utils::cmsg::LibcControlLen;
     use lightway_app_utils::recvmsg_x::{msghdr_x, recvmsg_x};
     use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::{io, mem};
@@ -201,7 +201,7 @@ mod apple {
                 hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_control = control.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
                     hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }
@@ -249,7 +249,7 @@ mod apple {
 
 #[cfg(linux)]
 mod linux {
-    use crate::io::outside::udp::cmsg::LibcControlLen;
+    use lightway_app_utils::cmsg::LibcControlLen;
     use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::{io, mem};
 
@@ -291,7 +291,7 @@ mod linux {
                 hdr.msg_hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdr.msg_hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_hdr.msg_control = control.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
                     hdr.msg_hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }

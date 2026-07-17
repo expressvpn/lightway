@@ -18,6 +18,8 @@ use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
+#[cfg(linux)]
+pub use io::inside::InsideIORecvGso;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -229,6 +231,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Base MTU for PMTU discovery
     pub pmtud_base_mtu: Option<u16>,
 
+    /// Enable TUN offload (GSO) for batch packet processing.
+    /// Only effective on Linux; ignored elsewhere.
+    pub enable_tun_offload: bool,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -336,6 +342,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
             pmtud_base_mtu: config.pmtud_base_mtu,
+            enable_tun_offload: config.enable_tun_offload,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -673,6 +680,123 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
 
             match conn.inside_data_received(&mut buf) {
+                Ok(()) => conn.activity().last_outside_data_received,
+                Err(ConnectionError::PluginDropWithReply(reply)) => {
+                    // Send the reply packet to inside path
+                    let _ = inside_io.try_send(reply, ip_config);
+                    continue;
+                }
+                Err(ConnectionError::InvalidState) => {
+                    // Ignore the packet till the connection is online
+                    continue;
+                }
+                Err(ConnectionError::InvalidInsidePacket(_)) => {
+                    // Ignore invalid inside packet
+                    continue;
+                }
+                Err(err) => {
+                    // Fatal error
+                    return Err(err.into());
+                }
+            }
+        };
+
+        let now = Instant::now();
+        let duration_since_last_outside_data = now.duration_since(last_outside_data_received);
+
+        if !tracer_trigger_timeout.is_zero()
+            && duration_since_last_outside_data > tracer_trigger_timeout
+            && tracer_timeout_last_outside_data_rcvd.is_none_or(|x| x != last_outside_data_received)
+        {
+            {
+                tracer_timeout_last_outside_data_rcvd = Some(last_outside_data_received);
+                keepalive.tracer_delta_exceeded().await;
+            }
+        }
+    }
+}
+
+/// An async function to handle all the inside traffic when TUN offload
+/// (GSO) is enabled.
+///
+/// Mirrors [`inside_io_task`], but reads (potentially oversized) GSO
+/// superpackets from the TUN and forwards each aggregate via
+/// `Connection::inside_data_received_gso`, which segments it in
+/// userspace, encrypts each segment and ships the whole batch as a
+/// single `sendmsg(UDP_SEGMENT)`.
+#[cfg(linux)]
+pub async fn inside_io_task_gso<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    inside_io: Arc<dyn io::inside::InsideIORecvGso<ExtAppState>>,
+    tun_dns_ip: Ipv4Addr,
+    keepalive: Keepalive,
+    keepalive_config: KeepaliveConfig,
+) -> Result<()> {
+    use lightway_core::gso::{
+        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN,
+        gso_none_checksum,
+    };
+
+    let tracer_trigger_timeout = if keepalive_config.continuous {
+        Duration::ZERO
+    } else {
+        keepalive_config
+            .tracer_trigger_timeout
+            .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
+    };
+    let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
+
+    // Receive buffer reused across iterations. `recv_gso` writes
+    // directly into the spare capacity (no zero-init pass); on success
+    // the virtio header has already been parsed and stripped, so `buf`
+    // holds exactly the IP superpacket. `clear()` + `reserve()` at the
+    // top of the loop compacts the window back to the start of the
+    // backing slab without a memcpy (len is 0).
+    let initial_cap = VIRTIO_NET_HDR_LEN + 65535;
+    let mut buf = BytesMut::with_capacity(initial_cap);
+    loop {
+        buf.clear();
+        buf.reserve(initial_cap);
+        let (_, hdr) = match inside_io.recv_gso(&mut buf).await {
+            IOCallbackResult::Ok(pair) => pair,
+            IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
+            IOCallbackResult::Err(err) => {
+                // Fatal error
+                return Err(err.into());
+            }
+        };
+
+        // With checksum offload the kernel hands us packets whose
+        // transport checksum is only the pseudo-header partial sum;
+        // finish it before the packet enters the pipeline.
+        if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+            gso_none_checksum(buf.as_mut(), hdr.csum_start, hdr.csum_offset);
+        }
+
+        let last_outside_data_received = {
+            let mut conn = conn.lock().unwrap();
+
+            // Update source IP address to server assigned IP address
+            let ip_config = conn.app_state().ip_config;
+            if let Some(ip_config) = &ip_config {
+                ipv4_update_source(buf.as_mut(), ip_config.client_ip);
+
+                // Update TUN device DNS IP address to server provided DNS address
+                let packet = Ipv4Packet::new(buf.as_ref());
+                if let Some(packet) = packet
+                    && packet.get_destination() == tun_dns_ip
+                {
+                    ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
+                };
+            }
+
+            let result = if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+                conn.inside_data_received(&mut buf)
+            } else {
+                conn.inside_data_received_gso(&mut buf, &hdr)
+            };
+
+            match result {
                 Ok(()) => conn.activity().last_outside_data_received,
                 Err(ConnectionError::PluginDropWithReply(reply)) => {
                     // Send the reply packet to inside path
@@ -1099,13 +1223,38 @@ pub async fn connect<
         None,
     ));
 
-    let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(inside_io_task(
-        conn.clone(),
-        inside_io.clone(),
-        config.tun_dns_ip,
-        keepalive.clone(),
-        keepalive_config,
-    ));
+    let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = {
+        #[cfg(linux)]
+        let gso = config.enable_tun_offload;
+        #[cfg(not(linux))]
+        let gso = false;
+
+        if gso {
+            #[cfg(linux)]
+            {
+                let gso_io = inside_io.clone().as_gso().context(
+                    "enable_tun_offload is set but the inside IO backend does not support GSO offload",
+                )?;
+                tokio::spawn(inside_io_task_gso(
+                    conn.clone(),
+                    gso_io,
+                    config.tun_dns_ip,
+                    keepalive.clone(),
+                    keepalive_config,
+                ))
+            }
+            #[cfg(not(linux))]
+            unreachable!()
+        } else {
+            tokio::spawn(inside_io_task(
+                conn.clone(),
+                inside_io.clone(),
+                config.tun_dns_ip,
+                keepalive.clone(),
+                keepalive_config,
+            ))
+        }
+    };
 
     let (network_change_tx, network_change_rx) = tokio::sync::mpsc::channel(1);
     let mut network_change_task = tokio::spawn(handle_network_change(
@@ -1369,6 +1518,11 @@ pub async fn client<
     );
 
     validate_client_config(&config, &conn_confs)?;
+
+    #[cfg(linux)]
+    if config.enable_tun_offload {
+        config.tun_config.offload = true;
+    }
 
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),
