@@ -63,6 +63,8 @@ static METRIC_UDP_SEND_BATCH_DROPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_send_batch_dropped"));
 static METRIC_UDP_SEND_BATCH_BLOCKED: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_send_batch_blocked"));
+static METRIC_UDP_SEND_BATCH_MISSED_FLUSH: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_missed_flush"));
 
 // Connection performance
 static METRIC_TO_LINK_UP_TIME: LazyLock<Histogram> =
@@ -314,6 +316,12 @@ pub(crate) fn udp_send_batch_dropped(count: usize) {
 /// writability before continuing.
 pub(crate) fn udp_send_batch_blocked() {
     METRIC_UDP_SEND_BATCH_BLOCKED.increment(1);
+}
+
+/// A send-batch window was closed by the guard's drop fallback instead
+/// of an explicit flush, indicating a code path that misses the flush.
+pub(crate) fn udp_send_batch_missed_flush() {
+    METRIC_UDP_SEND_BATCH_MISSED_FLUSH.increment(1);
 }
 
 /// Fatal TLS error for [`lightway_core::Connection`].

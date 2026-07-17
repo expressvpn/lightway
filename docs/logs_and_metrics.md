@@ -69,6 +69,11 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | tun_rejected_packet_no_connection | server | Counter | Counts packets received on the TUN device for which there is no corresponding connection |
 | tun_from_client | server | Counter | Counts bytes sent on the TUN interface (i.e. which is data coming from a client) |
 | tun_to_client | server | Counter | Counts bytes received on the TUN interface (i.e which is data going to a client) |
+| tun_recv_batch_size | server | Histogram | Number of packets returned by one batched inside-IO receive. Only recorded when `--enable-batch-send` is active |
+| udp_send_batch_size | server | Histogram | Number of datagrams flushed by one send-batch window. Windows that queued nothing are not recorded. Only recorded when `--enable-batch-send` is active |
+| udp_send_batch_blocked | server | Counter | Counts batched flushes that found the socket send buffer full and waited for writability before continuing |
+| udp_send_batch_dropped | server | Counter | Counts datagrams dropped because a batched flush could not send them |
+| udp_send_batch_missed_flush | server | Counter | Counts send-batch windows that were closed by the guard's drop fallback instead of an explicit flush.<br><br>Should generally be expected to be 0 |
 | sessions_current_online | server | Gauge | The number of connections which are currently in the Online state |
 | sessions_lifetime_total | server | Gauge | The total number of connections which have been created over the entire lifetime of the server |
 | sessions_pending_id_rotations | server | Gauge | The number of connections for which a session ID rotation is in progress |

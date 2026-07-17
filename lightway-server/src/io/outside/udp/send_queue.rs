@@ -116,6 +116,7 @@ impl Drop for SendBatchGuard {
         // takes the queue and leaves None here.
         let msgs = self.queue.queue.lock().unwrap().take();
         let Some(msgs) = msgs else { return };
+        metrics::udp_send_batch_missed_flush();
         if !msgs.is_empty() {
             metrics::udp_send_batch_flush(msgs.len());
             flush_best_effort(&self.queue.sock, &msgs);
