@@ -128,48 +128,194 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
 
     // Read the kernel-deposited pseudo-header partial, then zero the
     // field so it doesn't double-count when we sum the segment.
-    let initial = read_u16(&buf[at..at + 2]) as u64;
+    let partial = u16::from_be_bytes([buf[at], buf[at + 1]]);
     buf[at] = 0;
     buf[at + 1] = 0;
 
-    let csum = !checksum(&buf[start..], initial);
-    buf[at] = (csum >> 8) as u8;
-    buf[at + 1] = csum as u8;
+    let sum = checksum_accumulate(&buf[start..]) + seed_from_be(partial);
+    let csum = fold_checksum_u64(sum);
+    buf[at..at + 2].copy_from_slice(&csum.to_be_bytes());
 }
 
-// Internet checksum used only by `gso_none_checksum` below — the
-// build_segment path uses pnet_packet's protocol-aware helpers.
+// ---------------------------------------------------------------------------
+// Fast Internet checksum (RFC 1071) primitives.
+//
+// The checksum is defined over 16-bit big-endian words, but one's-complement
+// addition commutes with a byte swap: swapping the bytes of the folded sum
+// of native-endian words gives the same result as folding the sum of
+// big-endian words. The hot loops below therefore use plain unaligned
+// native-endian loads with no per-word byte swap; `fold_checksum_u64`
+// applies the single final swap.
+
+/// Accumulate the one's-complement sum of `data` using native-endian loads.
+///
+/// Returns the raw 64-bit sum — not folded and not complemented. On
+/// little-endian targets the sum is in byte-swapped form; only
+/// [`fold_checksum_u64`] converts it back to the big-endian domain, so all
+/// values added into one accumulation must be in the native-endian domain
+/// (see [`seed_from_be`] for seeding with a big-endian partial).
+///
+/// Dispatches to an AVX2 path at runtime on x86_64, otherwise uses a
+/// 4-accumulator scalar path for instruction-level parallelism.
 #[inline]
-fn read_u16(b: &[u8]) -> u16 {
-    u16::from_be_bytes(b[..2].try_into().unwrap())
+fn checksum_accumulate(data: &[u8]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability was verified at runtime just above,
+        // satisfying `checksum_avx2`'s only precondition.
+        #[allow(unsafe_code)]
+        return unsafe { checksum_avx2(data) };
+    }
+    checksum_scalar(data)
 }
 
-// One's-complement folded checksum with a kernel-seeded initial value.
-// The inner loop unrolls to read 8 bytes per iteration; on x86_64
-// release LLVM auto-vectorizes the resulting straight-line code.
+/// AVX2 accumulation: 32 bytes per iteration into two 4-lane u64 vectors
+/// (sums of the low and high u32 halves of each 64-bit word), then reduced
+/// to a scalar and finished with [`checksum_tail`].
+///
+/// Lane overflow: each iteration adds at most `u32::MAX` per lane, and a
+/// packet is at most 64 KiB (2048 iterations), so a lane peaks around
+/// 2^43 — far below `u64::MAX`.
+///
+/// # Safety
+///
+/// The caller must ensure the CPU supports AVX2
+/// (e.g. via `is_x86_feature_detected!("avx2")`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn checksum_avx2(data: &[u8]) -> u64 {
+    use std::arch::x86_64::*;
+
+    let mask32 = _mm256_set1_epi64x(0xFFFF_FFFF);
+    let mut alo = _mm256_setzero_si256(); // sums of low u32 halves, 4 lanes
+    let mut ahi = _mm256_setzero_si256(); // sums of high u32 halves, 4 lanes
+    let mut b = data;
+
+    while b.len() >= 32 {
+        // SAFETY: the loop condition guarantees at least 32 readable bytes
+        // at `b.as_ptr()`; `_mm256_loadu_si256` permits unaligned loads.
+        let v = unsafe { _mm256_loadu_si256(b.as_ptr() as *const __m256i) };
+        alo = _mm256_add_epi64(alo, _mm256_and_si256(v, mask32));
+        ahi = _mm256_add_epi64(ahi, _mm256_srli_epi64(v, 32));
+        b = &b[32..];
+    }
+
+    // Merge lo+hi, then reduce 4 u64 lanes → 2 → 1.
+    let acc = _mm256_add_epi64(alo, ahi);
+    let lo = _mm256_castsi256_si128(acc);
+    let hi = _mm256_extracti128_si256(acc, 1);
+    let v128 = _mm_add_epi64(lo, hi);
+    let s0 = _mm_cvtsi128_si64(v128) as u64;
+    let s1 = _mm_extract_epi64(v128, 1) as u64;
+    checksum_tail(s0 + s1, b)
+}
+
+/// Fold a 64-bit word into `low32 + high32` (at most 33 bits), so u64
+/// accumulators cannot overflow for any realistic input length.
 #[inline]
-fn checksum(mut b: &[u8], initial: u64) -> u16 {
-    let mut acc = initial;
-    while b.len() >= 8 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
-        acc += u32::from_be_bytes(b[4..8].try_into().unwrap()) as u64;
+fn fold32(w: u64) -> u64 {
+    (w & 0xFFFF_FFFF) + (w >> 32)
+}
+
+/// Scalar accumulation: four independent accumulator chains so the adds
+/// can retire in parallel, 32 bytes per iteration. Fully portable — this
+/// is the only path on non-x86_64 targets.
+fn checksum_scalar(data: &[u8]) -> u64 {
+    let (mut s0, mut s1, mut s2, mut s3) = (0u64, 0u64, 0u64, 0u64);
+    let mut b = data;
+    while b.len() >= 32 {
+        s0 += fold32(u64::from_ne_bytes(b[0..8].try_into().unwrap()));
+        s1 += fold32(u64::from_ne_bytes(b[8..16].try_into().unwrap()));
+        s2 += fold32(u64::from_ne_bytes(b[16..24].try_into().unwrap()));
+        s3 += fold32(u64::from_ne_bytes(b[24..32].try_into().unwrap()));
+        b = &b[32..];
+    }
+    checksum_tail(s0 + s1 + s2 + s3, b)
+}
+
+/// Finish an accumulation over the trailing < 32 bytes.
+#[inline]
+fn checksum_tail(mut sum: u64, mut b: &[u8]) -> u64 {
+    if b.len() >= 16 {
+        sum += fold32(u64::from_ne_bytes(b[0..8].try_into().unwrap()));
+        sum += fold32(u64::from_ne_bytes(b[8..16].try_into().unwrap()));
+        b = &b[16..];
+    }
+    if b.len() >= 8 {
+        sum += fold32(u64::from_ne_bytes(b[0..8].try_into().unwrap()));
         b = &b[8..];
     }
     if b.len() >= 4 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
+        sum += u32::from_ne_bytes(b[0..4].try_into().unwrap()) as u64;
         b = &b[4..];
     }
     if b.len() >= 2 {
-        acc += read_u16(&b[..2]) as u64;
+        sum += u16::from_ne_bytes(b[0..2].try_into().unwrap()) as u64;
         b = &b[2..];
     }
-    if let Some(&byte) = b.first() {
-        acc += (byte as u64) << 8;
+    if let Some(&last) = b.first() {
+        // A trailing odd byte is the high byte of a zero-padded big-endian
+        // word. On little-endian the low byte position becomes the high
+        // byte after the final swap, so add it plain; on big-endian it
+        // must be shifted up directly.
+        #[cfg(target_endian = "little")]
+        {
+            sum += last as u64;
+        }
+        #[cfg(target_endian = "big")]
+        {
+            sum += (last as u64) << 8;
+        }
     }
-    while acc > 0xFFFF {
-        acc = (acc >> 16) + (acc & 0xFFFF);
+    sum
+}
+
+/// Fold a raw [`checksum_accumulate`] sum to 16 bits, convert from the
+/// native-endian accumulation domain back to big-endian, and return the
+/// one's complement — the value to store in a packet checksum field.
+#[inline]
+fn fold_checksum_u64(mut sum: u64) -> u16 {
+    // Fold 64 → 32 bits (two rounds absorb the carry).
+    sum = (sum >> 32) + (sum & 0xFFFF_FFFF);
+    sum = (sum >> 32) + (sum & 0xFFFF_FFFF);
+    // Fold 32 → 16 bits.
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    #[cfg(target_endian = "little")]
+    let folded = (sum as u16).swap_bytes();
+    #[cfg(target_endian = "big")]
+    let folded = sum as u16;
+    !folded
+}
+
+/// Convert a big-endian 16-bit partial checksum (e.g. the kernel-deposited
+/// pseudo-header sum) into the native-endian domain used by
+/// [`checksum_accumulate`], so it can be added to a raw accumulation.
+#[inline]
+fn seed_from_be(partial: u16) -> u64 {
+    #[cfg(target_endian = "little")]
+    {
+        partial.swap_bytes() as u64
     }
-    acc as u16
+    #[cfg(target_endian = "big")]
+    {
+        partial as u64
+    }
+}
+
+/// One's-complement sum of a TCP/UDP pseudo-header: source address,
+/// destination address, zero-padded protocol byte, and transport length,
+/// laid out big-endian. Works for both IPv4 (4-byte) and IPv6 (16-byte)
+/// addresses and, once folded, matches pnet_packet's pseudo-header
+/// contribution exactly.
+#[inline]
+fn pseudo_header_sum(src: &[u8], dst: &[u8], proto: u8, transport_len: u16) -> u64 {
+    let mut sum = checksum_accumulate(src);
+    sum += checksum_accumulate(dst);
+    // [zero, proto, len_hi, len_lo] — the big-endian pseudo-header trailer.
+    let trailer = [0u8, proto, (transport_len >> 8) as u8, transport_len as u8];
+    sum + checksum_accumulate(&trailer)
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
@@ -329,6 +475,7 @@ pub(crate) fn build_segment(
     gso_idx: usize,
     out: &mut bytes::BytesMut,
 ) -> Result<(), GsoSegError> {
+    use pnet_packet::Packet;
     use pnet_packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
     use pnet_packet::ipv6::{Ipv6Packet, MutableIpv6Packet};
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags};
@@ -382,7 +529,13 @@ pub(crate) fn build_segment(
         ip.set_checksum(csum);
     }
 
-    // Transport-layer fixups.
+    // Transport-layer fixups. The checksum is the fold of the pseudo-header
+    // sum (src + dst + proto + transport length) plus the sum over the
+    // transport slice with its checksum field zeroed — identical to
+    // pnet_packet's `{tcp,udp}::ipv{4,6}_checksum` (which skips the checksum
+    // word instead of requiring it zeroed; a zeroed word contributes 0, so
+    // the results are the same), but without pnet's per-word byte swaps.
+    let transport_len = (out_len - csum_start) as u16;
     if hdr.is_tcp() {
         let mut tcp =
             MutableTcpPacket::new(&mut out[csum_start..out_len]).ok_or(GsoSegError::Tcp)?;
@@ -397,31 +550,39 @@ pub(crate) fn build_segment(
             tcp.set_flags(tcp.get_flags() & !(TcpFlags::FIN | TcpFlags::PSH));
         }
         tcp.set_checksum(0);
-        let csum = match (v4_addrs, v6_addrs) {
+        let ph_sum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src, &dst)
+                pseudo_header_sum(&src.octets(), &dst.octets(), 6, transport_len)
             }
             (None, Some((src, dst))) => {
-                pnet_packet::tcp::ipv6_checksum(&tcp.to_immutable(), &src, &dst)
+                pseudo_header_sum(&src.octets(), &dst.octets(), 6, transport_len)
             }
             _ => unreachable!(),
         };
-        tcp.set_checksum(csum);
+        tcp.set_checksum(fold_checksum_u64(
+            ph_sum + checksum_accumulate(tcp.packet()),
+        ));
     } else {
         let mut udp =
             MutableUdpPacket::new(&mut out[csum_start..out_len]).ok_or(GsoSegError::Udp)?;
-        udp.set_length((out_len - csum_start) as u16);
+        udp.set_length(transport_len);
         udp.set_checksum(0);
-        let csum = match (v4_addrs, v6_addrs) {
+        let ph_sum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::udp::ipv4_checksum(&udp.to_immutable(), &src, &dst)
+                pseudo_header_sum(&src.octets(), &dst.octets(), 17, transport_len)
             }
             (None, Some((src, dst))) => {
-                pnet_packet::udp::ipv6_checksum(&udp.to_immutable(), &src, &dst)
+                pseudo_header_sum(&src.octets(), &dst.octets(), 17, transport_len)
             }
             _ => unreachable!(),
         };
-        udp.set_checksum(csum);
+        // Note: pnet's `udp::ipv4_checksum`/`ipv6_checksum` perform no
+        // RFC 768 zero-checksum substitution (`finalize_checksum` is a
+        // plain fold + complement), so neither do we — output stays
+        // bit-identical to the previous pnet-computed value.
+        udp.set_checksum(fold_checksum_u64(
+            ph_sum + checksum_accumulate(udp.packet()),
+        ));
     }
     Ok(())
 }
@@ -791,5 +952,84 @@ mod tests {
     fn calc_gso_segs_zero_gso_size_returns_zero() {
         assert_eq!(calc_gso_segs(1000, 40, 0), 0);
         assert_eq!(calc_gso_segs(0, 0, 0), 0);
+    }
+
+    // ---- fast checksum primitives ----
+
+    /// Naive RFC 1071 reference: sum big-endian 16-bit words (an odd
+    /// trailing byte is the high byte of a zero-padded word) plus a
+    /// big-endian seed, fold to 16 bits, complement.
+    fn reference_checksum(data: &[u8], seed: u16) -> u16 {
+        let mut acc = seed as u32;
+        let mut chunks = data.chunks_exact(2);
+        for w in &mut chunks {
+            acc += u16::from_be_bytes([w[0], w[1]]) as u32;
+        }
+        if let [last] = chunks.remainder() {
+            acc += (*last as u32) << 8;
+        }
+        while acc > 0xFFFF {
+            acc = (acc >> 16) + (acc & 0xFFFF);
+        }
+        !(acc as u16)
+    }
+
+    /// Deterministic pseudo-random bytes (xorshift32).
+    fn pseudo_random_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// Every tail path (odd byte, 2/4/8/16-byte steps, ≥32-byte vector
+    /// iterations) must match the naive big-endian reference.
+    #[test]
+    fn checksum_accumulate_matches_reference_all_tail_lengths() {
+        for len in 0..=131usize {
+            let data = pseudo_random_bytes(len, 0x9E37_79B9 ^ len as u32);
+            let got = fold_checksum_u64(checksum_accumulate(&data));
+            let want = reference_checksum(&data, 0);
+            assert_eq!(got, want, "len={len}");
+        }
+    }
+
+    /// The gso_none_checksum formula: a big-endian partial (as the kernel
+    /// deposits) seeded via `seed_from_be` must match seeding the naive
+    /// reference directly.
+    #[test]
+    fn checksum_accumulate_seeded_matches_reference() {
+        for len in 0..=131usize {
+            let data = pseudo_random_bytes(len, 0x0BAD_5EED ^ len as u32);
+            let seed = 0xABCDu16.wrapping_mul(len as u16).wrapping_add(0x1357);
+            let got = fold_checksum_u64(checksum_accumulate(&data) + seed_from_be(seed));
+            let want = reference_checksum(&data, seed);
+            assert_eq!(got, want, "len={len} seed={seed:#06x}");
+        }
+    }
+
+    /// The AVX2 and scalar paths compute the same raw accumulation (both
+    /// equal the sum of `low32 + high32` over all 8-byte words plus the
+    /// shared tail), so the raw u64 sums must be identical, not merely
+    /// congruent after folding.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn checksum_avx2_matches_scalar_on_large_inputs() {
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available on this host, skipping");
+            return;
+        }
+        // > 4 KiB, mixed odd/even lengths.
+        for len in [4096usize, 4097, 8191, 16385] {
+            let data = pseudo_random_bytes(len, 0xA5A5_5A5A ^ len as u32);
+            // SAFETY: AVX2 availability was verified at runtime above.
+            #[allow(unsafe_code)]
+            let avx = unsafe { checksum_avx2(&data) };
+            assert_eq!(avx, checksum_scalar(&data), "len={len}");
+        }
     }
 }
