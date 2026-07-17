@@ -10,6 +10,8 @@ mod context;
 mod encoding_request_states;
 mod features;
 #[cfg(any(target_os = "linux", test))]
+pub mod gro;
+#[cfg(any(target_os = "linux", test))]
 pub mod gso;
 mod io;
 #[cfg(feature = "postquantum")]

@@ -658,6 +658,7 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIORecvGro>,
+    inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
@@ -685,7 +686,13 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
             IOCallbackResult::Err(err) => return Err(err.into()),
         };
 
-        {
+        // Open a GRO coalescing window for the batch: decrypted TCP
+        // segments delivered via the inside send callback may be
+        // coalesced into TSO superpackets and written to the TUN once.
+        // The matching flush must run even when processing errors, so
+        // capture the result and only propagate it afterwards.
+        inside_io.gro_open();
+        let result = {
             let mut conn = conn.lock().unwrap();
             match gro_size {
                 Some(gro_size) if gro_size > 0 && (gro_size as usize) < buf.len() => {
@@ -694,16 +701,16 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                     let pkts = segments
                         .iter_mut()
                         .map(|b| OutsidePacket::Wire(b, connection_type));
-                    conn.multiple_outside_data_received(pkts, |err| {
-                        err.is_fatal(connection_type)
-                    })?;
+                    conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))
                 }
                 _ => {
                     let pkt = std::iter::once(OutsidePacket::Wire(&mut buf, connection_type));
-                    conn.multiple_outside_data_received(pkt, |err| err.is_fatal(connection_type))?;
+                    conn.multiple_outside_data_received(pkt, |err| err.is_fatal(connection_type))
                 }
             }
-        }
+        };
+        inside_io.gro_flush();
+        result?;
         segments.clear();
 
         keepalive.outside_activity().await
@@ -1319,6 +1326,7 @@ pub async fn connect<
                         conn.clone(),
                         connection_type,
                         _gro_io,
+                        inside_io.clone(),
                         keepalive.clone(),
                         None,
                     ))

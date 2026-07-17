@@ -79,6 +79,21 @@ impl VirtioNetHdr {
         unsafe { Ok(&*(ptr as *const VirtioNetHdr)) }
     }
 
+    /// Serialize to the on-wire layout used by the TUN vnet header.
+    ///
+    /// virtio-net fields are guest-endian, which is native endian for
+    /// every target we build for.
+    pub fn to_bytes(&self) -> [u8; VIRTIO_NET_HDR_LEN] {
+        let mut b = [0u8; VIRTIO_NET_HDR_LEN];
+        b[0] = self.flags;
+        b[1] = self.gso_type;
+        b[2..4].copy_from_slice(&self.hdr_len.to_ne_bytes());
+        b[4..6].copy_from_slice(&self.gso_size.to_ne_bytes());
+        b[6..8].copy_from_slice(&self.csum_start.to_ne_bytes());
+        b[8..10].copy_from_slice(&self.csum_offset.to_ne_bytes());
+        b
+    }
+
     /// True if `gso_type` indicates a TCP segmentation aggregate (v4 or v6).
     ///
     /// Linux ORs `VIRTIO_NET_HDR_GSO_ECN` (0x80) into `gso_type` for
@@ -158,7 +173,7 @@ fn checksum(mut b: &[u8], initial: u64) -> u16 {
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
-const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+pub(crate) const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
 /// GSO type: TCP segmentation aggregate over IPv6.
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 /// ECN flag OR'd into `gso_type` for ECN-marked aggregates.

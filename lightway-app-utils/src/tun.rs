@@ -360,6 +360,26 @@ impl Tun {
         }
     }
 
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]). Only the
+    /// direct backend supports this; the `IoUring` backend reports
+    /// [`std::io::ErrorKind::Unsupported`].
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.try_send_gso(buf, hdr),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => {
+                IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        }
+    }
+
     /// MTU of `Tun` interface
     pub fn mtu(&self) -> usize {
         match self {
@@ -543,6 +563,39 @@ impl TunDirect {
         #[cfg(not(target_os = "linux"))]
         let res = tun.try_send(&buf[..]);
         match res {
+            Ok(nr) => IOCallbackResult::Ok(nr),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]).
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        if !self.vnet_hdr {
+            debug_assert!(false, "try_send_gso called on a Tun opened without offload");
+            // The device won't accept a virtio header; fall back to a
+            // plain write rather than corrupt traffic in release builds.
+            return self.try_send(buf);
+        }
+
+        let tun = self.tun.as_ref().unwrap();
+        let hdr_len = lightway_core::gso::VIRTIO_NET_HDR_LEN;
+        let mut prefixed = bytes::BytesMut::with_capacity(hdr_len + buf.len());
+        prefixed.extend_from_slice(&hdr.to_bytes());
+        prefixed.extend_from_slice(&buf[..]);
+        match tun
+            .try_send(&prefixed[..])
+            .map(|n| n.saturating_sub(hdr_len))
+        {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
