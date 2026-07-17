@@ -231,7 +231,8 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Base MTU for PMTU discovery
     pub pmtud_base_mtu: Option<u16>,
 
-    /// Enable TUN offload (GSO) for batch packet processing.
+    /// Enable offload for batch packet processing: GSO on the TUN
+    /// read + UDP send path, GRO on the UDP receive path.
     /// Only effective on Linux; ignored elsewhere.
     pub enable_tun_offload: bool,
 
@@ -626,6 +627,84 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             b.clear();
             b.reserve(mtu);
         }
+
+        keepalive.outside_activity().await
+    }
+}
+
+/// Split a GRO aggregate into per-datagram buffers on `gro_size`
+/// boundaries; the final segment may be shorter. The split-off views
+/// share the aggregate's backing slab — no copies.
+#[cfg(linux)]
+fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
+    debug_assert!(gro_size > 0);
+    while !buf.is_empty() {
+        let take = buf.len().min(gro_size);
+        segments.push(buf.split_to(take));
+    }
+}
+
+/// An async function to handle all the outside traffic when UDP GRO
+/// is enabled on the socket.
+///
+/// Mirrors [`outside_io_task`], but the kernel coalesces trains of
+/// equal-size datagrams from the server into one buffer per
+/// `recvmsg`, reporting the per-segment size via the `UDP_GRO`
+/// control message — one syscall replaces up to a whole aggregate's
+/// worth of receives during bulk downloads. The aggregate is split
+/// back into wire packets on the reported boundary before decryption.
+#[cfg(linux)]
+pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    connection_type: ConnectionType,
+    outside_io: Arc<dyn io::outside::OutsideIORecvGro>,
+    keepalive: Keepalive,
+    mut ready_signal: Option<oneshot::Sender<()>>,
+) -> Result<()> {
+    // A GRO aggregate can be up to the maximum IP datagram size.
+    const RECV_CAP: usize = 65535;
+
+    let mut buf = BytesMut::with_capacity(RECV_CAP);
+    let mut segments: Vec<BytesMut> = Vec::new();
+    loop {
+        // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
+        outside_io.poll(tokio::io::Interest::READABLE).await?;
+
+        // Send ready signal after first successful poll
+        if let Some(tx) = ready_signal.take() {
+            let _ = tx.send(());
+        }
+
+        // With `segments` cleared, `buf` is the slab's sole owner
+        // again and `reserve` reclaims it without reallocating.
+        buf.clear();
+        buf.reserve(RECV_CAP);
+        let (_, gro_size) = match outside_io.recv_gro(&mut buf) {
+            IOCallbackResult::Ok(pair) => pair,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
+        };
+
+        {
+            let mut conn = conn.lock().unwrap();
+            match gro_size {
+                Some(gro_size) if gro_size > 0 && (gro_size as usize) < buf.len() => {
+                    segments.clear();
+                    split_gro_segments(&mut buf, gro_size as usize, &mut segments);
+                    let pkts = segments
+                        .iter_mut()
+                        .map(|b| OutsidePacket::Wire(b, connection_type));
+                    conn.multiple_outside_data_received(pkts, |err| {
+                        err.is_fatal(connection_type)
+                    })?;
+                }
+                _ => {
+                    let pkt = std::iter::once(OutsidePacket::Wire(&mut buf, connection_type));
+                    conn.multiple_outside_data_received(pkt, |err| err.is_fatal(connection_type))?;
+                }
+            }
+        }
+        segments.clear();
 
         keepalive.outside_activity().await
     }
@@ -1090,6 +1169,15 @@ pub async fn connect<
                     sock.enable_batch_receive();
                 }
 
+                // GRO delivery replaces per-packet receive entirely
+                // (a plain recv would merge separate datagrams), so
+                // only flip the sockopt when the GRO outside loop
+                // below will consume it.
+                #[cfg(linux)]
+                if config.enable_tun_offload {
+                    sock.enable_gro();
+                }
+
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
                 (ConnectionType::Datagram, Arc::new(sock))
@@ -1214,14 +1302,40 @@ pub async fn connect<
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
-    let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
-        conn.clone(),
-        config.outside_mtu,
-        connection_type,
-        outside_io.clone(),
-        keepalive.clone(),
-        None,
-    ));
+    let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = {
+        // GRO capability is present only when `enable_tun_offload`
+        // flipped the sockopt on a UDP socket above; TCP mode and
+        // kernels without UDP_GRO fall back to the per-packet loop.
+        #[cfg(linux)]
+        let gro_io = outside_io.clone().as_gro();
+        #[cfg(not(linux))]
+        let gro_io: Option<std::convert::Infallible> = None;
+
+        match gro_io {
+            Some(_gro_io) => {
+                #[cfg(linux)]
+                {
+                    tokio::spawn(outside_io_task_gro(
+                        conn.clone(),
+                        connection_type,
+                        _gro_io,
+                        keepalive.clone(),
+                        None,
+                    ))
+                }
+                #[cfg(not(linux))]
+                unreachable!()
+            }
+            None => tokio::spawn(outside_io_task(
+                conn.clone(),
+                config.outside_mtu,
+                connection_type,
+                outside_io.clone(),
+                keepalive.clone(),
+                None,
+            )),
+        }
+    };
 
     let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = {
         #[cfg(linux)]
@@ -2020,6 +2134,26 @@ mod tests {
             result.unwrap_err().to_string(),
             "All connections disconnected"
         );
+    }
+
+    /// GRO aggregates split on `gro_size` boundaries: full segments
+    /// plus a shorter trailing one; an exact multiple has no short
+    /// tail; content is preserved byte-for-byte across the views.
+    #[test_case(3300, 1350 => vec![1350, 1350, 600] ; "short trailing segment")]
+    #[test_case(2700, 1350 => vec![1350, 1350]      ; "exact multiple")]
+    #[test_case(600,  1350 => vec![600]             ; "single short packet")]
+    #[cfg(linux)]
+    fn gro_split_segment_sizes(total: usize, gro_size: usize) -> Vec<usize> {
+        let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let mut buf = BytesMut::from(&payload[..]);
+        let mut segments = Vec::new();
+
+        split_gro_segments(&mut buf, gro_size, &mut segments);
+
+        assert!(buf.is_empty());
+        let rejoined: Vec<u8> = segments.iter().flat_map(|s| s.iter().copied()).collect();
+        assert_eq!(rejoined, payload, "content preserved");
+        segments.iter().map(|s| s.len()).collect()
     }
 
     #[test_case(Some(true),  Some(true)  => None       ; "unchanged")]

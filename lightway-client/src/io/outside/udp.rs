@@ -1,3 +1,5 @@
+#[cfg(linux)]
+use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -18,6 +20,8 @@ pub struct Udp {
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    #[cfg(linux)]
+    gro_enabled: bool,
 }
 
 impl Udp {
@@ -48,7 +52,29 @@ impl Udp {
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            #[cfg(linux)]
+            gro_enabled: false,
         })
+    }
+
+    /// Enable UDP GRO on the socket so the kernel coalesces trains of
+    /// equal-size datagrams into one buffer per `recvmsg`. On failure
+    /// (kernel < 5.0) logs and leaves the per-packet receive path in
+    /// place — [`OutsideIO::as_gro`] will report the capability as
+    /// absent.
+    #[cfg(linux)]
+    pub fn enable_gro(&mut self) {
+        match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
+            Ok(()) => {
+                tracing::info!("UDP GRO enabled on outside socket");
+                self.gro_enabled = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to enable UDP GRO, falling back to per-packet receive: {e}"
+                );
+            }
+        }
     }
 
     #[cfg(batch_receive)]
@@ -190,6 +216,11 @@ impl OutsideIO for Udp {
         }
     }
 
+    #[cfg(linux)]
+    fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
+        if self.gro_enabled { Some(self) } else { None }
+    }
+
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
         self
     }
@@ -208,6 +239,60 @@ impl OutsideIO for Udp {
         #[cfg(windows)]
         let handle = self.sock.as_raw_socket();
         OutsideSocket::Udp(handle)
+    }
+}
+
+#[cfg(linux)]
+impl OutsideIORecvGro for Udp {
+    #[allow(unsafe_code)]
+    fn recv_gro(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<(usize, Option<u16>)> {
+        use lightway_app_utils::cmsg;
+        use socket2::{MaybeUninitSlice, MsgHdrMut, SockRef};
+        use tokio::io::Interest;
+
+        // The kernel reports the coalesced segment size as one
+        // `UDP_GRO` control message carrying a C int.
+        const CONTROL_SIZE: usize = cmsg::Message::space::<libc::c_int>();
+
+        let res = self.sock.try_io(Interest::READABLE, || {
+            let sock = SockRef::from(self.sock.as_ref());
+
+            let mut control = cmsg::Buffer::<CONTROL_SIZE>::new();
+            // Scope the msghdr so its borrow of `control` ends before
+            // the control messages are parsed below.
+            let (n, control_len) = {
+                let mut data = [MaybeUninitSlice::new(buf.spare_capacity_mut())];
+                let mut msghdr = MsgHdrMut::new()
+                    .with_buffers(&mut data)
+                    .with_control(control.spare_capacity_mut());
+
+                let n = sock.recvmsg(&mut msghdr, 0)?;
+                (n, msghdr.control_len())
+            };
+
+            // SAFETY: the kernel initialized `control_len` bytes of
+            // the control buffer.
+            let gro_size = unsafe { control.iter(control_len as cmsg::LibcControlLen) }
+                .find_map(|m| match m {
+                    cmsg::Message::UdpGroSegments(s) => Some(s),
+                    _ => None,
+                });
+
+            Ok((n, gro_size))
+        });
+
+        match res {
+            Ok((n, gro_size)) => {
+                // SAFETY: recvmsg wrote exactly `n` initialized bytes
+                // into the spare capacity advertised above.
+                unsafe { buf.set_len(buf.len() + n) };
+                IOCallbackResult::Ok((n, gro_size))
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
+        }
     }
 }
 

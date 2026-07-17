@@ -91,6 +91,10 @@ impl<const N: usize> Default for Buffer<N> {
 pub enum Message<'a> {
     /// An `IP_PKTINFO` message.
     IpPktinfo(&'a libc::in_pktinfo),
+    /// A `UDP_GRO` message carrying the size of each coalesced
+    /// segment in a GRO aggregate delivered by `recvmsg(2)`.
+    #[cfg(target_os = "linux")]
+    UdpGroSegments(u16),
     /// Any other control message.
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
 }
@@ -143,10 +147,24 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
                 let data = unsafe { libc::CMSG_DATA(item) as *const libc::in_pktinfo };
                 // SAFETY: we constructed `data` above
                 let pi = unsafe { &*data };
-                Some(Message::IpPktinfo(pi))
-            } else {
-                Some(Message::Unknown(item))
+                return Some(Message::IpPktinfo(pi));
             }
+
+            #[cfg(target_os = "linux")]
+            if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_GRO {
+                // The kernel writes the segment size as a C int
+                // (`udp_cmsg_recv`); the value is a `gso_size` and so
+                // always fits a u16.
+                // SAFETY: `item` is a valid `cmsghdr` from a prior
+                // call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
+                let data = unsafe { libc::CMSG_DATA(item) as *const libc::c_int };
+                // SAFETY: `CMSG_DATA` is aligned for a `cmsghdr`,
+                // which is at least the alignment of `c_int`.
+                let gro_size = unsafe { *data };
+                return Some(Message::UdpGroSegments(gro_size as u16));
+            }
+
+            Some(Message::Unknown(item))
         }
     }
 }
@@ -335,6 +353,29 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    /// Round-trip: a control buffer built with `SOL_UDP`/`UDP_GRO`
+    /// parses back as `Message::UdpGroSegments` with the same size.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parse_udp_gro_cmsg() {
+        const SIZE: usize = Message::space::<libc::c_int>();
+        let mut out = BufferMut::<SIZE>::zeroed();
+        out.builder()
+            .fill_next(libc::SOL_UDP, libc::UDP_GRO, 1350 as libc::c_int)
+            .unwrap();
+
+        // Copy the built control bytes into a receive-side Buffer.
+        let mut buf = Buffer::<SIZE>::new();
+        for (dst, src) in buf.spare_capacity_mut().iter_mut().zip(out.as_ref()) {
+            dst.write(*src);
+        }
+
+        // SAFETY: all SIZE bytes were initialized by the copy above.
+        let mut iter = unsafe { buf.iter(SIZE as LibcControlLen) };
+        assert!(matches!(iter.next(), Some(Message::UdpGroSegments(1350))));
+        assert!(iter.next().is_none());
     }
 
     #[test]
