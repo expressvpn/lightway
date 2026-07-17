@@ -264,6 +264,21 @@ impl TcpGroBatch {
         }
     }
 
+    /// True iff the batch holds segments and `pkt` belongs to the same
+    /// flow as its first segment: IPv4 with IHL 5, protocol TCP, long
+    /// enough to carry the ports, and src/dst addresses (bytes 12..20)
+    /// plus TCP ports (bytes 20..24) byte-equal to the batch's.
+    ///
+    /// A cheap identity test only — [`Self::append`] still performs
+    /// the full coalescability checks.
+    fn matches_flow(&self, pkt: &[u8]) -> bool {
+        self.segs != 0
+            && pkt.len() >= IPV4_HDR_LEN + 4
+            && pkt[0] == 0x45
+            && pkt[9] == IPPROTO_TCP
+            && pkt[12..IPV4_HDR_LEN + 4] == self.buf[12..IPV4_HDR_LEN + 4]
+    }
+
     /// Take the assembled superpacket and its virtio header, resetting
     /// the batch. None if empty.
     ///
@@ -326,6 +341,146 @@ impl TcpGroBatch {
 }
 
 impl Default for TcpGroBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Maximum concurrently-open flows in a [`TcpGroTable`] window.
+const MAX_GRO_FLOWS: usize = 8;
+
+/// Result of offering a packet to a [`TcpGroTable`].
+pub struct GroTableAppend {
+    /// Superpackets that must be written to the TUN now, in order.
+    /// Usually empty (no allocation): flushes only happen on PSH/FIN,
+    /// caps, or same-flow incompatibility.
+    pub flushes: Vec<(BytesMut, VirtioNetHdr)>,
+    /// False: the packet was not absorbed — the caller must write it
+    /// directly AFTER writing `flushes` (same-flow ordering).
+    pub consumed: bool,
+}
+
+/// A bounded pool of [`TcpGroBatch`]es keyed by flow, so several
+/// concurrent TCP flows can coalesce within one GRO window without
+/// flushing each other on every alternation.
+///
+/// Within-flow write order is preserved: a flow's pending superpacket
+/// is always flushed before any packet of that flow is handed back to
+/// the caller for a direct write. Cross-flow order is arbitrary —
+/// independent flows have no ordering relationship.
+pub struct TcpGroTable {
+    /// Fixed pool of batches; a slot is free when its batch is empty.
+    slots: [TcpGroBatch; MAX_GRO_FLOWS],
+}
+
+impl TcpGroTable {
+    /// Create a table with all slots empty.
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| TcpGroBatch::new()),
+        }
+    }
+
+    /// True if no batch holds segments.
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(TcpGroBatch::is_empty)
+    }
+
+    /// Offer a packet (a full IPv4 frame, no virtio header) to the
+    /// table. The caller must write every entry of
+    /// [`GroTableAppend::flushes`] to the TUN in order, then — iff
+    /// `consumed` is false — write the packet itself directly.
+    ///
+    /// A packet matching a held flow goes to that flow's batch; if the
+    /// batch rejects it (seq gap, ack change, pure ACK…) the batch is
+    /// flushed first so its segments reach the TUN before the packet.
+    /// A packet of a new flow seeds a free slot, except a PSH/FIN-first
+    /// segment: [`TcpGroBatch::append`] flushes it immediately, so it
+    /// is absorbed and returned straight back in `flushes` (as a
+    /// single-segment superpacket, bytes untouched) rather than left
+    /// occupying a slot. With no matching flow and no free slot the
+    /// packet is simply not consumed — nothing held belongs to its
+    /// flow, so a direct write cannot reorder within a flow.
+    pub fn append(&mut self, pkt: &[u8]) -> GroTableAppend {
+        if let Some(batch) = self.slots.iter_mut().find(|b| b.matches_flow(pkt)) {
+            return match batch.append(pkt) {
+                GroAppend::Coalesced => GroTableAppend {
+                    flushes: Vec::new(),
+                    consumed: true,
+                },
+                GroAppend::CoalescedFlush => {
+                    let out = batch.take().expect("batch just absorbed a segment");
+                    GroTableAppend {
+                        flushes: vec![out],
+                        consumed: true,
+                    }
+                }
+                GroAppend::Incompatible => {
+                    // Same flow but unmergeable: the held segments
+                    // must hit the TUN before this packet.
+                    let old = batch.take().expect("matches_flow implies non-empty");
+                    match batch.append(pkt) {
+                        // The packet seeds a fresh batch in the slot.
+                        GroAppend::Coalesced => GroTableAppend {
+                            flushes: vec![old],
+                            consumed: true,
+                        },
+                        // e.g. a PSH-marked segment after a seq gap:
+                        // absorbed but flushed immediately.
+                        GroAppend::CoalescedFlush => {
+                            let fresh = batch.take().expect("batch just absorbed a segment");
+                            GroTableAppend {
+                                flushes: vec![old, fresh],
+                                consumed: true,
+                            }
+                        }
+                        // Not coalescable at all (e.g. pure ACK).
+                        GroAppend::Incompatible => GroTableAppend {
+                            flushes: vec![old],
+                            consumed: false,
+                        },
+                    }
+                }
+            };
+        }
+
+        // New flow: seed a free slot if the table has room.
+        let Some(slot) = self.slots.iter_mut().find(|b| b.is_empty()) else {
+            return GroTableAppend {
+                flushes: Vec::new(),
+                consumed: false,
+            };
+        };
+        match slot.append(pkt) {
+            GroAppend::Coalesced => GroTableAppend {
+                flushes: Vec::new(),
+                consumed: true,
+            },
+            // PSH/FIN-first segment: flushed immediately as a
+            // single-segment superpacket, freeing the slot again.
+            GroAppend::CoalescedFlush => {
+                let out = slot.take().expect("batch just absorbed a segment");
+                GroTableAppend {
+                    flushes: vec![out],
+                    consumed: true,
+                }
+            }
+            // Not coalescable (non-IPv4, non-TCP, pure ACK…).
+            GroAppend::Incompatible => GroTableAppend {
+                flushes: Vec::new(),
+                consumed: false,
+            },
+        }
+    }
+
+    /// Take every pending superpacket (window close). Cross-flow order
+    /// is arbitrary. Slots retain no data and are reused afterwards.
+    pub fn drain(&mut self) -> Vec<(BytesMut, VirtioNetHdr)> {
+        self.slots.iter_mut().filter_map(TcpGroBatch::take).collect()
+    }
+}
+
+impl Default for TcpGroTable {
     fn default() -> Self {
         Self::new()
     }
@@ -836,5 +991,209 @@ mod tests {
         let (sp, vhdr) = batch.take().unwrap();
         assert_eq!(sp.len(), IPV4_HDR_LEN + TCP_MIN_HDR_LEN + MAX_GSO_SEGS * p);
         assert_eq!(vhdr.gso_size as usize, p);
+    }
+
+    // ---- TcpGroTable tests ----
+
+    /// Two flows interleaved segment-by-segment coalesce independently
+    /// with zero intermediate flushes; drain() yields one superpacket
+    /// per flow, byte-identical to coalescing that flow alone.
+    #[test]
+    fn table_interleaved_flows_coalesce_independently() {
+        let p = 400usize;
+        let seg_a = |i: u32| Seg::new(0x1000_0000 + i * p as u32, i as u16, p).src_port(1111);
+        let seg_b =
+            |i: u32| Seg::new(0x2000_0000 + i * p as u32, 100 + i as u16, p).src_port(2222);
+
+        let mut table = TcpGroTable::new();
+        assert!(table.is_empty());
+        for i in 0..3u32 {
+            for pkt in [seg_a(i).build(), seg_b(i).build()] {
+                let r = table.append(&pkt);
+                assert!(r.consumed, "seg {i} consumed");
+                assert!(r.flushes.is_empty(), "seg {i} no intermediate flush");
+            }
+        }
+        assert!(!table.is_empty());
+
+        // Reference: each flow coalesced alone in a plain batch.
+        let alone = |mk: &dyn Fn(u32) -> Seg| {
+            let mut batch = TcpGroBatch::new();
+            for i in 0..3u32 {
+                assert_eq!(batch.append(&mk(i).build()), GroAppend::Coalesced);
+            }
+            batch.take().unwrap()
+        };
+        let (sp_a, vh_a) = alone(&seg_a);
+        let (sp_b, vh_b) = alone(&seg_b);
+
+        let mut out = table.drain();
+        assert!(table.is_empty());
+        assert_eq!(out.len(), 2);
+        // Cross-flow order is arbitrary: identify flows by src port.
+        out.sort_by_key(|(sp, _)| u16::from_be_bytes([sp[20], sp[21]]));
+        assert_eq!(&out[0].0[..], &sp_a[..], "flow A superpacket");
+        assert_eq!(out[0].1.to_bytes(), vh_a.to_bytes());
+        assert_eq!(&out[1].0[..], &sp_b[..], "flow B superpacket");
+        assert_eq!(out[1].1.to_bytes(), vh_b.to_bytes());
+    }
+
+    /// A same-flow sequence gap flushes the held superpacket, and the
+    /// gap packet seeds a fresh batch that drains with its own seq.
+    #[test]
+    fn table_same_flow_seq_gap_flushes_and_reseeds() {
+        let p = 100usize;
+        let seq0 = 0x0300_0000u32;
+        let mut table = TcpGroTable::new();
+        for i in 0..2u32 {
+            let r = table.append(&Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build());
+            assert!(r.consumed && r.flushes.is_empty(), "seg {i}");
+        }
+        // Gap: skips one segment's worth of payload.
+        let gap = Seg::new(seq0 + 3 * p as u32, 3, p).build();
+        let r = table.append(&gap);
+        assert!(r.consumed, "gap packet seeds a fresh batch");
+        assert_eq!(r.flushes.len(), 1);
+        assert_eq!(
+            r.flushes[0].0.len(),
+            IPV4_HDR_LEN + TCP_MIN_HDR_LEN + 2 * p,
+            "held 2-segment superpacket flushed"
+        );
+
+        let out = table.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0].0[..], &gap[..], "fresh batch holds the gap packet");
+    }
+
+    /// A same-flow pure ACK flushes the held superpacket but is not
+    /// consumed — the caller writes it directly after the flush.
+    #[test]
+    fn table_same_flow_pure_ack_flushes_not_consumed() {
+        let p = 100usize;
+        let seq0 = 0x0400_0000u32;
+        let held = Seg::new(seq0, 1, p).build();
+        let mut table = TcpGroTable::new();
+        assert!(table.append(&held).consumed);
+
+        let ack = Seg::new(seq0 + p as u32, 2, 0).build();
+        let r = table.append(&ack);
+        assert!(!r.consumed, "pure ACK never coalesces");
+        assert_eq!(r.flushes.len(), 1);
+        assert_eq!(&r.flushes[0].0[..], &held[..], "held segments flushed first");
+        assert!(table.is_empty());
+    }
+
+    /// A packet of a different flow lands in its own slot without
+    /// flushing the flow already held.
+    #[test]
+    fn table_different_flow_no_cross_flush() {
+        let p = 100usize;
+        let mut table = TcpGroTable::new();
+        assert!(table.append(&Seg::new(0x0500_0000, 1, p).build()).consumed);
+
+        let other = Seg::new(0x0600_0000, 2, p).src_port(4321).build();
+        let r = table.append(&other);
+        assert!(r.consumed, "new flow takes its own slot");
+        assert!(r.flushes.is_empty(), "no cross-flow flush");
+        assert_eq!(table.drain().len(), 2);
+    }
+
+    /// With MAX_GRO_FLOWS flows held, a packet of yet another flow is
+    /// not consumed and flushes nothing; the held flows drain intact.
+    #[test]
+    fn table_overflow_rejects_extra_flow() {
+        let p = 100usize;
+        let mut table = TcpGroTable::new();
+        for i in 0..MAX_GRO_FLOWS {
+            let pkt = Seg::new(0x0700_0000, i as u16, p)
+                .src_port(1000 + i as u16)
+                .build();
+            let r = table.append(&pkt);
+            assert!(r.consumed && r.flushes.is_empty(), "flow {i}");
+        }
+
+        let extra = Seg::new(0x0700_0000, 99, p)
+            .src_port(1000 + MAX_GRO_FLOWS as u16)
+            .build();
+        let r = table.append(&extra);
+        assert!(!r.consumed, "table full: not absorbed");
+        assert!(r.flushes.is_empty(), "table full: nothing flushed");
+
+        let out = table.drain();
+        assert_eq!(out.len(), MAX_GRO_FLOWS);
+        let mut ports: Vec<u16> = out
+            .iter()
+            .map(|(sp, _)| u16::from_be_bytes([sp[20], sp[21]]))
+            .collect();
+        ports.sort_unstable();
+        let want: Vec<u16> = (0..MAX_GRO_FLOWS).map(|i| 1000 + i as u16).collect();
+        assert_eq!(ports, want, "all held flows drain intact");
+    }
+
+    /// A PSH-marked first segment of a fresh flow is absorbed and
+    /// returned immediately in `flushes` (single-segment superpacket,
+    /// bytes untouched) — it never occupies a slot, and its bytes
+    /// reach the output exactly once.
+    #[test]
+    fn table_psh_start_fresh_flow_flushes_immediately() {
+        let pkt = Seg::new(0x0800_0000, 1, 100)
+            .flags(TCP_FLAG_ACK | TCP_FLAG_PSH)
+            .build();
+        let mut table = TcpGroTable::new();
+        let r = table.append(&pkt);
+        assert!(r.consumed);
+        assert_eq!(r.flushes.len(), 1);
+        assert_eq!(&r.flushes[0].0[..], &pkt[..], "bytes untouched");
+        assert_eq!(
+            r.flushes[0].1.to_bytes(),
+            VirtioNetHdr::default().to_bytes()
+        );
+        assert!(table.is_empty(), "slot freed immediately");
+        assert!(table.drain().is_empty(), "not emitted a second time");
+    }
+
+    /// Non-coalescable packets (UDP, IPv6) are not consumed and do not
+    /// disturb a held flow.
+    #[test]
+    fn table_non_tcp_and_ipv6_not_consumed() {
+        let p = 100usize;
+        let held = Seg::new(0x0900_0000, 1, p).build();
+        let mut table = TcpGroTable::new();
+        assert!(table.append(&held).consumed);
+
+        let mut udp = Seg::new(0x0A00_0000, 2, p).build();
+        udp[9] = 17; // IPPROTO_UDP
+        let mut v6 = Seg::new(0x0A00_0000, 3, p).build();
+        v6[0] = 0x60;
+        for pkt in [udp, v6] {
+            let r = table.append(&pkt);
+            assert!(!r.consumed);
+            assert!(r.flushes.is_empty());
+        }
+
+        let out = table.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0].0[..], &held[..]);
+    }
+
+    /// After a drain the slots are reusable: the table coalesces a new
+    /// train exactly as a fresh one would.
+    #[test]
+    fn table_reusable_after_drain() {
+        let p = 200usize;
+        let mut table = TcpGroTable::new();
+        assert!(table.append(&Seg::new(0x0B00_0000, 1, p).build()).consumed);
+        assert_eq!(table.drain().len(), 1);
+        assert!(table.is_empty());
+
+        let seq0 = 0x0C00_0000u32;
+        for i in 0..2u32 {
+            let r = table.append(&Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build());
+            assert!(r.consumed && r.flushes.is_empty(), "seg {i}");
+        }
+        let out = table.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.len(), IPV4_HDR_LEN + TCP_MIN_HDR_LEN + 2 * p);
+        assert_eq!(out[0].1.gso_size as usize, p);
     }
 }

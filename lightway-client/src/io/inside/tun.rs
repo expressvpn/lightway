@@ -11,7 +11,7 @@ use lightway_app_utils::{Tun as AppUtilsTun, TunConfig};
 #[cfg(linux)]
 use lightway_core::VirtioNetHdr;
 #[cfg(linux)]
-use lightway_core::gro::{GroAppend, TcpGroBatch};
+use lightway_core::gro::TcpGroTable;
 #[cfg(linux)]
 use lightway_core::gso::VIRTIO_NET_HDR_GSO_NONE;
 use lightway_core::{
@@ -29,7 +29,7 @@ use crate::{ConnectionState, io::inside::InsideIORecv};
 #[derive(Default)]
 struct GroWindow {
     open: bool,
-    batch: TcpGroBatch,
+    table: TcpGroTable,
 }
 
 pub struct Tun {
@@ -78,14 +78,11 @@ impl Tun {
         self.tun.name()
     }
 
-    /// Write any pending coalesced batch to the TUN. Failures are
+    /// Write one coalesced superpacket to the TUN. Failures are
     /// logged and dropped (datagram semantics) — the sends whose
-    /// packets were absorbed into the batch already reported success.
+    /// packets were absorbed into it already reported success.
     #[cfg(linux)]
-    fn flush_batch(&self, batch: &mut TcpGroBatch) {
-        let Some((pkt, hdr)) = batch.take() else {
-            return;
-        };
+    fn write_super(&self, pkt: BytesMut, hdr: VirtioNetHdr) {
         // A single-segment batch comes back as the original packet
         // bytes with a default header — a plain write suffices.
         let result = if hdr.flags == 0 && hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
@@ -105,32 +102,21 @@ impl Tun {
     }
 
     /// Route a packet through the GRO coalescer. Returns `Ok(len)`
-    /// whenever the batch consumed the packet — core treats that as
+    /// whenever the table consumed the packet — core treats that as
     /// sent.
     #[cfg(linux)]
-    fn coalesce_send(&self, batch: &mut TcpGroBatch, buf: BytesMut) -> IOCallbackResult<usize> {
+    fn coalesce_send(&self, table: &mut TcpGroTable, buf: BytesMut) -> IOCallbackResult<usize> {
         let len = buf.len();
-        match batch.append(&buf) {
-            GroAppend::Coalesced => IOCallbackResult::Ok(len),
-            GroAppend::CoalescedFlush => {
-                self.flush_batch(batch);
-                IOCallbackResult::Ok(len)
-            }
-            GroAppend::Incompatible => {
-                // The pending batch must reach the TUN before this
-                // packet to preserve delivery order.
-                self.flush_batch(batch);
-                // Re-offer once — with the batch now empty it may
-                // start a fresh one.
-                match batch.append(&buf) {
-                    GroAppend::Coalesced => IOCallbackResult::Ok(len),
-                    GroAppend::CoalescedFlush => {
-                        self.flush_batch(batch);
-                        IOCallbackResult::Ok(len)
-                    }
-                    GroAppend::Incompatible => self.tun.try_send(buf),
-                }
-            }
+        let result = table.append(&buf);
+        // Any flushed superpackets must reach the TUN before this
+        // packet to preserve within-flow delivery order.
+        for (pkt, hdr) in result.flushes {
+            self.write_super(pkt, hdr);
+        }
+        if result.consumed {
+            IOCallbackResult::Ok(len)
+        } else {
+            self.tun.try_send(buf)
         }
     }
 }
@@ -185,9 +171,10 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
     #[cfg(linux)]
     fn gro_flush(&self) {
         let mut gro = self.gro.lock().unwrap();
-        let GroWindow { open, batch } = &mut *gro;
-        self.flush_batch(batch);
-        *open = false;
+        for (pkt, hdr) in gro.table.drain() {
+            self.write_super(pkt, hdr);
+        }
+        gro.open = false;
     }
 
     fn into_io_send_callback(
@@ -230,7 +217,7 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
         {
             let mut gro = self.gro.lock().unwrap();
             if gro.open {
-                return self.coalesce_send(&mut gro.batch, buf);
+                return self.coalesce_send(&mut gro.table, buf);
             }
         }
 
