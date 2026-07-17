@@ -32,6 +32,7 @@
             androidConstants = (import ./constants.nix).android;
             androidComposition = pkgs.androidenv.composeAndroidPackages {
               buildToolsVersions = [ androidConstants.BUILD_TOOL_VERSION ];
+              includeEmulator = false;
               includeNDK = true;
               includeSystemImages = false;
               ndkVersions = [ ANDROID_NDK_VERSION ];
@@ -63,20 +64,14 @@
                 "i686-linux-android"
                 "x86_64-linux-android"
               ];
-              extensions = [
-                "rust-analyzer"
-                "rust-src"
-              ];
             };
             shellEnvVar = {
               inherit ANDROID_NDK_VERSION;
               ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
-              ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk/${ANDROID_NDK_VERSION}";
+              ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
               ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
             };
             extraBuildPkgs = with pkgs; [
-              androidenv.androidPkgs.androidsdk
-              androidenv.androidPkgs.ndk-bundle
               buildScript
               cleanScript
               git-lfs

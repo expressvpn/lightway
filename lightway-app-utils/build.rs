@@ -1,3 +1,7 @@
+// Temporary workaround for cfg_aliases 0.2.1 tripping the nightly
+// deny-by-default lint (rust-lang/rust#79813), which breaks test-miri in CI.
+// Remove once cfg_aliases ships a fix upstream.
+#![allow(semicolon_in_expressions_from_macros)]
 use cfg_aliases::cfg_aliases;
 
 fn main() {

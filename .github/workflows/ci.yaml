@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e, coverage, nix-mobile-check, nix-build, nix-tests, windows-build]
+    needs: [earthly, e2e, coverage, nix-mobile-build, nix-build, nix-tests, windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -212,29 +212,52 @@ jobs:
         if: steps.coverage-check.outputs.failed == 'true'
         run: exit 1
 
-  # We do not have beef-up runners to build mobile lib for OSS repo,
-  # to prevent the code changes starting from OSS repo,
-  # so we do check and unit test on the Rust mobile lib
-  nix-mobile-check:
-    name: Mobile lib check
+  nix-mobile-build:
+    name: Mobile Lib Build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
-    - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v21
-    - name: Setup Nix cache
-      uses: DeterminateSystems/magic-nix-cache-action@v13
-      with:
-        use-flakehub: false
-    - name: Check with mobile
-      working-directory: ./lightway-client
-      run: nix develop -c cargo check --features=mobile
-    - name: Clippy with mobile
-      working-directory: ./lightway-client
-      run: nix develop -c cargo clippy --features=mobile --all-targets -- -D warnings
-    - name: Test with mobile features
-      working-directory: ./lightway-client
-      run: nix develop -c cargo test --features=mobile-test
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: false
+
+      - name: Check with mobile
+        working-directory: ./lightway-client
+        run: nix develop -c cargo check --features=mobile
+      - name: Clippy with mobile
+        working-directory: ./lightway-client
+        run: nix develop -c cargo clippy --features=mobile --all-targets -- -D warnings
+      - name: Test with mobile features
+        working-directory: ./lightway-client
+        run: nix develop -c cargo test --features=mobile-test
+
+      - name: Build Android AAR
+        id: build-android-aar
+        run: |
+          nix develop .#android -c build
+          AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-release.aar
+          echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-android-aar
+          path: ${{ steps.build-android-aar.outputs.path }}
+          if-no-files-found: error
+      - name: Build JsonSchema
+        run: nix develop -c cargo run --all-features -p lightway-client -- -c client.schema.json -g jsonschema
+      - name: Upload JsonSchema artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightway-client-jsonschema
+          path: client.schema.json
+          if-no-files-found: error
 
   nix-build:
     name: Nix Build (${{ matrix.target }})
@@ -423,6 +446,8 @@ jobs:
           cp artifacts/lightway-server-x86_64-apple-darwin/lightway-server release-assets/lightway-server-x86_64-apple-darwin
           cp artifacts/lightway-client-x86_64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc.exe
           cp artifacts/lightway-client-aarch64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc.exe
+          cp artifacts/lightway-android-aar/lightway-release.aar release-assets/lightway-release.aar
+          cp artifacts/lightway-client-jsonschema/client.schema.json release-assets/client.schema.json
 
           chmod +x release-assets/*
 
@@ -442,6 +467,7 @@ jobs:
             - **Linux** (x86_64, aarch64, riscv64): lightway-client and lightway-server
             - **macOS** (x86_64, aarch64): lightway-client and lightway-server
             - **Windows** (x86_64, aarch64): lightway-client only
+            - **Android**: AAR library and client JSON schema
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
