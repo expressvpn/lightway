@@ -1444,6 +1444,12 @@ impl<AppState: Send> Connection<AppState> {
                     new: new_session_id,
                 });
 
+                // Announce the rotation: the keepalive ping is stamped
+                // with the new session id and the pong reply echoes it
+                // back, completing the rotation within one round trip
+                // instead of waiting for organic client traffic
+                let _ = self.keepalive();
+
                 Ok(new_session_id)
             }
         }
