@@ -1504,6 +1504,7 @@ impl<AppState: Send> Connection<AppState> {
             Client { .. } => {
                 self.session_id = session_id;
                 self.session.io_cb_mut().set_session_id(session_id);
+                self.publish_expresslane_key();
             }
             Server {
                 ref mut pending_session_id,
