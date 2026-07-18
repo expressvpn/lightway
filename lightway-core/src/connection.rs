@@ -701,7 +701,11 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Set the address of this connection's peer
     pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        self.session.io_cb_mut().io.set_peer_addr(addr)
+        let old = self.session.io_cb_mut().io.set_peer_addr(addr);
+        if old != addr {
+            self.publish_expresslane_key();
+        }
+        old
     }
 
     /// Get the negotiated cipher, only valid after [`State::LinkUp`]
