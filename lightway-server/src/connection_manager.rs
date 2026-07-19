@@ -530,6 +530,18 @@ impl ConnectionManager {
             .collect()
     }
 
+    /// Snapshot of the currently-online connections (Arc clones). The map
+    /// lock is released with the returned Vec, so callers can do per-connection
+    /// work (e.g. a kernel ioctl) without holding it - unlike iter_connections.
+    pub(crate) fn online_connections(self: &Arc<Self>) -> Vec<Arc<Connection>> {
+        self.connections
+            .lock()
+            .iter_connections()
+            .filter(|c| matches!(c.state(), State::Online))
+            .cloned()
+            .collect()
+    }
+
     #[instrument(level = "trace", skip_all)]
     fn evict_idle_connections(&self) {
         tracing::trace!("Aging connections");

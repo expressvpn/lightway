@@ -4,6 +4,7 @@ mod connection_manager;
 mod io;
 mod ip_manager;
 pub mod metrics;
+mod offload_stats;
 mod statistics;
 
 // re-export so server app does not need to depend on lightway-core
@@ -633,6 +634,15 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     );
 
     let mut send_queue: Option<Arc<SendQueue>> = None;
+
+    if let Some(provider) = config.expresslane_metrics.clone() {
+        tokio::spawn(offload_stats::run(
+            conn_manager.clone(),
+            provider,
+            offload_stats::DEFAULT_OFFLOAD_STATS_INTERVAL,
+        ));
+    }
+
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => {
             let udp_server = io::outside::UdpServer::new(
