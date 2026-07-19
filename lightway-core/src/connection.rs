@@ -643,6 +643,24 @@ impl<AppState: Send> Connection<AppState> {
         self.activity
     }
 
+    /// Refresh activity timestamps from offloaded (kernel-path) traffic that
+    /// never reaches the userspace data path. Kept kernel-ref-free: the caller
+    /// (the offload stats poller) decides when to call it from kernel counter
+    /// deltas. `rx` (peer -> us) bumps both the peer-data and outside-data
+    /// timestamps; `tx` (us -> peer) refreshes only the outside-data timestamp
+    /// so a download keeps the connection out of idle-eviction without marking
+    /// the peer as actively sending.
+    pub fn mark_offload_activity(&mut self, rx: bool, tx: bool) {
+        let now = Instant::now();
+        if rx {
+            self.activity.last_data_traffic_from_peer = now;
+            self.activity.last_outside_data_received = now;
+        }
+        if tx {
+            self.activity.last_outside_data_received = now;
+        }
+    }
+
     /// Query the TLS protocol version of this connection, only valid
     /// after [`State::LinkUp`] has been reached.
     pub fn tls_protocol_version(&mut self) -> ProtocolVersion {

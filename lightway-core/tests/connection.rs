@@ -950,3 +950,51 @@ async fn test_server_dn(server_dn: Option<&str>) {
         .await
         .expect("Timed out");
 }
+
+/// Builds a `Connection` by reusing the `client()` construction pattern
+/// above (`ClientContextBuilder` -> `start_connect` -> `with_auth_token` ->
+/// `connect`), trimmed down to just the construction step - no handshake is
+/// driven. `Connection::new` performs one (pending) TLS negotiation attempt
+/// internally, which is enough to exercise `mark_offload_activity` without
+/// needing the full client/server event loop.
+#[tokio::test]
+async fn mark_offload_activity_bumps_by_rule() {
+    let (client_sock, _server_sock) = UnixStream::pair().expect("UnixStream");
+    let client_sock = Arc::new(TestStreamSock(client_sock));
+
+    let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+    let (ticker, _ticker_task) = ConnectionTicker::new();
+    let state = ConnectionState { ticker };
+
+    let mut conn = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        None,
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .connect(state)
+    .unwrap();
+
+    let before = conn.activity();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    conn.mark_offload_activity(false, true); // tx only
+    let after_tx = conn.activity();
+    assert!(after_tx.last_outside_data_received > before.last_outside_data_received);
+    assert_eq!(
+        after_tx.last_data_traffic_from_peer,
+        before.last_data_traffic_from_peer
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    conn.mark_offload_activity(true, false); // rx bumps both
+    let after_rx = conn.activity();
+    assert!(after_rx.last_data_traffic_from_peer > before.last_data_traffic_from_peer);
+    assert!(after_rx.last_outside_data_received > after_tx.last_outside_data_received);
+}
