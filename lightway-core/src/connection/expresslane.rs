@@ -41,10 +41,14 @@ pub(crate) const EXPRESSLANE_DEGRADE_STRIKES: u8 = 3;
 /// Packet counters for ExpressLane health monitoring.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExpresslanePacketStats {
-    /// Total sent via expresslane
-    pub sent: u64,
-    /// Total received via expresslane
-    pub received: u64,
+    /// Total packets sent via expresslane
+    pub sent_packets: u64,
+    /// Total packets received via expresslane
+    pub received_packets: u64,
+    /// Total bytes sent via expresslane
+    pub sent_bytes: u64,
+    /// Total bytes received via expresslane
+    pub received_bytes: u64,
 }
 
 /// Provider of ExpressLane packet metrics.
@@ -127,7 +131,7 @@ impl<AppState: Send> Expresslane<AppState> {
         match &self.metrics {
             Some(provider) => {
                 let stats = provider.get_stats(session_id);
-                (stats.sent, stats.received)
+                (stats.sent_packets, stats.received_packets)
             }
             None => (self.data.packets_sent(), self.data.packets_received()),
         }
