@@ -106,6 +106,14 @@ run-udp-server-batch-receive-test:
 run-udp-both-batch-receive-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive" --SERVER_EXTRA_ARGS="--enable-batch-receive"
 
+# run-udp-server-batch-send-test runs e2e test using UDP with batch send enabled on the server
+run-udp-server-batch-send-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-batch-send"
+
+# run-udp-server-all-batching-test runs e2e test using UDP with batch receive and batch send enabled on the server
+run-udp-server-all-batching-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-batch-receive --enable-batch-send"
+
 # run-udp-expresslane-test runs e2e test using UDP with expresslane enabled
 run-udp-expresslane-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane"
@@ -126,6 +134,10 @@ run-udp-keepalive-test:
 # run-tcp-keepalive-test runs e2e test of TCP with client using keepalive
 run-tcp-keepalive-test:
     DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s"
+
+# run-tcp-server-batch-send-test proves the flag is a no-op on stream transports
+run-tcp-server-batch-send-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-batch-send"
 
 # run-udp-single-threaded-test runs e2e test of UDP with server and client using a single Tokio worker thread
 run-udp-single-threaded-test:
@@ -172,11 +184,14 @@ run-all-tests:
     BUILD +run-udp-client-batch-receive-test
     BUILD +run-udp-server-batch-receive-test
     BUILD +run-udp-both-batch-receive-test
+    BUILD +run-udp-server-batch-send-test
+    BUILD +run-udp-server-all-batching-test
     BUILD +run-udp-expresslane-test
     BUILD +run-udp-expresslane-compat-test
     BUILD +run-tcp-iouring-test
     BUILD +run-udp-keepalive-test
     BUILD +run-tcp-keepalive-test
+    BUILD +run-tcp-server-batch-send-test
     BUILD +run-udp-single-threaded-test
     BUILD +run-tcp-single-threaded-test
     BUILD +run-tcp-parallel-connect-test
