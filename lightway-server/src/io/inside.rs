@@ -13,6 +13,12 @@ use std::sync::Arc;
 pub trait InsideIORecv: Sync + Send {
     async fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize>;
 
+    /// Upgrade to the batch-receive interface, when this instance can
+    /// pop multiple packets per call. Default: not supported.
+    fn as_batch(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvBatch>> {
+        None
+    }
+
     /// Upgrade to the GSO-capable interface, when this instance supports
     /// GSO reads. Default: not supported. Capability is per-instance —
     /// a TUN opened without offload returns `None`.
@@ -26,6 +32,29 @@ pub trait InsideIORecv: Sync + Send {
 
 /// Trait for InsideIO
 pub trait InsideIO: InsideIORecv + InsideIOSendCallback<ConnectionState> {}
+
+/// Inside IO backends that can pop multiple packets per call. Obtained
+/// from [`InsideIORecv::as_batch`]; the batched inside loop only accepts
+/// this type, so the capability check happens once at startup.
+///
+/// Implementers must also override [`InsideIORecv::as_batch`] to return
+/// `Some(self)` — the default `None` hides the capability.
+#[async_trait]
+pub trait InsideIORecvBatch: InsideIORecv {
+    /// Receive up to `max` packets, appending each to `pkts` as its own
+    /// `BytesMut`, sized by the implementation (the backend knows its
+    /// own MTU). Returns the number of packets appended (>= 1), or
+    /// `WouldBlock`/`Err`.
+    ///
+    /// Implementations must only wait when no packet is immediately
+    /// available; when packets are already queued they return whatever
+    /// is ready without waiting, so batching adds no latency.
+    async fn recv_buf_many(
+        &self,
+        pkts: &mut Vec<bytes::BytesMut>,
+        max: usize,
+    ) -> IOCallbackResult<usize>;
+}
 
 /// Inside IO backends that can receive GSO superpackets. Obtained from
 /// [`InsideIORecv::as_gso`]; the GSO inside loop only accepts this type,
@@ -53,8 +82,80 @@ pub trait InsideIORecvGso: InsideIORecv {
     async fn recv_gso(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<(usize, VirtioNetHdr)>;
 }
 
+#[cfg(test)]
+mod batch_capability_tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    /// Backend without the batch capability: only the base trait.
+    struct NoBatch;
+
+    #[async_trait]
+    impl InsideIORecv for NoBatch {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            unimplemented!("not needed for capability tests")
+        }
+
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            unimplemented!("not needed for capability tests")
+        }
+    }
+
+    /// Backend with the batch capability: overrides the upgrade.
+    struct WithBatch;
+
+    #[async_trait]
+    impl InsideIORecv for WithBatch {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            unimplemented!("not needed for capability tests")
+        }
+
+        fn as_batch(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvBatch>> {
+            Some(self)
+        }
+
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            unimplemented!("not needed for capability tests")
+        }
+    }
+
+    #[async_trait]
+    impl InsideIORecvBatch for WithBatch {
+        async fn recv_buf_many(
+            &self,
+            pkts: &mut Vec<BytesMut>,
+            _max: usize,
+        ) -> IOCallbackResult<usize> {
+            pkts.push(BytesMut::from(&[0xAB][..]));
+            IOCallbackResult::Ok(1)
+        }
+    }
+
+    #[test]
+    fn default_as_batch_is_none() {
+        assert!(Arc::new(NoBatch).as_batch().is_none());
+    }
+
+    #[test]
+    fn as_batch_is_none_through_a_trait_object() {
+        let io: Arc<dyn InsideIORecv> = Arc::new(NoBatch);
+        assert!(io.as_batch().is_none());
+    }
+
+    #[tokio::test]
+    async fn upgraded_handle_dispatches_recv_buf_many() {
+        let io = Arc::new(WithBatch).as_batch().expect("override upgrades");
+        let mut pkts = Vec::new();
+        assert!(matches!(
+            io.recv_buf_many(&mut pkts, 32).await,
+            IOCallbackResult::Ok(1)
+        ));
+        assert_eq!(pkts.len(), 1);
+    }
+}
+
 #[cfg(all(test, linux))]
-mod tests {
+mod gso_capability_tests {
     use super::*;
     use bytes::BytesMut;
 
