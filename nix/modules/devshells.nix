@@ -5,7 +5,7 @@
       config,
       lib,
       pkgs,
-      rustLatest,
+      rustStable,
       rustMsrv,
       rustNightly,
       system,
@@ -16,7 +16,7 @@
         default = config.devShells.stable;
 
         stable = pkgs.callPackage ../shell.nix {
-          rustc = rustLatest.default;
+          rustc = rustStable.default;
         };
         nightly = pkgs.callPackage ../shell.nix {
           rustc = rustNightly.default;
@@ -57,7 +57,7 @@
               .${system} or null;
           in
           pkgsCross.callPackage ../shell.nix ({
-            rustc = rustLatest.minimal.override {
+            rustc = rustStable.minimal.override {
               targets = [
                 "aarch64-linux-android"
                 "armv7-linux-androideabi"

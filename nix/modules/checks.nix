@@ -4,7 +4,7 @@
     {
       lib,
       pkgs,
-      rustLatest,
+      rustStable,
       ...
     }:
     let
@@ -12,7 +12,7 @@
       src = ../..;
 
       # Rust toolchain with rustfmt component
-      rust = rustLatest.default.override {
+      rust = rustStable.default.override {
         extensions = [ "rustfmt" ];
       };
 

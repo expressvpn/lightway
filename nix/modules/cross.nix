@@ -6,7 +6,7 @@
       pkgs,
       pkgsDarwinX64,
       system,
-      rustLatest,
+      rustStable,
       ...
     }:
     let
@@ -91,7 +91,7 @@
       mkCrossToolchain =
         targetName: config:
         let
-          rust = (config.rustBin or rustLatest).minimal.override { targets = [ config.rustTarget ]; };
+          rust = (config.rustBin or rustStable).minimal.override { targets = [ config.rustTarget ]; };
         in
         {
           inherit (config) pkgsCross rustTarget isStatic;

@@ -5,15 +5,15 @@
       lib,
       pkgs,
       system,
-      rustLatest,
+      rustStable,
       rustMsrv,
       ...
     }:
     let
       # Rust platforms
-      rustPlatformLatest = pkgs.makeRustPlatform {
-        cargo = rustLatest.minimal;
-        rustc = rustLatest.minimal;
+      rustPlatformStable = pkgs.makeRustPlatform {
+        cargo = rustStable.minimal;
+        rustc = rustStable.minimal;
       };
       rustPlatformMsrv = pkgs.makeRustPlatform {
         cargo = rustMsrv.minimal;
@@ -44,9 +44,9 @@
 
       # Native packages for all platforms
       nativePackages = {
-        # Latest stable builds
-        "lightway-client-${nativeSuffix}" = mkPackage "lightway-client" pkgs rustPlatformLatest;
-        "lightway-server-${nativeSuffix}" = mkPackage "lightway-server" pkgs rustPlatformLatest;
+        # Pinned stable builds
+        "lightway-client-${nativeSuffix}" = mkPackage "lightway-client" pkgs rustPlatformStable;
+        "lightway-server-${nativeSuffix}" = mkPackage "lightway-server" pkgs rustPlatformStable;
 
         # MSRV builds
         "lightway-client-${nativeSuffix}-msrv" = mkPackage "lightway-client" pkgs rustPlatformMsrv;
