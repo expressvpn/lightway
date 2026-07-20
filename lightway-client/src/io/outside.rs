@@ -99,4 +99,33 @@ pub trait OutsideIORecvGro: OutsideIO {
     /// Caller must ensure `buf` has spare capacity for a maximum-size
     /// aggregate (64KiB) or the tail of the aggregate is truncated.
     fn recv_gro(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<(usize, Option<u16>)>;
+
+    /// Batched [`Self::recv_gro`]: fill up to `MAX_IO_BATCH_SIZE`
+    /// datagrams in a single `recvmmsg`, writing each datagram's
+    /// GRO segment size into `gro_sizes[i]` (`None` if the kernel did
+    /// not coalesce that message). Returns the datagram count (`>= 1`
+    /// on `Ok`).
+    ///
+    /// This is the read-side batching that cuts one `recvmsg` per
+    /// datagram down to one syscall per batch — the win is largest
+    /// against a server whose zero-checksum UDP the kernel will not
+    /// coalesce, where `recv_gro` would otherwise return one datagram
+    /// at a time.
+    ///
+    /// The default reads a single datagram via [`Self::recv_gro`] into
+    /// `bufs[0]`; UDP overrides it with a real `recvmmsg`.
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
+        match self.recv_gro(&mut bufs[0]) {
+            IOCallbackResult::Ok((_, gro_size)) => {
+                gro_sizes[0] = gro_size;
+                IOCallbackResult::Ok(1)
+            }
+            IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
+        }
+    }
 }

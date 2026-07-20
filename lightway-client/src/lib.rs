@@ -679,12 +679,10 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
 ) -> Result<()> {
     // A GRO aggregate can be up to the maximum IP datagram size.
     const RECV_CAP: usize = 65535;
-    // Coalesce at most this many datagrams per window before flushing
-    // and yielding, so a saturated socket cannot monopolize the task
-    // (the inner drain does not `.await`). Matches the recvmmsg batch.
-    const DRAIN_BATCH: usize = lightway_core::MAX_IO_BATCH_SIZE;
+    const BATCH: usize = lightway_core::MAX_IO_BATCH_SIZE;
 
-    let mut buf = BytesMut::with_capacity(RECV_CAP);
+    let mut bufs: [BytesMut; BATCH] = std::array::from_fn(|_| BytesMut::with_capacity(RECV_CAP));
+    let mut gro_sizes: [Option<u16>; BATCH] = [None; BATCH];
     let mut segments: Vec<BytesMut> = Vec::new();
     loop {
         // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
@@ -695,30 +693,29 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
             let _ = tx.send(());
         }
 
-        // Open one TUN GRO window and drain the datagrams that are
-        // ready right now into it, coalescing across them. `gro_open`
-        // is idempotent. The window is flushed after the drain, before
-        // we wait for the next readiness, so packets never wait on
-        // future traffic.
-        inside_io.gro_open();
-        let mut drained = 0usize;
-        let outcome: Result<()> = loop {
-            // With `segments` cleared, `buf` is the slab's sole owner
-            // again and `reserve` reclaims it without reallocating.
-            buf.clear();
-            buf.reserve(RECV_CAP);
-            let (_, gro_size) = match outside_io.recv_gro(&mut buf) {
-                IOCallbackResult::Ok(pair) => pair,
-                IOCallbackResult::WouldBlock => break Ok(()),
-                IOCallbackResult::Err(err) => break Err(err.into()),
-            };
+        // One syscall pulls up to BATCH datagrams. Each may itself be a
+        // kernel-coalesced aggregate (gro_sizes[i] set) or a single
+        // datagram (None) — both feed the userspace TUN coalescer.
+        let count = match outside_io.recv_gro_batch(&mut bufs, &mut gro_sizes) {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
+        };
 
-            let result = {
-                let mut conn = conn.lock().unwrap();
-                match gro_size {
-                    Some(gro_size) if gro_size > 0 && (gro_size as usize) < buf.len() => {
+        // Open one TUN GRO window across the whole batch and flush it
+        // after, so decrypted same-flow segments coalesce into TSO
+        // superpackets and packets never wait on future traffic.
+        // `gro_open` is idempotent. The flush must run even on error,
+        // so capture the result and propagate it afterwards.
+        inside_io.gro_open();
+        let result = {
+            let mut conn = conn.lock().unwrap();
+            let mut acc = Ok(());
+            for i in 0..count {
+                let r = match gro_sizes[i] {
+                    Some(gro_size) if gro_size > 0 && (gro_size as usize) < bufs[i].len() => {
                         segments.clear();
-                        split_gro_segments(&mut buf, gro_size as usize, &mut segments);
+                        split_gro_segments(&mut bufs[i], gro_size as usize, &mut segments);
                         let pkts = segments
                             .iter_mut()
                             .map(|b| OutsidePacket::Wire(b, connection_type));
@@ -727,32 +724,29 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                         })
                     }
                     _ => {
-                        let pkt = std::iter::once(OutsidePacket::Wire(&mut buf, connection_type));
+                        let pkt =
+                            std::iter::once(OutsidePacket::Wire(&mut bufs[i], connection_type));
                         conn.multiple_outside_data_received(pkt, |err| err.is_fatal(connection_type))
                     }
+                };
+                segments.clear();
+                if let Err(e) = r {
+                    acc = Err(e);
+                    break;
                 }
-            };
-            segments.clear();
-            if let Err(e) = result {
-                break Err(e.into());
             }
-
-            drained += 1;
-            if drained >= DRAIN_BATCH {
-                break Ok(());
-            }
+            acc
         };
-
-        // Flush the coalesced batch before propagating any error or
-        // waiting for the next readiness.
         inside_io.gro_flush();
-        outcome?;
+        result?;
 
-        // Skip keepalive bookkeeping on a spurious wakeup that yielded
-        // no datagrams (matches the plain loop's WouldBlock `continue`).
-        if drained > 0 {
-            keepalive.outside_activity().await;
+        // Reset the buffers consumed this round.
+        for b in &mut bufs[..count] {
+            b.clear();
+            b.reserve(RECV_CAP);
         }
+
+        keepalive.outside_activity().await
     }
 }
 

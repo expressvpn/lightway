@@ -109,6 +109,53 @@ impl Message<'_> {
     }
 }
 
+/// Scan a raw control-message buffer — the `msg_control` region a
+/// `recvmsg`/`recvmmsg` filled, sliced to the returned `msg_controllen`
+/// — for a `UDP_GRO` control message and return its coalesced segment
+/// size, if present.
+///
+/// `control` must be aligned for a `libc::cmsghdr` (the `CMSG_*` macros
+/// require it); receive buffers built from [`BufferMut`] or a
+/// `#[repr(align(…))]` wrapper satisfy this.
+#[cfg(target_os = "linux")]
+pub fn first_udp_gro_segment(control: &[u8]) -> Option<u16> {
+    if control.is_empty() {
+        return None;
+    }
+    debug_assert_eq!(
+        control.as_ptr().align_offset(std::mem::align_of::<libc::cmsghdr>()),
+        0,
+        "control buffer must be aligned for cmsghdr"
+    );
+
+    // Build a `msghdr` referencing `control` purely so the `CMSG_*`
+    // macros can walk it — they read only `msg_control`/`msg_controllen`.
+    // SAFETY: a zeroed msghdr is valid; the two fields we use are set
+    // below and the buffer is never written through this pointer.
+    let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+    msghdr.msg_control = control.as_ptr() as *mut _;
+    msghdr.msg_controllen = control.len() as LibcControlLen;
+
+    // SAFETY: `msghdr` is valid and `control` is initialized for its
+    // full length per the caller's contract.
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msghdr) };
+    while !cmsg.is_null() {
+        // SAFETY: `cmsg` came from `CMSG_FIRSTHDR`/`CMSG_NXTHDR`, non-null.
+        let hdr = unsafe { &*cmsg };
+        if hdr.cmsg_level == libc::SOL_UDP && hdr.cmsg_type == libc::UDP_GRO {
+            // SAFETY: `hdr` is a valid cmsg from CMSG_FIRSTHDR/NXTHDR.
+            let data = unsafe { libc::CMSG_DATA(hdr) as *const libc::c_int };
+            // SAFETY: a `UDP_GRO` cmsg carries a `c_int`; `CMSG_DATA`
+            // returns a pointer aligned for it within the cmsg.
+            let seg = unsafe { *data };
+            return Some(seg as u16);
+        }
+        // SAFETY: `msghdr` and `cmsg` are valid; advances or returns null.
+        cmsg = unsafe { libc::CMSG_NXTHDR(&msghdr, cmsg) };
+    }
+    None
+}
+
 /// Iterator over the control messages in a [`Buffer`].
 pub struct Iter<'a, const N: usize> {
     msghdr: libc::msghdr,
@@ -376,6 +423,40 @@ mod tests {
         let mut iter = unsafe { buf.iter(SIZE as LibcControlLen) };
         assert!(matches!(iter.next(), Some(Message::UdpGroSegments(1350))));
         assert!(iter.next().is_none());
+    }
+
+    /// `first_udp_gro_segment` extracts the segment size from a raw
+    /// (aligned) control buffer built with `SOL_UDP`/`UDP_GRO`, and
+    /// returns `None` when no such message is present.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn first_udp_gro_segment_parses_raw_control() {
+        const SIZE: usize = Message::space::<libc::c_int>();
+        let mut out = BufferMut::<SIZE>::zeroed();
+        out.builder()
+            .fill_next(libc::SOL_UDP, libc::UDP_GRO, 1400 as libc::c_int)
+            .unwrap();
+        // BufferMut is `#[repr(align(16))]`, so `as_ref()` is aligned.
+        assert_eq!(first_udp_gro_segment(out.as_ref()), Some(1400));
+
+        // A buffer with an unrelated (pktinfo) message yields None.
+        const PSIZE: usize = Message::space::<libc::in_pktinfo>();
+        let mut other = BufferMut::<PSIZE>::zeroed();
+        other
+            .builder()
+            .fill_next(
+                libc::SOL_IP,
+                libc::IP_PKTINFO,
+                libc::in_pktinfo {
+                    ipi_ifindex: 0,
+                    ipi_spec_dst: libc::in_addr { s_addr: 0 },
+                    ipi_addr: libc::in_addr { s_addr: 0 },
+                },
+            )
+            .unwrap();
+        assert_eq!(first_udp_gro_segment(other.as_ref()), None);
+
+        assert_eq!(first_udp_gro_segment(&[]), None);
     }
 
     #[test]

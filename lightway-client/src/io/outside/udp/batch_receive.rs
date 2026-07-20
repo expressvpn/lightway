@@ -30,6 +30,25 @@ pub(crate) fn recv_multiple(
     PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
 }
 
+/// Batched GRO receive (Linux): one `recvmmsg` fills up to
+/// `max_batch_size` datagrams, and for each we parse the per-message
+/// `UDP_GRO` control message so a datagram the kernel coalesced is
+/// reported with its segment size in `gro_sizes[i]` (`None` when the
+/// kernel did not coalesce that message — e.g. an old kernel or a
+/// server that sends zero-checksum UDP). Returns the datagram count.
+///
+/// This replaces one `recvmsg` per datagram on the download path with
+/// one syscall per batch, independent of whether the kernel coalesces.
+#[cfg(linux)]
+pub(crate) fn recv_multiple_gro(
+    fd: libc::c_int,
+    recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
+    gro_sizes: &mut [Option<u16>; MAX_IO_BATCH_SIZE],
+    max_batch_size: usize,
+) -> io::Result<usize> {
+    linux::recv_multiple_gro(fd, recv_bufs, gro_sizes, max_batch_size.min(MAX_IO_BATCH_SIZE))
+}
+
 #[cfg(apple)]
 mod apple {
     use bytes::BytesMut;
@@ -117,6 +136,98 @@ mod linux {
     use bytes::BytesMut;
     use lightway_core::MAX_IO_BATCH_SIZE;
     use std::{io, mem};
+
+    /// Per-message control buffer for one `UDP_GRO` cmsg, aligned for
+    /// `cmsghdr` as the `CMSG_*` macros require. Stack-allocated and
+    /// reused per call — no heap traffic on the receive hot path.
+    #[cfg(linux)]
+    #[repr(C, align(16))]
+    struct GroControl([u8; lightway_app_utils::cmsg::Message::space::<libc::c_int>()]);
+
+    /// One `recvmmsg` with per-message `UDP_GRO` control parsing.
+    #[cfg(linux)]
+    #[allow(unsafe_code)]
+    pub(crate) fn recv_multiple_gro(
+        fd: libc::c_int,
+        recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; MAX_IO_BATCH_SIZE],
+        msg_count: usize,
+    ) -> io::Result<usize> {
+        use lightway_app_utils::cmsg;
+
+        const CTRL_LEN: usize = cmsg::Message::space::<libc::c_int>();
+
+        // SAFETY: a zeroed iovec is valid (null pointer + zero length).
+        let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
+        // SAFETY: a zeroed mmsghdr is valid (null pointers + zero lengths).
+        let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; MAX_IO_BATCH_SIZE]>() };
+        // Aligned, zeroed control area per message (see `GroControl`).
+        let mut ctrls: [GroControl; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| GroControl([0u8; CTRL_LEN]));
+
+        for i in 0..msg_count {
+            // Advertise only the buffer's spare capacity so the kernel
+            // can never write past the allocation; oversized datagrams
+            // are truncated, matching the non-batch recv path.
+            let spare = recv_bufs[i].spare_capacity_mut();
+            iovecs[i].iov_base = spare.as_mut_ptr() as *mut libc::c_void;
+            iovecs[i].iov_len = spare.len();
+            hdrs[i].msg_hdr.msg_iov = &mut iovecs[i];
+            hdrs[i].msg_hdr.msg_iovlen = 1;
+            hdrs[i].msg_hdr.msg_control = ctrls[i].0.as_mut_ptr() as *mut libc::c_void;
+            hdrs[i].msg_hdr.msg_controllen = CTRL_LEN as _;
+        }
+
+        // SAFETY: hdrs/iovecs/ctrls are valid for msg_count entries and
+        // outlive the call; fd is a valid borrowed socket.
+        let n = unsafe {
+            libc::recvmmsg(
+                fd,
+                hdrs.as_mut_ptr(),
+                msg_count as _,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let count = (n as usize).min(msg_count);
+        let mut truncated = 0usize;
+        for i in 0..count {
+            let len = hdrs[i].msg_len as usize;
+            let recv_buf = &mut recv_bufs[i];
+            let new_len = recv_buf.len() + len;
+            // SAFETY: the kernel wrote `len` bytes into the spare
+            // capacity advertised via the iovec, bounded by it, so
+            // `new_len <= capacity()`.
+            unsafe {
+                recv_buf.set_len(new_len);
+            }
+
+            // Parse the per-message control area for a UDP_GRO segment
+            // size. `msg_controllen` is what the kernel actually wrote.
+            let controllen = hdrs[i].msg_hdr.msg_controllen as usize;
+            gro_sizes[i] = if controllen == 0 {
+                None
+            } else {
+                cmsg::first_udp_gro_segment(&ctrls[i].0[..controllen])
+            };
+
+            if hdrs[i].msg_hdr.msg_flags & libc::MSG_TRUNC != 0 {
+                truncated += 1;
+            }
+        }
+        if truncated > 0 {
+            tracing::warn!(
+                "{truncated} datagram(s) truncated to receive buffer capacity; \
+                 the configured outside_mtu may be too small"
+            );
+        }
+
+        Ok(count)
+    }
 
     pub(crate) struct Recvmmsg;
 

@@ -299,6 +299,35 @@ impl OutsideIORecvGro for Udp {
             Err(err) => IOCallbackResult::Err(err),
         }
     }
+
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; lightway_core::MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; lightway_core::MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
+        use std::os::fd::AsRawFd;
+        let fd = self.sock.as_raw_fd();
+        loop {
+            match self.sock.try_io(tokio::io::Interest::READABLE, || {
+                batch_receive::recv_multiple_gro(
+                    fd,
+                    bufs,
+                    gro_sizes,
+                    lightway_core::MAX_IO_BATCH_SIZE,
+                )
+            }) {
+                Ok(n) => return IOCallbackResult::Ok(n),
+                // try_io can report WouldBlock spuriously; surface it so
+                // the caller waits for the next readiness event.
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return IOCallbackResult::WouldBlock;
+                }
+                // A signal interrupted the syscall; retry immediately.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return IOCallbackResult::Err(e),
+            }
+        }
+    }
 }
 
 impl OutsideIOSendCallback for Udp {
