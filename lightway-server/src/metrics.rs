@@ -83,6 +83,8 @@ static METRIC_TUN_REJECTED_NO_CLIENT_IP: LazyLock<Counter> =
 // Traffic volume
 static METRIC_TUN_FROM_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tun_from_client"));
 static METRIC_TUN_TO_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tun_to_client"));
+static METRIC_TUN_RECV_BATCH_SIZE: LazyLock<Histogram> =
+    LazyLock::new(|| histogram!("tun_recv_batch_size"));
 
 static METRIC_SESSIONS_CURRENT_ONLINE: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("sessions_current_online"));
@@ -368,6 +370,11 @@ pub fn tun_from_client(sz: usize) {
 /// The difference is one virtio header (12 bytes) per recv.
 pub fn tun_to_client(sz: usize) {
     METRIC_TUN_TO_CLIENT.increment(sz as u64);
+}
+
+/// Number of packets returned by one batched inside-IO receive.
+pub fn tun_recv_batch(sz: usize) {
+    METRIC_TUN_RECV_BATCH_SIZE.record(sz as f64);
 }
 
 /// Current session statistics

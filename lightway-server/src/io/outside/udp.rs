@@ -233,6 +233,12 @@ impl UdpServer {
         })
     }
 
+    /// Handle for the inside loop to open send-batch windows. `Some`
+    /// only when inside-IO batching was enabled at construction.
+    pub(crate) fn send_queue(&self) -> Option<Arc<SendQueue>> {
+        self.send_queue.clone()
+    }
+
     fn data_received(
         &mut self,
         peer_addr: SocketAddr,

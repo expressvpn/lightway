@@ -29,7 +29,7 @@ use ipnet::Ipv4Net;
 use lightway_app_utils::{PacketCodecFactoryType, TunConfig, connection_ticker_cb};
 use lightway_core::{
     AuthMethod, BuilderPredicates, ConnectionError, ConnectionResult, IOCallbackResult,
-    InsideIpConfig, Secret, ServerContextBuilder, ipv4_update_destination,
+    InsideIpConfig, MAX_IO_BATCH_SIZE, Secret, ServerContextBuilder, ipv4_update_destination,
 };
 use pnet_packet::ipv4::Ipv4Packet;
 use std::{
@@ -48,8 +48,9 @@ use tracing::info;
 pub use crate::connection::ConnectionState;
 #[cfg(linux)]
 pub use crate::io::inside::InsideIORecvGso;
-pub use crate::io::inside::{InsideIO, InsideIORecv};
+pub use crate::io::inside::{InsideIO, InsideIORecv, InsideIORecvBatch};
 
+use crate::io::outside::udp::send_queue::SendQueue;
 use crate::ip_manager::IpManager;
 
 use connection_manager::ConnectionManager;
@@ -390,6 +391,61 @@ async fn inside_io_loop_default(
     }
 }
 
+/// Like [`inside_io_loop_default`], but pops packets in batches and
+/// holds every resulting encrypted datagram in a send queue that is
+/// flushed with one batched syscall per receive batch. Only runs for
+/// UDP servers — stream transports have no batched send path.
+///
+/// `recv_buf_many` waits only when no packet is available, so batches
+/// form under backlog without adding latency.
+async fn inside_io_loop_batched(
+    inside_io: Arc<dyn InsideIORecvBatch>,
+    ip_manager: Arc<IpManager<Arc<Connection>>>,
+    lightway_client_ip: Ipv4Addr,
+    send_queue: Arc<SendQueue>,
+) -> anyhow::Result<()> {
+    let mut pkts: Vec<BytesMut> = Vec::with_capacity(MAX_IO_BATCH_SIZE);
+    loop {
+        pkts.clear();
+        match inside_io.recv_buf_many(&mut pkts, MAX_IO_BATCH_SIZE).await {
+            IOCallbackResult::Ok(_n) => {}
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => {
+                break Err(anyhow!(err).context("InsideIO recv_buf_many error"));
+            }
+        };
+
+        metrics::tun_recv_batch(pkts.len());
+
+        // Sends triggered by inside_data_received (which is synchronous)
+        // are queued while this guard is live and flushed together once
+        // the batch has been processed. There are no await points inside
+        // the window; the flush itself may wait for socket writability,
+        // which backpressures this loop.
+        let batch_guard = send_queue.begin_batch();
+
+        for mut buf in pkts.drain(..) {
+            let packet = Ipv4Packet::new(buf.as_ref());
+            let Some(packet) = packet else {
+                eprintln!("Invalid inside packet size (less than Ipv4 header)!");
+                continue;
+            };
+            let conn = ip_manager.find_connection(packet.get_destination());
+
+            ipv4_update_destination(buf.as_mut(), lightway_client_ip);
+
+            if let Some(conn) = conn {
+                let result = conn.inside_data_received(&mut buf);
+                handle_inside_io_error(conn, result);
+            } else {
+                metrics::tun_rejected_packet_no_connection();
+            }
+        }
+
+        batch_guard.flush().await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 async fn inside_io_loop_gso(
     inside_io: Arc<dyn crate::io::inside::InsideIORecvGso>,
@@ -562,9 +618,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.statistics_reporting_interval,
     ));
 
+    let mut send_queue: Option<Arc<SendQueue>> = None;
     let mut server: Box<dyn Server> = match connection_type {
-        ServerConnectionMode::Datagram(may_be_sock) => Box::new(
-            io::outside::UdpServer::new(
+        ServerConnectionMode::Datagram(may_be_sock) => {
+            let udp_server = io::outside::UdpServer::new(
                 conn_manager.clone(),
                 config.bind_address,
                 config.udp_buffer_size,
@@ -572,8 +629,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 config.enable_batch_send,
                 may_be_sock,
             )
-            .await?,
-        ),
+            .await?;
+            send_queue = udp_server.send_queue();
+            Box::new(udp_server)
+        }
         ServerConnectionMode::Stream(may_be_sock) => Box::new(
             io::outside::TcpServer::new(
                 conn_manager.clone(),
@@ -605,6 +664,21 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             }
             #[cfg(not(target_os = "linux"))]
             unreachable!()
+        } else if config.enable_batch_send
+            && let Some(send_queue) = send_queue
+        {
+            // send_queue exists only for UDP servers; on stream
+            // transports there is no batched send path, so the flag is
+            // a no-op and the default loop runs below.
+            let batch_io = inside_io.clone().as_batch().context(
+                "enable_batch_send is set but the inside IO backend does not support batched receive",
+            )?;
+            tokio::spawn(inside_io_loop_batched(
+                batch_io,
+                ip_manager.clone(),
+                config.lightway_client_ip,
+                send_queue,
+            ))
         } else {
             tokio::spawn(inside_io_loop_default(
                 inside_io,
@@ -651,5 +725,129 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             conn_manager.shutdown();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lightway_core::InsideIOSendCallbackArg;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// InsideIO whose recv_buf_many pops scripted batches, then errors.
+    struct ScriptedInsideIO {
+        batches: Mutex<VecDeque<Vec<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::io::inside::InsideIORecv for ScriptedInsideIO {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            unimplemented!("batched loop must use recv_buf_many")
+        }
+
+        fn as_batch(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvBatch>> {
+            Some(self)
+        }
+
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl InsideIORecvBatch for ScriptedInsideIO {
+        async fn recv_buf_many(
+            &self,
+            pkts: &mut Vec<BytesMut>,
+            _max: usize,
+        ) -> IOCallbackResult<usize> {
+            match self.batches.lock().unwrap().pop_front() {
+                Some(batch) => {
+                    let n = batch.len();
+                    pkts.extend(batch.into_iter().map(|p| BytesMut::from(&p[..])));
+                    IOCallbackResult::Ok(n)
+                }
+                None => IOCallbackResult::Err(std::io::Error::other("script exhausted")),
+            }
+        }
+    }
+
+    impl lightway_core::InsideIOSendCallback<ConnectionState> for ScriptedInsideIO {
+        fn send(&self, buf: BytesMut, _state: &mut ConnectionState) -> IOCallbackResult<usize> {
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn mtu(&self) -> usize {
+            1350
+        }
+
+        fn if_index(&self) -> std::io::Result<u32> {
+            Ok(0)
+        }
+
+        fn name(&self) -> std::io::Result<String> {
+            Ok("mock".to_string())
+        }
+    }
+
+    impl crate::io::inside::InsideIO for ScriptedInsideIO {}
+
+    fn test_ip_manager() -> Arc<IpManager<Arc<Connection>>> {
+        let pool: Ipv4Net = "10.125.0.0/16".parse().unwrap();
+        Arc::new(IpManager::new(
+            pool,
+            HashMap::new(),
+            std::iter::empty::<Ipv4Addr>(),
+            InsideIpConfig {
+                client_ip: Ipv4Addr::new(10, 125, 0, 5),
+                server_ip: Ipv4Addr::new(10, 125, 0, 6),
+                dns_ip: Ipv4Addr::new(10, 125, 0, 1),
+            },
+            false,
+            true,
+        ))
+    }
+
+    /// Minimal valid IPv4 header (20 bytes) to an address with no
+    /// connection, exercising the no-connection drop path without a
+    /// real Connection.
+    fn ipv4_packet_to(dest: Ipv4Addr) -> Vec<u8> {
+        let mut pkt = vec![0u8; 20];
+        pkt[0] = 0x45; // version 4, IHL 5
+        pkt[16..20].copy_from_slice(&dest.octets());
+        pkt
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn batched_loop_drains_all_batches_then_exits_on_recv_error() {
+        let io = Arc::new(ScriptedInsideIO {
+            batches: Mutex::new(VecDeque::from([
+                vec![ipv4_packet_to(Ipv4Addr::new(10, 125, 0, 7)); 3],
+                vec![ipv4_packet_to(Ipv4Addr::new(10, 125, 0, 8)); 2],
+            ])),
+        });
+        let batches_handle = Arc::clone(&io);
+
+        let sock = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let send_queue = SendQueue::new(sock);
+
+        let result = inside_io_loop_batched(
+            io,
+            test_ip_manager(),
+            Ipv4Addr::new(10, 125, 0, 5),
+            send_queue,
+        )
+        .await;
+
+        assert!(result.is_err(), "loop must terminate on recv error");
+        assert!(
+            batches_handle.batches.lock().unwrap().is_empty(),
+            "loop must consume every scripted batch before the error"
+        );
     }
 }
