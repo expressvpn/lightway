@@ -618,6 +618,20 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.statistics_reporting_interval,
     ));
 
+    #[cfg(linux)]
+    let gso = config.enable_tun_offload;
+    #[cfg(not(linux))]
+    let gso = false;
+
+    // Also enforced by config::Config::validate; repeated here to cover
+    // ServerConfig built directly by library consumers. With offload on,
+    // the GSO loop already aggregates packets, so batch send has nothing
+    // to add.
+    anyhow::ensure!(
+        !(gso && config.enable_batch_send),
+        "enable_batch_send cannot be used with enable_tun_offload"
+    );
+
     let mut send_queue: Option<Arc<SendQueue>> = None;
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => {
@@ -645,11 +659,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     };
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
-        #[cfg(target_os = "linux")]
-        let gso = config.enable_tun_offload;
-        #[cfg(not(target_os = "linux"))]
-        let gso = false;
-
         if gso {
             #[cfg(target_os = "linux")]
             {

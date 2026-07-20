@@ -249,6 +249,13 @@ impl Config {
             )
         }
 
+        if self.enable_batch_send {
+            anyhow::ensure!(
+                !self.enable_tun_offload,
+                "Batch send cannot be used with tun offload"
+            )
+        }
+
         Ok(())
     }
 }
@@ -279,5 +286,20 @@ mod tests {
         config.mode = ConnectionType::Udp;
         config.proxy_protocol = true;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_batch_send_with_tun_offload() {
+        let mut config = Config::default();
+        config.enable_batch_send = true;
+        config.enable_tun_offload = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_batch_send_alone() {
+        let mut config = Config::default();
+        config.enable_batch_send = true;
+        assert!(config.validate().is_ok());
     }
 }
