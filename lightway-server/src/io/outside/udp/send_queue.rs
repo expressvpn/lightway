@@ -436,4 +436,41 @@ mod tests {
 
         assert_eq!(recv_one(&receiver).await, b"with-pktinfo");
     }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn udp_socket_send_queues_inside_window_and_sends_direct_outside() {
+        use super::super::UdpSocket;
+        use lightway_core::OutsideIOSendCallback;
+        use std::sync::RwLock;
+
+        let (sender, receiver, receiver_addr) = socket_pair().await;
+        let queue = SendQueue::new(sender.clone());
+
+        let cb = UdpSocket {
+            sock: sender,
+            peer_addr: RwLock::new((receiver_addr, receiver_addr.into())),
+            reply_pktinfo: None,
+            send_queue: Some(queue.clone()),
+        };
+
+        // Outside a window: direct send, arrives immediately.
+        cb.send(b"direct");
+        assert_eq!(recv_one(&receiver).await, b"direct");
+
+        // Inside a window: held until the guard flushes.
+        let guard = queue.begin_batch();
+        cb.send(b"queued");
+        let mut probe = vec![0u8; 64];
+        assert!(
+            receiver.try_recv(&mut probe).is_err(),
+            "datagram must be held in the queue until flush"
+        );
+        drop(guard);
+        assert_eq!(recv_one(&receiver).await, b"queued");
+    }
 }

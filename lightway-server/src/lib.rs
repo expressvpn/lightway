@@ -258,6 +258,12 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     /// Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux)
     pub enable_batch_receive: bool,
 
+    /// Batch inside-path receives and flush the resulting UDP datagrams
+    /// with a single syscall where the platform supports it. UDP mode
+    /// only — a TCP server falls back to the default inside loop.
+    /// Default off.
+    pub enable_batch_send: bool,
+
     /// Disable IP pool randomization
     /// Should be used for debugging only
     #[cfg(feature = "debug")]
@@ -319,6 +325,7 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             proxy_protocol: config.proxy_protocol,
             udp_buffer_size: config.udp_buffer_size,
             enable_batch_receive: config.enable_batch_receive,
+            enable_batch_send: config.enable_batch_send,
             #[cfg(feature = "debug")]
             randomize_ippool: config.randomize_ippool,
         })
@@ -562,6 +569,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 config.bind_address,
                 config.udp_buffer_size,
                 config.enable_batch_receive,
+                config.enable_batch_send,
                 may_be_sock,
             )
             .await?,

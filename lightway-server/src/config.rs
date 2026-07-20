@@ -156,6 +156,14 @@ pub struct Config {
     #[patch(attribute(doc = "Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux)"))]
     pub enable_batch_receive: bool,
 
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Batch inside-path receives and flush the resulting UDP sends with one syscall per batch (UDP servers only; no-op on TCP)"
+    ))]
+    pub enable_batch_send: bool,
+
     #[cfg(feature = "debug")]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
@@ -218,6 +226,7 @@ impl Default for Config {
             proxy_protocol: false,
             udp_buffer_size: ByteSize::mib(15),
             enable_batch_receive: false,
+            enable_batch_send: false,
             #[cfg(feature = "debug")]
             tls_debug: false,
             #[cfg(feature = "debug")]
