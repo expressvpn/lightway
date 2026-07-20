@@ -701,7 +701,11 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Set the address of this connection's peer
     pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        self.session.io_cb_mut().io.set_peer_addr(addr)
+        let old = self.session.io_cb_mut().io.set_peer_addr(addr);
+        if old != addr {
+            self.publish_expresslane_key();
+        }
+        old
     }
 
     /// Get the negotiated cipher, only valid after [`State::LinkUp`]
@@ -1444,6 +1448,12 @@ impl<AppState: Send> Connection<AppState> {
                     new: new_session_id,
                 });
 
+                // Announce the rotation: the keepalive ping is stamped
+                // with the new session id and the pong reply echoes it
+                // back, completing the rotation within one round trip
+                // instead of waiting for organic client traffic
+                let _ = self.keepalive();
+
                 Ok(new_session_id)
             }
         }
@@ -1504,6 +1514,7 @@ impl<AppState: Send> Connection<AppState> {
             Client { .. } => {
                 self.session_id = session_id;
                 self.session.io_cb_mut().set_session_id(session_id);
+                self.publish_expresslane_key();
             }
             Server {
                 ref mut pending_session_id,
