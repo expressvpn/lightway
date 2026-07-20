@@ -64,16 +64,21 @@ impl Udp {
     /// absent.
     #[cfg(linux)]
     pub fn enable_gro(&mut self) {
+        // Route receives through `recv_gro` whenever offload is
+        // requested — not only when the sockopt succeeds. `recv_gro`
+        // degrades to a plain single-datagram `recvmsg` when the
+        // kernel does not coalesce (old kernel, or a server that sends
+        // zero-checksum UDP, which the kernel GRO engine skips by
+        // design), and userspace TUN-side coalescing still applies in
+        // that case. The `UDP_GRO` sockopt is a best-effort bonus that
+        // additionally coalesces on the socket read when the server's
+        // datagrams carry a checksum.
+        self.gro_enabled = true;
         match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
-            Ok(()) => {
-                tracing::info!("UDP GRO enabled on outside socket");
-                self.gro_enabled = true;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to enable UDP GRO, falling back to per-packet receive: {e}"
-                );
-            }
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Err(e) => tracing::warn!(
+                "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
+            ),
         }
     }
 
