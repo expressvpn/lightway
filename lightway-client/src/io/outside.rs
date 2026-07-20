@@ -39,6 +39,9 @@ pub trait OutsideIO: Sync + Send {
     fn set_send_buffer_size(&self, size: usize) -> Result<()>;
     fn set_recv_buffer_size(&self, size: usize) -> Result<()>;
 
+    fn send_buffer_size(&self) -> Result<usize>;
+    fn recv_buffer_size(&self) -> Result<usize>;
+
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready>;
 
     /// Receive a single packet into `buf`. Returns how many bytes were read.
