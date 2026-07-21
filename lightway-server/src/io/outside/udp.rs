@@ -1,5 +1,6 @@
 mod batch_receive;
 mod cmsg;
+pub(crate) mod send_queue;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use tracing::{info, warn};
 
 use super::Server;
 use crate::io::outside::udp::batch_receive::{BatchRecvSlot, recv_multiple_with_metadata};
+use crate::io::outside::udp::send_queue::SendQueue;
 use crate::{connection_manager::ConnectionManager, metrics};
 
 enum BindMode {
@@ -84,11 +86,14 @@ fn send_to_socket(
             }
         }
 
-        // If cmsg_len is 0, the kernel will never read cmsg.
-        let msghdr = MsgHdr::new()
-            .with_addr(peer_addr)
-            .with_buffers(bufs)
-            .with_control(&cmsg.as_ref()[..cmsg_len]);
+        // Only attach control data when present: macOS rejects a
+        // non-null msg_control paired with msg_controllen == 0.
+        let msghdr = MsgHdr::new().with_addr(peer_addr).with_buffers(bufs);
+        let msghdr = if cmsg_len > 0 {
+            msghdr.with_control(&cmsg.as_ref()[..cmsg_len])
+        } else {
+            msghdr
+        };
 
         sock.sendmsg(&msghdr, 0)
     });
@@ -106,11 +111,17 @@ struct UdpSocket {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: RwLock<(SocketAddr, SockAddr)>,
     reply_pktinfo: Option<libc::in_pktinfo>,
+    send_queue: Option<Arc<SendQueue>>,
 }
 
 impl OutsideIOSendCallback for UdpSocket {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         let peer_addr = self.peer_addr.read().unwrap();
+        if let Some(queue) = &self.send_queue
+            && queue.try_enqueue(peer_addr.1.clone(), self.reply_pktinfo, buf)
+        {
+            return IOCallbackResult::Ok(buf.len());
+        }
         send_to_socket(
             &self.sock,
             &[IoSlice::new(buf)],
@@ -148,6 +159,7 @@ pub(crate) struct UdpServer {
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
     batch_receive_enabled: bool,
+    send_queue: Option<Arc<SendQueue>>,
 }
 
 impl UdpServer {
@@ -156,6 +168,7 @@ impl UdpServer {
         bind_address: SocketAddr,
         udp_buffer_size: ByteSize,
         enable_batch_receive: bool,
+        enable_batch_send: bool,
         sock: Option<tokio::net::UdpSocket>,
     ) -> Result<UdpServer> {
         let sock = match sock {
@@ -173,6 +186,8 @@ impl UdpServer {
         // successfully in `OutsideIOSendCallback` callback
         sock.writable().await?;
         let sock = Arc::new(sock);
+
+        let send_queue = enable_batch_send.then(|| SendQueue::new(sock.clone()));
 
         let bind_mode = if bind_address.ip().is_unspecified() {
             BindMode::UnspecifiedAddress {
@@ -214,7 +229,14 @@ impl UdpServer {
             sock,
             bind_mode,
             batch_receive_enabled,
+            send_queue,
         })
+    }
+
+    /// Handle for the inside loop to open send-batch windows. `Some`
+    /// only when inside-IO batching was enabled at construction.
+    pub(crate) fn send_queue(&self) -> Option<Arc<SendQueue>> {
+        self.send_queue.clone()
     }
 
     fn data_received(
@@ -260,6 +282,7 @@ impl UdpServer {
                             sock: self.sock.clone(),
                             peer_addr: RwLock::new((peer_addr, peer_addr.into())),
                             reply_pktinfo,
+                            send_queue: self.send_queue.clone(),
                         })
                     },
                 );

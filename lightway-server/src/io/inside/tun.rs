@@ -2,7 +2,7 @@ use crate::connection::ConnectionState;
 #[cfg(linux)]
 use crate::io::inside::InsideIORecvGso;
 use crate::{
-    io::inside::{InsideIO, InsideIORecv},
+    io::inside::{InsideIO, InsideIORecv, InsideIORecvBatch},
     metrics,
 };
 use anyhow::Result;
@@ -56,6 +56,10 @@ impl InsideIORecv for Tun {
         }
     }
 
+    fn as_batch(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvBatch>> {
+        Some(self)
+    }
+
     #[cfg(linux)]
     fn as_gso(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvGso>> {
         if self.0.supports_gso() {
@@ -67,6 +71,23 @@ impl InsideIORecv for Tun {
 
     fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
         self
+    }
+}
+
+#[async_trait]
+impl InsideIORecvBatch for Tun {
+    async fn recv_buf_many(&self, pkts: &mut Vec<BytesMut>, max: usize) -> IOCallbackResult<usize> {
+        // `pkts` may arrive non-empty; meter only what this call appended.
+        let start = pkts.len();
+        match self.0.recv_buf_many(pkts, max).await {
+            IOCallbackResult::Ok(n) => {
+                for pkt in &pkts[start..] {
+                    metrics::tun_to_client(pkt.len());
+                }
+                IOCallbackResult::Ok(n)
+            }
+            e => e,
+        }
     }
 }
 

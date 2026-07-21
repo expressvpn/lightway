@@ -319,6 +319,24 @@ impl Tun {
         }
     }
 
+    /// Recv up to `max` packets from Tun, appending to `pkts` (each
+    /// buffer sized to the interface MTU by the backend). Waits only
+    /// when nothing is immediately available. Only the io_uring backend
+    /// returns more than one packet per call; the direct backend reads
+    /// a single packet.
+    #[cfg_attr(not(feature = "io-uring"), allow(unused_variables))]
+    pub async fn recv_buf_many(
+        &self,
+        pkts: &mut Vec<BytesMut>,
+        max: usize,
+    ) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.recv_buf_many(pkts).await,
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.recv_buf_many(pkts, max).await,
+        }
+    }
+
     /// Recv a GSO frame from `Tun` into `buf`, stripping and decoding the
     /// leading `virtio_net_hdr`.
     ///
@@ -453,6 +471,24 @@ impl TunDirect {
                 IOCallbackResult::WouldBlock
             }
             Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
+    /// Recv one packet from Tun, appending it to `pkts` as a buffer
+    /// sized to the interface MTU. The direct backend has no batched
+    /// read, so this is the single-packet counterpart of the io_uring
+    /// backend's `recv_buf_many`.
+    pub async fn recv_buf_many(&self, pkts: &mut Vec<BytesMut>) -> IOCallbackResult<usize> {
+        let mtu = self.mtu();
+        let mut buf = BytesMut::with_capacity(mtu);
+        buf.resize(mtu, 0);
+        match self.recv_buf(&mut buf).await {
+            IOCallbackResult::Ok(_n) => {
+                pkts.push(buf);
+                IOCallbackResult::Ok(1)
+            }
+            IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
         }
     }
 
@@ -652,6 +688,18 @@ impl TunIoUring {
                 *buf = pkt;
                 IOCallbackResult::Ok(len)
             }
+            Err(e) => IOCallbackResult::Err(std::io::Error::other(e)),
+        }
+    }
+
+    /// Recv up to `max` packets from Tun via the io_uring rx queue.
+    pub async fn recv_buf_many(
+        &self,
+        pkts: &mut Vec<BytesMut>,
+        max: usize,
+    ) -> IOCallbackResult<usize> {
+        match self.tun_io_uring.recv_many(pkts, max).await {
+            Ok(n) => IOCallbackResult::Ok(n),
             Err(e) => IOCallbackResult::Err(std::io::Error::other(e)),
         }
     }

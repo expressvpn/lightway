@@ -100,6 +100,22 @@ impl<T: AsRawFd> IOUring<T> {
             .ok_or(IOUringError::RecvError)
     }
 
+    /// Receive up to `max` packets from the Tun device, appending them
+    /// to `out`. Waits only when the rx queue is empty; when packets
+    /// are already queued it returns what is immediately available.
+    pub async fn recv_many(&self, out: &mut Vec<BytesMut>, max: usize) -> IOUringResult<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let n = self.rx_queue.lock().await.recv_many(out, max).await;
+        if n == 0 {
+            // With max > 0, recv_many returns 0 only when the channel
+            // is closed.
+            return Err(IOUringError::RecvError);
+        }
+        Ok(n)
+    }
+
     /// Try Send packet to Tun device
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         let buf_len = buf.len();

@@ -57,6 +57,14 @@ static METRIC_UDP_RECV_INVALID_ADDR: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_recv_invalid_addr"));
 static METRIC_UDP_RECV_MISSING_PKTINFO: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_recv_missing_pktinfo"));
+static METRIC_UDP_SEND_BATCH_SIZE: LazyLock<Histogram> =
+    LazyLock::new(|| histogram!("udp_send_batch_size"));
+static METRIC_UDP_SEND_BATCH_DROPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_dropped"));
+static METRIC_UDP_SEND_BATCH_BLOCKED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_blocked"));
+static METRIC_UDP_SEND_BATCH_MISSED_FLUSH: LazyLock<Counter> =
+    LazyLock::new(|| counter!("udp_send_batch_missed_flush"));
 
 // Connection performance
 static METRIC_TO_LINK_UP_TIME: LazyLock<Histogram> =
@@ -77,6 +85,8 @@ static METRIC_TUN_REJECTED_NO_CLIENT_IP: LazyLock<Counter> =
 // Traffic volume
 static METRIC_TUN_FROM_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tun_from_client"));
 static METRIC_TUN_TO_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tun_to_client"));
+static METRIC_TUN_RECV_BATCH_SIZE: LazyLock<Histogram> =
+    LazyLock::new(|| histogram!("tun_recv_batch_size"));
 
 static METRIC_SESSIONS_CURRENT_ONLINE: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("sessions_current_online"));
@@ -291,6 +301,29 @@ pub(crate) fn udp_recv_missing_pktinfo() {
     METRIC_UDP_RECV_MISSING_PKTINFO.increment(1);
 }
 
+/// Number of datagrams flushed by one send-batch window. Windows that
+/// queued nothing are not recorded.
+pub(crate) fn udp_send_batch_flush(sz: usize) {
+    METRIC_UDP_SEND_BATCH_SIZE.record(sz as f64);
+}
+
+/// Datagrams dropped because a batched flush could not send them.
+pub(crate) fn udp_send_batch_dropped(count: usize) {
+    METRIC_UDP_SEND_BATCH_DROPPED.increment(count as u64);
+}
+
+/// A batched flush found the socket send buffer full and waited for
+/// writability before continuing.
+pub(crate) fn udp_send_batch_blocked() {
+    METRIC_UDP_SEND_BATCH_BLOCKED.increment(1);
+}
+
+/// A send-batch window was closed by the guard's drop fallback instead
+/// of an explicit flush, indicating a code path that misses the flush.
+pub(crate) fn udp_send_batch_missed_flush() {
+    METRIC_UDP_SEND_BATCH_MISSED_FLUSH.increment(1);
+}
+
 /// Fatal TLS error for [`lightway_core::Connection`].
 pub(crate) fn connection_tls_error(fatal: bool) {
     counter!(METRIC_CONNECTION_TLS_ERROR, FATAL_LABEL => fatal.to_string()).increment(1);
@@ -345,6 +378,11 @@ pub fn tun_from_client(sz: usize) {
 /// The difference is one virtio header (12 bytes) per recv.
 pub fn tun_to_client(sz: usize) {
     METRIC_TUN_TO_CLIENT.increment(sz as u64);
+}
+
+/// Number of packets returned by one batched inside-IO receive.
+pub fn tun_recv_batch(sz: usize) {
+    METRIC_TUN_RECV_BATCH_SIZE.record(sz as f64);
 }
 
 /// Current session statistics
