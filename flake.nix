@@ -53,6 +53,9 @@
           # Lazily evaluated - only forced by cross.nix when building on aarch64-darwin.
           _module.args.pkgsDarwinX64 = import inputs.nixpkgs-darwin-x64 {
             inherit system;
+            overlays = [
+              inputs.rust-overlay.overlays.default
+            ];
             config.allowUnfree = true;
           };
 
