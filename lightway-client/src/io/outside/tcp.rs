@@ -41,6 +41,15 @@ impl OutsideIO for Tcp {
         Ok(())
     }
 
+    fn send_buffer_size(&self) -> Result<usize> {
+        let socket = socket2::SockRef::from(&self.0);
+        Ok(socket.send_buffer_size()?)
+    }
+    fn recv_buffer_size(&self) -> Result<usize> {
+        let socket = socket2::SockRef::from(&self.0);
+        Ok(socket.recv_buffer_size()?)
+    }
+
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready> {
         let r = self.0.ready(interest).await?;
         Ok(r)

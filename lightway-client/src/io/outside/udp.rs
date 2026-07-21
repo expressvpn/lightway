@@ -86,6 +86,15 @@ impl OutsideIO for Udp {
         Ok(())
     }
 
+    fn send_buffer_size(&self) -> Result<usize> {
+        let socket = socket2::SockRef::from(&self.sock);
+        Ok(socket.send_buffer_size()?)
+    }
+    fn recv_buffer_size(&self) -> Result<usize> {
+        let socket = socket2::SockRef::from(&self.sock);
+        Ok(socket.recv_buffer_size()?)
+    }
+
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready> {
         let r = self.sock.ready(interest).await?;
         Ok(r)
