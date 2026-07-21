@@ -31,6 +31,17 @@ jobs:
     - name: Update Rust version in Earthfile
       run: sed -i -E 's/^(\s*FROM rust):(:?[0-9\.]+)(-.+)?$/\1:${{ steps.check-version.outputs.rust }}\3/g' Earthfile
 
+    - name: Update Rust version in rust-toolchain.toml
+      run: sed -i -E 's/^(channel = ")[0-9\.]+(")$/\1${{ steps.check-version.outputs.rust }}\2/' rust-toolchain.toml
+
+    # nix (rust-overlay) can only resolve the pinned stable version once flake.lock points at a
+    # rust-overlay revision that carries it, so refresh that input in the same PR.
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@v21
+
+    - name: Update rust-overlay in flake.lock
+      run: nix flake update rust-overlay
+
     - uses: peter-evans/create-pull-request@v6
       with:
         token: ${{ secrets.SERVICE_ACCOUNT_PAT }}
