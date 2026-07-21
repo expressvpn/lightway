@@ -277,8 +277,6 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
         config_reload_signal: Option<mpsc::Receiver<ReloadableClientConfig>>,
         config: config::Config,
     ) -> Result<ClientConfig<ExtAppState>> {
-        config.validate()?;
-
         let mut tun_config = TunConfig::default();
 
         if let Some(ref tun_name) = config.tun_name {
