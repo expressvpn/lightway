@@ -9,10 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: expressvpn_iat_automation_githubiatuser_gpg_key
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4.3.1
 
     - name: Import GPG Key
-      uses: crazy-max/ghaction-import-gpg@v6
+      uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6
       with:
         gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
         passphrase: ${{ secrets.GPG_PASSPHRASE }}
@@ -37,12 +37,12 @@ jobs:
     # nix (rust-overlay) can only resolve the pinned stable version once flake.lock points at a
     # rust-overlay revision that carries it, so refresh that input in the same PR.
     - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v21
+      uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
 
     - name: Update rust-overlay in flake.lock
       run: nix flake update rust-overlay
 
-    - uses: peter-evans/create-pull-request@v6
+    - uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
       with:
         token: ${{ secrets.SERVICE_ACCOUNT_PAT }}
         delete-branch: true

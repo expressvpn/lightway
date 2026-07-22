@@ -48,52 +48,52 @@ jobs:
     env:
       FORCE_COLOR: 1
     steps:
-      - uses: earthly/actions-setup@v1
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203 # v1
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
       - name: Run +${{ matrix.target }} on Earthly
         run: earthly --ci --output ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
 
       - name: Upload lightway-client artifact (x86_64)
         if: matrix.target == 'build'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-x86_64-unknown-linux-gnu
           path: target/release/lightway-client
 
       - name: Upload lightway-server artifact (x86_64)
         if: matrix.target == 'build'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-x86_64-unknown-linux-gnu
           path: target/release/lightway-server
 
       - name: Upload lightway-client artifact (arm64)
         if: matrix.target == 'build-cross-arm64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-aarch64-unknown-linux-gnu
           path: target/aarch64-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (arm64)
         if: matrix.target == 'build-cross-arm64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-aarch64-unknown-linux-gnu
           path: target/aarch64-unknown-linux-gnu/release/lightway-server
 
       - name: Upload lightway-client artifact (riscv64)
         if: matrix.target == 'build-cross-riscv64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-riscv64gc-unknown-linux-gnu
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (riscv64)
         if: matrix.target == 'build-cross-riscv64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-riscv64gc-unknown-linux-gnu
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
@@ -107,11 +107,11 @@ jobs:
       matrix:
         distro: [bookworm]
     steps:
-      - uses: earthly/actions-setup@v1
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203 # v1
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
       - name: Run +e2e on Earthly
         run: earthly --ci --allow-privileged +e2e --debian ${{ matrix.distro }}
   coverage:
@@ -119,11 +119,11 @@ jobs:
     env:
       FORCE_COLOR: 1
     steps:
-      - uses: earthly/actions-setup@v1
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203 # v1
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
       - name: Run +coverage on Earthly
         id: coverage
         run: |
@@ -136,7 +136,7 @@ jobs:
           cat output/summary.txt  >> "$GITHUB_OUTPUT"
           echo ""                 >> "$GITHUB_OUTPUT"
           echo "$EOF"             >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: coverage
           path: output/html
@@ -183,13 +183,13 @@ jobs:
           echo "Setting output: failed: $FAILED"
           echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
 
-      - uses: jwalton/gh-find-current-pr@v1
+      - uses: jwalton/gh-find-current-pr@f3d61b485d2801773f7a07b2aaa3306bd8f8e653 # v1
         id: find-pr
         with:
           state: open
       - name: Find Coverage Comment
         if: steps.find-pr.outputs.number
-        uses: peter-evans/find-comment@v3
+        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e # v3
         id: coverage-comment
         with:
           issue-number: ${{ steps.find-pr.outputs.number }}
@@ -197,7 +197,7 @@ jobs:
           body-includes: 'Code coverage summary'
       - name: Create or update comment
         if: steps.find-pr.outputs.number
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
         with:
           comment-id: ${{ steps.coverage-comment.outputs.comment-id }}
           issue-number: ${{ steps.find-pr.outputs.number }}
@@ -216,15 +216,15 @@ jobs:
     name: Mobile Lib Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v21
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
           use-flakehub: false
 
@@ -245,7 +245,7 @@ jobs:
           AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-release.aar
           echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
       - name: Upload AAR artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-android-aar
           path: ${{ steps.build-android-aar.outputs.path }}
@@ -253,7 +253,7 @@ jobs:
       - name: Build JsonSchema
         run: nix develop -c cargo run --all-features -p lightway-client -- -c client.schema.json -g jsonschema
       - name: Upload JsonSchema artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-jsonschema
           path: client.schema.json
@@ -283,13 +283,13 @@ jobs:
             package_server: lightway-server-x86_64-darwin
             build_msrv: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v21
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
 
       - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
           use-flakehub: false
 
@@ -311,14 +311,14 @@ jobs:
 
       - name: Upload lightway-client artifact
         if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}
           path: result-client/bin/lightway-client
 
       - name: Upload lightway-server artifact
         if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
           path: result-server/bin/lightway-server
@@ -331,13 +331,13 @@ jobs:
       matrix:
         os: [macos-26, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v21
+        uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
 
       - name: Setup Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
           use-flakehub: false
 
@@ -366,7 +366,7 @@ jobs:
             os: windows-11-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
       - name: Get Rust version
         id: rust-version
         shell: bash
@@ -374,14 +374,14 @@ jobs:
           RUST_VERSION=$(grep "FROM rust" Earthfile | awk -F'[:\\-]' '{print $2}')
           echo "version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: ${{ steps.rust-version.outputs.version }}
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -404,7 +404,7 @@ jobs:
         run: cargo test --target ${{ matrix.target }} -p lightway-client
 
       - name: Upload lightway-client artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/lightway-client.exe
@@ -420,10 +420,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           path: artifacts/
 
@@ -452,7 +452,7 @@ jobs:
           chmod +x release-assets/*
 
       - name: Create nightly release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: lightway-nightly
           name: Nightly Build

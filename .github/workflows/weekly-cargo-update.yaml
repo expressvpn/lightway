@@ -9,16 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: expressvpn_iat_automation_githubiatuser_gpg_key
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4.3.1
     - name: Import GPG Key
-      uses: crazy-max/ghaction-import-gpg@v6
+      uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6
       with:
         gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
         passphrase: ${{ secrets.GPG_PASSPHRASE }}
         git_user_signingkey: true
         git_commit_gpgsign: true
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
     - run: rustup show
 
     # Updates indirect and direct dependencies according to semver
@@ -29,7 +29,7 @@ jobs:
         cargo update 2>&1 | tee /tmp/cargo-update.log
 
     - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v21
+      uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
 
     # Update flake.lock after cargo update so nix sees the new Cargo.lock.
     - name: Update nix flake inputs
@@ -71,7 +71,7 @@ jobs:
         echo "$body"           >> "$GITHUB_OUTPUT"
         echo "$EOF"            >> "$GITHUB_OUTPUT"
 
-    - uses: peter-evans/create-pull-request@v6
+    - uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
       id: pr
       with:
         token: ${{ secrets.SERVICE_ACCOUNT_PAT }}
@@ -122,7 +122,7 @@ jobs:
     # comment.
     - name: Outdated dependencies comment
       if: steps.pr.outputs.pull-request-number && steps.outdated-check.outputs.failed == 'true'
-      uses: peter-evans/create-or-update-comment@v4
+      uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
       with:
         issue-number: ${{ steps.pr.outputs.pull-request-number }}
         body: ${{ steps.outdated-check.outputs.comment }}
