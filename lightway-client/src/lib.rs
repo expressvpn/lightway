@@ -248,6 +248,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Inside packet codec's config
     pub inside_pkt_codec_config: Option<ClientInsidePacketCodecConfig>,
 
+    /// When the inside packet codec is active and the user is pushing traffic
+    /// but no decoded packet has reached the inside path within this timeout,
+    /// tear down the tunnel to force a reconnect. `Duration::ZERO` disables the
+    /// check (default)
+    pub inside_pkt_codec_stall_timeout: Duration,
+
     /// Signal for notifying a network change event
     /// network change being defined as a change in
     /// wifi networks or a change of network interfaces
@@ -343,6 +349,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "io-uring")]
             iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
             inside_pkt_codec_config: None,
+            inside_pkt_codec_stall_timeout: Duration::ZERO,
             config_reload_signal,
             network_change_signal: None,
             best_connection_selected_signal: None,
@@ -632,6 +639,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     tun_dns_ip: Ipv4Addr,
     keepalive: Keepalive,
     keepalive_config: KeepaliveConfig,
+    inside_pkt_codec_stall_timeout: Duration,
 ) -> Result<()> {
     let tracer_trigger_timeout = if keepalive_config.continuous {
         Duration::ZERO
@@ -673,7 +681,26 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
 
             match conn.inside_data_received(&mut buf) {
-                Ok(()) => conn.activity().last_outside_data_received,
+                Ok(()) => {
+                    // If the inside packet codec has stalled the data plane, downgrade to
+                    // unencoded rather than tearing the tunnel down. Control frames bypass
+                    // the codec, so keepalive/tracer can't detect this on their own.
+                    match conn.downgrade_inside_pkt_codec_if_stalled(inside_pkt_codec_stall_timeout)
+                    {
+                        Ok(true) => {
+                            tracing::warn!(
+                                "inside packet codec data-plane stalled; disabling codec"
+                            )
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to disable inside packet codec after stall: {e}"
+                            )
+                        }
+                    }
+                    conn.activity().last_outside_data_received
+                }
                 Err(ConnectionError::PluginDropWithReply(reply)) => {
                     // Send the reply packet to inside path
                     let _ = inside_io.try_send(reply, ip_config);
@@ -1105,6 +1132,7 @@ pub async fn connect<
         config.tun_dns_ip,
         keepalive.clone(),
         keepalive_config,
+        config.inside_pkt_codec_stall_timeout,
     ));
 
     let (network_change_tx, network_change_rx) = tokio::sync::mpsc::channel(1);

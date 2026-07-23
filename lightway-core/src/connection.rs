@@ -347,6 +347,11 @@ pub struct ConnectionActivity {
     /// When the last `wire::Frame::Data` from peer (going to inside
     /// path) was seen.
     pub last_data_traffic_from_peer: Instant,
+
+    /// When a decoded packet was last delivered to the inside/TUN path.
+    /// Unlike `last_outside_data_received`, control frames (ping/pong) never
+    /// touch this, so it reflects real data-plane delivery.
+    pub last_data_delivered_to_inside: Instant,
 }
 
 /// The result of an operation on a [`Connection`].
@@ -518,6 +523,7 @@ impl<AppState: Send> Connection<AppState> {
             activity: ConnectionActivity {
                 last_data_traffic_from_peer: now,
                 last_outside_data_received: now,
+                last_data_delivered_to_inside: now,
             },
             tls_tick_interval: None,
             tls_pending_queue: VecDeque::new(),
@@ -840,6 +846,7 @@ impl<AppState: Send> Connection<AppState> {
     /// Update TLS Session to use the new outside IO Callback
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
         self.session.io_cb_mut().io = new_io;
+        self.activity.last_data_delivered_to_inside = Instant::now();
     }
 
     /// Accept some data from outside and run an iteration of the I/O
@@ -2323,6 +2330,7 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         self.activity.last_data_traffic_from_peer = Instant::now();
+        self.activity.last_data_delivered_to_inside = Instant::now();
         match inside_io.send(inside_pkt, &mut self.app_state) {
             IOCallbackResult::Ok(_nr) => {}
             IOCallbackResult::Err(err) => {
@@ -2544,6 +2552,39 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         self.send_frame_or_queue(msg)
+    }
+
+    /// Data-plane stall guard for the inside packet codec. (Client only)
+    ///
+    /// When the codec is active but no decoded packet has reached the inside
+    /// path within `timeout`, the codec is black-holing the data plane: control
+    /// frames (keepalive) bypass the codec, so the tunnel still looks alive and
+    /// neither keepalive nor the tracer can observe the failure. Request
+    /// disabling the codec so traffic falls back to unencoded, rather than
+    /// tearing the tunnel down.
+    ///
+    /// Returns `true` if a disable request was sent this call. A single stall
+    /// episode sends one request: calls are suppressed while a request is
+    /// pending and once encoding is off. `timeout == ZERO` disables the check.
+    pub fn downgrade_inside_pkt_codec_if_stalled(
+        &mut self,
+        timeout: Duration,
+    ) -> ConnectionResult<bool> {
+        if timeout.is_zero() || !self.is_encoding_enabled() {
+            return Ok(false);
+        }
+        // A codec change is already in flight; wait for it to resolve.
+        if self.encoding_request_states.pending_request_pkt.is_some() {
+            return Ok(false);
+        }
+        let stalled = Instant::now()
+            .saturating_duration_since(self.activity.last_data_delivered_to_inside)
+            > timeout;
+        if !stalled {
+            return Ok(false);
+        }
+        self.set_encoding(false)?;
+        Ok(true)
     }
 
     /// Attempts to retransmit the currently pending encoding request packet. (Client only)

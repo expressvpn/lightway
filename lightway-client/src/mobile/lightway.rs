@@ -394,6 +394,7 @@ pub(crate) async fn async_lightway_start(
         config.tun_dns_ip,
         keepalive,
         keepalive_config,
+        Duration::ZERO,
     ));
 
     tokio::select! {
