@@ -26,12 +26,13 @@ use lightway_app_utils::NetworkChangeMonitor;
 #[cfg(feature = "postquantum")]
 use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::{
-    ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    ConnectionTicker, ConnectionTickerState, ConnectionTickerTask, DplpmtudTimer, DplpmtudTimerTask,
+    EventStream, EventStreamCallback, PacketCodecFactoryType, TunConfig, args::Cipher,
+    connection_ticker_cb,
 };
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
+    BuilderPredicates, ClientConnectionBuilder, ClientContextBuilder, ClientIpConfig, Connection,
+    ConnectionError, ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
     InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -45,6 +46,8 @@ use crate::keepalive::Config as KeepaliveConfig;
 use crate::route_manager::{RouteManager, RouteMode};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
+use futures::future::OptionFuture;
+use keepalive::KeepaliveResult;
 pub use lightway_core::{
     AuthMethod, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, MAX_INSIDE_MTU, MAX_OUTSIDE_MTU,
     PluginFactoryError, PluginFactoryList, RootCertificate, Version,
@@ -840,7 +843,154 @@ async fn config_reload_task(
     tracing::info!("config reload task has finished");
 }
 
+/// Output of [`establish`]: the live connection plus tasks the caller still needs to spawn.
+pub(crate) struct Connect<T: Send + Sync> {
+    pub(crate) conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
+    pub(crate) keepalive: Keepalive,
+    pub(crate) keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub(crate) keepalive_config: KeepaliveConfig,
+    pub(crate) event_stream: EventStream,
+    pub(crate) ticker_task: ConnectionTickerTask,
+    pub(crate) pmtud_timer_task: DplpmtudTimerTask,
+}
+
+/// Shared connection setup used by both the CLI and mobile paths.
+///
+/// Builds the TLS context, establishes the connection, and wires up keepalive.
+/// Platform-specific builder tweaks are injected via the two closures:
+/// - `customize_ctx`  — called after cipher/plugins are set, before `.build()`.
+/// - `customize_conn` — called after `.with_auth()` / `.with_event_cb()`, before `.connect()`.
+pub(crate) fn establish<'cert, T, FCtx, FConn>(
+    connection_type: ConnectionType,
+    outside_io: Arc<dyn io::outside::OutsideIO>,
+    root_ca_cert: RootCertificate<'cert>,
+    inside_io_opt: Option<InsideIOSendCallbackArg<ConnectionState<T>>>,
+    cipher: Cipher,
+    inside_plugins: PluginFactoryList,
+    outside_plugins: PluginFactoryList,
+    auth: AuthMethod,
+    outside_mtu: usize,
+    server_dn: Option<String>,
+    enable_pmtud: bool,
+    keepalive_config: KeepaliveConfig,
+    customize_ctx: FCtx,
+    customize_conn: FConn,
+) -> Result<Connect<T>>
+where
+    T: Default + Send + Sync + 'static,
+    FCtx: FnOnce(
+        ClientContextBuilder<ConnectionState<T>>,
+    ) -> ClientContextBuilder<ConnectionState<T>>,
+    FConn: FnOnce(
+        ClientConnectionBuilder<ConnectionState<T>>,
+    ) -> ClientConnectionBuilder<ConnectionState<T>>,
+{
+    let (event_cb, event_stream) = EventStreamCallback::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let state = ConnectionState {
+        ticker,
+        ip_config: None,
+        extended: T::default(),
+    };
+    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
+
+    let ctx = ClientContextBuilder::new(
+        connection_type,
+        root_ca_cert,
+        inside_io_opt,
+        Arc::new(ClientIpConfigCb),
+        connection_ticker_cb,
+    )?
+    .with_cipher(cipher.into())?
+    .with_inside_plugins(inside_plugins)
+    .with_outside_plugins(outside_plugins);
+
+    let conn_builder = customize_ctx(ctx)
+        .build()
+        .start_connect(outside_io.into_io_send_callback(), outside_mtu)?
+        .with_auth(auth)
+        .with_event_cb(Box::new(event_cb))
+        .when(server_dn.is_some(), |b| {
+            b.with_server_domain_name_validation(&server_dn.expect("checked above"))
+        })
+        .when(connection_type.is_datagram() && enable_pmtud, |b| {
+            b.with_pmtud_timer(pmtud_timer)
+        });
+
+    let conn_builder = customize_conn(conn_builder);
+
+    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
+
+    let (keepalive, keepalive_task) =
+        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    Ok(Connect {
+        conn,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        event_stream,
+        ticker_task,
+        pmtud_timer_task,
+    })
+}
+
+#[cfg(not(feature = "mobile"))]
+impl<T: Default + Send + Sync + 'static> Connect<T> {
+    pub(crate) fn into_client_connect(
+        self,
+        task: JoinHandle<anyhow::Result<ClientResult>>,
+        inside_io: Arc<dyn io::inside::InsideIO<T>>,
+        #[cfg(desktop)] outside_io: Arc<dyn io::outside::OutsideIO>,
+        connected_signal: Option<oneshot::Receiver<()>>,
+        stop_signal: Option<oneshot::Sender<()>>,
+        network_change_signal: mpsc::Sender<()>,
+        encoding_request_signal: mpsc::Sender<bool>,
+    ) -> ClientConnection<T> {
+        ClientConnection {
+            task,
+            conn: self.conn,
+            inside_io,
+            #[cfg(desktop)]
+            outside_io,
+            connected_signal,
+            stop_signal,
+            network_change_signal,
+            encoding_request_signal,
+            #[cfg(desktop)]
+            route_manager: None,
+            #[cfg(desktop)]
+            dns_manager: None,
+        }
+    }
+}
+
+#[cfg(feature = "mobile")]
+impl Connect<Option<Arc<io::inside::Tun>>> {
+    pub(crate) fn into_client_connect(
+        self,
+        outside_io_task: JoinHandle<uniffi::Result<()>>,
+        new_outside_io_sender: mpsc::Sender<()>,
+        join_set: JoinSet<()>,
+        instance_id: usize,
+        expresslane_event_rx: Option<mpsc::Receiver<mobile::ExpresslaneState>>,
+    ) -> ClientConnection {
+        ClientConnection {
+            conn: self.conn,
+            outside_io_task,
+            new_outside_io_sender,
+            keepalive: self.keepalive,
+            keepalive_task: self.keepalive_task,
+            keepalive_config: self.keepalive_config,
+            join_set,
+            instance_id,
+            expresslane_event_rx,
+        }
+    }
+}
+
 /// Represents a connection to a server. When dropped, the route table will be removed.
+#[cfg(not(feature = "mobile"))]
 pub struct ClientConnection<T: Send + Sync> {
     task: JoinHandle<anyhow::Result<ClientResult>>,
     conn: Arc<Mutex<Connection<ConnectionState<T>>>>,
@@ -857,6 +1007,7 @@ pub struct ClientConnection<T: Send + Sync> {
     dns_manager: Option<DnsManager>,
 }
 
+#[cfg(not(feature = "mobile"))]
 impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     /// Returns details about the established outside connection.
     #[cfg(desktop)]
@@ -919,6 +1070,19 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             self.inside_io.clone().into_io_send_callback();
         self.conn.lock().unwrap().inside_io(inside_io);
     }
+}
+
+#[cfg(feature = "mobile")]
+pub(crate) struct ClientConnection {
+    pub(crate) conn: Arc<Mutex<Connection<ConnectionState<Option<Arc<io::inside::Tun>>>>>>,
+    pub(crate) outside_io_task: JoinHandle<uniffi::Result<()>>,
+    pub(crate) new_outside_io_sender: mpsc::Sender<()>,
+    pub(crate) keepalive: Keepalive,
+    pub(crate) keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
+    pub(crate) keepalive_config: KeepaliveConfig,
+    pub(crate) join_set: JoinSet<()>,
+    pub(crate) instance_id: usize,
+    pub(crate) expresslane_event_rx: Option<mpsc::Receiver<mobile::ExpresslaneState>>,
 }
 
 #[tracing::instrument(
@@ -990,16 +1154,6 @@ pub async fn connect<
             }
         };
 
-    let (event_cb, event_stream) = EventStreamCallback::new();
-
-    let (ticker, ticker_task) = ConnectionTicker::new();
-    let state = ConnectionState {
-        ticker,
-        ip_config: None,
-        extended: Default::default(),
-    };
-    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
-
     #[cfg(feature = "debug")]
     if config.tls_debug {
         set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
@@ -1017,59 +1171,57 @@ pub async fn connect<
         None => (None, None, None),
     };
 
-    let conn_builder = ClientContextBuilder::new(
-        connection_type,
-        RootCertificate::PemBuffer(cert_content.as_bytes()),
-        None,
-        Arc::new(ClientIpConfigCb),
-        connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
-    .with_inside_plugins(inside_plugins)
-    .with_outside_plugins(outside_plugins)
-    .when(config.enable_expresslane, |b| {
-        b.with_expresslane(config.expresslane_keys_rotation_interval)
-    })
-    .when(config.expresslane_cb.is_some(), |b| {
-        b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
-    })
-    .when(config.expresslane_metrics.is_some(), |b| {
-        b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
-    })
-    .build()
-    .start_connect(
-        outside_io.clone().into_io_send_callback(),
-        config.outside_mtu,
-    )?
-    .with_auth(auth)
-    .with_event_cb(Box::new(event_cb))
-    .with_inside_pkt_codec(inside_io_codec)
-    .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
-    .when_some(server_dn, |b, sdn| {
-        b.with_server_domain_name_validation(&sdn)
-    })
-    .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
-        b.with_pmtud_timer(pmtud_timer)
-    });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
-
-    #[cfg(feature = "debug")]
-    let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
-    });
-
-    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
-
     let keepalive_config = keepalive::Config {
         interval: config.keepalive_interval,
         timeout: config.keepalive_timeout,
         continuous: config.continuous_keepalive,
         tracer_trigger_timeout: Some(config.tracer_packet_timeout),
     };
-    let (keepalive, keepalive_task) =
-        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    let Connect {
+        conn,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        event_stream,
+        ticker_task,
+        pmtud_timer_task,
+    } = establish(
+        connection_type,
+        outside_io.clone(),
+        RootCertificate::PemBuffer(cert_content.as_bytes()),
+        None,
+        cipher,
+        inside_plugins,
+        outside_plugins,
+        auth,
+        config.outside_mtu,
+        server_dn,
+        config.enable_pmtud,
+        keepalive_config,
+        |ctx| {
+            ctx.when(config.enable_expresslane, |b| {
+                b.with_expresslane(config.expresslane_keys_rotation_interval)
+            })
+            .when(config.expresslane_cb.is_some(), |b| {
+                b.with_expresslane_cb(config.expresslane_cb.clone().unwrap())
+            })
+            .when(config.expresslane_metrics.is_some(), |b| {
+                b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
+            })
+        },
+        |conn_builder| {
+            #[cfg(feature = "postquantum")]
+            let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
+            #[cfg(feature = "debug")]
+            let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {
+                b.with_key_logger(WiresharkKeyLogger::new(k))
+            });
+            conn_builder
+                .with_inside_pkt_codec(inside_io_codec)
+                .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
+        },
+    )?;
 
     let (connected_tx, connected_rx) = oneshot::channel();
     let (disconnected_tx, disconnected_rx) = oneshot::channel();

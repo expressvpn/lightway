@@ -1,22 +1,19 @@
 use crate::config::{Config, ConnectionConfig};
 use crate::io::outside::OutsideIO;
-use crate::keepalive::{Keepalive, KeepaliveResult};
+use crate::keepalive::Keepalive;
 use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
-    ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
+    ClientResult, ClientConnection, ConnectionState, Connect, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,
 };
 use futures::StreamExt;
-use futures::future::{FutureExt, OptionFuture, select_all};
+use futures::future::{FutureExt, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
-use lightway_app_utils::{
-    ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
-    connection_ticker_cb,
-};
+use lightway_app_utils::{EventStream, EventStreamCallback, TunConfig};
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType, Event,
-    EventCallback, IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
+    BuilderPredicates, Connection, ConnectionError, ConnectionType, Event, EventCallback,
+    IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -223,7 +220,7 @@ pub(crate) async fn async_lightway_start(
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
                 })
-                .instrument(info_span!("LightwayConnection", instance_id = instance_id)),
+                .instrument(info_span!("ClientConnection", instance_id = instance_id)),
             );
             (task.abort_handle(), task)
         })
@@ -244,8 +241,8 @@ pub(crate) async fn async_lightway_start(
     // Drop the last sender
     drop(online_signal_sender);
 
-    let mut non_preferred_connections: Vec<(usize, LightwayConnection)> = Vec::new();
-    let mut pending_online_connections: HashMap<usize, LightwayConnection> =
+    let mut non_preferred_connections: Vec<(usize, ClientConnection)> = Vec::new();
+    let mut pending_online_connections: HashMap<usize, ClientConnection> =
         HashMap::with_capacity(server_len);
     let mut failed_connections = 0usize;
     let mut connection_error_to_return = None;
@@ -254,7 +251,7 @@ pub(crate) async fn async_lightway_start(
     let active_connection = loop {
         tokio::select! {
             // Prioritise management commands over other branches, also make sure we add
-            // LightwayConnection to HashMap first to make sure when it goes online,
+            // ClientConnection to HashMap first to make sure when it goes online,
             // we can remove it from the HashMap and break the loop.
             biased;
             _ = futures::future::ready(()), if failed_connections == server_len => {
@@ -310,7 +307,7 @@ pub(crate) async fn async_lightway_start(
                     info!("Deferring connection {}", instance_id);
                     non_preferred_connections.push((instance_id, connection));
                 } else {
-                    warn!(?instance_id, "Cannot find LightwayConnection");
+                    warn!(?instance_id, "Cannot find ClientConnection");
                 }
             },
 
@@ -358,7 +355,7 @@ pub(crate) async fn async_lightway_start(
             .collect(),
     ));
 
-    let LightwayConnection {
+    let ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,
@@ -499,7 +496,7 @@ async fn restartable_outside_io_task(
 }
 
 fn first_outside_io_exit(
-    connections: &mut HashMap<usize, LightwayConnection>,
+    connections: &mut HashMap<usize, ClientConnection>,
 ) -> impl Future<Output = (usize, Result<uniffi::Result<()>, tokio::task::JoinError>)> + '_ {
     if connections.is_empty() {
         return futures::future::Either::Left(std::future::pending());
@@ -516,7 +513,7 @@ fn first_outside_io_exit(
 
 async fn cleanup_connections(
     in_progress_connections_abort_handle: Vec<AbortHandle>,
-    completed_connections: Vec<LightwayConnection>,
+    completed_connections: Vec<ClientConnection>,
 ) {
     for conn in in_progress_connections_abort_handle {
         if !conn.is_finished() {
@@ -537,17 +534,6 @@ async fn cleanup_connections(
     info!("Cleaned up unused connections");
 }
 
-struct LightwayConnection {
-    conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
-    outside_io_task: JoinHandle<uniffi::Result<()>>,
-    new_outside_io_sender: MpscSender<()>,
-    keepalive: Keepalive,
-    keepalive_task: OptionFuture<JoinHandle<KeepaliveResult>>,
-    keepalive_config: KeepaliveConfig,
-    join_set: JoinSet<()>,
-    instance_id: usize,
-    expresslane_event_rx: Option<MpscReceiver<ExpresslaneState>>,
-}
 
 struct LightwayClientConnectArgs {
     instance_id: usize,
@@ -576,7 +562,7 @@ async fn lightway_client_connect(
         event_stream_handler,
         external_event_handler,
     }: LightwayClientConnectArgs,
-) -> uniffi::Result<LightwayConnection> {
+) -> uniffi::Result<ClientConnection> {
     let mut join_set = JoinSet::new();
 
     // TODO: Should be strong type error
@@ -595,62 +581,16 @@ async fn lightway_client_connect(
         builder.build(&mut outside_plugins).await?
     };
 
+    // Copy fields before borrowing connect_conf for the CA cert.
+    let cipher = connect_conf.cipher;
+    let outside_mtu = connect_conf.outside_mtu;
+    let mode = connect_conf.mode;
     let root_ca_cert = connect_conf.load_ca()?;
 
-    let inside_io = MobileInsideIo {
-        mtu: INTERNAL_MTU as usize,
-    };
     let inside_io: Arc<dyn InsideIOSendCallback<ConnectionState<TunnelState>> + Send + Sync> =
-        Arc::new(inside_io);
-
-    let (event_cb, event_stream) = EventStreamCallback::new();
-
-    let (ticker, ticker_task) = ConnectionTicker::new();
-    let state: ConnectionState<TunnelState> = ConnectionState {
-        ticker,
-        ip_config: None,
-        extended: None,
-    };
-    let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
-
-    let ConnectionConfig {
-        cipher,
-        outside_mtu,
-        mode,
-        ..
-    } = connect_conf;
-
-    let conn_builder = ClientContextBuilder::new(
-        connection_type,
-        root_ca_cert,
-        Some(inside_io),
-        Arc::new(ClientIpConfigCb),
-        connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
-    .with_inside_plugins(inside_plugins)
-    .with_outside_plugins(outside_plugins)
-    .when(connection_type.is_datagram() && enable_expresslane, |b| {
-        b.with_expresslane(expresslane_keys_rotation_interval)
-    })
-    .build()
-    .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
-    .with_auth(auth)
-    .with_event_cb(Box::new(event_cb))
-    .when(server_dn.is_some(), |b| {
-        b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
-    })
-    .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
-    .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
-        b.with_pmtud_timer(pmtud_timer)
-    });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(true, |b| {
-        b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
-    });
-
-    let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
+        Arc::new(MobileInsideIo {
+            mtu: INTERNAL_MTU as usize,
+        });
 
     let keepalive_config = KeepaliveConfig {
         interval: Duration::new(2, 0),
@@ -658,8 +598,43 @@ async fn lightway_client_connect(
         continuous: enable_keepalive,
         tracer_trigger_timeout: Some(Duration::from_secs(10)),
     };
-    let (keepalive, keepalive_task) =
-        Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
+
+    let Connect {
+        conn,
+        keepalive,
+        keepalive_task,
+        keepalive_config,
+        event_stream,
+        ticker_task,
+        pmtud_timer_task,
+    } = crate::establish(
+        connection_type,
+        outside_io.clone(),
+        root_ca_cert,
+        Some(inside_io),
+        cipher,
+        inside_plugins,
+        outside_plugins,
+        auth,
+        outside_mtu,
+        server_dn,
+        ENABLE_PMTUD,
+        keepalive_config,
+        |ctx| {
+            ctx.when(connection_type.is_datagram() && enable_expresslane, |b| {
+                b.with_expresslane(expresslane_keys_rotation_interval)
+            })
+        },
+        |conn_builder| {
+            let conn_builder =
+                conn_builder.when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header));
+            #[cfg(feature = "postquantum")]
+            let conn_builder = conn_builder.when(true, |b| {
+                b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
+            });
+            conn_builder
+        },
+    )?;
 
     let notify_keepalive_reply = Arc::new(Notify::new());
     let (expresslane_event_tx, expresslane_event_rx) = if enable_expresslane && !mode.is_tcp() {
@@ -700,7 +675,7 @@ async fn lightway_client_connect(
         .in_current_span(),
     );
 
-    Ok(LightwayConnection {
+    Ok(ClientConnection {
         conn,
         outside_io_task,
         new_outside_io_sender,

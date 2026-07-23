@@ -12,7 +12,13 @@ fn main() {
         ios: { target_os = "ios" },
         tvos: { target_os = "tvos" },
         // Backends
-        desktop: { any(windows, linux, macos) },
+        desktop: {
+            all(
+                any(windows, linux, macos),
+                // cross compiling from desktop to mobile, not for a desktop client use case
+                not(feature="mobile"),
+            )
+        },
         mobile: { any(android, ios, tvos) },
         // Apple platform
         apple: {
