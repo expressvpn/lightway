@@ -248,6 +248,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Inside packet codec's config
     pub inside_pkt_codec_config: Option<ClientInsidePacketCodecConfig>,
 
+    /// When the inside packet codec is active and the user is pushing traffic
+    /// but no decoded packet has reached the inside path within this timeout,
+    /// tear down the tunnel to force a reconnect. `Duration::ZERO` disables the
+    /// check (default)
+    pub inside_pkt_codec_stall_timeout: Duration,
+
     /// Signal for notifying a network change event
     /// network change being defined as a change in
     /// wifi networks or a change of network interfaces
@@ -343,6 +349,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "io-uring")]
             iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
             inside_pkt_codec_config: None,
+            inside_pkt_codec_stall_timeout: Duration::ZERO,
             config_reload_signal,
             network_change_signal: None,
             best_connection_selected_signal: None,
@@ -626,12 +633,27 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 
 const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Data plane is stalled iff the inside packet codec is active but no decoded
+/// packet has reached the inside path within `timeout`. `timeout == ZERO`
+/// disables the check.
+fn data_plane_stalled(
+    encoding_enabled: bool,
+    last_delivered: Instant,
+    timeout: Duration,
+    now: Instant,
+) -> bool {
+    !timeout.is_zero()
+        && encoding_enabled
+        && now.saturating_duration_since(last_delivered) > timeout
+}
+
 pub async fn inside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     inside_io: Arc<dyn io::inside::InsideIORecv<ExtAppState>>,
     tun_dns_ip: Ipv4Addr,
     keepalive: Keepalive,
     keepalive_config: KeepaliveConfig,
+    inside_pkt_codec_stall_timeout: Duration,
 ) -> Result<()> {
     let tracer_trigger_timeout = if keepalive_config.continuous {
         Duration::ZERO
@@ -655,7 +677,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
-        let last_outside_data_received = {
+        let (last_outside_data_received, stalled) = {
             let mut conn = conn.lock().unwrap();
 
             // Update source IP address to server assigned IP address
@@ -673,7 +695,15 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
 
             match conn.inside_data_received(&mut buf) {
-                Ok(()) => conn.activity().last_outside_data_received,
+                Ok(()) => {
+                    let stalled = data_plane_stalled(
+                        conn.is_encoding_enabled(),
+                        conn.activity().last_data_delivered_to_inside,
+                        inside_pkt_codec_stall_timeout,
+                        Instant::now(),
+                    );
+                    (conn.activity().last_outside_data_received, stalled)
+                }
                 Err(ConnectionError::PluginDropWithReply(reply)) => {
                     // Send the reply packet to inside path
                     let _ = inside_io.try_send(reply, ip_config);
@@ -693,6 +723,10 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
                 }
             }
         };
+
+        if stalled {
+            return Err(anyhow!("inside packet codec data-plane stalled"));
+        }
 
         let now = Instant::now();
         let duration_since_last_outside_data = now.duration_since(last_outside_data_received);
@@ -1105,6 +1139,7 @@ pub async fn connect<
         config.tun_dns_ip,
         keepalive.clone(),
         keepalive_config,
+        config.inside_pkt_codec_stall_timeout,
     ));
 
     let (network_change_tx, network_change_rx) = tokio::sync::mpsc::channel(1);
@@ -1557,6 +1592,23 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
+
+    #[test]
+    fn data_plane_stalled_predicate() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let stale = now - Duration::from_secs(10);
+        let fresh = now - Duration::from_secs(1);
+
+        // encoding off => never stalled
+        assert!(!data_plane_stalled(false, stale, timeout, now));
+        // ZERO timeout disables the check
+        assert!(!data_plane_stalled(true, stale, Duration::ZERO, now));
+        // stale delivery + encoding on => stalled
+        assert!(data_plane_stalled(true, stale, timeout, now));
+        // fresh delivery => not stalled
+        assert!(!data_plane_stalled(true, fresh, timeout, now));
+    }
 
     #[test_case(1, vec![], false => None)]
     #[test_case(1, vec![0], true => Some(0))]
