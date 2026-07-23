@@ -24,25 +24,37 @@ jobs:
       run: |
         rustup install stable
         stable=$(rustup run stable rustc -V | sed -E -e 's/^rustc ([0-9\.]+) \(.*\)$/\1/g')
-        echo "Latest stable rust is ${stable}"
+        current=$(sed -E -n 's/^channel = "([0-9\.]+)"$/\1/p' rust-toolchain.toml)
+        echo "Latest stable rust is ${stable}, currently pinned to ${current}"
 
         echo rust="$stable" >> "$GITHUB_OUTPUT"
+        if [ "$stable" != "$current" ]; then
+          echo changed=true >> "$GITHUB_OUTPUT"
+        else
+          echo changed=false >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Update Rust version in Earthfile
+      if: steps.check-version.outputs.changed == 'true'
       run: sed -i -E 's/^(\s*FROM rust):(:?[0-9\.]+)(-.+)?$/\1:${{ steps.check-version.outputs.rust }}\3/g' Earthfile
 
     - name: Update Rust version in rust-toolchain.toml
+      if: steps.check-version.outputs.changed == 'true'
       run: sed -i -E 's/^(channel = ")[0-9\.]+(")$/\1${{ steps.check-version.outputs.rust }}\2/' rust-toolchain.toml
 
     # nix (rust-overlay) can only resolve the pinned stable version once flake.lock points at a
-    # rust-overlay revision that carries it, so refresh that input in the same PR.
+    # rust-overlay revision that carries it, so refresh that input in the same PR. Gated on an
+    # actual version change so we don't bump the input (and open a spurious PR) on an unchanged night.
     - name: Install Nix
+      if: steps.check-version.outputs.changed == 'true'
       uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
 
     - name: Update rust-overlay in flake.lock
+      if: steps.check-version.outputs.changed == 'true'
       run: nix flake update rust-overlay
 
-    - uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
+    - if: steps.check-version.outputs.changed == 'true'
+      uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
       with:
         token: ${{ secrets.SERVICE_ACCOUNT_PAT }}
         delete-branch: true
