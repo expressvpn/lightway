@@ -161,10 +161,13 @@ impl RouteManager {
 
     pub async fn stop(&mut self) -> Result<(), RoutingTableError> {
         if let Some(task) = self.task.take() {
+            // TEMP teardown instrumentation — remove after diagnosis.
+            tracing::info!("route_manager.stop: aborting task");
             task.abort();
-
+            tracing::info!("route_manager.stop: task aborted, awaiting join");
             // Wait till the task finishes to clear routes
             let _ = task.await;
+            tracing::info!("route_manager.stop: task joined");
         }
 
         Ok(())

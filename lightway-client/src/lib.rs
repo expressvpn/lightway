@@ -1539,16 +1539,25 @@ pub async fn client<
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
 
     let result = connection.task.await?;
+    // TEMP teardown instrumentation — remove after diagnosis.
+    tracing::info!("teardown: connection task returned");
 
     #[cfg(desktop)]
     if let Some(mut route_manager) = connection.route_manager {
+        tracing::info!("teardown: calling route_manager.stop()");
         let _ = route_manager.stop().await;
+        tracing::info!("teardown: route_manager.stop() returned");
     }
 
     // Dropping the monitor aborts its background task.
     #[cfg(desktop)]
-    drop(network_change_monitor);
+    {
+        tracing::info!("teardown: dropping network_change_monitor");
+        drop(network_change_monitor);
+        tracing::info!("teardown: network_change_monitor dropped");
+    }
 
+    tracing::info!("teardown: client() returning (dropping connection scope)");
     result
 }
 
