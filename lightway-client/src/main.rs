@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
     config.apply(env_patch.clone());
     let cli_patch = options.clone();
     config.apply(options);
+    config.validate()?;
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
