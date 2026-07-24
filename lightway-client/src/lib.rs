@@ -323,7 +323,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             expresslane_metrics: None,
             keepalive_interval: config.keepalive_interval.into(),
             keepalive_timeout: config.keepalive_timeout.into(),
-            continuous_keepalive: config.keepalive_continuous,
+            continuous_keepalive: !config.disable_keepalive_continuous,
             tracer_packet_timeout: config.tracer_packet_timeout.into(),
             preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
             sndbuf: config.sndbuf,

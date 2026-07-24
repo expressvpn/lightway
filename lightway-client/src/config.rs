@@ -151,8 +151,8 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable continuous Keepalive"))]
-    pub keepalive_continuous: bool,
+    #[patch(attribute(doc = "Disable continuous keepalive"))]
+    pub disable_keepalive_continuous: bool,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
@@ -480,7 +480,7 @@ impl Default for Config {
             keyshare: KeyShare::default(),
             keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
             keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
-            keepalive_continuous: true,
+            disable_keepalive_continuous: false,
             tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
             preferred_connection_wait_interval: Duration::from_std_duration(
                 StdDuration::from_secs(0),
