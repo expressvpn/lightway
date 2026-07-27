@@ -104,48 +104,38 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
 
     // Read the kernel-deposited pseudo-header partial, then zero the
     // field so it doesn't double-count when we sum the segment.
-    let initial = read_u16(&buf[at..at + 2]) as u64;
+    let partial = u16::from_be_bytes([buf[at], buf[at + 1]]);
     buf[at] = 0;
     buf[at + 1] = 0;
 
-    let csum = !checksum(&buf[start..], initial);
-    buf[at] = (csum >> 8) as u8;
-    buf[at + 1] = csum as u8;
+    // Seed with the big-endian partial (one 16-bit word), then sum the
+    // transport bytes from `csum_start` with the field zeroed.
+    let mut c = internet_checksum::Checksum::new();
+    c.add_bytes(&partial.to_be_bytes());
+    c.add_bytes(&buf[start..]);
+    buf[at..at + 2].copy_from_slice(&c.checksum());
 }
 
-// Internet checksum used only by `gso_none_checksum` below — the
-// build_segment path uses pnet_packet's protocol-aware helpers.
+/// One's-complement transport checksum over a TCP/UDP pseudo-header
+/// (source address, destination address, zero-padded protocol byte, and
+/// transport length) plus the transport bytes, which must already have
+/// their checksum field zeroed. Works for IPv4 (4-byte) and IPv6 (16-byte)
+/// addresses; returns the host-order value to store via `set_checksum`.
+///
+/// Matches `pnet_packet::{tcp,udp}::ipv{4,6}_checksum` exactly — pnet skips
+/// the checksum word while we zero it, and a zeroed word contributes 0.
+/// Neither performs the RFC 768 zero substitution, so UDP output is
+/// bit-identical.
 #[inline]
-fn read_u16(b: &[u8]) -> u16 {
-    u16::from_be_bytes(b[..2].try_into().unwrap())
-}
-
-// One's-complement folded checksum with a kernel-seeded initial value.
-// The inner loop unrolls to read 8 bytes per iteration; on x86_64
-// release LLVM auto-vectorizes the resulting straight-line code.
-#[inline]
-fn checksum(mut b: &[u8], initial: u64) -> u16 {
-    let mut acc = initial;
-    while b.len() >= 8 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
-        acc += u32::from_be_bytes(b[4..8].try_into().unwrap()) as u64;
-        b = &b[8..];
-    }
-    if b.len() >= 4 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
-        b = &b[4..];
-    }
-    if b.len() >= 2 {
-        acc += read_u16(&b[..2]) as u64;
-        b = &b[2..];
-    }
-    if let Some(&byte) = b.first() {
-        acc += (byte as u64) << 8;
-    }
-    while acc > 0xFFFF {
-        acc = (acc >> 16) + (acc & 0xFFFF);
-    }
-    acc as u16
+fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u16 {
+    let transport_len = transport.len() as u16;
+    let mut c = internet_checksum::Checksum::new();
+    c.add_bytes(src);
+    c.add_bytes(dst);
+    // [zero, proto, len_hi, len_lo] — the big-endian pseudo-header trailer.
+    c.add_bytes(&[0, proto, (transport_len >> 8) as u8, transport_len as u8]);
+    c.add_bytes(transport);
+    u16::from_be_bytes(c.checksum())
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
@@ -305,6 +295,7 @@ pub(crate) fn build_segment(
     gso_idx: usize,
     out: &mut bytes::BytesMut,
 ) -> Result<(), GsoSegError> {
+    use pnet_packet::Packet;
     use pnet_packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
     use pnet_packet::ipv6::{Ipv6Packet, MutableIpv6Packet};
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags};
@@ -358,7 +349,8 @@ pub(crate) fn build_segment(
         ip.set_checksum(csum);
     }
 
-    // Transport-layer fixups.
+    // Transport-layer fixups. See [`transport_checksum`] for the pseudo-
+    // header + zeroed-field formula and its pnet equivalence.
     if hdr.is_tcp() {
         let mut tcp =
             MutableTcpPacket::new(&mut out[csum_start..out_len]).ok_or(GsoSegError::Tcp)?;
@@ -375,10 +367,10 @@ pub(crate) fn build_segment(
         tcp.set_checksum(0);
         let csum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 6, tcp.packet())
             }
             (None, Some((src, dst))) => {
-                pnet_packet::tcp::ipv6_checksum(&tcp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 6, tcp.packet())
             }
             _ => unreachable!(),
         };
@@ -390,10 +382,10 @@ pub(crate) fn build_segment(
         udp.set_checksum(0);
         let csum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::udp::ipv4_checksum(&udp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 17, udp.packet())
             }
             (None, Some((src, dst))) => {
-                pnet_packet::udp::ipv6_checksum(&udp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 17, udp.packet())
             }
             _ => unreachable!(),
         };
