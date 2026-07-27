@@ -1,11 +1,11 @@
 mod batch_receive;
-mod cmsg;
 pub(crate) mod send_queue;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use bytesize::ByteSize;
+use lightway_app_utils::cmsg;
 #[cfg(target_os = "linux")]
 use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
@@ -415,8 +415,8 @@ impl Server for UdpServer {
     }
 }
 
-fn find_pktinfo_from_iter<const N: usize>(
-    mut iter: cmsg::Iter<'_, N>,
+fn find_pktinfo_from_iter(
+    mut iter: cmsg::Iter<'_>,
     local_port: u16,
 ) -> Option<(SocketAddr, libc::in_pktinfo)> {
     iter.find_map(|cmsg| {
@@ -484,7 +484,7 @@ fn read_single_from_socket(
     let mut msg = MsgHdrMut::new()
         .with_addr(&mut peer_sock_addr)
         .with_buffers(&mut raw_buf)
-        .with_control(control.as_mut());
+        .with_control(control.spare_capacity_mut());
 
     let len = sock.recvmsg(&mut msg, 0)?;
 
