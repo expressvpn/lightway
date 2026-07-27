@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::io::Interest;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use super::Server;
 use crate::io::outside::udp::batch_receive::{BatchRecvSlot, recv_multiple_with_metadata};
@@ -305,6 +305,7 @@ impl UdpServer {
                 // TLS library skips duplicate packets and thus no frames read.
                 // It is also possible that adversary can capture the packet
                 // and replay it. In any case, skip processing further
+                error!("DEBUG update_peer_address: {update_peer_address}");
                 if update_peer_address {
                     metrics::udp_session_rotation_attempted_via_replay();
                 }

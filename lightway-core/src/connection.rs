@@ -1606,6 +1606,10 @@ impl<AppState: Send> Connection<AppState> {
 
         let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
         outside_received_pending.extend_from_slice(&buf[..]);
+        // Bytes handed to wolfSSL on this call. For datagram transport the
+        // recv_buf was cleared at the end of the previous call, so this equals
+        // the size of the current record.
+        let fed_bytes = buf.len();
 
         let frame_read_count_result = match self.state {
             State::Connecting => match self.session.try_negotiate()? {
@@ -1640,6 +1644,21 @@ impl<AppState: Send> Connection<AppState> {
             let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
             outside_received_pending.clear();
         }
+
+        let produced_no_frames = matches!(frame_read_count_result.as_ref(), Ok(&0));
+        if self.connection_type.is_datagram()
+            && matches!(self.state, State::Online)
+            && fed_bytes > 0
+            && produced_no_frames
+        {
+            error!(
+                session = ?self.session_id,
+                peer = ?self.peer_addr(),
+                bytes_fed = fed_bytes,
+                "DEBUG DTLS record decoded to 0 frames: silently dropped by wolfSSL (replay or bad MAC)"
+            );
+        }
+
 
         frame_read_count_result
     }

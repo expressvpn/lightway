@@ -522,8 +522,8 @@ impl RouteManagerInner {
 
             // Check if the route to the server has changed
             if server_gateway != current_gateway || server_if_index != current_if_index {
-                tracing::debug!(
-                    "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
+                tracing::error!(
+                    "DEBUG Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
                     server_gateway,
                     server_if_index,
                     current_gateway,
