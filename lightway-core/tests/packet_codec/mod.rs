@@ -2,6 +2,7 @@ use lightway_app_utils::{PacketCodec, PacketCodecFactory};
 use lightway_core::{CodecStatus, PacketCodecResult, PacketDecoder, PacketEncoder};
 
 use bytes::BytesMut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -119,5 +120,55 @@ impl PacketDecoder for TestPacketDecoder {
         sender.send(data.clone()).expect("TestPacketDecoder send");
 
         Ok(CodecStatus::PacketAccepted)
+    }
+}
+
+/// Encoder that ACCEPTS every packet (`PacketAccepted`) but never emits it on
+/// the encoded channel, modelling a codec that silently black-holes the data
+/// plane once encoding is enabled.
+#[derive(Default)]
+pub(crate) struct BlackHolePacketCodecFactory {}
+
+impl PacketCodecFactory for BlackHolePacketCodecFactory {
+    fn build(&self) -> PacketCodec {
+        let (encoded_pkt_sender, encoded_pkt_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (decoded_pkt_sender, decoded_pkt_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        PacketCodec {
+            encoder: Arc::new(BlackHoleEncoder {
+                codec_enabled: AtomicBool::new(false),
+                _encoded_pkt_sender: encoded_pkt_sender,
+            }),
+            decoder: Arc::new(TestPacketDecoder::new(decoded_pkt_sender)),
+            encoded_pkt_receiver,
+            decoded_pkt_receiver,
+        }
+    }
+
+    fn get_codec_name(&self) -> String {
+        String::from("Black Hole Packet Codec")
+    }
+}
+
+struct BlackHoleEncoder {
+    codec_enabled: AtomicBool,
+    _encoded_pkt_sender: UnboundedSender<BytesMut>,
+}
+
+impl PacketEncoder for BlackHoleEncoder {
+    fn store(&self, _data: &mut BytesMut) -> PacketCodecResult<CodecStatus> {
+        if !self.codec_enabled.load(Ordering::SeqCst) {
+            return Ok(CodecStatus::SkipPacket);
+        }
+        // Accept and drop: the packet is never sent on `_encoded_pkt_sender`.
+        Ok(CodecStatus::PacketAccepted)
+    }
+
+    fn set_encoding_state(&self, enabled: bool) {
+        self.codec_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    fn get_encoding_state(&self) -> bool {
+        self.codec_enabled.load(Ordering::SeqCst)
     }
 }
