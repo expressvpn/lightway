@@ -45,7 +45,7 @@ rustPlatform.buildRustPackage {
   };
 
   buildFeatures = features;
-  cargoBuildFlags = "-p ${package}";
+  cargoBuildFlags = "-p ${package} --features=debug";
 
   nativeBuildInputs = [
     autoconf
