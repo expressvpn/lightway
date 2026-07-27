@@ -99,7 +99,9 @@ impl OutsideIOBuilder {
                 Ok((ConnectionType::Stream, Arc::new(sock)))
             }
             OutsideSocket::Udp(s) => {
-                let sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
+                // Mobile embeddings manage network changes at the platform layer
+                // and hand us an already-bound socket, so we do not connect it.
+                let sock = io::outside::Udp::new(self.server_sockaddr, Some(s), false)
                     .await
                     .context("Outside IO UDP")?;
                 // TODO: Skip setting send/recv buffer size on Android for now

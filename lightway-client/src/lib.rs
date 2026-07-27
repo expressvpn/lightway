@@ -211,6 +211,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Connect the outside UDP socket to the server (Datagram only).
+    /// Lowers per-packet receive cost by pinning the peer so the kernel
+    /// skips the per-packet PCB lookup + source-address copy. The socket is
+    /// re-established on a network change. Ignored for TCP connections.
+    pub enable_connected_udp: bool,
+
     /// Interval between Expresslane key rotations
     pub expresslane_keys_rotation_interval: std::time::Duration,
 
@@ -318,6 +324,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "postquantum")]
             keyshare: config.keyshare,
             enable_expresslane: config.enable_expresslane,
+            enable_connected_udp: config.enable_connected_udp,
             expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
@@ -713,6 +720,7 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
     weak: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
+    outside_io: Arc<dyn io::outside::OutsideIO>,
 ) -> ClientResult {
     while (network_change_signal.recv().await).is_some() {
         let Some(conn) = weak.upgrade() else {
@@ -721,7 +729,14 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         let conn_type = conn.lock().unwrap().connection_type();
         match conn_type {
             ConnectionType::Datagram => {
-                info!("sending keepalives due to network change ..");
+                // Re-establish the outside socket first. For a connected UDP
+                // socket this rebinds onto the now-current default route (a
+                // no-op for an unconnected socket), so subsequent keepalives and
+                // data egress from a live local binding rather than a stale one.
+                info!("network change: re-establishing outside socket and sending keepalives ..");
+                if let Err(e) = outside_io.reconnect().await {
+                    tracing::warn!("Failed to reconnect outside socket on network change: {e}");
+                }
                 keepalive.network_changed().await;
             }
             ConnectionType::Stream => {
@@ -956,10 +971,13 @@ pub async fn connect<
         match mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server, maybe_sock)
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
-                    .context("Outside IO UDP")?;
+                let mut sock =
+                    io::outside::Udp::new(server, maybe_sock, config.enable_connected_udp)
+                        .await
+                        .inspect_err(|e| {
+                            tracing::error!("Failed to create outside IO UDP socket: {e}")
+                        })
+                        .context("Outside IO UDP")?;
 
                 #[cfg(batch_receive)]
                 if config.enable_batch_receive {
@@ -1112,6 +1130,7 @@ pub async fn connect<
         keepalive,
         network_change_rx,
         Arc::downgrade(&conn),
+        outside_io.clone(),
     ));
 
     let mut encoded_pkt_send_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(

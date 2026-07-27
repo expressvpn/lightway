@@ -68,6 +68,17 @@ pub trait OutsideIO: Sync + Send {
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg;
 
+    /// Re-establish the underlying socket after a network change.
+    ///
+    /// Default is a no-op, which is correct for TCP (the stream is torn down and
+    /// rebuilt elsewhere) and for an unconnected UDP socket (nothing is pinned to
+    /// a stale local route). A connected UDP socket overrides this to rebind and
+    /// reconnect (or re-associate an injected socket) so it recovers from a
+    /// WiFi/cellular switch.
+    async fn reconnect(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn peer_addr(&self) -> SocketAddr;
 
     /// Returns the underlying socket tagged with its transport type.

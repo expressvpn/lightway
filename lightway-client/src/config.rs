@@ -232,6 +232,17 @@ pub struct Config {
     pub enable_expresslane: bool,
 
     #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = r#"Connect the outside UDP socket to the server.
+    UDP only (ignored for TCP). Connecting the single-peer outside socket
+    lets the kernel skip the per-packet PCB lookup and source-address copy on
+    the UDP input path, lowering per-packet receive cost. The socket is
+    re-established automatically on a network change (WiFi/cellular switch)."#))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub enable_connected_udp: bool,
+
+    #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
     pub expresslane_keys_rotation_interval: Duration,
@@ -495,6 +506,7 @@ impl Default for Config {
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
             enable_expresslane: false,
+            enable_connected_udp: false,
             expresslane_keys_rotation_interval: Duration::from_std_duration(
                 lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
             ),
