@@ -639,6 +639,95 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 
 const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Tracks the tracer trigger for the inside IO loops: fires
+/// `tracer_delta_exceeded` when outside data has been stale for longer
+/// than the configured timeout, at most once per stale timestamp.
+struct TracerTrigger {
+    timeout: Duration,
+    last_fired_for: Option<Instant>,
+}
+
+impl TracerTrigger {
+    fn new(keepalive_config: &KeepaliveConfig) -> Self {
+        let timeout = if keepalive_config.continuous {
+            Duration::ZERO
+        } else {
+            keepalive_config
+                .tracer_trigger_timeout
+                .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
+        };
+        Self {
+            timeout,
+            last_fired_for: None,
+        }
+    }
+
+    async fn tick(&mut self, keepalive: &Keepalive, last_outside_data_received: Instant) {
+        if self.timeout.is_zero() {
+            return;
+        }
+        let stale_for = Instant::now().duration_since(last_outside_data_received);
+        if stale_for > self.timeout
+            && self
+                .last_fired_for
+                .is_none_or(|x| x != last_outside_data_received)
+        {
+            self.last_fired_for = Some(last_outside_data_received);
+            keepalive.tracer_delta_exceeded().await;
+        }
+    }
+}
+
+/// Shared body of the inside IO loops: rewrite the source/DNS
+/// addresses, dispatch the packet into the connection and map the
+/// recoverable errors. Returns `Ok(Some(last_outside_data_received))`
+/// when the packet entered the pipeline, `Ok(None)` when it was
+/// dropped and the loop should just continue.
+fn process_inside_packet<ExtAppState: Send + Sync>(
+    conn: &Mutex<Connection<ConnectionState<ExtAppState>>>,
+    inside_io: &dyn io::inside::InsideIORecv<ExtAppState>,
+    tun_dns_ip: Ipv4Addr,
+    buf: &mut BytesMut,
+    dispatch: impl FnOnce(
+        &mut Connection<ConnectionState<ExtAppState>>,
+        &mut BytesMut,
+    ) -> std::result::Result<(), ConnectionError>,
+) -> Result<Option<Instant>> {
+    let mut conn = conn.lock().unwrap();
+
+    // Update source IP address to server assigned IP address
+    let ip_config = conn.app_state().ip_config;
+    if let Some(ip_config) = &ip_config {
+        ipv4_update_source(buf.as_mut(), ip_config.client_ip);
+
+        // Update TUN device DNS IP address to server provided DNS address
+        let packet = Ipv4Packet::new(buf.as_ref());
+        if let Some(packet) = packet
+            && packet.get_destination() == tun_dns_ip
+        {
+            ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
+        };
+    }
+
+    match dispatch(&mut conn, buf) {
+        Ok(()) => Ok(Some(conn.activity().last_outside_data_received)),
+        Err(ConnectionError::PluginDropWithReply(reply)) => {
+            // Send the reply packet to inside path
+            let _ = inside_io.try_send(reply, ip_config);
+            Ok(None)
+        }
+        // Ignore the packet till the connection is online, and ignore
+        // invalid inside packets
+        Err(ConnectionError::InvalidState) | Err(ConnectionError::InvalidInsidePacket(_)) => {
+            Ok(None)
+        }
+        Err(err) => {
+            // Fatal error
+            Err(err.into())
+        }
+    }
+}
+
 pub async fn inside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     inside_io: Arc<dyn io::inside::InsideIORecv<ExtAppState>>,
@@ -647,14 +736,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     keepalive_config: KeepaliveConfig,
     inside_pkt_codec_stall_timeout: Duration,
 ) -> Result<()> {
-    let tracer_trigger_timeout = if keepalive_config.continuous {
-        Duration::ZERO
-    } else {
-        keepalive_config
-            .tracer_trigger_timeout
-            .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
-    };
-    let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
+    let mut tracer = TracerTrigger::new(&keepalive_config);
     let mtu = inside_io.mtu();
     let mut buf = BytesMut::with_capacity(mtu);
     loop {
@@ -669,76 +751,33 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
-        let last_outside_data_received = {
-            let mut conn = conn.lock().unwrap();
-
-            // Update source IP address to server assigned IP address
-            let ip_config = conn.app_state().ip_config;
-            if let Some(ip_config) = &ip_config {
-                ipv4_update_source(buf.as_mut(), ip_config.client_ip);
-
-                // Update TUN device DNS IP address to server provided DNS address
-                let packet = Ipv4Packet::new(buf.as_ref());
-                if let Some(packet) = packet
-                    && packet.get_destination() == tun_dns_ip
-                {
-                    ipv4_update_destination(buf.as_mut(), ip_config.dns_ip);
-                };
-            }
-
-            match conn.inside_data_received(&mut buf) {
-                Ok(()) => {
-                    // If the inside packet codec has stalled the data plane, downgrade to
-                    // unencoded rather than tearing the tunnel down. Control frames bypass
-                    // the codec, so keepalive/tracer can't detect this on their own.
-                    match conn.downgrade_inside_pkt_codec_if_stalled(inside_pkt_codec_stall_timeout)
-                    {
-                        Ok(true) => {
-                            tracing::warn!(
-                                "inside packet codec data-plane stalled; disabling codec"
-                            )
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to disable inside packet codec after stall: {e}"
-                            )
-                        }
+        let Some(last_outside_data_received) = process_inside_packet(
+            &conn,
+            inside_io.as_ref(),
+            tun_dns_ip,
+            &mut buf,
+            |conn, buf| {
+                conn.inside_data_received(buf)?;
+                // If the inside packet codec has stalled the data plane, downgrade to
+                // unencoded rather than tearing the tunnel down. Control frames bypass
+                // the codec, so keepalive/tracer can't detect this on their own.
+                match conn.downgrade_inside_pkt_codec_if_stalled(inside_pkt_codec_stall_timeout) {
+                    Ok(true) => {
+                        tracing::warn!("inside packet codec data-plane stalled; disabling codec")
                     }
-                    conn.activity().last_outside_data_received
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::error!("failed to disable inside packet codec after stall: {e}")
+                    }
                 }
-                Err(ConnectionError::PluginDropWithReply(reply)) => {
-                    // Send the reply packet to inside path
-                    let _ = inside_io.try_send(reply, ip_config);
-                    continue;
-                }
-                Err(ConnectionError::InvalidState) => {
-                    // Ignore the packet till the connection is online
-                    continue;
-                }
-                Err(ConnectionError::InvalidInsidePacket(_)) => {
-                    // Ignore invalid inside packet
-                    continue;
-                }
-                Err(err) => {
-                    // Fatal error
-                    return Err(err.into());
-                }
-            }
+                Ok(())
+            },
+        )?
+        else {
+            continue;
         };
 
-        let now = Instant::now();
-        let duration_since_last_outside_data = now.duration_since(last_outside_data_received);
-
-        if !tracer_trigger_timeout.is_zero()
-            && duration_since_last_outside_data > tracer_trigger_timeout
-            && tracer_timeout_last_outside_data_rcvd.is_none_or(|x| x != last_outside_data_received)
-        {
-            {
-                tracer_timeout_last_outside_data_rcvd = Some(last_outside_data_received);
-                keepalive.tracer_delta_exceeded().await;
-            }
-        }
+        tracer.tick(&keepalive, last_outside_data_received).await;
     }
 }
 
