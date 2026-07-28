@@ -643,6 +643,24 @@ impl<AppState: Send> Connection<AppState> {
         self.activity
     }
 
+    /// Refresh activity timestamps from offloaded (kernel-path) traffic that
+    /// never reaches the userspace data path. Kept kernel-ref-free: the caller
+    /// (the offload stats poller) decides when to call it from kernel counter
+    /// deltas. `rx` (peer -> us) bumps both the peer-data and outside-data
+    /// timestamps; `tx` (us -> peer) refreshes only the outside-data timestamp
+    /// so a download keeps the connection out of idle-eviction without marking
+    /// the peer as actively sending.
+    pub fn mark_offload_activity(&mut self, rx: bool, tx: bool) {
+        let now = Instant::now();
+        if rx {
+            self.activity.last_data_traffic_from_peer = now;
+            self.activity.last_outside_data_received = now;
+        }
+        if tx {
+            self.activity.last_outside_data_received = now;
+        }
+    }
+
     /// Query the TLS protocol version of this connection, only valid
     /// after [`State::LinkUp`] has been reached.
     pub fn tls_protocol_version(&mut self) -> ProtocolVersion {
@@ -1779,6 +1797,19 @@ impl<AppState: Send> Connection<AppState> {
         loss_ratio > PACKET_LOSS_RATIO_THRESHOLD
     }
 
+    /// Fold one keepalive window into a direction's strike counter, as a
+    /// leaky bucket: a bad window adds one, a good window drains one.
+    /// Draining rather than clearing is what stops an attacker from
+    /// resetting the count with one clean window between drop bursts.
+    /// Returns the updated count and whether it now warrants degrading.
+    fn advance_strikes(strikes: u8, sent: u64, received: u64) -> (u8, bool) {
+        if !Self::has_packet_drops(sent, received) {
+            return (strikes.saturating_sub(1), false);
+        }
+        let strikes = strikes.saturating_add(1);
+        (strikes, strikes >= expresslane::EXPRESSLANE_DEGRADE_STRIKES)
+    }
+
     /// Check expresslane health from keepalive pong payload
     ///  and disable if packet drops detected
     fn check_expresslane_health(&mut self, mut payload: &[u8]) -> ConnectionResult<()> {
@@ -1794,8 +1825,8 @@ impl<AppState: Send> Connection<AppState> {
         // Detect counter reset: cumulative stats should never decrease.
         // If they do, an external stats provider re-initialized its state
         // with fresh counters. Log for debugging but continue with the
-        // health check — the underflow will trigger degradation and fall
-        // back to DTLS as a safe default.
+        // health check — the underflow reads as loss, so a reset that
+        // persists degrades to DTLS as a safe default.
         if total_peer_sent < self.expresslane.prev_peer_sent
             || total_peer_recv < self.expresslane.prev_peer_recv
         {
@@ -1837,14 +1868,26 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         // Inbound packet drops
-        if Self::has_packet_drops(peer_sent_delta, my_recv_delta) {
+        let (inbound_strikes, degrade) = Self::advance_strikes(
+            self.expresslane.inbound_strikes,
+            peer_sent_delta,
+            my_recv_delta,
+        );
+        self.expresslane.inbound_strikes = inbound_strikes;
+        if degrade {
             warn!("Expresslane degraded (INBOUND): Falling back to DTLS");
             self.set_expresslane_degraded();
             return Ok(());
         }
 
         // Outbound packet drops
-        if Self::has_packet_drops(my_sent_delta, peer_recv_delta) {
+        let (outbound_strikes, degrade) = Self::advance_strikes(
+            self.expresslane.outbound_strikes,
+            my_sent_delta,
+            peer_recv_delta,
+        );
+        self.expresslane.outbound_strikes = outbound_strikes;
+        if degrade {
             warn!("Expresslane degraded (OUTBOUND): Falling back to DTLS");
             self.set_expresslane_degraded();
             return Ok(());
@@ -2625,5 +2668,90 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::EncodingRequest(pending_request_pkt.clone());
         self.send_frame_or_queue(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `advance_strikes` ignores AppState; pick the simplest `Send` type.
+    type Conn = Connection<()>;
+
+    const BAD: (u64, u64) = (100, 0); // 100% loss
+    const GOOD: (u64, u64) = (100, 100);
+    const BELOW_MIN: (u64, u64) = (9, 0); // under MIN_PACKETS_FOR_LOSS_CHECK
+
+    #[test]
+    fn single_bad_window_does_not_degrade() {
+        assert_eq!(Conn::advance_strikes(0, BAD.0, BAD.1), (1, false));
+    }
+
+    #[test]
+    fn consecutive_bad_windows_degrade() {
+        let threshold = expresslane::EXPRESSLANE_DEGRADE_STRIKES;
+        let mut strikes = 0;
+        for window in 1..threshold {
+            let degrade;
+            (strikes, degrade) = Conn::advance_strikes(strikes, BAD.0, BAD.1);
+            assert_eq!((strikes, degrade), (window, false));
+        }
+        assert_eq!(
+            Conn::advance_strikes(strikes, BAD.0, BAD.1),
+            (threshold, true)
+        );
+    }
+
+    #[test]
+    fn good_window_drains_one_strike() {
+        let (strikes, _) = Conn::advance_strikes(0, BAD.0, BAD.1);
+        let (strikes, _) = Conn::advance_strikes(strikes, BAD.0, BAD.1);
+        assert_eq!(strikes, 2);
+        assert_eq!(
+            Conn::advance_strikes(strikes, GOOD.0, GOOD.1),
+            (1, false),
+            "a clean window drains one strike, it does not clear the bucket"
+        );
+    }
+
+    #[test]
+    fn drain_floors_at_zero() {
+        assert_eq!(Conn::advance_strikes(0, GOOD.0, GOOD.1), (0, false));
+    }
+
+    /// An attacker alternating (threshold - 1) bad windows with one clean
+    /// window would evade a reset-on-good counter forever. Draining makes
+    /// the bucket climb anyway.
+    #[test]
+    fn pulsed_drops_still_degrade() {
+        let threshold = expresslane::EXPRESSLANE_DEGRADE_STRIKES;
+        let mut strikes = 0;
+        for _ in 0..10 {
+            for _ in 0..threshold - 1 {
+                let degrade;
+                (strikes, degrade) = Conn::advance_strikes(strikes, BAD.0, BAD.1);
+                if degrade {
+                    return;
+                }
+            }
+            (strikes, _) = Conn::advance_strikes(strikes, GOOD.0, GOOD.1);
+        }
+        panic!("pulsed drop pattern never degraded, bucket stuck at {strikes}");
+    }
+
+    #[test]
+    fn idle_window_is_not_a_strike() {
+        assert_eq!(
+            Conn::advance_strikes(1, BELOW_MIN.0, BELOW_MIN.1),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn strikes_saturate_instead_of_wrapping() {
+        assert_eq!(
+            Conn::advance_strikes(u8::MAX, BAD.0, BAD.1),
+            (u8::MAX, true)
+        );
     }
 }

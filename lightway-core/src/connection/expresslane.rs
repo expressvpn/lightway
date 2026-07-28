@@ -33,13 +33,22 @@ pub type ExpresslaneCbType<AppState> = Arc<dyn ExpresslaneCb<AppState> + Sync + 
 /// Default interval between expresslane key rotations
 pub const DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_mins(15);
 
+/// Strike-bucket level at which a direction degrades expresslane. A single
+/// over-threshold window can be an artifact of bursty traffic straddling
+/// the peer's counter snapshot, so one is never enough.
+pub(crate) const EXPRESSLANE_DEGRADE_STRIKES: u8 = 3;
+
 /// Packet counters for ExpressLane health monitoring.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExpresslanePacketStats {
-    /// Total sent via expresslane
-    pub sent: u64,
-    /// Total received via expresslane
-    pub received: u64,
+    /// Total packets sent via expresslane
+    pub sent_packets: u64,
+    /// Total packets received via expresslane
+    pub received_packets: u64,
+    /// Total bytes sent via expresslane
+    pub sent_bytes: u64,
+    /// Total bytes received via expresslane
+    pub received_bytes: u64,
 }
 
 /// Provider of ExpressLane packet metrics.
@@ -77,6 +86,10 @@ pub(crate) struct Expresslane<AppState: Send> {
     pub(crate) last_snapshot_sent: u64,
     /// Packets received at the time of last keepalive exchange
     pub(crate) last_snapshot_recv: u64,
+    /// Inbound loss strike bucket; +1 per bad window, -1 per good one
+    pub(crate) inbound_strikes: u8,
+    /// Outbound loss strike bucket; +1 per bad window, -1 per good one
+    pub(crate) outbound_strikes: u8,
     /// Wire-level crypto engine (encrypt/decrypt/serialize)
     pub(crate) data: ExpresslaneData,
     /// Callback invoked on session key updates so the application can
@@ -104,6 +117,8 @@ impl<AppState: Send> Expresslane<AppState> {
             prev_peer_recv: 0,
             last_snapshot_sent: 0,
             last_snapshot_recv: 0,
+            inbound_strikes: 0,
+            outbound_strikes: 0,
             data: ExpresslaneData::default(),
             cb,
             metrics,
@@ -116,7 +131,7 @@ impl<AppState: Send> Expresslane<AppState> {
         match &self.metrics {
             Some(provider) => {
                 let stats = provider.get_stats(session_id);
-                (stats.sent, stats.received)
+                (stats.sent_packets, stats.received_packets)
             }
             None => (self.data.packets_sent(), self.data.packets_received()),
         }

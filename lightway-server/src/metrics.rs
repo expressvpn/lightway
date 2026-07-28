@@ -87,6 +87,10 @@ static METRIC_TUN_FROM_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tu
 static METRIC_TUN_TO_CLIENT: LazyLock<Counter> = LazyLock::new(|| counter!("tun_to_client"));
 static METRIC_TUN_RECV_BATCH_SIZE: LazyLock<Histogram> =
     LazyLock::new(|| histogram!("tun_recv_batch_size"));
+static METRIC_EXPRESSLANE_OFFLOAD_TX_BYTES: LazyLock<Counter> =
+    LazyLock::new(|| counter!("expresslane_offload_tx_bytes"));
+static METRIC_EXPRESSLANE_OFFLOAD_RX_BYTES: LazyLock<Counter> =
+    LazyLock::new(|| counter!("expresslane_offload_rx_bytes"));
 
 static METRIC_SESSIONS_CURRENT_ONLINE: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("sessions_current_online"));
@@ -383,6 +387,15 @@ pub fn tun_to_client(sz: usize) {
 /// Number of packets returned by one batched inside-IO receive.
 pub fn tun_recv_batch(sz: usize) {
     METRIC_TUN_RECV_BATCH_SIZE.record(sz as f64);
+}
+
+/// Bytes sent to the peer over the kernel-offload (expresslane) path.
+pub fn expresslane_offload_tx_bytes(sz: u64) {
+    METRIC_EXPRESSLANE_OFFLOAD_TX_BYTES.increment(sz);
+}
+/// Bytes received from the peer over the kernel-offload (expresslane) path.
+pub fn expresslane_offload_rx_bytes(sz: u64) {
+    METRIC_EXPRESSLANE_OFFLOAD_RX_BYTES.increment(sz);
 }
 
 /// Current session statistics

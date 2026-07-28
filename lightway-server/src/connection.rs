@@ -102,6 +102,7 @@ impl Connection {
             pub fn tls_protocol_version(&self) -> ProtocolVersion;
             pub fn connection_type(&self) -> ConnectionType;
             pub fn session_id(&self) -> SessionId;
+            pub fn mark_offload_activity(&self, rx: bool, tx: bool);
             pub fn peer_addr(&self) -> SocketAddr;
             pub fn set_peer_addr(&self, addr: SocketAddr) -> SocketAddr;
             pub fn current_cipher(&self) -> Option<String>;
