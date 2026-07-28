@@ -84,6 +84,78 @@ impl Udp {
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
+
+    /// Run `f` under `try_io(READABLE)`, mapping the spurious
+    /// `WouldBlock` that `try_io` may report (so the caller waits for
+    /// the next readiness event) and retrying immediately when a
+    /// signal interrupts the syscall.
+    #[cfg(batch_receive)]
+    fn try_readable_io<T>(&self, mut f: impl FnMut() -> std::io::Result<T>) -> IOCallbackResult<T> {
+        loop {
+            match self.sock.try_io(tokio::io::Interest::READABLE, &mut f) {
+                Ok(n) => return IOCallbackResult::Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return IOCallbackResult::WouldBlock;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return IOCallbackResult::Err(e),
+            }
+        }
+    }
+
+    /// Map the result of a UDP send syscall into an
+    /// [`IOCallbackResult`], swallowing transient errors (see the
+    /// per-arm comments) so the TLS socket does not enter the error
+    /// state. `len` is the number of bytes the caller asked to send,
+    /// reported as "sent" for the swallowed cases.
+    fn map_send_result(res: std::io::Result<usize>, len: usize) -> IOCallbackResult<usize> {
+        match res {
+            Ok(nr) => IOCallbackResult::Ok(nr),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
+                // Possibly the server isn't listening (yet).
+                //
+                // Swallow the error so the TLS socket does not
+                // enter the error state, and DTLS would handles the retransmission as well.
+                //
+                // This way we can continue if/when the server shows up.
+                //
+                // Returning the number of bytes requested to be sent to mock
+                // that the send is successful.
+                // Otherwise, TLS perceives that no data is sent and try
+                // to send the same data again, creating a live-lock until
+                // the network is reachable.
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
+                // This case indicates network unreachable error.
+                // Possibly there is a network change at the moment.
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
+                // No buffer space available
+                // UDP sockets may have this error when the system is overloaded.
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                IOCallbackResult::Ok(len)
+            }
+            #[cfg(macos)]
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
+                // The source address is no longer valid (e.g. Switched WiFi hotspots)
+                // It should eventually recover by itself after a while.
+                // If the user has disconnected from the internet, keepalive should fail
+                // due to missed reply (`keepalive_timeout`).
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) => {
+                tracing::warn!("Outside IO Send failed: {err:?}");
+                IOCallbackResult::Err(err)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -144,22 +216,9 @@ impl OutsideIO for Udp {
 
         let fd = self.sock.as_raw_fd();
 
-        loop {
-            match self.sock.try_io(tokio::io::Interest::READABLE, || {
-                batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
-            }) {
-                Ok(n) => return IOCallbackResult::Ok(n),
-                // try_io may return WouldBlock even if the socket isn't actually
-                // readable. Break with 0 to wait for another readable event emitted.
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return IOCallbackResult::WouldBlock;
-                }
-                // Interrupted means the syscall was interrupted by a signal and can be
-                // retried immediately without waiting for another readable event.
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return IOCallbackResult::Err(e),
-            }
-        }
+        self.try_readable_io(|| {
+            batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
+        })
     }
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
@@ -185,52 +244,7 @@ impl OutsideIO for Udp {
 
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
-        match self.sock.try_send_to(buf, self.peer_addr) {
-            Ok(nr) => IOCallbackResult::Ok(nr),
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                IOCallbackResult::WouldBlock
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
-                // Possibly the server isn't listening (yet).
-                //
-                // Swallow the error so the TLS socket does not
-                // enter the error state, and DTLS would handles the retransmission as well.
-                //
-                // This way we can continue if/when the server shows up.
-                //
-                // Returning the number of bytes requested to be sent to mock
-                // that the send is successful.
-                // Otherwise, TLS perceives that no data is sent and try
-                // to send the same data again, creating a live-lock until
-                // the network is reachable.
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
-                // This case indicates network unreachable error.
-                // Possibly there is a network change at the moment.
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
-                // No buffer space available
-                // UDP sockets may have this error when the system is overloaded.
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
-                IOCallbackResult::Ok(buf.len())
-            }
-            #[cfg(macos)]
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
-                // The source address is no longer valid (e.g. Switched WiFi hotspots)
-                // It should eventually recover by itself after a while.
-                // If the user has disconnected from the internet, keepalive should fail
-                // due to missed reply (`keepalive_timeout`).
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) => {
-                tracing::warn!("Outside IO Send failed: {err:?}");
-                IOCallbackResult::Err(err)
-            }
-        }
+        Self::map_send_result(self.sock.try_send_to(buf, self.peer_addr), buf.len())
     }
 
     fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
