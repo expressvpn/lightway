@@ -70,6 +70,9 @@ impl<const N: usize> Default for Buffer<N> {
 pub enum Message<'a> {
     /// An `IP_PKTINFO` message.
     IpPktinfo(&'a libc::in_pktinfo),
+    /// A `UDP_GRO` message carrying the coalesced segment size.
+    #[cfg(linux)]
+    UdpGroSegment(libc::c_int),
     /// Any other control message.
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
 }
@@ -119,6 +122,17 @@ pub fn iter_control(control: &[u8]) -> Iter<'_> {
     }
 }
 
+/// Scan a raw control-message buffer (see [`iter_control`] for the
+/// alignment contract) for a `UDP_GRO` control message and return its
+/// coalesced segment size, if present.
+#[cfg(linux)]
+pub fn first_udp_gro_segment(control: &[u8]) -> Option<u16> {
+    iter_control(control).find_map(|m| match m {
+        Message::UdpGroSegment(seg) => Some(seg as u16),
+        _ => None,
+    })
+}
+
 /// Iterator over the control messages in a [`Buffer`] or raw control
 /// region (see [`iter_control`]).
 pub struct Iter<'a> {
@@ -159,6 +173,15 @@ impl<'a> Iterator for Iter<'a> {
                 // SAFETY: we constructed `data` above
                 let pi = unsafe { &*data };
                 return Some(Message::IpPktinfo(pi));
+            }
+
+            #[cfg(linux)]
+            if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_GRO {
+                // SAFETY: `item` is a valid cmsg; a `UDP_GRO` cmsg
+                // carries a `c_int` and `CMSG_DATA` returns a pointer
+                // aligned for it within the cmsg.
+                let seg = unsafe { *(libc::CMSG_DATA(item) as *const libc::c_int) };
+                return Some(Message::UdpGroSegment(seg));
             }
 
             Some(Message::Unknown(item))
@@ -361,6 +384,40 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    /// `first_udp_gro_segment` extracts the segment size from a raw
+    /// (aligned) control buffer built with `SOL_UDP`/`UDP_GRO`, and
+    /// returns `None` when no such message is present.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn first_udp_gro_segment_parses_raw_control() {
+        const SIZE: usize = Message::space::<libc::c_int>();
+        let mut out = BufferMut::<SIZE>::zeroed();
+        out.builder()
+            .fill_next(libc::SOL_UDP, libc::UDP_GRO, 1400 as libc::c_int)
+            .unwrap();
+        // BufferMut is `#[repr(align(16))]`, so `as_ref()` is aligned.
+        assert_eq!(first_udp_gro_segment(out.as_ref()), Some(1400));
+
+        // A buffer with an unrelated (pktinfo) message yields None.
+        const PSIZE: usize = Message::space::<libc::in_pktinfo>();
+        let mut other = BufferMut::<PSIZE>::zeroed();
+        other
+            .builder()
+            .fill_next(
+                libc::SOL_IP,
+                libc::IP_PKTINFO,
+                libc::in_pktinfo {
+                    ipi_ifindex: 0,
+                    ipi_spec_dst: libc::in_addr { s_addr: 0 },
+                    ipi_addr: libc::in_addr { s_addr: 0 },
+                },
+            )
+            .unwrap();
+        assert_eq!(first_udp_gro_segment(other.as_ref()), None);
+
+        assert_eq!(first_udp_gro_segment(&[]), None);
     }
 
     #[test]
