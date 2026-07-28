@@ -44,6 +44,15 @@ pub(crate) const MAX_GSO_SEGS: usize = 64;
 /// `MAX_GSO_SEGS` segments, each at most `MAX_OUTSIDE_MTU`.
 pub(crate) const MAX_GSO_FRAME_BYTES: usize = MAX_GSO_SEGS * crate::MAX_OUTSIDE_MTU;
 
+/// Upper bound on the UDP payload bytes a single `sendmsg` with
+/// `UDP_SEGMENT` may carry. The kernel assembles the whole batch into
+/// one skb before segmenting, so the total is bounded by the maximum
+/// IP datagram size (65535) minus the UDP header (8) and the larger
+/// IPv6 header (40); exceeding it fails with `EMSGSIZE`. A TUN TSO
+/// aggregate can be up to 65535 bytes *before* the per-segment
+/// `wire::Header` is added, so flushes must be chunked to this limit.
+pub(crate) const MAX_GSO_SEND_BYTES: usize = 65535 - 8 - 40;
+
 impl VirtioNetHdr {
     /// Interpret the first [`VIRTIO_NET_HDR_LEN`] bytes of `buf` as a
     /// `&VirtioNetHdr` without copying.
