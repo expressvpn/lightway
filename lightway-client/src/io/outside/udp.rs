@@ -1,3 +1,5 @@
+#[cfg(linux)]
+use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -18,6 +20,8 @@ pub struct Udp {
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    #[cfg(linux)]
+    gro_enabled: bool,
 }
 
 impl Udp {
@@ -48,7 +52,33 @@ impl Udp {
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            #[cfg(linux)]
+            gro_enabled: false,
         })
+    }
+
+    /// Enable UDP GRO on the socket so the kernel coalesces trains of
+    /// equal-size datagrams into one buffer per `recvmsg`. On failure
+    /// (kernel < 5.0) logs and leaves the per-packet receive path in
+    /// place — the GRO capability itself stays enabled either way.
+    #[cfg(linux)]
+    pub fn enable_gro(&mut self) {
+        // Route receives through `recv_gro_batch` whenever offload is
+        // requested — not only when the sockopt succeeds. That path
+        // degrades to plain single-datagram slots when the kernel does
+        // not coalesce (old kernel, or a server that sends zero-checksum
+        // UDP, which the kernel GRO engine skips by design), and
+        // userspace TUN-side coalescing still applies in that case. The
+        // `UDP_GRO` sockopt is a best-effort bonus that additionally
+        // coalesces on the socket read when the server's datagrams carry
+        // a checksum.
+        self.gro_enabled = true;
+        match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Err(e) => tracing::warn!(
+                "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
+            ),
+        }
     }
 
     #[cfg(batch_receive)]
@@ -204,6 +234,11 @@ impl OutsideIO for Udp {
         })
     }
 
+    #[cfg(linux)]
+    fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
+        if self.gro_enabled { Some(self) } else { None }
+    }
+
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
         self
     }
@@ -222,6 +257,19 @@ impl OutsideIO for Udp {
         #[cfg(windows)]
         let handle = self.sock.as_raw_socket();
         OutsideSocket::Udp(handle)
+    }
+}
+
+#[cfg(linux)]
+impl OutsideIORecvGro for Udp {
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; lightway_core::MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; lightway_core::MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
+        use std::os::fd::AsRawFd;
+        let fd = self.sock.as_raw_fd();
+        self.try_readable_io(|| batch_receive::recv_multiple_gro(fd, bufs, gro_sizes))
     }
 }
 
