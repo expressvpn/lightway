@@ -442,6 +442,25 @@ impl TunDirect {
         // This currently is not supported for Android and IOS
         #[cfg(mobile)]
         let mtu = 1350;
+
+        // Reflect the capability the device actually negotiated, not what
+        // was requested. `build_async` succeeds even when the kernel
+        // rejects `TUNSETOFFLOAD` (tun-rs only logs a warning), leaving
+        // `IFF_VNET_HDR` unset. Trusting `config.offload` here would make
+        // `recv_gso`/`try_send_gso` strip/prepend a 10-byte virtio header
+        // the device does not use, corrupting every packet.
+        #[cfg(target_os = "linux")]
+        let vnet_hdr = {
+            let negotiated = tun_device.tcp_gso();
+            if config.offload && !negotiated {
+                tracing::warn!(
+                    "TUN offload requested but the kernel did not negotiate IFF_VNET_HDR; \
+                     continuing without GSO/GRO offload"
+                );
+            }
+            negotiated
+        };
+
         let tun = Some(tun_device);
 
         Ok(TunDirect {
@@ -452,7 +471,7 @@ impl TunDirect {
             #[cfg(unix)]
             close_fd_on_drop: config.close_fd_on_drop,
             #[cfg(target_os = "linux")]
-            vnet_hdr: config.offload,
+            vnet_hdr,
         })
     }
 
