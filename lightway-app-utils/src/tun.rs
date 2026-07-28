@@ -640,22 +640,22 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        let tun = self.tun.as_ref().unwrap();
         #[cfg(target_os = "linux")]
-        let res = if self.vnet_hdr {
-            // IFF_VNET_HDR requires a zeroed `virtio_net_hdr` prefix
-            // on every write (NEEDS_CSUM=0, GSO_NONE).
-            let hdr_len = tun_rs::VIRTIO_NET_HDR_LEN;
-            let mut prefixed = bytes::BytesMut::zeroed(hdr_len);
-            prefixed.extend_from_slice(&buf[..]);
-            tun.try_send(&prefixed[..])
-                .map(|n| n.saturating_sub(hdr_len))
-        } else {
-            tun.try_send(&buf[..])
-        };
-        #[cfg(not(target_os = "linux"))]
-        let res = tun.try_send(&buf[..]);
-        Self::map_send_result(res)
+        if self.vnet_hdr {
+            // IFF_VNET_HDR requires a zeroed `virtio_net_hdr` prefix on
+            // every write (NEEDS_CSUM=0, GSO_NONE). Send it vectored so the
+            // header is not copied onto the packet; the returned count
+            // excludes it to match a plain send.
+            let hdr = [0u8; tun_rs::VIRTIO_NET_HDR_LEN];
+            let chunks = [std::io::IoSlice::new(&hdr), std::io::IoSlice::new(&buf[..])];
+            return Self::map_send_result(
+                self.send_chunks(&chunks)
+                    .map(|n| n.saturating_sub(hdr.len())),
+            );
+        }
+
+        let tun = self.tun.as_ref().unwrap();
+        Self::map_send_result(tun.try_send(&buf[..]))
     }
 
     /// Map the result of a TUN write onto an [`IOCallbackResult`], shared by
@@ -670,6 +670,14 @@ impl TunDirect {
             }
             Err(err) => IOCallbackResult::Err(err),
         }
+    }
+
+    /// Write `chunks` to the TUN in one vectored send — no copy, no
+    /// allocation. Returns the total number of bytes written across all
+    /// chunks.
+    #[cfg(target_os = "linux")]
+    fn send_chunks(&self, chunks: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+        self.tun.as_ref().unwrap().try_send_vectored(chunks)
     }
 
     /// MTU of Tun
