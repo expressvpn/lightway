@@ -18,6 +18,8 @@ use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
+#[cfg(linux)]
+pub use io::inside::InsideIORecvGso;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -229,6 +231,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Base MTU for PMTU discovery
     pub pmtud_base_mtu: Option<u16>,
 
+    /// Enable offload for batch packet processing: GSO on the TUN
+    /// read + UDP send path, GRO on the UDP receive path.
+    /// Only effective on Linux; ignored elsewhere.
+    pub enable_tun_offload: bool,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -336,6 +343,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
             pmtud_base_mtu: config.pmtud_base_mtu,
+            enable_tun_offload: config.enable_tun_offload,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -752,6 +760,83 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+/// An async function to handle all the inside traffic when TUN offload
+/// (GSO) is enabled.
+///
+/// Mirrors [`inside_io_task`], but reads (potentially oversized) GSO
+/// superpackets from the TUN and forwards each aggregate via
+/// `Connection::inside_data_received_gso`, which segments it in
+/// userspace, encrypts each segment and ships the whole batch as a
+/// single `sendmsg(UDP_SEGMENT)`.
+#[cfg(linux)]
+pub async fn inside_io_task_gso<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    inside_io: Arc<dyn io::inside::InsideIORecvGso<ExtAppState>>,
+    tun_dns_ip: Ipv4Addr,
+    keepalive: Keepalive,
+    keepalive_config: KeepaliveConfig,
+) -> Result<()> {
+    use lightway_core::gso::{
+        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN,
+        gso_none_checksum,
+    };
+
+    let mut tracer = TracerTrigger::new(&keepalive_config);
+
+    // Receive buffer reused across iterations. `recv_gso` writes
+    // directly into the spare capacity (no zero-init pass); on success
+    // the virtio header has already been parsed and stripped, so `buf`
+    // holds exactly the IP superpacket. `clear()` + `reserve()` at the
+    // top of the loop compacts the window back to the start of the
+    // backing slab without a memcpy (len is 0).
+    let initial_cap = VIRTIO_NET_HDR_LEN + lightway_core::gro::MAX_IPV4_PACKET_LEN;
+    let mut buf = BytesMut::with_capacity(initial_cap);
+    loop {
+        buf.clear();
+        buf.reserve(initial_cap);
+        let (_, hdr) = match inside_io.recv_gso(&mut buf).await {
+            IOCallbackResult::Ok(pair) => pair,
+            IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
+            IOCallbackResult::Err(err) => {
+                // Fatal error
+                return Err(err.into());
+            }
+        };
+
+        // With checksum offload the kernel hands us packets whose
+        // transport checksum is only the pseudo-header partial sum;
+        // finish it before the packet enters the pipeline. Only for
+        // non-GSO packets: the kernel sets NEEDS_CSUM on TSO aggregates
+        // too, but `gso::build_segment` recomputes each segment's
+        // checksum from scratch, so folding the (up to ~64KB)
+        // superpacket here would be immediately discarded work.
+        if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE
+            && hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0
+        {
+            gso_none_checksum(buf.as_mut(), hdr.csum_start, hdr.csum_offset);
+        }
+
+        let Some(last_outside_data_received) = process_inside_packet(
+            &conn,
+            inside_io.as_ref(),
+            tun_dns_ip,
+            &mut buf,
+            |conn, buf| {
+                if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+                    conn.inside_data_received(buf)
+                } else {
+                    conn.inside_data_received_gso(buf, &hdr)
+                }
+            },
+        )?
+        else {
+            continue;
+        };
+
+        tracer.tick(&keepalive, last_outside_data_received).await;
+    }
+}
+
 async fn handle_network_change<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut network_change_signal: mpsc::Receiver<()>,
@@ -1142,6 +1227,28 @@ pub async fn connect<
         None,
     ));
 
+    #[cfg(linux)]
+    let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = if config.enable_tun_offload {
+        let gso_io = inside_io.clone().as_gso().context(
+            "enable_tun_offload is set but the inside IO backend does not support GSO offload",
+        )?;
+        tokio::spawn(inside_io_task_gso(
+            conn.clone(),
+            gso_io,
+            config.tun_dns_ip,
+            keepalive.clone(),
+            keepalive_config,
+        ))
+    } else {
+        tokio::spawn(inside_io_task(
+            conn.clone(),
+            inside_io.clone(),
+            config.tun_dns_ip,
+            keepalive.clone(),
+            keepalive_config,
+        ))
+    };
+    #[cfg(not(linux))]
     let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(inside_io_task(
         conn.clone(),
         inside_io.clone(),
@@ -1389,6 +1496,20 @@ fn validate_client_config<
         return Err(anyhow!("At least one server should be specified"));
     }
 
+    // Offload forces the TUN device open with `IFF_VNET_HDR` and drives
+    // the GSO inside-IO path, but the io-uring backend cannot supply a
+    // GSO device (`TunIoUring::supports_gso()` is always false). Left to
+    // run, `as_gso()` would return `None` and `connect()` would hard-fail
+    // for every server. Reject the combination up front with a clear
+    // error instead.
+    #[cfg(all(linux, feature = "io-uring"))]
+    if config.enable_tun_offload && config.enable_tun_iouring {
+        return Err(anyhow!(
+            "enable_tun_offload and enable_tun_iouring cannot be enabled together: \
+             the io-uring inside IO backend does not support GSO offload"
+        ));
+    }
+
     for server_config in servers {
         if server_config.inside_pkt_codec.is_some() && config.inside_pkt_codec_config.is_none() {
             return Err(anyhow!(
@@ -1423,6 +1544,11 @@ pub async fn client<
     );
 
     validate_client_config(&config, &conn_confs)?;
+
+    #[cfg(linux)]
+    if config.enable_tun_offload {
+        config.tun_config.offload = true;
+    }
 
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),

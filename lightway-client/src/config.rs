@@ -251,6 +251,13 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable TUN offload (GSO/GRO) for batch packet processing"))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub enable_tun_offload: bool,
+
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
     #[schemars(extend("x-cfg" = "linux"))]
     pub enable_tun_iouring: bool,
@@ -500,6 +507,7 @@ impl Default for Config {
             ),
             enable_pmtud: false,
             pmtud_base_mtu: None,
+            enable_tun_offload: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
