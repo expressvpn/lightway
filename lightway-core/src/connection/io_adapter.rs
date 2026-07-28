@@ -200,6 +200,27 @@ pub(crate) struct TlsIOAdapter {
 
     /// Plugins to act while egressing outside packet
     pub(crate) outside_plugins: Arc<PluginList>,
+
+    /// DEBUG for number of records 
+    pub(crate) dbg_records_sent: u64,
+    pub(crate) dbg_records_recvd: u64,
+}
+
+fn dbg_dtls_hdr(buf: &[u8]) -> String {
+    let Some(&b0) = buf.first() else { return "empty".to_string() };
+    if (b0 >> 5) == 0b001 {
+        let cid = (b0 >> 4) & 1;
+        let seq_len = if (b0 >> 3) & 1 == 1 { 2 } else { 1 };
+        let len_present = (b0 >> 2) & 1 == 1;
+        let epoch_low = b0 & 0b11;
+        let seq: String = buf.get(1..1 + seq_len)
+            .map(|s| s.iter().map(|b| format!("{b:02x}")).collect())
+            .unwrap_or_default();
+        format!("dtls13 b0={b0:#04x} epoch_low={epoch_low} cid={cid} seq_enc={seq} len_present={len_present}")
+    } else if (20..=23).contains(&b0) {
+        let epoch = buf.get(3..5).map(|s| u16::from_be_bytes([s[0], s[1]])).unwrap_or_default();
+        format!("dtls_plaintext type={b0} epoch={epoch}")
+    } else { format!("unknown b0={b0:#04x}") }
 }
 
 impl TlsIOAdapter {
@@ -503,10 +524,24 @@ impl crate::tls::IOCallbacks for TlsIOAdapter {
         let mut pending_buf = pending_buf.split_to(n).freeze();
         pending_buf.copy_to_slice(&mut buf[..n]);
         debug_assert!(pending_buf.is_empty(), "Should have consumed everything");
+        if matches!(self.connection_type, ConnectionType::Datagram) {
+            self.dbg_records_recvd += 1;
+            tracing::error!(target: "lw_dtls_records", dir = "recv",
+                n = self.dbg_records_recvd, peer = ?self.io.peer_addr(),
+                session = ?self.session_id, bytes = n,
+                hdr = %dbg_dtls_hdr(&buf[..n]), "dtls record");
+        }
         IOCallbackResult::Ok(n)
     }
 
     fn send(&mut self, buf: &[u8]) -> IOCallbackResult<usize> {
+        if matches!(self.connection_type, ConnectionType::Datagram) {
+            self.dbg_records_sent += 1;
+            tracing::error!(target: "lw_dtls_records", dir = "send",
+                n = self.dbg_records_sent, peer = ?self.io.peer_addr(),
+                session = ?self.session_id, bytes = buf.len(),
+                hdr = %dbg_dtls_hdr(buf), "dtls record");
+        }
         match self.connection_type {
             ConnectionType::Stream => self.tcp_send(buf),
             ConnectionType::Datagram => self.udp_send(buf, false),
@@ -603,6 +638,8 @@ mod tests {
             outside_plugins: outside_plugins.into(),
             #[cfg(target_os = "linux")]
             gso_buf: GsoBuffer::default(),
+            dbg_records_recvd: 0,
+            dbg_records_sent: 0,
         }
     }
 
