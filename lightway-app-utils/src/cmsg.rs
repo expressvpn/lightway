@@ -2,8 +2,6 @@
 //! `sendmsg(2)`.
 #![allow(unsafe_code)]
 
-use bytes::BytesMut;
-
 /// The libc type of `msghdr::msg_controllen` on this platform.
 #[cfg(target_vendor = "apple")]
 pub type LibcControlLen = libc::socklen_t;
@@ -17,30 +15,46 @@ pub type LibcControlLen = libc::socklen_t;
 pub type LibcControlLen = libc::size_t;
 
 /// A buffer suitable for receiving control messages with `recvmsg(2)`.
-pub struct Buffer<const N: usize>(BytesMut);
+///
+/// The storage is an inline over-aligned array rather than a heap
+/// allocation, so the buffer is *structurally* aligned for a
+/// `libc::cmsghdr` as the `CMSG_*` macros require (see [`iter_control`])
+/// instead of relying on what the global allocator happens to return.
+#[repr(C, align(16))] // Must be suitably aligned for a `libc::cmsghdr`.
+pub struct Buffer<const N: usize>([std::mem::MaybeUninit<u8>; N]);
 
 impl<const N: usize> Buffer<N> {
     /// A new buffer with capacity for `N` bytes of control messages.
     pub fn new() -> Self {
-        Self(BytesMut::with_capacity(N))
+        const {
+            assert!(std::mem::align_of::<libc::cmsghdr>() <= 16);
+        }
+        Self([std::mem::MaybeUninit::uninit(); N])
     }
 
     /// The spare capacity of the buffer, to be passed to `recvmsg(2)`
     /// as `msg_control`.
+    ///
+    /// The buffer holds no initialized prefix of its own — the kernel
+    /// owns the whole array on each receive and reports how much of it
+    /// it filled — so this is the entire `N` bytes.
     pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
-        self.0.spare_capacity_mut()
+        &mut self.0
     }
 
     /// Total capacity of the buffer.
     pub fn capacity(&self) -> usize {
-        self.0.capacity()
+        N
     }
 
     /// Reset the buffer for reuse in a subsequent `recvmsg(2)` call.
-    pub fn reset(&mut self) {
-        self.0.clear();
-        self.0.reserve(N);
-    }
+    ///
+    /// Nothing to do: the initialized region is delimited by the
+    /// `control_len` passed to [`Buffer::iter`] rather than by state held
+    /// here, and [`Buffer::spare_capacity_mut`] always offers the full
+    /// array. Retained so callers need not care which representation
+    /// backs the buffer.
+    pub fn reset(&mut self) {}
 
     /// Iterate over the control messages the kernel wrote.
     ///
@@ -49,14 +63,22 @@ impl<const N: usize> Buffer<N> {
     /// `control_len` must have been set to the number of bytes of the
     /// buffer which have been initialized.
     pub unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_> {
-        // SAFETY: The outer function here has enforced this requirement already
-        unsafe {
-            // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
-            // apple/musl, so the cast is a no-op on some targets only.
-            #[cfg_attr(linux, allow(clippy::unnecessary_cast))]
-            self.0.set_len(control_len as usize);
-        }
-        iter_control(self.0.as_ref())
+        // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
+        // apple/musl, so the cast is a no-op on some targets only.
+        #[allow(clippy::unnecessary_cast)]
+        let control_len = control_len as usize;
+        assert!(
+            control_len <= N,
+            "control_len ({control_len}) exceeds control buffer capacity ({N})"
+        );
+
+        // SAFETY: the caller guarantees the kernel initialized the first
+        // `control_len` bytes, and `MaybeUninit<u8>` has the same layout
+        // as `u8`.
+        let control =
+            unsafe { std::slice::from_raw_parts(self.0.as_ptr() as *const u8, control_len) };
+
+        iter_control(control)
     }
 }
 
@@ -95,7 +117,11 @@ impl Message<'_> {
 /// require it); receive buffers built from [`Buffer`], [`BufferMut`] or
 /// a `#[repr(align(…))]` wrapper satisfy this.
 pub fn iter_control(control: &[u8]) -> Iter<'_> {
-    debug_assert!(
+    // Not a `debug_assert!`: `Iter::next` turns the `CMSG_*` pointers
+    // into `&libc::cmsghdr`, and a misaligned reference is UB. Keeping
+    // the check in release turns that into a clean panic, at the cost of
+    // one predictable branch per `recvmsg`.
+    assert!(
         control.is_empty()
             || control
                 .as_ptr()
@@ -177,10 +203,13 @@ impl<'a> Iterator for Iter<'a> {
 
             #[cfg(linux)]
             if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_GRO {
-                // SAFETY: `item` is a valid cmsg; a `UDP_GRO` cmsg
-                // carries a `c_int` and `CMSG_DATA` returns a pointer
-                // aligned for it within the cmsg.
-                let seg = unsafe { *(libc::CMSG_DATA(item) as *const libc::c_int) };
+                // SAFETY: `item` is a valid `cmsghdr` from a prior call
+                // to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
+                let data = unsafe { libc::CMSG_DATA(item) as *const libc::c_int };
+                // SAFETY: a `UDP_GRO` cmsg carries a `c_int` and
+                // `CMSG_DATA` returns a pointer aligned for it within
+                // the cmsg.
+                let seg = unsafe { *data };
                 return Some(Message::UdpGroSegment(seg));
             }
 
@@ -367,6 +396,22 @@ mod tests {
     #![allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 
     use super::*;
+
+    /// Both buffer types are aligned for a `cmsghdr` by construction, so
+    /// the `iter_control` alignment assertion can never fire for them.
+    #[test]
+    fn buffers_are_aligned_for_cmsghdr() {
+        let cmsghdr_align = std::mem::align_of::<libc::cmsghdr>();
+        assert!(std::mem::align_of::<Buffer<64>>() >= cmsghdr_align);
+        assert!(std::mem::align_of::<BufferMut<64>>() >= cmsghdr_align);
+
+        let mut buf = Buffer::<64>::new();
+        assert_eq!(
+            buf.spare_capacity_mut().as_ptr().align_offset(cmsghdr_align),
+            0,
+        );
+        assert_eq!(buf.capacity(), 64);
+    }
 
     #[test]
     fn success_single_pktinfo() {
