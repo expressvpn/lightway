@@ -1624,6 +1624,11 @@ impl<AppState: Send> Connection<AppState> {
 
         let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
         outside_received_pending.extend_from_slice(&buf[..]);
+        // Bytes handed to wolfSSL on this call. For datagram transport the
+        // recv_buf was cleared at the end of the previous call, so this equals
+        // the size of the current record.
+        #[cfg(feature = "debug")]
+        let fed_bytes = buf.len();
 
         let frame_read_count_result = match self.state {
             State::Connecting => match self.session.try_negotiate()? {
@@ -1657,6 +1662,30 @@ impl<AppState: Send> Connection<AppState> {
         if self.connection_type.is_datagram() {
             let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
             outside_received_pending.clear();
+        }
+
+        // DIAGNOSTIC (UDP roaming): a datagram carried bytes into wolfSSL but no
+        // frame came back out. For DTLS this is a *silent* drop inside wolfSSL
+        // (replay window or AEAD/MAC failure) surfacing as WANT_READ ->
+        // Poll::PendingRead -> Ok(0). This is exactly the path that blocks UDP
+        // session recovery ("float") after a NAT rebind: the server's udp.rs
+        // treats Ok(0) as a replay attempt and never updates the peer address.
+        // Log it so the drops can be counted and correlated with the address
+        // change. To learn *why* wolfSSL dropped it (replay vs bad MAC), enable
+        // the wolfSSL debug bridge (server: build with `--features debug` and set
+        // `tls_debug: true`; watch target `ssl_debug`).
+        #[cfg(feature = "debug")]
+        if self.connection_type.is_datagram()
+            && matches!(self.state, State::Online)
+            && fed_bytes > 0
+            && matches!(frame_read_count_result.as_ref(), Ok(&0))
+        {
+            debug!(
+                session = ?self.session_id,
+                peer = ?self.peer_addr(),
+                bytes_fed = fed_bytes,
+                "DTLS record decoded to 0 frames: silently dropped by wolfSSL (replay or bad MAC)"
+            );
         }
 
         frame_read_count_result
