@@ -103,10 +103,21 @@ pub trait OutsideIORecvGro: OutsideIO {
     /// final one; `None` means `bufs[i]` holds a single wire packet.
     ///
     /// This is the read-side batching that cuts one `recvmsg` per
-    /// datagram down to one syscall per batch — the win is largest
-    /// against a server whose zero-checksum UDP the kernel will not
-    /// coalesce, where the receive would otherwise return one datagram
-    /// at a time.
+    /// datagram down to one syscall per batch. It stacks with the
+    /// kernel's own socket-read coalescing, which is driven by the
+    /// `UDP_GRO` sockopt on the receiving socket: a valid UDP checksum
+    /// on the sender's datagrams is necessary but *not* sufficient — the
+    /// sockopt is what does the work. Measured on Linux 6.x with
+    /// identical, correctly-checksummed senders, a receiver *with* the
+    /// sockopt got 1 `recvmsg` of 14000 bytes whose cmsg reported
+    /// `seg=1400`; a receiver *without* it got 10 separate 1400-byte
+    /// `recv()` calls and no coalescing at all.
+    ///
+    /// A peer that sends zero-checksum UDP is skipped by the kernel GRO
+    /// engine by design, so every `gro_sizes[i]` comes back `None` and
+    /// each slot holds a single wire packet. That costs the socket-read
+    /// coalescing only; the independent TUN-write coalescing
+    /// (`TcpGroTable` on the inside path) is unaffected.
     ///
     /// Caller must ensure each buffer has spare capacity for a
     /// maximum-size aggregate (64KiB) or the tail of the aggregate is

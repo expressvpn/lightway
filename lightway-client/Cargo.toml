@@ -37,6 +37,7 @@ futures = "0.3.30"
 libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core.workspace = true
+metrics.workspace = true
 pnet_packet.workspace = true
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }

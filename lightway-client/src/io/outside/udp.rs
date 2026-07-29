@@ -57,21 +57,41 @@ impl Udp {
         })
     }
 
-    /// Enable UDP GRO on the socket so the kernel coalesces trains of
-    /// equal-size datagrams into one buffer per `recvmsg`. On failure
-    /// (kernel < 5.0) logs and leaves the per-packet receive path in
-    /// place — the GRO capability itself stays enabled either way.
+    /// Switch this socket to the GRO receive path and ask the kernel to
+    /// coalesce trains of equal-size datagrams into one buffer per
+    /// `recvmsg`. The receive path moves to
+    /// [`OutsideIORecvGro::recv_gro_batch`] unconditionally; the
+    /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
+    /// this logs and continues, with that path degrading to one wire
+    /// packet per slot.
     #[cfg(linux)]
     pub fn enable_gro(&mut self) {
-        // Route receives through `recv_gro_batch` whenever offload is
-        // requested — not only when the sockopt succeeds. That path
+        // Two independent optimizations are in play here, each worth
+        // having on its own:
+        //
+        //  1. Socket-read coalescing, via the `UDP_GRO` sockopt below.
+        //     Note the direction of causality: a valid UDP checksum on
+        //     the peer's datagrams is necessary but *not* sufficient for
+        //     the kernel to coalesce — the receiving socket must set this
+        //     sockopt too, and that is what actually does the work.
+        //     Measured on Linux 6.x with identical, correctly-checksummed
+        //     senders: a receiver *with* the sockopt got 1 `recvmsg` of
+        //     14000 bytes with the cmsg reporting seg=1400, while a
+        //     receiver *without* it got 10 separate 1400-byte `recv()`
+        //     calls and no coalescing.
+        //  2. TUN-write coalescing, via `TcpGroTable` on the inside
+        //     path, which merges segments before they are written to the
+        //     TUN. This is unrelated to how the datagrams arrived.
+        //
+        // A peer that sends zero-checksum UDP is skipped by the kernel
+        // GRO engine by design, which costs (1) but not (2) — that holds
+        // for any non-conforming peer.
+        //
+        // So route receives through `recv_gro_batch` whenever offload is
+        // requested, not only when the sockopt succeeds: that path
         // degrades to plain single-datagram slots when the kernel does
-        // not coalesce (old kernel, or a server that sends zero-checksum
-        // UDP, which the kernel GRO engine skips by design), and
-        // userspace TUN-side coalescing still applies in that case. The
-        // `UDP_GRO` sockopt is a best-effort bonus that additionally
-        // coalesces on the socket read when the server's datagrams carry
-        // a checksum.
+        // not coalesce (old kernel, or such a peer), and (2) still
+        // applies.
         self.gro_enabled = true;
         match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
             Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
@@ -307,7 +327,26 @@ impl OutsideIOSendCallback for Udp {
             sock.sendmsg(&msghdr, 0)
         });
 
-        Self::map_send_result(res, total_len)
+        // `map_send_result` deliberately swallows several transient
+        // errors as `Ok(len)` so TLS does not live-lock resending the
+        // same record. That contract was written for a single datagram;
+        // here it silently discards a whole batch, so count it.
+        //
+        // Detecting the swallow by "input was `Err`, output is `Ok`"
+        // rather than re-listing the error kinds keeps this from drifting
+        // out of sync with `map_send_result`'s arms.
+        let was_err = res.is_err();
+        let out = Self::map_send_result(res, total_len);
+        if was_err && matches!(out, IOCallbackResult::Ok(_)) {
+            // Every wire packet in the batch is `gso_size` bytes except a
+            // possibly-shorter final one.
+            let segments = match gso_size {
+                0 => 1,
+                stride => total_len.div_ceil(stride as usize) as u64,
+            };
+            crate::metrics::outside_gso_batch_shed(segments);
+        }
+        out
     }
 
     #[cfg(not(linux))]
