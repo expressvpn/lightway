@@ -35,9 +35,14 @@ pub const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
 /// Flag: checksum needs to be computed.
 pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
-/// Maximum number of segments in a single UDP GSO superpacket —
-/// matches the kernel's `UDP_MAX_SEGMENTS` (`1 << 6`); a `sendmsg`
-/// with `UDP_SEGMENT` and more than this is rejected with `EINVAL`.
+/// Maximum number of segments in a single UDP GSO superpacket. A
+/// `sendmsg` with `UDP_SEGMENT` carrying more than the kernel's
+/// `UDP_MAX_SEGMENTS` is rejected with `EINVAL`.
+///
+/// That kernel constant is **not** fixed: it was `1 << 6` (64) before
+/// Linux 6.x and is `1 << 7` (128) on current kernels (measured). We
+/// pin the conservative 64 so a batch built here is accepted on both,
+/// which also keeps [`MAX_GSO_FRAME_BYTES`] bounded.
 pub(crate) const MAX_GSO_SEGS: usize = 64;
 
 /// Upper bound on the bytes a single GSO coalescing buffer can hold:
@@ -51,6 +56,9 @@ pub(crate) const MAX_GSO_FRAME_BYTES: usize = MAX_GSO_SEGS * crate::MAX_OUTSIDE_
 /// IPv6 header (40); exceeding it fails with `EMSGSIZE`. A TUN TSO
 /// aggregate can be up to 65535 bytes *before* the per-segment
 /// `wire::Header` is added, so flushes must be chunked to this limit.
+// Only the Linux `UDP_SEGMENT` send path consults this; gating keeps
+// non-Linux builds free of a `dead_code` warning.
+#[cfg(target_os = "linux")]
 pub(crate) const MAX_GSO_SEND_BYTES: usize = 65535 - 8 - 40;
 
 impl VirtioNetHdr {
@@ -103,6 +111,45 @@ impl VirtioNetHdr {
         let base = self.gso_type & !VIRTIO_NET_HDR_GSO_ECN;
         base == VIRTIO_NET_HDR_GSO_TCPV4 || base == VIRTIO_NET_HDR_GSO_TCPV6
     }
+
+    /// True if `gso_type` indicates a non-GSO packet, i.e. a single
+    /// segment rather than an aggregate.
+    ///
+    /// Masks `VIRTIO_NET_HDR_GSO_ECN` for the same reason [`Self::is_tcp`]
+    /// does. Prefer this over comparing `gso_type` to
+    /// [`VIRTIO_NET_HDR_GSO_NONE`] directly: the raw comparison silently
+    /// misclassifies an ECN-marked packet, and it keeps the ECN constant
+    /// from having to be mirrored outside this module.
+    pub fn is_gso_none(&self) -> bool {
+        self.gso_type & !VIRTIO_NET_HDR_GSO_ECN == VIRTIO_NET_HDR_GSO_NONE
+    }
+}
+
+/// Layer-4 protocol number, needed to decide whether the RFC 768 zero
+/// substitution applies. IPv4 keeps it at offset 9, IPv6 at offset 6.
+const IPPROTO_UDP: u8 = 17;
+
+/// Read the layer-4 protocol number out of the IP header at the start of
+/// `buf`.
+///
+/// Returns `None` when the version nibble is neither 4 nor 6, or the
+/// buffer is too short to hold the field.
+///
+/// For IPv6 this reads the *immediate* Next Header field, so a packet
+/// carrying extension headers yields the first extension header's number
+/// rather than the transport protocol. That is deliberately conservative:
+/// the value is then never [`IPPROTO_UDP`], so the only consequence is
+/// that the zero substitution is skipped, matching the behaviour before
+/// it existed. It can never mis-identify TCP as UDP, which is the
+/// direction that would corrupt a packet. Walk the chain here if an IPv6
+/// path with extension headers ever becomes reachable.
+#[inline]
+fn ip_l4_proto(buf: &[u8]) -> Option<u8> {
+    match buf.first()? >> 4 {
+        4 => buf.get(9).copied(),
+        6 => buf.get(6).copied(),
+        _ => None,
+    }
 }
 
 /// Compute and fill the transport-layer checksum for a non-GSO packet
@@ -111,6 +158,12 @@ impl VirtioNetHdr {
 /// The kernel deposits the pseudo-header partial sum (src + dst + proto + len)
 /// at `[csum_start + csum_offset]` before delivering the packet.
 /// We seed our sum with that value, then sum from `csum_start` and complement.
+///
+/// For UDP the RFC 768 substitution of `0xFFFF` for a computed zero is
+/// applied (see [`transport_checksum`]). `csum_start`/`csum_offset` alone
+/// cannot distinguish UDP from TCP and `0x0000` is a legal TCP checksum,
+/// so the protocol is read from the IP header via [`ip_l4_proto`] and the
+/// substitution is applied only for protocol 17.
 pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
     let start = csum_start as usize;
     let offset = csum_offset as usize;
@@ -126,6 +179,9 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
         return;
     }
 
+    // Protocol must be read before the transport bytes are borrowed.
+    let is_udp = ip_l4_proto(buf) == Some(IPPROTO_UDP);
+
     // Read the kernel-deposited pseudo-header partial, then zero the
     // field so it doesn't double-count when we sum the segment.
     let partial = u16::from_be_bytes([buf[at], buf[at + 1]]);
@@ -137,7 +193,12 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
     let mut c = internet_checksum::Checksum::new();
     c.add_bytes(&partial.to_be_bytes());
     c.add_bytes(&buf[start..]);
-    buf[at..at + 2].copy_from_slice(&c.checksum());
+    let csum = u16::from_be_bytes(c.checksum());
+    // RFC 768: a computed UDP checksum of zero goes on the wire as
+    // 0xFFFF, which is the same value in one's complement. Never for
+    // TCP, where 0x0000 is legal.
+    let csum = if is_udp && csum == 0 { 0xFFFF } else { csum };
+    buf[at..at + 2].copy_from_slice(&csum.to_be_bytes());
 }
 
 /// One's-complement transport checksum over a TCP/UDP pseudo-header
@@ -146,12 +207,26 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
 /// their checksum field zeroed. Works for IPv4 (4-byte) and IPv6 (16-byte)
 /// addresses; returns the host-order value to store via `set_checksum`.
 ///
-/// Matches `pnet_packet::{tcp,udp}::ipv{4,6}_checksum` exactly — pnet skips
-/// the checksum word while we zero it, and a zeroed word contributes 0.
-/// Neither performs the RFC 768 zero substitution, so UDP output is
-/// bit-identical.
+/// For UDP (`proto == 17`) a computed checksum of zero is returned as
+/// `0xFFFF` per RFC 768: `0x0000` is the IPv4 "no checksum computed"
+/// sentinel and is outright invalid over IPv6 (RFC 8200 §8.1), while
+/// `0xFFFF` and `0x0000` are the same value in one's complement so any
+/// verifier accepts it. TCP is left alone — `0x0000` is a legal TCP
+/// checksum.
+///
+/// Otherwise matches `pnet_packet::{tcp,udp}::ipv{4,6}_checksum` exactly —
+/// pnet skips the checksum word while we zero it, and a zeroed word
+/// contributes 0. pnet does not apply the RFC 768 substitution, so UDP
+/// output differs from pnet's only for the ~1-in-65536 zero case.
 #[inline]
 fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u16 {
+    // The pseudo-header length field is 16 bits; a longer slice would
+    // wrap it and silently produce a wrong checksum. Unreachable from
+    // `build_segment`, whose slices are bounded by `gso_size`.
+    debug_assert!(
+        transport.len() <= u16::MAX as usize,
+        "transport too long for pseudo-header"
+    );
     let transport_len = transport.len() as u16;
     let mut c = internet_checksum::Checksum::new();
     c.add_bytes(src);
@@ -159,7 +234,12 @@ fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u1
     // [zero, proto, len_hi, len_lo] — the big-endian pseudo-header trailer.
     c.add_bytes(&[0, proto, (transport_len >> 8) as u8, transport_len as u8]);
     c.add_bytes(transport);
-    u16::from_be_bytes(c.checksum())
+    let csum = u16::from_be_bytes(c.checksum());
+    if proto == IPPROTO_UDP && csum == 0 {
+        0xFFFF
+    } else {
+        csum
+    }
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
@@ -774,6 +854,113 @@ mod tests {
         assert_eq!(
             build_segment(&vhdr, 40, &[], 0, &mut out),
             Err(GsoSegError::Empty)
+        );
+    }
+
+    /// A 16-byte UDP datagram (header + 8 payload bytes, checksum field
+    /// already zeroed) whose one's-complement sum folds to exactly
+    /// `0xFFFF` — so the complement is `0x0000` — under the address
+    /// pairs used by the two tests below. Captured from the differential
+    /// review harness; nothing about it is crafted beyond the addresses
+    /// chosen to land the sum on the boundary.
+    const ZERO_SUM_UDP: [u8; 16] = [
+        0x92, 0x95, 0x48, 0xde, 0x00, 0x10, 0x00, 0x00, 0x89, 0xc2, 0xf5, 0xce, 0x27, 0x45, 0x13,
+        0x7f,
+    ];
+
+    /// The uncomplemented pseudo-header partial (src + dst + proto + len)
+    /// for [`ZERO_SUM_UDP`] under both address pairs below — the value the
+    /// kernel deposits in the checksum field for `NEEDS_CSUM`.
+    const ZERO_SUM_UDP_PARTIAL: u16 = 0x6a26;
+
+    /// RFC 768 / RFC 8200 §8.1: a computed UDP checksum of zero must be
+    /// transmitted as `0xFFFF`. Pins one datagram whose folded sum is
+    /// `0xFFFF` (complement `0x0000`) over both IPv4 and IPv6, and one
+    /// whose folded sum is also `0xFFFF` but is TCP, where `0x0000` is a
+    /// legal checksum and must be emitted unchanged.
+    #[test]
+    fn transport_checksum_substitutes_zero_udp_only() {
+        // IPv6: 2001::1 -> 2001:2a00::2
+        let v6_src = std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1).octets();
+        let v6_dst = std::net::Ipv6Addr::new(0x2001, 0x2a00, 0, 0, 0, 0, 0, 2).octets();
+        assert_eq!(
+            transport_checksum(&v6_src, &v6_dst, IPPROTO_UDP, &ZERO_SUM_UDP),
+            0xFFFF,
+            "IPv6 UDP zero checksum must be emitted as 0xFFFF"
+        );
+
+        // IPv4: 10.0.0.1 -> 96.0.0.4
+        assert_eq!(
+            transport_checksum(&[10, 0, 0, 1], &[96, 0, 0, 4], IPPROTO_UDP, &ZERO_SUM_UDP),
+            0xFFFF,
+            "IPv4 UDP zero checksum must be emitted as 0xFFFF"
+        );
+
+        // TCP over 10.0.0.1 -> 96.0.0.15 folds to 0xFFFF for the same
+        // bytes (the pseudo-header proto/addresses differ). 0x0000 is a
+        // valid TCP checksum and must survive untouched.
+        assert_eq!(
+            transport_checksum(&[10, 0, 0, 1], &[96, 0, 0, 15], IPPROTO_TCP, &ZERO_SUM_UDP),
+            0x0000,
+            "TCP zero checksum must not be substituted"
+        );
+    }
+
+    /// `gso_none_checksum` gets only `csum_start`/`csum_offset`, so it
+    /// reads the protocol from the IP header to decide whether the RFC 768
+    /// substitution applies. Same transport bytes and same kernel partial
+    /// throughout — only the IPv4 protocol byte / IPv6 next-header byte
+    /// changes — so the assertions isolate exactly that decision.
+    #[test]
+    fn gso_none_checksum_substitutes_zero_udp_only() {
+        /// Build `ip_hdr ++ ZERO_SUM_UDP`, with the kernel's partial sum
+        /// deposited in the checksum field, run `gso_none_checksum` and
+        /// return the checksum it wrote.
+        fn run(ip_hdr: &[u8], csum_offset: u16) -> u16 {
+            let csum_start = ip_hdr.len();
+            let mut buf = ip_hdr.to_vec();
+            buf.extend_from_slice(&ZERO_SUM_UDP);
+            let at = csum_start + csum_offset as usize;
+            buf[at..at + 2].copy_from_slice(&ZERO_SUM_UDP_PARTIAL.to_be_bytes());
+            gso_none_checksum(&mut buf, csum_start as u16, csum_offset);
+            u16::from_be_bytes([buf[at], buf[at + 1]])
+        }
+
+        // IPv6 header, next_header at offset 6.
+        let mut v6 = [0u8; 40];
+        v6[0] = 0x60;
+        v6[4..6].copy_from_slice(&(ZERO_SUM_UDP.len() as u16).to_be_bytes());
+        v6[6] = IPPROTO_UDP;
+        v6[8..24].copy_from_slice(&std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1).octets());
+        v6[24..40]
+            .copy_from_slice(&std::net::Ipv6Addr::new(0x2001, 0x2a00, 0, 0, 0, 0, 0, 2).octets());
+        assert_eq!(run(&v6, 6), 0xFFFF, "IPv6 UDP zero -> 0xFFFF");
+
+        // Same bytes, next_header = TCP: 0x0000 must stand.
+        let mut v6_tcp = v6;
+        v6_tcp[6] = IPPROTO_TCP;
+        assert_eq!(run(&v6_tcp, 6), 0x0000, "IPv6 TCP zero left as 0x0000");
+
+        // IPv4 header, protocol at offset 9.
+        let v4 = {
+            let mut h = ipv4_hdr((IPV4_HDR_LEN + ZERO_SUM_UDP.len()) as u16, 0, IPPROTO_UDP);
+            h[12..16].copy_from_slice(&[10, 0, 0, 1]);
+            h[16..20].copy_from_slice(&[96, 0, 0, 4]);
+            h
+        };
+        assert_eq!(run(&v4, 6), 0xFFFF, "IPv4 UDP zero -> 0xFFFF");
+
+        let mut v4_tcp = v4;
+        v4_tcp[9] = IPPROTO_TCP;
+        assert_eq!(run(&v4_tcp, 6), 0x0000, "IPv4 TCP zero left as 0x0000");
+
+        // Unrecognised IP version: protocol unknown, so no substitution.
+        let mut bogus = v4;
+        bogus[0] = 0x95;
+        assert_eq!(
+            run(&bogus, 6),
+            0x0000,
+            "unknown IP version -> no substitution"
         );
     }
 
