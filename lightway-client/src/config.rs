@@ -212,6 +212,25 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub route_mode: RouteMode,
 
+    #[cfg(target_os = "linux")]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(
+        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
+
+When set, the tunnel's own encrypted packets carry this mark so policy
+routing rules can keep them out of the tunnel. Pair with:
+
+```text
+ip rule add priority 100 lookup main suppress_prefixlength 0
+ip rule add priority 110 not fwmark <MARK> lookup <TABLE>
+ip route add default dev <tun> table <TABLE>
+```
+
+and run with route_mode=noexec. Requires CAP_NET_ADMIN."#)
+    )]
+    pub fwmark: Option<u32>,
+
     #[cfg(desktop)]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"DNS configuration mode
@@ -491,6 +510,8 @@ impl Default for Config {
             enable_batch_receive: false,
             #[cfg(desktop)]
             route_mode: RouteMode::default(),
+            #[cfg(target_os = "linux")]
+            fwmark: None,
             #[cfg(desktop)]
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,

@@ -99,7 +99,7 @@ impl OutsideIOBuilder {
                 Ok((ConnectionType::Stream, Arc::new(sock)))
             }
             OutsideSocket::Udp(s) => {
-                let sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
+                let sock = io::outside::Udp::new(self.server_sockaddr, Some(s), None)
                     .await
                     .context("Outside IO UDP")?;
                 // TODO: Skip setting send/recv buffer size on Android for now
