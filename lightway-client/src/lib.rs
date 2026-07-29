@@ -4,6 +4,8 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
+#[cfg(linux)]
+mod metrics;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
