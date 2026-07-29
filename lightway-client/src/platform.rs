@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
