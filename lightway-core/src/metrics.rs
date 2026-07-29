@@ -41,6 +41,15 @@ static METRIC_GSO_DROPPED_OVERSIZED_SEGMENT: LazyLock<Counter> =
 #[cfg(target_os = "linux")]
 static METRIC_GSO_SEND_FAILED: LazyLock<Counter> = LazyLock::new(|| counter!("gso_send_failed"));
 #[cfg(target_os = "linux")]
+static METRIC_GSO_SEND_WOULD_BLOCK: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_send_would_block"));
+#[cfg(target_os = "linux")]
+static METRIC_GSO_SEND_PARTIAL_BATCH_DROPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_send_partial_batch_dropped"));
+#[cfg(target_os = "linux")]
+static METRIC_GSO_BATCH_DROPPED_BY_PLUGINS: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_batch_dropped_by_plugins"));
+#[cfg(target_os = "linux")]
 const METRIC_GSO_BUILD_SEGMENT_FAILED: &str = "gso_build_segment_failed";
 #[cfg(target_os = "linux")]
 const GSO_BUILD_REASON_LABEL: &str = "reason";
@@ -48,8 +57,9 @@ const GSO_BUILD_REASON_LABEL: &str = "reason";
 static METRIC_GSO_NONE_CHECKSUM_SKIPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("gso_none_checksum_skipped"));
 #[cfg(target_os = "linux")]
-static METRIC_GSO_DROPPED_IOV_OVERFLOW: LazyLock<Counter> =
-    LazyLock::new(|| counter!("gso_dropped_iov_overflow"));
+const METRIC_GSO_BATCH_SKIPPED: &str = "gso_batch_skipped";
+#[cfg(target_os = "linux")]
+const GSO_BATCH_REASON_LABEL: &str = "reason";
 
 /// [`crate::Connection`] has allocated its [`crate::Connection::fragment_map`]
 pub(crate) fn connection_alloc_frag_map() {
@@ -142,6 +152,33 @@ pub(crate) fn gso_send_failed() {
     METRIC_GSO_SEND_FAILED.increment(1);
 }
 
+/// `sendmsg(UDP_SEGMENT)` of the GSO batch returned `WouldBlock`. The
+/// batch is discarded rather than retried — the socket send buffer is
+/// full, which is the expected shedding mode under the load GSO
+/// exists to serve.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_send_would_block() {
+    METRIC_GSO_SEND_WOULD_BLOCK.increment(1);
+}
+
+/// A GSO batch split across several `sendmsg(UDP_SEGMENT)` calls
+/// failed part-way through: the earlier chunks are on the wire, the
+/// remainder is dropped and cannot be retried. Accompanied by
+/// [`gso_send_failed`] or [`gso_send_would_block`] for the cause.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_send_partial_batch_dropped() {
+    METRIC_GSO_SEND_PARTIAL_BATCH_DROPPED.increment(1);
+}
+
+/// Outside plugins dropped every segment of a GSO batch, so nothing
+/// was handed to the socket. Not an error, but recorded so that a
+/// batch which never reached the wire is distinguishable from a sent
+/// one.
+#[cfg(target_os = "linux")]
+pub(crate) fn gso_batch_dropped_by_plugins() {
+    METRIC_GSO_BATCH_DROPPED_BY_PLUGINS.increment(1);
+}
+
 /// `build_segment` could not parse the per-segment header (kernel
 /// supplied a virtio_net_hdr with csum_start/hdr_len that disagree
 /// with the actual packet bytes, or the packet was truncated mid-
@@ -161,11 +198,13 @@ pub(crate) fn gso_none_checksum_skipped() {
     METRIC_GSO_NONE_CHECKSUM_SKIPPED.increment(1);
 }
 
-/// Server dropped a GSO superpacket whose segment count exceeds the
-/// `IOV_MAX`-derived cap. Each segment contributes 2 iovecs to the
-/// outbound `sendmsg`, so the cap protects against `EMSGSIZE` /
-/// `EINVAL` from the kernel under malformed virtio_net_hdr input.
+/// A GSO superpacket could not be shipped as one `UDP_SEGMENT` batch,
+/// so its segments were sent as individual datagrams instead — slower,
+/// but not dropped. `reason` is one of:
+/// `too_many_segments` (more segments than `gso::MAX_GSO_SEGS`) |
+/// `over_data_mps` (a segment exceeds PMTUD's converged `data_mps`, so
+/// it needs lightway fragmentation, which a batch cannot express).
 #[cfg(target_os = "linux")]
-pub(crate) fn gso_dropped_iov_overflow() {
-    METRIC_GSO_DROPPED_IOV_OVERFLOW.increment(1);
+pub(crate) fn gso_batch_skipped(reason: &'static str) {
+    counter!(METRIC_GSO_BATCH_SKIPPED, GSO_BATCH_REASON_LABEL => reason).increment(1);
 }
