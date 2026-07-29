@@ -89,6 +89,52 @@ const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 /// Maximum number of retransmissions attempts for each encoding request packet.
 const ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 
+/// How the segments of a GSO superpacket will be put on the wire.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GsoBatchMode {
+    /// Coalesce every segment into one `sendmsg(UDP_SEGMENT)` batch.
+    Batched,
+    /// Send each segment as its own datagram: the aggregate holds more
+    /// segments than one `UDP_SEGMENT` send may carry.
+    PerSegmentTooManySegments,
+    /// Send each segment as its own datagram: PMTUD has converged
+    /// below the per-segment wire size. A batch is flushed at a single
+    /// uniform stride and cannot be lightway-fragmented, so the
+    /// per-segment path — which fragments on `data_mps` — has to take
+    /// it.
+    PerSegmentOverDataMps,
+}
+
+#[cfg(target_os = "linux")]
+impl GsoBatchMode {
+    /// Label for [`crate::metrics::gso_batch_skipped`], or `None` when
+    /// the aggregate is batched and there is nothing to report.
+    fn metric_reason(&self) -> Option<&'static str> {
+        match self {
+            GsoBatchMode::Batched => None,
+            GsoBatchMode::PerSegmentTooManySegments => Some("too_many_segments"),
+            GsoBatchMode::PerSegmentOverDataMps => Some("over_data_mps"),
+        }
+    }
+}
+
+/// Decide how a GSO superpacket of `gso_segs` segments, each at most
+/// `seg_size` inside bytes, should be sent.
+///
+/// `data_mps` is PMTUD's converged maximum data packet size, or `None`
+/// when PMTUD is disabled or has not converged.
+#[cfg(target_os = "linux")]
+fn gso_batch_mode(gso_segs: usize, seg_size: usize, data_mps: Option<usize>) -> GsoBatchMode {
+    if gso_segs > crate::gso::MAX_GSO_SEGS {
+        GsoBatchMode::PerSegmentTooManySegments
+    } else if data_mps.is_some_and(|data_mps| seg_size > data_mps) {
+        GsoBatchMode::PerSegmentOverDataMps
+    } else {
+        GsoBatchMode::Batched
+    }
+}
+
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -1108,6 +1154,11 @@ impl<AppState: Send> Connection<AppState> {
     /// calls the IO callback `send()`. The IO callback detects the
     /// open `GsoBuffer` batch and coalesces framed wire packets there
     /// instead of sending.
+    ///
+    /// When the aggregate cannot be expressed as one `UDP_SEGMENT`
+    /// batch (see [`gso_batch_mode`]) no batch is opened and the
+    /// segments go out individually via [`Self::send_to_outside`],
+    /// which is slower but always correct.
     #[cfg(target_os = "linux")]
     fn send_to_outside_gso(
         &mut self,
@@ -1152,18 +1203,6 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        if gso_segs > gso::MAX_GSO_SEGS {
-            tracing::warn!(
-                gso_segs,
-                MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
-                "too many segments in superpacket, dropping"
-            );
-            crate::metrics::gso_dropped_iov_overflow();
-            return Err(ConnectionError::InvalidInsidePacket(
-                InvalidPacketError::InvalidGsoPacket,
-            ));
-        }
-
         // Per-segment MTU guard: when TUN_F_TSO4 is enabled the kernel
         // hands us GSO aggregates without enforcing per-segment MTU.
         // If anything upstream (TS-unaware MSS, missing MSS clamp, a
@@ -1186,6 +1225,42 @@ impl<AppState: Send> Connection<AppState> {
 
         let expresslane = self.expresslane_ready();
 
+        // Can this aggregate travel as one `UDP_SEGMENT` batch? If
+        // not, fall back to one datagram per segment rather than
+        // dropping it.
+        let data_mps = self
+            .pmtud
+            .as_ref()
+            .and_then(|pmtud| pmtud.maximum_packet_sizes())
+            .map(|(data_mps, _frag_mps)| data_mps);
+        let batch_mode = gso_batch_mode(gso_segs, seg_size, data_mps);
+        if let Some(reason) = batch_mode.metric_reason() {
+            crate::metrics::gso_batch_skipped(reason);
+            // Log level differs by how expected the fallback is. Falling
+            // back on `data_mps` is the steady state of a healthy bulk
+            // flow on a PMTU-reduced path — it can fire on every
+            // superpacket, so the metric carries the signal and the log
+            // stays at debug. Exceeding the segment cap needs both a
+            // sub-1024 MSS and a high pacing rate, so it is worth a warn.
+            match batch_mode {
+                GsoBatchMode::PerSegmentOverDataMps => tracing::debug!(
+                    reason,
+                    gso_segs,
+                    seg_size,
+                    ?data_mps,
+                    "GSO batching skipped, sending segments individually"
+                ),
+                _ => tracing::warn!(
+                    reason,
+                    gso_segs,
+                    seg_size,
+                    ?data_mps,
+                    "GSO batching skipped, sending segments individually"
+                ),
+            }
+        }
+        let batched = matches!(batch_mode, GsoBatchMode::Batched);
+
         // One reusable segment buffer. `build_segment` calls `clear()`
         // and then `extend_from_slice` to materialize the segment, so
         // we only need capacity here — no zero-init.
@@ -1194,7 +1269,11 @@ impl<AppState: Send> Connection<AppState> {
         // Open the GSO coalescing buffer — IO callback will coalesce
         // here. Both DTLS and expresslane paths detect this and
         // append encrypted segments instead of sending immediately.
-        self.session.io_cb_mut().gso_buf.open();
+        // Left closed on the fallback path, where `udp_send` passes
+        // each segment straight to the socket.
+        if batched {
+            self.session.io_cb_mut().gso_buf.open();
+        }
 
         let mut result = Ok(());
 
@@ -1217,7 +1296,16 @@ impl<AppState: Send> Connection<AppState> {
                 break;
             }
 
-            if let Err(e) = self.send_outside_data(&mut segment, false) {
+            // Batched: `send_outside_data` coalesces into `gso_buf`.
+            // Fallback: `send_to_outside` so that a segment above
+            // PMTUD's `data_mps` is lightway-fragmented, exactly as on
+            // the non-offload path.
+            let sent = if batched {
+                self.send_outside_data(&mut segment, false)
+            } else {
+                self.send_to_outside(&mut segment, false)
+            };
+            if let Err(e) = sent {
                 result = Err(e);
                 break;
             }
@@ -1225,20 +1313,30 @@ impl<AppState: Send> Connection<AppState> {
 
         if result.is_ok() {
             self.activity.last_data_traffic_from_peer = Instant::now();
-            match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
-                IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
-                IOCallbackResult::Err(e) => {
-                    tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
-                    crate::metrics::gso_send_failed();
-                }
-            }
         }
 
-        // Always reset the GSO coalescing buffer on exit. udp_send_gso
-        // borrows it; this returns to Passthrough and clears the
-        // bytes in place so the underlying allocation is reused on
-        // the next batch.
-        self.session.io_cb_mut().gso_buf.reset();
+        if batched {
+            if result.is_ok() {
+                match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
+                    IOCallbackResult::Ok(()) => {}
+                    IOCallbackResult::WouldBlock => {
+                        // Socket send buffer full. The batch is
+                        // discarded, not retried, so record the shed.
+                        crate::metrics::gso_send_would_block();
+                    }
+                    IOCallbackResult::Err(e) => {
+                        tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
+                        crate::metrics::gso_send_failed();
+                    }
+                }
+            }
+
+            // Always reset the GSO coalescing buffer on exit.
+            // udp_send_gso borrows it; this returns to Passthrough and
+            // clears the bytes in place so the underlying allocation
+            // is reused on the next batch.
+            self.session.io_cb_mut().gso_buf.reset();
+        }
 
         result
     }
@@ -2793,6 +2891,79 @@ mod tests {
         assert_eq!(
             Conn::advance_strikes(u8::MAX, BAD.0, BAD.1),
             (u8::MAX, true)
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gso_batch_mode_tests {
+    use super::*;
+
+    /// An aggregate within both limits is batched.
+    #[test]
+    fn gso_batch_mode_batches_within_limits() {
+        assert_eq!(
+            gso_batch_mode(crate::gso::MAX_GSO_SEGS, 1350, None),
+            GsoBatchMode::Batched
+        );
+        assert_eq!(
+            gso_batch_mode(crate::gso::MAX_GSO_SEGS, 1350, Some(1350)),
+            GsoBatchMode::Batched
+        );
+    }
+
+    /// More segments than one `sendmsg(UDP_SEGMENT)` may carry falls
+    /// back to per-segment sends rather than dropping the aggregate.
+    #[test]
+    fn gso_batch_mode_falls_back_over_max_segs() {
+        assert_eq!(
+            gso_batch_mode(crate::gso::MAX_GSO_SEGS + 1, 1350, None),
+            GsoBatchMode::PerSegmentTooManySegments
+        );
+        // 65535 / 536 — the small-MSS peer case.
+        assert_eq!(
+            gso_batch_mode(122, 556, None),
+            GsoBatchMode::PerSegmentTooManySegments
+        );
+    }
+
+    /// Once PMTUD converges below the per-segment size the batched
+    /// path cannot fragment, so the per-segment path takes it.
+    #[test]
+    fn gso_batch_mode_falls_back_over_data_mps() {
+        assert_eq!(
+            gso_batch_mode(10, 1350, Some(1349)),
+            GsoBatchMode::PerSegmentOverDataMps
+        );
+    }
+
+    /// PMTUD disabled or not yet converged imposes no limit.
+    #[test]
+    fn gso_batch_mode_ignores_unconverged_pmtud() {
+        assert_eq!(gso_batch_mode(10, 1350, None), GsoBatchMode::Batched);
+    }
+
+    /// The segment-count limit is reported ahead of the PMTUD one when
+    /// both apply — either way the aggregate is not batched.
+    #[test]
+    fn gso_batch_mode_reports_segment_count_first() {
+        assert_eq!(
+            gso_batch_mode(crate::gso::MAX_GSO_SEGS + 1, 1350, Some(600)),
+            GsoBatchMode::PerSegmentTooManySegments
+        );
+    }
+
+    /// Only the fallback modes carry a metric label.
+    #[test]
+    fn gso_batch_mode_metric_reasons() {
+        assert_eq!(GsoBatchMode::Batched.metric_reason(), None);
+        assert_eq!(
+            GsoBatchMode::PerSegmentTooManySegments.metric_reason(),
+            Some("too_many_segments")
+        );
+        assert_eq!(
+            GsoBatchMode::PerSegmentOverDataMps.metric_reason(),
+            Some("over_data_mps")
         );
     }
 }

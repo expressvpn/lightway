@@ -98,15 +98,29 @@ impl GsoBuffer {
 }
 
 /// Flush GSO wire segments to the socket, splitting the batch into
-/// multiple `sendmsg(UDP_SEGMENT)` calls when it exceeds the kernel's
-/// single-send payload limit ([`crate::gso::MAX_GSO_SEND_BYTES`] — the
-/// kernel builds one skb per send, bounded by the 64KiB maximum IP
-/// datagram size, and rejects anything larger with `EMSGSIZE`).
+/// multiple `sendmsg(UDP_SEGMENT)` calls when it exceeds either of the
+/// kernel's two independent per-send limits:
+///
+/// * payload bytes — [`crate::gso::MAX_GSO_SEND_BYTES`]; the kernel
+///   builds one skb per send, bounded by the 64KiB maximum IP datagram
+///   size, and rejects anything larger with `EMSGSIZE`.
+/// * segment count — [`crate::gso::MAX_GSO_SEGS`]; `udp_send_skb()`
+///   rejects `datalen > gso_size * UDP_MAX_SEGMENTS` with `EINVAL`.
+///   The byte budget alone does not imply this bound: at a stride
+///   below ~512 bytes it yields a chunk with more segments than the
+///   kernel accepts.
 ///
 /// `iovs` holds `entries_per_seg` gather entries per wire segment;
 /// every segment is `stride` bytes except possibly a shorter final
 /// one. Chunks split on segment boundaries, so the uniform-stride
 /// requirement of `UDP_SEGMENT` holds within each call.
+///
+/// The count of bytes accepted by the socket is deliberately not
+/// returned: the underlying [`crate::io::OutsideIOSendCallback::send_gso`]
+/// implementations may report a whole batch as sent even when the
+/// kernel shed it (e.g. `ENOBUFS`), so no caller may treat a
+/// successful return as a delivery count. Failures are reported for
+/// logging and metering only.
 ///
 /// On a mid-batch failure the earlier chunks are already on the wire
 /// and cannot be retried; the failure is surfaced for the caller's
@@ -118,18 +132,26 @@ fn send_gso_chunked(
     iovs: &[std::io::IoSlice<'_>],
     entries_per_seg: usize,
     stride: u16,
-) -> IOCallbackResult<usize> {
-    let segs_per_send = std::cmp::max(1, crate::gso::MAX_GSO_SEND_BYTES / stride.max(1) as usize);
+) -> IOCallbackResult<()> {
+    let segs_per_send = (crate::gso::MAX_GSO_SEND_BYTES / stride.max(1) as usize)
+        .clamp(1, crate::gso::MAX_GSO_SEGS);
     let entries_per_send = segs_per_send * entries_per_seg;
 
-    let mut sent = 0;
-    for chunk in iovs.chunks(entries_per_send) {
-        match io.send_gso(chunk, stride) {
-            IOCallbackResult::Ok(n) => sent += n,
-            other => return other,
+    for (i, chunk) in iovs.chunks(entries_per_send).enumerate() {
+        let failure = match io.send_gso(chunk, stride) {
+            IOCallbackResult::Ok(_) => continue,
+            IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
+        };
+        if i > 0 {
+            // Chunks `0..i` reached the wire, the rest never will.
+            // Distinguishable from a whole-batch failure, where
+            // nothing was sent.
+            crate::metrics::gso_send_partial_batch_dropped();
         }
+        return failure;
     }
-    IOCallbackResult::Ok(sent)
+    IOCallbackResult::Ok(())
 }
 
 pub(crate) struct SendBuffer {
@@ -358,24 +380,27 @@ impl TlsIOAdapter {
     /// is sent zero-copy: the kernel gathers a shared header buffer
     /// and slices of `tun_buf` via `iovec`, with no intermediate copy
     /// of the segment bytes.
+    ///
+    /// Returns no byte count — see [`send_gso_chunked`] for why one
+    /// would not be meaningful.
     #[cfg(target_os = "linux")]
     pub(crate) fn udp_send_gso(
         &mut self,
         gso_segs: usize,
         expresslane_data: bool,
-    ) -> IOCallbackResult<usize> {
+    ) -> IOCallbackResult<()> {
         use std::io::{Error, IoSlice};
 
         // No coalesced frame yet — caller's `gso.reset()` cleanup
         // path runs unconditionally, so this is also the safe exit
         // when nothing was buffered.
         let Some((tun_buf, tun_gso_size)) = self.gso_buf.frame() else {
-            return IOCallbackResult::Ok(0);
+            return IOCallbackResult::Ok(());
         };
         let tun_gso_size = tun_gso_size.get();
 
         if gso_segs == 0 {
-            return IOCallbackResult::Ok(0);
+            return IOCallbackResult::Ok(());
         }
 
         // Same Lightway header for every segment.
@@ -447,10 +472,12 @@ impl TlsIOAdapter {
             segs.push(seg);
         }
 
-        // All segments dropped by plugins — nothing to put on the wire,
-        // but report success for the inside bytes the caller handed us.
+        // All segments dropped by plugins — nothing to put on the
+        // wire. Not an error, but metered so a batch that never
+        // reached the socket is distinguishable from a sent one.
         if segs.is_empty() {
-            return IOCallbackResult::Ok(tun_buf.len());
+            crate::metrics::gso_batch_dropped_by_plugins();
+            return IOCallbackResult::Ok(());
         }
 
         let stride = wire_gso_size.unwrap_or(0) as u16;
@@ -994,7 +1021,7 @@ mod tests {
         let arg: OutsideIOSendCallbackArg = io.clone();
 
         let r = send_gso_chunked(&arg, &iovs, 1, 1350);
-        assert!(matches!(r, IOCallbackResult::Ok(n) if n == 10 * 1350));
+        assert!(matches!(r, IOCallbackResult::Ok(())));
         assert_eq!(io.calls(), vec![(10 * 1350, 1350)]);
     }
 
@@ -1016,7 +1043,7 @@ mod tests {
         let arg: OutsideIOSendCallbackArg = io.clone();
 
         let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
-        assert!(matches!(r, IOCallbackResult::Ok(n) if n == SEGS * STRIDE));
+        assert!(matches!(r, IOCallbackResult::Ok(())));
 
         let calls = io.calls();
         let segs_per_send = crate::gso::MAX_GSO_SEND_BYTES / STRIDE; // 48
@@ -1054,7 +1081,7 @@ mod tests {
         let arg: OutsideIOSendCallbackArg = io.clone();
 
         let r = send_gso_chunked(&arg, &iovs, 2, STRIDE as u16);
-        assert!(matches!(r, IOCallbackResult::Ok(n) if n == SEGS * STRIDE));
+        assert!(matches!(r, IOCallbackResult::Ok(())));
 
         // Every chunk's byte count is a whole multiple of the stride
         // (all segments here are full-sized), within the send limit.
@@ -1089,5 +1116,73 @@ mod tests {
         let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
         assert!(matches!(r, IOCallbackResult::Err(e) if e.to_string() == "EMSGSIZE"));
         assert_eq!(io.calls().len(), 2);
+    }
+
+    /// `WouldBlock` from the socket is propagated, not folded into
+    /// `Ok`, so the caller can meter the shed.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_would_block_is_surfaced() {
+        const STRIDE: usize = 1350;
+
+        let io = FakeGsoIOSend::with_fakes(vec![IOCallbackResult::WouldBlock].into());
+        let seg = vec![0xAA; STRIDE];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..10).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::WouldBlock));
+        assert_eq!(io.calls().len(), 1);
+    }
+
+    /// The byte budget alone is not enough: at a small stride it
+    /// permits far more segments than the kernel's `UDP_MAX_SEGMENTS`.
+    /// Every chunk must respect *both* limits.
+    #[test_case(256, 255; "stride 256 would fit 255 segs by bytes")]
+    #[test_case(100, 654; "stride 100 would fit 654 segs by bytes")]
+    #[test_case(64, 1023; "stride 64 would fit 1023 segs by bytes")]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_clamps_segments_per_send(stride: usize, segs: usize) {
+        // Precondition: the byte budget on its own would pack more
+        // segments into one send than the kernel accepts.
+        assert_gt!(
+            crate::gso::MAX_GSO_SEND_BYTES / stride,
+            crate::gso::MAX_GSO_SEGS
+        );
+
+        let io = FakeGsoIOSend::new();
+        let seg = vec![0xAA; stride];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..segs).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, stride as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+
+        let calls = io.calls();
+        assert_eq!(calls.len(), segs.div_ceil(crate::gso::MAX_GSO_SEGS));
+        let mut total = 0;
+        for (bytes, _) in &calls {
+            assert_le!(bytes / stride, crate::gso::MAX_GSO_SEGS);
+            assert_le!(*bytes, crate::gso::MAX_GSO_SEND_BYTES);
+            total += bytes;
+        }
+        assert_eq!(total, segs * stride, "segments lost or duplicated");
+    }
+
+    /// A stride larger than the whole send budget still yields at
+    /// least one segment per call rather than an empty chunk.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_clamps_segments_per_send_lower_bound() {
+        let io = FakeGsoIOSend::new();
+        let seg = vec![0xAA; u16::MAX as usize];
+        let iovs: Vec<std::io::IoSlice<'_>> = (0..3).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, u16::MAX);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+        assert_eq!(io.calls().len(), 3);
     }
 }
