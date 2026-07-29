@@ -273,6 +273,34 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
 }
 
 impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
+    /// Ensure the assembled server config is internally consistent.
+    ///
+    /// This complements [`config::Config::validate`], which can only see
+    /// the config-file fields. The inside packet codec is not one of
+    /// them — it is only ever supplied by an embedder constructing
+    /// [`ServerConfig`] directly (`try_from_auth_and_config` always
+    /// leaves `inside_pkt_codec` as `None`) — so a constraint that
+    /// relates the codec to another setting has to be checked here,
+    /// where both are known.
+    pub fn validate(&self) -> Result<()> {
+        // Offload and the inside packet codec are mutually exclusive.
+        // `Connection::inside_data_received_gso` offers the packet to the
+        // encoder *before* segmentation and returns early on
+        // `CodecStatus::PacketAccepted`, so `gso::build_segment` never
+        // runs: the codec would ship a ~64KB superpacket whose IP
+        // `total_length` describes something else entirely to the peer,
+        // which then writes it to its own TUN. Reject the combination up
+        // front rather than corrupting traffic.
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            !(self.enable_tun_offload && self.inside_pkt_codec.is_some()),
+            "enable_tun_offload and the inside packet codec cannot be enabled together: \
+             the codec consumes the packet before GSO segmentation runs"
+        );
+
+        Ok(())
+    }
+
     pub fn try_from_auth_and_config(auth: SA, config: config::Config) -> Result<Self> {
         config.validate()?;
 
@@ -453,9 +481,7 @@ async fn inside_io_loop_gso(
     ip_manager: Arc<IpManager<Arc<Connection>>>,
     lightway_client_ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
-    use lightway_core::gso::{
-        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN, gso_none_checksum,
-    };
+    use lightway_core::gso::{VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_LEN, gso_none_checksum};
 
     // Receive buffer reused across iterations. `recv_gso` writes
     // directly into `pkt.spare_capacity_mut()` (a `&mut
@@ -490,7 +516,7 @@ async fn inside_io_loop_gso(
         // aggregates too, but `gso::build_segment` recomputes each
         // segment's checksum from scratch, so folding the (up to
         // ~64KB) superpacket here would be immediately discarded work.
-        if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE && hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        if hdr.is_gso_none() && hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
             gso_none_checksum(pkt.as_mut(), hdr.csum_start, hdr.csum_offset);
         }
 
@@ -504,7 +530,7 @@ async fn inside_io_loop_gso(
         ipv4_update_destination(pkt.as_mut(), lightway_client_ip);
 
         if let Some(conn) = conn {
-            let result = if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+            let result = if hdr.is_gso_none() {
                 conn.inside_data_received(&mut pkt)
             } else {
                 conn.inside_data_received_gso(&mut pkt, &hdr)
@@ -521,6 +547,8 @@ async fn inside_io_loop_gso(
 pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'static>(
     mut config: ServerConfig<SA>,
 ) -> Result<()> {
+    config.validate()?;
+
     let server_key = Secret::PemFile(&config.server_key);
     let server_cert = Secret::PemFile(&config.server_cert);
 
@@ -872,5 +900,61 @@ mod tests {
             batches_handle.batches.lock().unwrap().is_empty(),
             "loop must consume every scripted batch before the error"
         );
+    }
+
+    struct TestAuth;
+
+    impl<'a> ServerAuth<AuthState<'a>> for TestAuth {}
+
+    struct TestPacketCodecFactory;
+
+    impl lightway_app_utils::PacketCodecFactory for TestPacketCodecFactory {
+        fn build(&self) -> lightway_app_utils::PacketCodec {
+            unimplemented!("config validation never builds the codec")
+        }
+
+        fn get_codec_name(&self) -> String {
+            "test".to_string()
+        }
+    }
+
+    fn test_server_config() -> ServerConfig<TestAuth> {
+        ServerConfig::try_from_auth_and_config(TestAuth, config::Config::default())
+            .expect("default config should be valid")
+    }
+
+    #[test]
+    fn validate_default_server_config() {
+        assert!(test_server_config().validate().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validate_tun_offload_with_inside_pkt_codec() {
+        let mut config = test_server_config();
+        config.enable_tun_offload = true;
+        config.inside_pkt_codec = Some(Box::new(TestPacketCodecFactory));
+
+        let err = config
+            .validate()
+            .expect_err("offload + inside packet codec must be rejected");
+        assert!(err.to_string().contains("enable_tun_offload"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validate_tun_offload_without_inside_pkt_codec() {
+        let mut config = test_server_config();
+        config.enable_tun_offload = true;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_inside_pkt_codec_without_tun_offload() {
+        let mut config = test_server_config();
+        config.inside_pkt_codec = Some(Box::new(TestPacketCodecFactory));
+
+        assert!(config.validate().is_ok());
     }
 }
