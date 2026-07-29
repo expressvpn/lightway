@@ -72,39 +72,48 @@ struct SegInfo {
 /// fragments, non-TCP, truncated/short TCP header, empty payload
 /// (pure ACKs), or SYN/RST/URG/CWR flags.
 fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
+    use pnet_packet::ip::IpNextHeaderProtocols;
+    use pnet_packet::ipv4::{Ipv4Flags, Ipv4Packet};
+    use pnet_packet::tcp::TcpPacket;
+
     if pkt.len() < IPV4_HDR_LEN + TCP_MIN_HDR_LEN {
         return None;
     }
     // Version 4 with IHL == 5 in a single byte; IHL > 5 (IP options)
-    // is rejected to keep all header offsets fixed.
+    // is rejected to keep all header offsets fixed. Raw bytes here
+    // (as in `gso::calc_hdr_len`): the version has to be known before
+    // an `Ipv4Packet` may be constructed.
     if pkt[0] != 0x45 {
         return None;
     }
-    if u16::from_be_bytes([pkt[2], pkt[3]]) as usize != pkt.len() {
+    // The length check above guarantees both views can be built.
+    let ip = Ipv4Packet::new(pkt)?;
+    if ip.get_total_length() as usize != pkt.len() {
         return None;
     }
     // Fragmented: MF set or non-zero fragment offset (DF is fine).
-    if pkt[6] & 0x3F != 0 || pkt[7] != 0 {
+    if ip.get_flags() & Ipv4Flags::MoreFragments != 0 || ip.get_fragment_offset() != 0 {
         return None;
     }
-    if pkt[9] != IPPROTO_TCP {
+    if ip.get_next_level_protocol() != IpNextHeaderProtocols::Tcp {
         return None;
     }
-    let tcp = &pkt[IPV4_HDR_LEN..];
-    let tcp_hdr_len = (tcp[12] >> 4) as usize * 4;
-    if tcp_hdr_len < TCP_MIN_HDR_LEN || tcp_hdr_len > tcp.len() {
+    let tcp_bytes = &pkt[IPV4_HDR_LEN..];
+    let tcp = TcpPacket::new(tcp_bytes)?;
+    let tcp_hdr_len = tcp.get_data_offset() as usize * 4;
+    if tcp_hdr_len < TCP_MIN_HDR_LEN || tcp_hdr_len > tcp_bytes.len() {
         return None;
     }
-    let payload_len = tcp.len() - tcp_hdr_len;
+    let payload_len = tcp_bytes.len() - tcp_hdr_len;
     if payload_len == 0 {
         // Pure ACKs are not coalescable.
         return None;
     }
-    let flags = tcp[13];
+    let flags = tcp.get_flags();
     if flags & TCP_NO_COALESCE_FLAGS != 0 {
         return None;
     }
-    let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let seq = tcp.get_sequence();
     Some(SegInfo {
         tcp_hdr_len,
         payload_len,
@@ -216,6 +225,24 @@ impl TcpGroBatch {
             return GroAppend::Incompatible;
         }
         let hdr_len = IPV4_HDR_LEN + self.tcp_hdr_len;
+        // The two comparisons below are deliberately raw byte ranges —
+        // a whitelist of *exclusions* — and must stay that way even
+        // though the rest of this module reads fields through
+        // `pnet_packet` accessors:
+        //
+        //  * They are exhaustive by construction. Every header byte is
+        //    compared except the few explicitly excluded, so a field
+        //    (or TCP option) nobody anticipated still differs and
+        //    still forces a safe flush. Rewriting them as
+        //    field-by-field accessor comparisons inverts this into a
+        //    blacklist, where one field forgotten by a future reader
+        //    silently merges bytes from two different TCP states into
+        //    one stream.
+        //  * They cover the variable-length TCP options region
+        //    (`p[18..]`), which named accessors cannot express without
+        //    a loop. The kernel compares that region the same way
+        //    (`for (i = sizeof(*th); i < thlen; i += 4) flush |= ...`).
+        //
         // IPv4 header bytes must match except total_length (2..4),
         // identification (4..6) and header checksum (10..12). This
         // enforces same addresses, TOS, TTL, DF and flow.
@@ -328,10 +355,20 @@ impl TcpGroBatch {
 
         // TCP fixups: propagate PSH/FIN collected from absorbed
         // segments, seed the checksum field with the pseudo-header
-        // partial (big-endian, not complemented).
-        buf[IPV4_HDR_LEN + 13] |= psh_fin;
+        // partial (big-endian, not complemented — `set_checksum`
+        // writes a host `u16` big-endian).
+        //
+        // The partial is computed before the mutable TCP view is taken;
+        // it reads only the IP addresses and the total length, none of
+        // which the fixups below touch.
         let partial = pseudo_header_partial(&buf);
-        buf[IPV4_HDR_LEN + 16..IPV4_HDR_LEN + 18].copy_from_slice(&partial.to_be_bytes());
+        {
+            use pnet_packet::tcp::MutableTcpPacket;
+            let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HDR_LEN..])
+                .expect("batch buffer always holds a full TCP header");
+            tcp.set_flags(tcp.get_flags() | psh_fin);
+            tcp.set_checksum(partial);
+        }
 
         let vhdr = VirtioNetHdr {
             flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
