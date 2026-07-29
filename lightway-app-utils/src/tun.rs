@@ -311,6 +311,10 @@ impl Tun {
     /// The [`Tun::Direct`] backend fills `buf` in place. The `IoUring` backend
     /// swaps `buf` for a buffer from its internal pool, so the underlying
     /// allocation may differ between calls.
+    ///
+    /// If the device was opened with offload (`TunConfig::offload`), the
+    /// [`Tun::Direct`] backend strips the `virtio_net_hdr` the kernel prepends,
+    /// so `buf` always holds a bare IP packet regardless of framing.
     pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self {
             Tun::Direct(t) => t.recv_buf(buf).await,
@@ -445,8 +449,9 @@ pub struct TunDirect {
     fd: RawFd,
     #[cfg(unix)]
     close_fd_on_drop: bool,
-    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 12-byte
-    /// `virtio_net_hdr`, reads include it.
+    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 10-byte
+    /// `virtio_net_hdr` (`size_of::<VirtioNetHdr>()`, the kernel's
+    /// `TUNGETVNETHDRSZ` default), reads include it.
     #[cfg(target_os = "linux")]
     vnet_hdr: bool,
 }
@@ -463,12 +468,31 @@ impl TunDirect {
         #[cfg(mobile)]
         let mtu = 1350;
 
-        // Reflect the capability the device actually negotiated, not what
-        // was requested. `build_async` succeeds even when the kernel
-        // rejects `TUNSETOFFLOAD` (tun-rs only logs a warning), leaving
-        // `IFF_VNET_HDR` unset. Trusting `config.offload` here would make
-        // `recv_gso`/`try_send_gso` strip/prepend a 10-byte virtio header
-        // the device does not use, corrupting every packet.
+        // Reflect the offload capability the device actually negotiated,
+        // not what was requested: `build_async` succeeds even when the
+        // kernel rejects `TUNSETOFFLOAD` (tun-rs only logs a warning) and
+        // `tcp_gso()` then reports false.
+        //
+        // Careful about what that false does *not* mean. tun-rs issues
+        // `TUNSETIFF` first, and it has already succeeded with
+        // `IFF_VNET_HDR` set; on a later `TUNSETOFFLOAD` failure tun-rs
+        // clears only its own bookkeeping bool and never re-issues
+        // `TUNSETIFF` to drop the flag. So the fd keeps vnet framing
+        // (verified on a live kernel: `TUNGETIFF` still returns
+        // `IFF_VNET_HDR`, `TUNGETVNETHDRSZ` still returns 10, and reads
+        // still carry the header) while this flag says it does not. Two
+        // properties are collapsed into one bool: the framing granted by
+        // `TUNSETIFF`, and the TSO/USO capability granted by
+        // `TUNSETOFFLOAD`. Only the second is what `tcp_gso()` tracks
+        // after the fallback.
+        //
+        // Traffic never flows in that state: `supports_gso()` returns this
+        // flag, so the `as_gso()` check on the client/server startup path
+        // aborts with an error before any packet is read or written when
+        // offload was requested but not negotiated. And
+        // `TUN_F_CSUM|TUN_F_TSO4|TUN_F_TSO6` has been supported since Linux
+        // 2.6, so on any ordinary kernel that granted `IFF_VNET_HDR` this
+        // is a no-op.
         #[cfg(target_os = "linux")]
         let vnet_hdr = {
             let negotiated = tun_device.tcp_gso();
@@ -496,6 +520,12 @@ impl TunDirect {
     }
 
     /// Recv from Tun
+    ///
+    /// When the device negotiated `IFF_VNET_HDR` the kernel prepends a
+    /// `virtio_net_hdr` to every read; it is stripped here so the caller
+    /// always gets a bare IP packet. This is the same `vnet_hdr` predicate the
+    /// send side uses in [`Self::try_send`], so both directions agree on
+    /// whether vnet framing is in play.
     pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
         match tun.recv(buf).await {
@@ -504,6 +534,10 @@ impl TunDirect {
             Ok(0) => IOCallbackResult::WouldBlock,
             Ok(nr) => {
                 buf.truncate(nr);
+                #[cfg(target_os = "linux")]
+                if self.vnet_hdr {
+                    return Self::strip_vnet_hdr(buf);
+                }
                 IOCallbackResult::Ok(nr)
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
@@ -529,6 +563,31 @@ impl TunDirect {
             IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
             IOCallbackResult::Err(e) => IOCallbackResult::Err(e),
         }
+    }
+
+    /// Strip the leading `virtio_net_hdr` from a packet just read from a
+    /// device opened with offload, leaving `buf` holding the IP payload.
+    ///
+    /// Mirrors [`Self::recv_gso`]: a read no longer than the header carries
+    /// no packet, so it is discarded and reported as
+    /// [`IOCallbackResult::WouldBlock`] to make the caller's recv loop retry
+    /// rather than treat it as a hard error.
+    #[cfg(target_os = "linux")]
+    fn strip_vnet_hdr(buf: &mut BytesMut) -> IOCallbackResult<usize> {
+        use bytes::Buf;
+        use lightway_core::gso::VIRTIO_NET_HDR_LEN;
+
+        if buf.len() <= VIRTIO_NET_HDR_LEN {
+            tracing::warn!(
+                n = buf.len(),
+                "tun recv_buf: read shorter than virtio header"
+            );
+            buf.clear();
+            return IOCallbackResult::WouldBlock;
+        }
+
+        buf.advance(VIRTIO_NET_HDR_LEN);
+        IOCallbackResult::Ok(buf.len())
     }
 
     /// Recv a GSO frame into `buf`. See [`Tun::recv_gso`] for the
@@ -600,6 +659,19 @@ impl TunDirect {
         IOCallbackResult::Ok((buf.len(), hdr))
     }
 
+    /// Map the result of a TUN write onto an [`IOCallbackResult`], shared by
+    /// every send path. A full buffer is retried by the caller; anything else
+    /// is fatal. Mirrors `map_send_result` on the outside UDP path.
+    fn map_send_result(res: std::io::Result<usize>) -> IOCallbackResult<usize> {
+        match res {
+            Ok(nr) => IOCallbackResult::Ok(nr),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         #[cfg(target_os = "linux")]
@@ -610,13 +682,7 @@ impl TunDirect {
         }
 
         let tun = self.tun.as_ref().unwrap();
-        match tun.try_send(&buf[..]) {
-            Ok(nr) => IOCallbackResult::Ok(nr),
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                IOCallbackResult::WouldBlock
-            }
-            Err(err) => IOCallbackResult::Err(err),
-        }
+        Self::map_send_result(tun.try_send(&buf[..]))
     }
 
     /// Send a packet with an explicit virtio header (e.g. a TSO
@@ -645,16 +711,10 @@ impl TunDirect {
     fn send_with_vnet_hdr(&self, hdr_bytes: &[u8], buf: &[u8]) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
         let iovs = [std::io::IoSlice::new(hdr_bytes), std::io::IoSlice::new(buf)];
-        match tun
-            .try_send_vectored(&iovs)
-            .map(|n| n.saturating_sub(hdr_bytes.len()))
-        {
-            Ok(nr) => IOCallbackResult::Ok(nr),
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                IOCallbackResult::WouldBlock
-            }
-            Err(err) => IOCallbackResult::Err(err),
-        }
+        Self::map_send_result(
+            tun.try_send_vectored(&iovs)
+                .map(|n| n.saturating_sub(hdr_bytes.len())),
+        )
     }
 
     /// MTU of Tun
