@@ -22,7 +22,7 @@ use lightway_app_utils::{
 use lightway_core::*;
 
 mod packet_codec;
-use packet_codec::TestPacketCodecFactory;
+use packet_codec::{BlackHolePacketCodecFactory, TestPacketCodecFactory};
 
 const CA_CERT: &[u8] = &include!("data/ca_cert_der_2048");
 const SERVER_CERT: &[u8] = &include!("data/server_cert_der_2048");
@@ -161,11 +161,11 @@ impl OutsideIOSendCallback for TestDatagramSock {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         match self.0.try_send(buf) {
             Ok(nr) => IOCallbackResult::Ok(nr),
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                // Real sockets never block (and doing so confuses the TLS library!), but they do drop, so we do too!
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) => IOCallbackResult::Err(err),
+            // Real datagram sockets never block (blocking confuses the TLS library),
+            // but they do drop. A full send buffer surfaces as WouldBlock on Linux and
+            // ENOBUFS on macOS; both are just a drop, so report success and let DTLS
+            // retransmit rather than propagating a fatal socket error to wolfSSL.
+            Err(_) => IOCallbackResult::Ok(buf.len()),
         }
     }
 
@@ -819,6 +819,151 @@ async fn test_datagram_connection(
         false,
     )
     .await;
+}
+
+/// A black-hole inside packet codec accepts every outbound packet but never
+/// emits it, so once encoding is enabled the data plane silently stalls while
+/// control frames (which bypass the codec) keep the tunnel alive. Verify the
+/// client detects the stall via `downgrade_inside_pkt_codec_if_stalled` and
+/// disables the codec, rather than depending on keepalive which cannot observe
+/// a codec-level black-hole.
+#[tokio::test]
+async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
+    const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+
+    // Server reflects inside data and ACKs the client's encoding requests.
+    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, false));
+
+    let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (event_cb, mut event_stream) = EventStreamCallback::new();
+
+    let packet_codec = BlackHolePacketCodecFactory::default().build();
+    let encoder = packet_codec.encoder.clone();
+    let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = (
+        Some((packet_codec.encoder, packet_codec.decoder)),
+        packet_codec.encoded_pkt_receiver,
+        packet_codec.decoded_pkt_receiver,
+    );
+
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let state = ConnectionState { ticker };
+
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_event_cb(Box::new(event_cb))
+    .with_inside_pkt_codec(packet_codec)
+    .connect(state)
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+
+    // Drain events so the stream never backpressures the connection.
+    tokio::spawn(async move { while event_stream.next().await.is_some() {} });
+
+    #[derive(PartialEq, Debug)]
+    enum Step {
+        Connecting,
+        EncodingRequested,
+        MessageSent,
+        Downgraded,
+    }
+    let mut step = Step::Connecting;
+    let mut stall_check = tokio::time::interval(std::time::Duration::from_millis(10));
+
+    let driver = async {
+        loop {
+            tokio::select! {
+                // inside -> outside: the black-hole encoder never emits, so this stays
+                // silent once encoding is enabled.
+                Some(mut encoded) = encoded_pkt_receiver.recv() => {
+                    client.lock().unwrap().send_to_outside(&mut encoded, true).expect("send encoded");
+                }
+                Some(decoded) = decoded_pkt_receiver.recv() => {
+                    client.lock().unwrap().send_to_inside(decoded).expect("send decoded");
+                }
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_) => {}
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                        Err(e) => panic!("client recv: {e}"),
+                    }
+                    let mut c = client.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    c.outside_data_received(pkt).expect("outside data received");
+                    if !matches!(c.state(), State::Online) {
+                        continue;
+                    }
+                    match step {
+                        Step::Connecting => {
+                            c.set_encoding(true).expect("enable encoding");
+                            step = Step::EncodingRequested;
+                        }
+                        Step::EncodingRequested if encoder.get_encoding_state() => {
+                            // Codec is enabled: push a packet the black-hole encoder drops.
+                            let mut msg = BytesMut::from(&b"\x40Hello World!"[..]);
+                            c.inside_data_received(&mut msg).expect("send message");
+                            step = Step::MessageSent;
+                        }
+                        _ => {}
+                    }
+                }
+                _ = stall_check.tick() => {
+                    let mut c = client.lock().unwrap();
+                    match step {
+                        Step::MessageSent => {
+                            if c
+                                .downgrade_inside_pkt_codec_if_stalled(STALL_TIMEOUT)
+                                .expect("stall check")
+                            {
+                                step = Step::Downgraded;
+                            }
+                        }
+                        // Server ACKed the disable: the codec is off, fix confirmed.
+                        Step::Downgraded if !encoder.get_encoding_state() => return,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                _ = driver => {}
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
 }
 
 #[cfg_attr(feature = "postquantum",

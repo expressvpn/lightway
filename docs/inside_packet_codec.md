@@ -142,3 +142,16 @@ to encoding requests with its id higher or equal to the id of the most recently 
 
 The number of re-transmission is limited by a constant to avoid wasting network resources in case the server does not have encoding enabled. If the client
 cannot receive a response after the maximum number of re-transmissions has been attempted, the request is considered as failed.
+
+## Data-Plane Stall Detection
+A faulty codec can silently black-hole the data plane: its encoder accepts inside packets (`PacketAccepted`) but never emits the encoded packets, so nothing
+reaches the tunnel. Keepalive cannot detect this, because keepalive ping/pong are control frames that bypass the codec and keep flowing, so the connection
+still looks alive while every inside packet is dropped.
+
+To catch this, the client tracks when a decoded packet was last delivered to the inside path. Control frames (such as keepalive) are deliberately excluded, so
+this reflects real data-plane delivery. If encoding is enabled but nothing has been delivered to the inside path within `ClientConfig::inside_pkt_codec_stall_timeout`,
+the client disables the codec through the [encoding request](#encoding-request) mechanism, downgrading to unencoded traffic instead of tearing the tunnel down.
+A single request is issued per stall episode.
+
+The check is evaluated on the inside-to-outside path, so it only runs while the client is sending traffic; an idle connection is never downgraded. A timeout of
+`Duration::ZERO` (the default) disables the check.

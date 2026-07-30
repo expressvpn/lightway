@@ -174,6 +174,7 @@ mod tests {
         let sessions = vec![ConnectionActivity {
             last_outside_data_received: now - outside_data_age,
             last_data_traffic_from_peer: now - data_traffic_age,
+            last_data_delivered_to_inside: now - data_traffic_age,
         }];
 
         let (standby, active) = calculate_session_stats(&sessions);
