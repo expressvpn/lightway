@@ -78,17 +78,97 @@ use anyhow::{Context, Result};
 use rtnetlink::Handle;
 use rtnetlink::packet_route::rule::{RuleAction, RuleMessage};
 
+const RT_TABLES_PATH: &str = "/etc/iproute2/rt_tables";
+
 /// Prefix for all policy-routing names used by Lightway.
 ///
 /// Each rule and the tunnel routing table get a distinct name under this prefix:
 ///
-/// | Rule            | Name                                  | Visible in  |
-/// | --------------- | ------------------------------------- | ----------- |
-/// | MARKED          | `lightway-marked-0x<fwmark>`          | tracing log |
-/// | SERVER          | `lightway-server`                     | tracing log |
-/// | MARKED_FALLBACK | `lightway-marked-0x<fwmark>-fallback` | tracing log |
-/// | TUNNEL (table)  | `lightway-tunnel`                     | tracing log |
+/// | Rule            | Name                                  | Visible in              |
+/// | --------------- | ------------------------------------- | ----------------------- |
+/// | MARKED          | `lightway-marked-0x<fwmark>`          | tracing log             |
+/// | SERVER          | `lightway-server`                     | tracing log             |
+/// | MARKED_FALLBACK | `lightway-marked-0x<fwmark>-fallback` | tracing log             |
+/// | TUNNEL (table)  | `lightway-tunnel`                     | tracing log + rt_tables |
+///
+/// Only the tunnel routing table name is registered in `/etc/iproute2/rt_tables`
+/// because ip rules themselves have no name field; the kernel identifies them by
+/// priority alone.
 const TABLE_PREFIX: &str = "lightway";
+
+/// Writes `"<id>\t<name>"` to `/etc/iproute2/rt_tables`, creating the file if
+/// it does not yet exist.
+///
+/// In debug builds, reads the file first: skips the write if the entry is
+/// already present with the correct id, and returns an error if it exists with
+/// a different id.  In release builds the check is skipped and the line is
+/// always appended — duplicates are harmless because the kernel never reads
+/// this file and `unregister_rt_table` removes all matching lines on cleanup.
+fn register_rt_table(id: u32, name: &str) -> Result<()> {
+    #[cfg(feature = "debug")]
+    {
+        let content = std::fs::read_to_string(RT_TABLES_PATH)
+            .with_context(|| format!("Cannot read {RT_TABLES_PATH}"))?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let mut cols = trimmed.split_whitespace();
+            let (Some(id_str), Some(tbl)) = (cols.next(), cols.next()) else {
+                continue;
+            };
+            if tbl == name {
+                let existing: u32 = id_str
+                    .parse()
+                    .with_context(|| format!("Malformed id for '{name}' in {RT_TABLES_PATH}"))?;
+                anyhow::ensure!(
+                    existing == id,
+                    "Table '{name}' already registered with id {existing}, expected {id}"
+                );
+                return Ok(()); // already present with the correct id
+            }
+        }
+    }
+
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(RT_TABLES_PATH)
+        .with_context(|| format!("Cannot open {RT_TABLES_PATH} for writing"))?;
+    writeln!(file, "{id}\t{name}").with_context(|| format!("Cannot write to {RT_TABLES_PATH}"))?;
+    tracing::debug!(id, name, "Registered routing table name");
+    Ok(())
+}
+
+/// Removes every line whose table-name field equals `name` from
+/// `/etc/iproute2/rt_tables`.
+fn unregister_rt_table(name: &str) {
+    let content = match std::fs::read_to_string(RT_TABLES_PATH) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Cannot read {RT_TABLES_PATH} during cleanup: {e}");
+            return;
+        }
+    };
+
+    let filtered: String = content
+        .lines()
+        .filter(|line| {
+            let mut cols = line.split_whitespace();
+            let _ = cols.next(); // skip id field
+            cols.next() != Some(name)
+        })
+        .flat_map(|line| [line, "\n"])
+        .collect();
+
+    if let Err(e) = std::fs::write(RT_TABLES_PATH, filtered) {
+        tracing::warn!("Cannot update {RT_TABLES_PATH} during cleanup: {e}");
+    } else {
+        tracing::debug!(name, "Unregistered routing table name");
+    }
+}
 
 /// Default firewall mark (`SO_MARK`) applied to the outside socket under `RouteMode::Fwmark` (Linux
 /// only).
@@ -197,9 +277,14 @@ impl PolicyRouting {
         let tunnel_name = format!("{TABLE_PREFIX}-tunnel");
 
         // Rule MARKED: marked traffic (the tunnel socket) resolves via `main`.
-        self.add_rule(self.rule_priority_marked, Some(self.fwmark), RT_TABLE_MAIN, &marked_name)
-            .await
-            .context("Failed to add fwmark rule")?;
+        self.add_rule(
+            self.rule_priority_marked,
+            Some(self.fwmark),
+            RT_TABLE_MAIN,
+            &marked_name,
+        )
+        .await
+        .context("Failed to add fwmark rule")?;
 
         // rp_filter fix — unmarked lookups for the server IP are
         // redirected to main so that strict rp_filter accepts the server's
@@ -220,13 +305,30 @@ impl PolicyRouting {
         // (e.g. during a Wi-Fi roam when the default route is momentarily
         // absent), return ENETUNREACH instead of falling through to
         // rule_priority_tunnel and starting an encapsulation loop.
-        self.add_fwmark_unreachable_rule(self.rule_priority_marked_fallback, self.fwmark, &marked_fallback_name)
-            .await
-            .context("Failed to add fwmark fallback rule")?;
+        self.add_fwmark_unreachable_rule(
+            self.rule_priority_marked_fallback,
+            self.fwmark,
+            &marked_fallback_name,
+        )
+        .await
+        .context("Failed to add fwmark fallback rule")?;
 
-        self.add_rule(self.rule_priority_tunnel, None, self.table as u32, &tunnel_name)
-            .await
-            .context("Failed to add tunnel table rule")?;
+        // Register the tunnel table name so that `ip rule show` displays
+        // `from all lookup lightway-tunnel` instead of a bare table id.
+        if let Err(e) = register_rt_table(self.table as u32, &tunnel_name)
+            .with_context(|| format!("Failed to register '{tunnel_name}' in {RT_TABLES_PATH}"))
+        {
+            tracing::error!("Fail to register table name: {}", e);
+        }
+
+        self.add_rule(
+            self.rule_priority_tunnel,
+            None,
+            self.table as u32,
+            &tunnel_name,
+        )
+        .await
+        .context("Failed to add tunnel table rule")?;
 
         tracing::info!(
             fwmark = self.fwmark,
@@ -314,11 +416,17 @@ impl PolicyRouting {
         req.execute().await?;
         self.installed.push(message);
 
-        tracing::debug!(priority, fwmark, rule_name, "Added fwmark unreachable ip rule");
+        tracing::debug!(
+            priority,
+            fwmark,
+            rule_name,
+            "Added fwmark unreachable ip rule"
+        );
         Ok(())
     }
 
-    /// Removes every rule this instance installed.
+    /// Removes every rule this instance installed and unregisters the table
+    /// name from `/etc/iproute2/rt_tables`.
     ///
     /// Failures are logged rather than propagated: leaving a stale rule behind
     /// is bad, but aborting cleanup half way through is worse.
@@ -328,6 +436,7 @@ impl PolicyRouting {
                 tracing::warn!("Failed to delete ip rule during cleanup: {e}");
             }
         }
+        unregister_rt_table(&format!("{TABLE_PREFIX}-tunnel"));
         tracing::info!("Removed policy routing rules");
     }
 }
