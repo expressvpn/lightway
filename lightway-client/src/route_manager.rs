@@ -65,7 +65,7 @@ const TUNNEL_ROUTES: [(IpAddr, u8); 2] = [
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum RouteMode {
-    #[default]
+    #[cfg_attr(not(linux), default)]
     Default,
     Lan,
     NoExec,
@@ -84,6 +84,7 @@ pub enum RouteMode {
     ///
     /// If `fwmark` is not set, a default mark (`0x4865_0000`) is used automatically.
     #[cfg(linux)]
+    #[cfg_attr(linux, default)]
     Fwmark,
 }
 
