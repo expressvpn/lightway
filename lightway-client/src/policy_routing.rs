@@ -92,6 +92,18 @@ use anyhow::{Context, Result};
 use rtnetlink::Handle;
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 
+/// Drop-in file that registers the tunnel routing table name with iproute2.
+///
+/// iproute2 reads `/etc/iproute2/rt_tables` and, only when that file does not
+/// exist, falls back to `/usr/share/iproute2/rt_tables` (where newer releases
+/// and some distros ship it). Appending to `/etc/iproute2/rt_tables` would
+/// create that file on such systems and shadow the distro one, so `ip` would
+/// lose the `main`/`local`/`default` names. The `rt_tables.d/*.conf` drop-in
+/// directory is read in both layouts and lets us own a file outright, so
+/// cleanup is a plain unlink instead of rewriting a shared file.
+const RT_TABLES_DROPIN_DIR: &str = "/etc/iproute2/rt_tables.d";
+const RT_TABLES_DROPIN_PATH: &str = "/etc/iproute2/rt_tables.d/lightway.conf";
+
 /// Prefix for all policy-routing names used by Lightway.
 ///
 /// Each rule and the tunnel routing table get a distinct name under this prefix:
@@ -103,7 +115,38 @@ use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 /// | MARKED_FALLBACK  | `lightway-marked-0x<fwmark>-fallback` | tracing log             |
 /// | SUPPRESS_DEFAULT | `lightway-suppress-default`           | tracing log             |
 /// | TUNNEL (table)   | `lightway-tunnel`                     | tracing log + rt_tables |
+///
+/// Only the tunnel routing table name is registered in
+/// `/etc/iproute2/rt_tables.d/lightway.conf` because ip rules themselves have
+/// no name field; the kernel identifies them by priority alone.
 const TABLE_PREFIX: &str = "lightway";
+
+/// Writes `"<id>\t<name>"` to `/etc/iproute2/rt_tables.d/lightway.conf`,
+/// creating the directory if it does not yet exist.
+///
+/// The file is owned by Lightway, so it is simply overwritten: a stale entry
+/// from a previous run (possibly with a different id) is replaced rather than
+/// appended to. The kernel never reads this file; it only affects how `ip`
+/// displays the table.
+fn register_rt_table(id: u32, name: &str) -> Result<()> {
+    std::fs::create_dir_all(RT_TABLES_DROPIN_DIR)
+        .with_context(|| format!("Cannot create {RT_TABLES_DROPIN_DIR}"))?;
+    std::fs::write(RT_TABLES_DROPIN_PATH, format!("{id}\t{name}\n"))
+        .with_context(|| format!("Cannot write to {RT_TABLES_DROPIN_PATH}"))?;
+    tracing::debug!(id, name, "Registered routing table name");
+    Ok(())
+}
+
+/// Removes `/etc/iproute2/rt_tables.d/lightway.conf`.
+///
+/// A missing file is not an error: registration may have failed or never run.
+fn unregister_rt_table() {
+    match std::fs::remove_file(RT_TABLES_DROPIN_PATH) {
+        Ok(()) => tracing::debug!("Unregistered routing table name"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("Cannot remove {RT_TABLES_DROPIN_PATH} during cleanup: {e}"),
+    }
+}
 
 /// Default firewall mark (`SO_MARK`) applied to the outside socket under `RouteMode::Fwmark` (Linux
 /// only).
@@ -269,6 +312,14 @@ impl PolicyRouting {
         .await
         .context("Failed to add suppress-default rule")?;
 
+        // Register the tunnel table name so that `ip rule show` displays
+        // `from all lookup lightway-tunnel` instead of a bare table id.
+        if let Err(e) = register_rt_table(self.table as u32, &tunnel_name).with_context(|| {
+            format!("Failed to register '{tunnel_name}' in {RT_TABLES_DROPIN_PATH}")
+        }) {
+            tracing::error!("Fail to register table name: {}", e);
+        }
+
         self.add_rule(
             self.rule_priority_tunnel,
             None,
@@ -407,7 +458,8 @@ impl PolicyRouting {
         Ok(())
     }
 
-    /// Removes every rule this instance installed.
+    /// Removes every rule this instance installed and unregisters the table
+    /// name from `/etc/iproute2/rt_tables.d/lightway.conf`.
     ///
     /// Failures are logged rather than propagated: leaving a stale rule behind
     /// is bad, but aborting cleanup half way through is worse.
@@ -417,6 +469,7 @@ impl PolicyRouting {
                 tracing::warn!("Failed to delete ip rule during cleanup: {e}");
             }
         }
+        unregister_rt_table();
         tracing::info!("Removed policy routing rules");
     }
 }
