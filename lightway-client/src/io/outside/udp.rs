@@ -24,7 +24,7 @@ impl Udp {
     pub async fn new(
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
-        fwmark: Option<u32>,
+        #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -45,24 +45,20 @@ impl Udp {
         // Apply the firewall mark *before* the socket is used for anything, so
         // that no packet can escape unmarked and be captured by the tunnel's
         // own routes.
-        #[cfg(linux)]
-        if let Some(mark) = fwmark {
-            sockopt::set_so_mark(&sock, mark).map_err(|e| {
-                anyhow!("Failed to set SO_MARK={mark} on outside socket (needs CAP_NET_ADMIN): {e}")
+        #[cfg(all(linux, not(feature = "mobile")))]
+        {
+            sockopt::set_so_mark(&sock, fwmark).map_err(|e| {
+                anyhow!("Failed to set SO_MARK={fwmark} on outside socket (needs CAP_NET_ADMIN): {e}")
             })?;
             // Read back rather than trust the setsockopt: a silently unmarked
             // socket would reintroduce the routing loop this exists to prevent.
             let applied = sockopt::get_so_mark(&sock)?;
-            if applied != mark {
+            if applied != fwmark {
                 return Err(anyhow!(
-                    "SO_MARK verification failed: set {mark}, read back {applied}"
+                    "SO_MARK verification failed: set {fwmark}, read back {applied}"
                 ));
             }
-            tracing::info!(fwmark = mark, "Applied firewall mark to outside socket");
-        }
-        #[cfg(not(target_os = "linux"))]
-        if fwmark.is_some() {
-            tracing::warn!("fwmark is only supported on Linux; ignoring");
+            tracing::info!("Applied firewall mark to outside socket");
         }
 
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;

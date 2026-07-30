@@ -988,16 +988,12 @@ pub async fn connect<
         match mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server, maybe_sock, {
-                    #[cfg(linux)]
-                    {
-                        Some(config.fwmark_config.fwmark)
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        None
-                    }
-                })
+                let mut sock = io::outside::Udp::new(
+                    server,
+                    maybe_sock,
+                    #[cfg(all(linux, not(feature = "mobile")))]
+                    config.fwmark_config.fwmark,
+                )
                 .await
                 .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
                 .context("Outside IO UDP")?;
