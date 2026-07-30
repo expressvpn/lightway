@@ -1,0 +1,32 @@
+name: Assign requested reviewer
+
+# When GitHub's team code-review assignment picks an individual reviewer for a
+# PR, mirror that person into the assignee field so PR ownership is visible at a
+# glance. Team-level review requests are ignored; only individual reviewers
+# (which is what the auto-assignment produces) become assignees.
+
+on:
+  # pull_request_target is safe here because it only runs the pinned
+  # actions/github-script action.
+  pull_request_target:
+    types: [review_requested]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  assign:
+    if: github.event.requested_reviewer != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign reviewer to PR
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const reviewer = context.payload.requested_reviewer.login;
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              assignees: [reviewer],
+            });
