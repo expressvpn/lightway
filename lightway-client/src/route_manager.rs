@@ -86,10 +86,12 @@ pub enum RouteMode {
 
 /// Routing table holding the tunnel routes under [`RouteMode::Fwmark`].
 ///
-/// `route_manager` represents table ids as a `u8`, so this must be in `1..=252`
-/// to avoid the reserved `main` (254), `default` (253) and `local` (255) tables.
+/// Chosen as 2 — the atomic number of Helium — as a memorable low value that
+/// sits well below the reserved `main` (254), `default` (253) and `local` (255)
+/// tables. `route_manager` represents table ids as a `u8`, so this must be in
+/// `1..=252`.
 #[cfg(linux)]
-pub const FWMARK_ROUTE_TABLE: u8 = 194;
+pub const FWMARK_ROUTE_TABLE: u8 = 2;
 
 #[derive(Error, Debug)]
 pub enum RoutingTableError {
@@ -149,6 +151,8 @@ struct RouteManagerInner {
     vpn_routes: Vec<Route>,
     lan_routes: Vec<Route>,
     server_route: Option<Route>,
+    #[cfg(linux)]
+    fwmark_route_table: u8,
 }
 
 impl RouteManager {
@@ -158,6 +162,7 @@ impl RouteManager {
         tun_index: u32,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        #[cfg(linux)] fwmark_route_table: u8,
     ) -> Result<Self, RoutingTableError> {
         let inner = Some(RouteManagerInner::new(
             routing_mode,
@@ -165,6 +170,8 @@ impl RouteManager {
             tun_index,
             tun_peer_ip,
             tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_route_table,
         )?);
         Ok(Self { inner, task: None })
     }
@@ -224,6 +231,7 @@ impl RouteManagerInner {
         tun_index: u32,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        #[cfg(linux)] fwmark_route_table: u8,
     ) -> Result<Self, RoutingTableError> {
         let route_manager =
             SyncRouteManager::new().map_err(RoutingTableError::RoutingManagerError)?;
@@ -240,6 +248,8 @@ impl RouteManagerInner {
             vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + 1),
             lan_routes: Vec::with_capacity(LAN_NETWORKS.len()),
             server_route: None,
+            #[cfg(linux)]
+            fwmark_route_table,
         })
     }
 
@@ -542,7 +552,7 @@ impl RouteManagerInner {
     fn apply_route_table(&self, route: Route) -> Route {
         #[cfg(linux)]
         if self.routing_mode == RouteMode::Fwmark {
-            return route.with_table(FWMARK_ROUTE_TABLE);
+            return route.with_table(self.fwmark_route_table);
         }
         route
     }
@@ -733,8 +743,15 @@ mod tests {
         }
 
         // Create RouteManagerInner directly for testing
-        let route_manager =
-            RouteManagerInner::new(route_mode, server_ip, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
+        let route_manager = RouteManagerInner::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
+        )?;
 
         // Return tuple - RouteManagerInner will be dropped first, then TUN device, RouteRestorer last
         Ok((restorer, tun_device, route_manager))
@@ -1026,8 +1043,16 @@ mod tests {
     #[serial_test::serial(route_manager)]
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_route_manager_start_stop(route_mode: RouteMode) {
-        let mut route_manager =
-            RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
+        )
+        .unwrap();
 
         // Test that we can start the route manager
         let start_result = route_manager.start().await;
@@ -1063,6 +1088,8 @@ mod tests {
             0,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            0,
         )
         .unwrap();
         let updater = route_manager.start().await.unwrap();
@@ -1086,8 +1113,15 @@ mod tests {
     #[tokio::test]
     async fn test_route_manager_inner_structure(route_mode: RouteMode) {
         // Test that RouteManagerInner can be created directly
-        let inner_result =
-            RouteManagerInner::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP);
+        let inner_result = RouteManagerInner::new(
+            route_mode,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
+        );
         assert!(inner_result.is_ok());
 
         let inner = inner_result.unwrap();
@@ -1109,6 +1143,8 @@ mod tests {
             0,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
         )
         .unwrap();
 
@@ -1162,6 +1198,8 @@ mod tests {
             1,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
         )
         .unwrap();
 
@@ -1180,6 +1218,8 @@ mod tests {
             1,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
         );
         assert!(inner.is_ok());
 
