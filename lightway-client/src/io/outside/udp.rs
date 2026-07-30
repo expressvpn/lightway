@@ -201,6 +201,13 @@ impl OutsideIOSendCallback for Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
                 IOCallbackResult::Ok(buf.len())
             }
+            #[cfg(linux)]
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::InvalidInput) => {
+                // EINVAL: server is covered by a blackhole route while a
+                // network change installs the real route. Mock a successful
+                // send so the session survives until routing recovers.
+                IOCallbackResult::Ok(buf.len())
+            }
             #[cfg(macos)]
             Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
                 // The source address is no longer valid (e.g. Switched WiFi hotspots)
