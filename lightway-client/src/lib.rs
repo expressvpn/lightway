@@ -249,9 +249,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
-    /// Firewall mark applied to the outside socket (Linux only).
+    /// Fwmark policy-routing parameters. Only effective under [`RouteMode::Fwmark`].
     #[cfg(linux)]
-    pub fwmark: u32,
+    pub fwmark_config: policy_routing::FWMarkConfig,
 
     /// Disable pinning the outside UDP socket to the physical egress interface
     /// via `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Windows).
@@ -409,10 +409,10 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
             route_mode: config.route_mode,
-            #[cfg(linux)]
-            fwmark: config.fwmark,
             #[cfg(windows)]
             disable_pin_egress_interface: config.disable_pin_egress_interface,
+            #[cfg(linux)]
+            fwmark_config: config.fwmark_config(),
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -1239,7 +1239,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         #[cfg(apple)] nudge_on_route_update: bool,
         stop_signal: Option<mpsc::Sender<String>>,
         #[cfg(windows)] pin_egress_interface: bool,
-        #[cfg(linux)] fwmark: u32,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -1258,14 +1258,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         // keep the tunnel's own packets out of it.
         #[cfg(linux)]
         if route_mode == RouteMode::Fwmark {
-            if fwmark == 0 {
-                anyhow::bail!("route_mode=fwmark requires `fwmark` to be set in the config");
-            };
-            let mut pr = policy_routing::PolicyRouting::new(
-                fwmark,
-                route_manager::FWMARK_ROUTE_TABLE,
-                server_ip,
-            )?;
+            let mut pr = policy_routing::PolicyRouting::new(fwmark_config, server_ip)?;
             if let Err(e) = pr.install().await {
                 pr.cleanup().await;
                 return Err(e);
@@ -1273,8 +1266,15 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             self.policy_routing = Some(pr);
         }
 
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_config.table,
+        )?;
         let route_updater = route_manager.start().await?;
 
         // A weak ref keeps the coordinator task from extending the outside
@@ -1387,7 +1387,7 @@ pub async fn connect<
                     server,
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
+                    config.fwmark_config.fwmark,
                 )
                 .await
                 .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
@@ -1421,7 +1421,7 @@ pub async fn connect<
                     server,
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
+                    config.fwmark_config.fwmark,
                 )
                 .await
                 .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
@@ -2069,7 +2069,7 @@ pub async fn client<
                 #[cfg(windows)]
                 !config.disable_pin_egress_interface,
                 #[cfg(linux)]
-                config.fwmark,
+                config.fwmark_config,
             )
             .await?;
     }
