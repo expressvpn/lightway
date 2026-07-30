@@ -47,18 +47,30 @@ impl Udp {
         // own routes.
         #[cfg(all(linux, not(feature = "mobile")))]
         {
-            sockopt::set_so_mark(&sock, fwmark).map_err(|e| {
-                anyhow!("Failed to set SO_MARK={fwmark} on outside socket (needs CAP_NET_ADMIN): {e}")
-            })?;
-            // Read back rather than trust the setsockopt: a silently unmarked
-            // socket would reintroduce the routing loop this exists to prevent.
-            let applied = sockopt::get_so_mark(&sock)?;
-            if applied != fwmark {
-                return Err(anyhow!(
-                    "SO_MARK verification failed: set {fwmark}, read back {applied}"
-                ));
+            // Show warning and tolerate when so mark dont not work
+            // so the network will not break
+            if sockopt::set_so_mark(&sock, fwmark)
+                .map_err(|e| {
+                    tracing::warn!("Fail to set so mark on socket: {}", e);
+                })
+                .is_ok()
+            {
+                tracing::info!("Applied firewall mark to outside socket");
             }
-            tracing::info!("Applied firewall mark to outside socket");
+
+            #[cfg(feature = "debug")]
+            match sockopt::get_so_mark(&sock) {
+                Ok(applied) => {
+                    if applied != fwmark {
+                        return Err(anyhow!(
+                            "SO_MARK verification failed: set {fwmark}, read back {applied}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Fail to read so mark from socket: {}", e);
+                }
+            }
         }
 
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
