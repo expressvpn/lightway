@@ -3,20 +3,21 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
 use super::relevant_addrs;
 use windows_sys::Win32::{
-    Foundation::{HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{HANDLE, INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0},
     NetworkManagement::IpHelper::{
         FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW,
         MIB_UNICASTIPADDRESS_TABLE, NotifyAddrChange,
     },
     Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC},
     System::IO::OVERLAPPED,
-    System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject},
+    System::Threading::{
+        CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+    },
 };
 
 /// Read the current system-wide unicast IP addresses via `GetUnicastIpAddressTable`.
@@ -76,11 +77,54 @@ pub enum AddrChangeEvent {
     AddressChanged,
 }
 
+/// Owned Win32 manual-reset event used to interrupt the monitor's blocking
+/// wait at shutdown. Signalling it wakes `WaitForMultipleObjects` immediately,
+/// so teardown does not have to wait for the address-change wait to time out.
+struct ShutdownEvent(HANDLE);
+
+// SAFETY: a Win32 event HANDLE is not tied to its creating thread, so the
+// owned handle can be moved to another thread.
+unsafe impl Send for ShutdownEvent {}
+// SAFETY: SetEvent and handle reads on a Win32 event HANDLE are safe to call
+// concurrently, so &ShutdownEvent can be shared across threads.
+unsafe impl Sync for ShutdownEvent {}
+
+impl ShutdownEvent {
+    fn new() -> Result<Self> {
+        // SAFETY: CreateEventW with a default security descriptor, manual-reset
+        // (1) so it latches once signalled, initially non-signaled (0), unnamed.
+        let handle = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
+        if handle.is_null() {
+            return Err(anyhow::anyhow!("Failed to create shutdown event"));
+        }
+        Ok(ShutdownEvent(handle))
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.0
+    }
+
+    fn signal(&self) {
+        // SAFETY: self.0 is a valid event handle created in `new`.
+        unsafe { SetEvent(self.0) };
+    }
+}
+
+impl Drop for ShutdownEvent {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: self.0 is a valid handle created by CreateEventW that has
+            // not been closed yet.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
+}
+
 /// Async stream for monitoring Windows address changes
 pub struct AsyncAddrListener {
     receiver: mpsc::UnboundedReceiver<AddrChangeEvent>,
     _join_handle: tokio::task::JoinHandle<()>,
-    shutdown: Arc<AtomicBool>,
+    shutdown_event: Arc<ShutdownEvent>,
 }
 
 impl AsyncAddrListener {
@@ -90,11 +134,11 @@ impl AsyncAddrListener {
     /// appearance/disappearance must not be reported as a network change.
     pub fn new(ignore: Vec<IpAddr>) -> Result<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = shutdown.clone();
+        let shutdown_event = Arc::new(ShutdownEvent::new()?);
+        let shutdown_event_clone = shutdown_event.clone();
 
         let join_handle = tokio::task::spawn_blocking(move || {
-            if let Err(e) = Self::monitor_address_changes(sender, shutdown_clone, ignore) {
+            if let Err(e) = Self::monitor_address_changes(sender, shutdown_event_clone, ignore) {
                 error!("Address monitoring task failed: {}", e);
             }
         });
@@ -102,14 +146,14 @@ impl AsyncAddrListener {
         Ok(Self {
             receiver,
             _join_handle: join_handle,
-            shutdown,
+            shutdown_event,
         })
     }
 
     /// Internal function to monitor address changes using Windows API
     fn monitor_address_changes(
         sender: mpsc::UnboundedSender<AddrChangeEvent>,
-        shutdown: Arc<AtomicBool>,
+        shutdown_event: Arc<ShutdownEvent>,
         ignore: Vec<IpAddr>,
     ) -> Result<()> {
         // RAII wrapper for Windows event handle
@@ -158,17 +202,11 @@ impl AsyncAddrListener {
         let mut prev: BTreeSet<IpAddr> = relevant_addrs(current_unicast_addrs(), &ignore);
 
         loop {
-            // Check if we should shutdown
-            if shutdown.load(Ordering::Relaxed) {
-                debug!("Address monitoring shutdown requested");
-                break;
-            }
-
             let monitoring_result =
-                Self::perform_single_monitor_cycle(event_handle.get(), shutdown.clone());
+                Self::perform_single_monitor_cycle(event_handle.get(), shutdown_event.handle());
 
             match monitoring_result {
-                Ok(()) => {
+                Ok(true) => {
                     let now = relevant_addrs(current_unicast_addrs(), &ignore);
                     if now == prev {
                         // Change was confined to ignored/tunnel addresses or
@@ -189,10 +227,26 @@ impl AsyncAddrListener {
                     // Small delay to prevent flooding if multiple rapid changes occur
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
+                Ok(false) => {
+                    // Shutdown event signalled mid-wait: exit immediately without
+                    // the error-retry backoff below.
+                    debug!("Address monitoring shutdown requested");
+                    break;
+                }
                 Err(e) => {
                     error!("Address monitoring cycle failed: {}", e);
-                    // Brief delay before retrying to prevent tight loop
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    // Brief backoff before retrying to prevent a tight loop, but
+                    // wake immediately on shutdown. A cycle that fails before
+                    // reaching the wait (e.g. NotifyAddrChange failing) would
+                    // otherwise never observe the shutdown event and could spin
+                    // here forever, hanging process exit.
+                    // SAFETY: shutdown_event holds a valid event handle for the
+                    // lifetime of this function.
+                    if unsafe { WaitForSingleObject(shutdown_event.handle(), 500) } == WAIT_OBJECT_0
+                    {
+                        debug!("Address monitoring shutdown requested");
+                        break;
+                    }
                 }
             }
         }
@@ -202,7 +256,7 @@ impl AsyncAddrListener {
     }
 
     /// Performs a single monitoring cycle with proper resource cleanup
-    fn perform_single_monitor_cycle(event_handle: HANDLE, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn perform_single_monitor_cycle(event_handle: HANDLE, shutdown_event: HANDLE) -> Result<bool> {
         // RAII wrapper for notification cleanup
         struct NotificationContext {
             handle: HANDLE,
@@ -261,39 +315,32 @@ impl AsyncAddrListener {
 
         debug!("Waiting for address change notification...");
 
-        // Wait for the event to be signaled with a timeout to prevent hanging
-        // Use 1 second timeout to periodically check shutdown flag
-        const TIMEOUT_MS: u32 = 1000;
+        // Wait on both the address-change event and the shutdown event. The
+        // shutdown event is signalled from `drop`, so teardown wakes this wait
+        // immediately instead of polling on a timeout.
+        let handles = [event_handle, shutdown_event];
 
-        loop {
-            // Check shutdown flag before each wait
-            if shutdown.load(Ordering::Relaxed) {
+        // SAFETY: both handles are valid event handles owned for the duration of
+        // the wait; `bWaitAll = FALSE` (0) returns as soon as either signals.
+        let wait_result =
+            unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE) };
+
+        match wait_result {
+            // Index 0: address-change event signalled.
+            WAIT_OBJECT_0 => {
+                // SAFETY: ResetEvent is called with a valid event handle that was signaled
+                unsafe { ResetEvent(event_handle) };
+                Ok(true)
+            }
+            // Index 1: shutdown event signalled.
+            w if w == WAIT_OBJECT_0 + 1 => {
                 debug!("Address monitoring cycle interrupted by shutdown");
-                return Err(anyhow::anyhow!("Monitoring interrupted by shutdown"));
+                Ok(false)
             }
-
-            // SAFETY: WaitForSingleObject is called with a valid event handle and timeout value
-            let wait_result = unsafe { WaitForSingleObject(event_handle, TIMEOUT_MS) };
-
-            match wait_result {
-                WAIT_OBJECT_0 => {
-                    // Address change detected
-                    // SAFETY: ResetEvent is called with a valid event handle that was signaled
-                    unsafe { ResetEvent(event_handle) };
-                    return Ok(());
-                }
-                WAIT_TIMEOUT => {
-                    // Timeout occurred - this is normal, check shutdown and continue
-                    // This allows the thread to check periodically if it should exit
-                    continue;
-                }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Wait for address change event failed: {}",
-                        wait_result
-                    ));
-                }
-            }
+            _ => Err(anyhow::anyhow!(
+                "Wait for address change event failed: {}",
+                wait_result
+            )),
         }
     }
 
@@ -305,8 +352,10 @@ impl AsyncAddrListener {
 
 impl Drop for AsyncAddrListener {
     fn drop(&mut self) {
-        // Signal the monitoring thread to shutdown
-        self.shutdown.store(true, Ordering::Relaxed);
+        // Signal the monitoring thread to shutdown: signal the event to wake any
+        // in-progress WaitForMultipleObjects immediately. The event is
+        // manual-reset, so it latches and any subsequent wait returns at once.
+        self.shutdown_event.signal();
         debug!("AsyncAddrListener dropping, shutdown signal sent");
     }
 }
