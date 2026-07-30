@@ -72,6 +72,13 @@ tun-rs.workspace = true
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2.0"
 
+# Same versions route_manager uses internally, for the blackhole route
+# support it lacks (see src/route_manager/blackhole.rs)
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core = "0.8"
+netlink-packet-route = "0.28"
+netlink-sys = "0.8"
+
 [build-dependencies]
 cfg_aliases.workspace = true
 

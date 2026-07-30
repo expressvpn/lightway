@@ -14,6 +14,15 @@ use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
 #[cfg(windows)]
 use crate::platform::windows::utils;
 
+#[cfg(linux)]
+mod blackhole;
+
+// Fallback blackhole for the server: when a network change removes the
+// primary server route, packets to the server must fail fast instead of
+// falling through to the tunnel default route and getting re-encrypted.
+#[cfg(linux)]
+const SERVER_BLACKHOLE_METRIC: u32 = 10000;
+
 // LAN networks for RouteMode::Lan
 const LAN_NETWORKS: [(IpAddr, u8); 5] = [
     (
@@ -127,6 +136,8 @@ struct RouteManagerInner {
     vpn_routes: Vec<Route>,
     lan_routes: Vec<Route>,
     server_route: Option<Route>,
+    #[cfg(linux)]
+    blackhole_installed: bool,
 }
 
 impl RouteManager {
@@ -194,6 +205,8 @@ impl RouteManagerInner {
             vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + 1),
             lan_routes: Vec::with_capacity(LAN_NETWORKS.len()),
             server_route: None,
+            #[cfg(linux)]
+            blackhole_installed: false,
         })
     }
 
@@ -372,6 +385,31 @@ impl RouteManagerInner {
         Ok(())
     }
 
+    /// Installs the blackhole fallback route for the server. Failure is not
+    /// fatal: the tunnel works without it, it only closes the window where
+    /// server-bound packets loop into the tunnel during a network change.
+    #[cfg(linux)]
+    fn install_blackhole_route(&mut self) {
+        let prefix = host_prefix_len(&self.server_ip);
+        match blackhole::add(self.server_ip, prefix, SERVER_BLACKHOLE_METRIC) {
+            Ok(()) => {
+                tracing::info!(
+                    "Added blackhole route {}/{} metric {}",
+                    self.server_ip,
+                    prefix,
+                    SERVER_BLACKHOLE_METRIC
+                );
+                self.blackhole_installed = true;
+            }
+            Err(e) if self.is_route_exists_error(&e) => {
+                self.blackhole_installed = true;
+            }
+            Err(e) => {
+                warn!("Failed to add blackhole route for server: {}", e);
+            }
+        }
+    }
+
     /// Adds LAN Route and stores it
     async fn add_route_lan(&mut self, route: Route) -> Result<(), RoutingTableError> {
         self.add_route(&route).await?;
@@ -407,6 +445,14 @@ impl RouteManagerInner {
                 route, e
             );
         }
+
+        #[cfg(linux)]
+        if self.blackhole_installed {
+            let prefix = host_prefix_len(&self.server_ip);
+            if let Err(e) = blackhole::delete(self.server_ip, prefix, SERVER_BLACKHOLE_METRIC) {
+                warn!("Failed to delete blackhole route during drop: {}", e);
+            }
+        }
         trace!("Inner route manager cleaned up");
     }
 
@@ -434,6 +480,9 @@ impl RouteManagerInner {
         let server_route = server_route.with_metric(0);
 
         self.add_route_server(server_route).await?;
+
+        #[cfg(linux)]
+        self.install_blackhole_route();
 
         if self.routing_mode == RouteMode::Lan {
             for (network, prefix) in LAN_NETWORKS {
@@ -830,6 +879,36 @@ mod tests {
             }
             Ok(_) => panic!(),
         }
+    }
+
+    #[cfg(linux)]
+    #[tokio::test]
+    #[serial_test::serial(route_manager)]
+    #[ignore = "May affect system routing"]
+    async fn test_privileged_blackhole_route_add_delete() {
+        let _restorer = RouteRestorer::new();
+        let mut sync_manager = SyncRouteManager::new().unwrap();
+        let prefix = host_prefix_len(&EXTERNAL_IP_V4);
+
+        blackhole::add(EXTERNAL_IP_V4, prefix, SERVER_BLACKHOLE_METRIC).unwrap();
+
+        let is_blackhole = |r: &Route| {
+            r.destination() == EXTERNAL_IP_V4
+                && r.prefix() == prefix
+                && r.metric() == Some(SERVER_BLACKHOLE_METRIC)
+                && r.gateway().is_none()
+                && r.if_index().is_none()
+        };
+        let routes = sync_manager.list().unwrap();
+        assert!(routes.iter().any(is_blackhole));
+
+        // Adding again must report "already exists"
+        let err = blackhole::add(EXTERNAL_IP_V4, prefix, SERVER_BLACKHOLE_METRIC).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
+
+        blackhole::delete(EXTERNAL_IP_V4, prefix, SERVER_BLACKHOLE_METRIC).unwrap();
+        let routes = sync_manager.list().unwrap();
+        assert!(!routes.iter().any(is_blackhole));
     }
 
     #[test_case(RouteAddMethod::Standard)]
