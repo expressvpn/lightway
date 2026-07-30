@@ -1,5 +1,12 @@
 #[cfg(desktop)]
 use super::dns_manager::DnsConfigMode;
+#[cfg(linux)]
+use super::policy_routing::{
+    DEFAULT_FWMARK, RULE_PRIORITY_MARKED, RULE_PRIORITY_MARKED_FALLBACK, RULE_PRIORITY_SERVER,
+    RULE_PRIORITY_TUNNEL,
+};
+#[cfg(linux)]
+use super::route_manager::FWMARK_ROUTE_TABLE;
 #[cfg(desktop)]
 use super::route_manager::RouteMode;
 use bytesize::ByteSize;
@@ -208,28 +215,73 @@ pub struct Config {
     Modes:
         default: Sets up routes as specified in server, tun_local_ip, tun_peer_ip, tun_dns_ip
         noexec : Does not setup any routes
-        lan    : Sets up default + additional lan routes"#))]
+        lan    : Sets up default + additional lan routes
+        fwmark : Setup routes fwmark(linux only)"#))]
     #[schemars(extend("x-cfg" = "desktop"))]
     pub route_mode: RouteMode,
 
-    #[cfg(target_os = "linux")]
+    #[cfg(linux)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(long)))]
     #[patch(
         attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
-
-When set, the tunnel's own encrypted packets carry this mark so policy
-routing rules can keep them out of the tunnel. Pair with:
-
-```text
-ip rule add priority 100 lookup main suppress_prefixlength 0
-ip rule add priority 110 not fwmark <MARK> lookup <TABLE>
-ip route add default dev <tun> table <TABLE>
-```
-
-and run with route_mode=noexec. Requires CAP_NET_ADMIN."#)
+        Only effective when route_mode=fwmark on Linux. The tunnel's own
+        encrypted packets carry this mark so policy routing rules can keep
+        them out of the tunnel (router mode fwmark only)."#)
     )]
-    pub fwmark: Option<u32>,
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub fwmark: u32,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(
+        doc = r#"Routing table id for fwmark tunnel routes (route_mode=fwmark).
+        Must be in 1..=252 to avoid reserved tables (main=254, default=253, local=255).
+        Defaults to 2 (Helium atomic number)."#
+    ))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub fwmark_route_table: u8,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(
+        doc = r#"Priority of the ip rule that routes the tunnel socket's traffic via the
+        main table (route_mode=fwmark). Must be less than rule_priority_marked_fallback."#
+    ))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub rule_priority_marked: u32,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(
+        doc = r#"Priority of the ip rule that fixes rp_filter for incoming server
+        reply packets (route_mode=fwmark). Must be less than rule_priority_tunnel."#
+    ))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub rule_priority_server: u32,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(
+        attribute(doc = r#"Priority of the loop-breaker ip rule (route_mode=fwmark).
+        Must be less than rule_priority_tunnel."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub rule_priority_marked_fallback: u32,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(
+        attribute(doc = r#"Priority of the ip rule that sends all other traffic into the
+        tunnel table (route_mode=fwmark). Must be greater than rule_priority_marked_fallback."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub rule_priority_tunnel: u32,
 
     #[cfg(desktop)]
     #[patch(attribute(clap(long, value_enum)))]
@@ -342,6 +394,19 @@ and run with route_mode=noexec. Requires CAP_NET_ADMIN."#)
 }
 
 impl Config {
+    /// Returns a [`crate::policy_routing::FWMarkConfig`] built from this config's fwmark fields.
+    #[cfg(linux)]
+    pub fn fwmark_config(&self) -> super::policy_routing::FWMarkConfig {
+        super::policy_routing::FWMarkConfig {
+            fwmark: self.fwmark,
+            table: self.fwmark_route_table,
+            rule_priority_marked: self.rule_priority_marked,
+            rule_priority_server: self.rule_priority_server,
+            rule_priority_marked_fallback: self.rule_priority_marked_fallback,
+            rule_priority_tunnel: self.rule_priority_tunnel,
+        }
+    }
+
     /// The number of servers
     pub fn len(&self) -> usize {
         if self.server.is_empty() {
@@ -465,6 +530,37 @@ impl Config {
                 && self.wintun_ring_capacity <= ByteSize::mib(64),
             "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
         );
+        #[cfg(linux)]
+        if self.route_mode == RouteMode::Fwmark {
+            anyhow::ensure!(
+                self.fwmark_route_table >= 1 && self.fwmark_route_table <= 252,
+                "fwmark_route_table must be in 1..=252 (reserved: local=255, main=254, default=253)"
+            );
+            // Rule MARKED must precede Rule MARKED_FALLBACK: marked packets must
+            // attempt the main table before the loop-breaker returns ENETUNREACH.
+            anyhow::ensure!(
+                self.rule_priority_marked < self.rule_priority_marked_fallback,
+                "rule_priority_marked ({}) must be less than rule_priority_marked_fallback ({})",
+                self.rule_priority_marked,
+                self.rule_priority_marked_fallback,
+            );
+            // Rule MARKED_FALLBACK must precede Rule TUNNEL: during a roam,
+            // marked packets must get ENETUNREACH before reaching the tunnel table.
+            anyhow::ensure!(
+                self.rule_priority_marked_fallback < self.rule_priority_tunnel,
+                "rule_priority_marked_fallback ({}) must be less than rule_priority_tunnel ({})",
+                self.rule_priority_marked_fallback,
+                self.rule_priority_tunnel,
+            );
+            // Rule SERVER must precede Rule TUNNEL: server-IP lookups must resolve
+            // via main so that rp_filter accepts incoming server packets.
+            anyhow::ensure!(
+                self.rule_priority_server < self.rule_priority_tunnel,
+                "rule_priority_server ({}) must be less than rule_priority_tunnel ({})",
+                self.rule_priority_server,
+                self.rule_priority_tunnel,
+            );
+        }
         Ok(())
     }
 }
@@ -510,8 +606,18 @@ impl Default for Config {
             enable_batch_receive: false,
             #[cfg(desktop)]
             route_mode: RouteMode::default(),
-            #[cfg(target_os = "linux")]
-            fwmark: None,
+            #[cfg(linux)]
+            fwmark: DEFAULT_FWMARK,
+            #[cfg(linux)]
+            fwmark_route_table: FWMARK_ROUTE_TABLE,
+            #[cfg(linux)]
+            rule_priority_marked: RULE_PRIORITY_MARKED,
+            #[cfg(linux)]
+            rule_priority_server: RULE_PRIORITY_SERVER,
+            #[cfg(linux)]
+            rule_priority_marked_fallback: RULE_PRIORITY_MARKED_FALLBACK,
+            #[cfg(linux)]
+            rule_priority_tunnel: RULE_PRIORITY_TUNNEL,
             #[cfg(desktop)]
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,

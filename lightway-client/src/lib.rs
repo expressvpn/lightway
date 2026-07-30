@@ -206,11 +206,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
-    /// Firewall mark (`SO_MARK`) applied to the outside socket.
-    ///
-    /// Required by [`RouteMode::Fwmark`]. See [`crate::policy_routing`].
+    /// Fwmark policy-routing parameters. Only effective under [`RouteMode::Fwmark`].
     #[cfg(linux)]
-    pub fwmark: Option<u32>,
+    pub fwmark_config: policy_routing::FWMarkConfig,
 
     /// DNS configuration mode
     #[cfg(desktop)]
@@ -341,7 +339,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(desktop)]
             route_mode: config.route_mode,
             #[cfg(linux)]
-            fwmark: config.fwmark,
+            fwmark_config: config.fwmark_config(),
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -886,7 +884,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
         network_change_rx: Option<watch::Receiver<()>>,
-        #[cfg(linux)] fwmark: Option<u32>,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -905,14 +903,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         // keep the tunnel's own packets out of it.
         #[cfg(linux)]
         if route_mode == RouteMode::Fwmark {
-            let Some(fwmark) = fwmark else {
-                anyhow::bail!("route_mode=fwmark requires `fwmark` to be set in the config");
-            };
-            let mut pr = policy_routing::PolicyRouting::new(
-                fwmark,
-                route_manager::FWMARK_ROUTE_TABLE,
-                server_ip,
-            )?;
+            let mut pr = policy_routing::PolicyRouting::new(fwmark_config, server_ip)?;
             if let Err(e) = pr.install().await {
                 pr.cleanup().await;
                 return Err(e);
@@ -920,8 +911,15 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             self.policy_routing = Some(pr);
         }
 
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_config.table,
+        )?;
         route_manager.start(network_change_rx).await?;
 
         self.route_manager = Some(route_manager);
@@ -993,7 +991,7 @@ pub async fn connect<
                 let mut sock = io::outside::Udp::new(server, maybe_sock, {
                     #[cfg(linux)]
                     {
-                        config.fwmark
+                        Some(config.fwmark_config.fwmark)
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -1577,7 +1575,7 @@ pub async fn client<
                 config.tun_dns_ip.into(),
                 Some(rx),
                 #[cfg(linux)]
-                config.fwmark,
+                config.fwmark_config,
             )
             .await?;
     }
