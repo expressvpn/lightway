@@ -1,5 +1,10 @@
 # lightway-core
 
+## TLS backends
+
+lightway-core supports two TLS/DTLS backends (defaults to wolfssl), selected at compile time.
+See [docs/tls_backends.md](../docs/tls_backends.md) for details.
+
 ## Fuzzing
 
 ### `cargo-fuzz`
