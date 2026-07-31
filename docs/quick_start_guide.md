@@ -42,9 +42,14 @@ Download the server binary from the [nightly releases page](https://github.com/e
 
 ```bash
 ARCH=$(uname -m); [[ "$ARCH" == "arm64" ]] && ARCH="aarch64"
-curl -fL "https://github.com/expressvpn/lightway/releases/download/lightway-nightly/lightway-server-${ARCH}-unknown-linux-gnu" -o lightway-server
+curl -fL "https://github.com/expressvpn/lightway/releases/download/lightway-nightly/lightway-server-${ARCH}-unknown-linux-gnu-wolfssl" -o lightway-server
 chmod +x lightway-server
 ```
+
+Binaries are published per TLS backend: the `-wolfssl` binaries use wolfSSL,
+the main and recommended backend, while the `-boringssl-beta` binaries are
+built with the newly supported BoringSSL backend. See
+[TLS backends](./tls_backends.md) for details.
 
 ### 2. Download the Setup Script
 

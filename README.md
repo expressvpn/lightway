@@ -13,6 +13,7 @@ This repository contains multiple crates as follows:
  - lightway-core - Core VPN protocol library
  - lightway-client - Client application
  - lightway-server - Server application
+ - lightway-boring - BoringSSL-backed TLS/DTLS layer (optional TLS backend, see [TLS backends](#tls-backends))
 
 In addition there is:
 
@@ -31,6 +32,28 @@ Both x86_64 and arm64 platforms are supported and built as part of CI.
 
 Support for other platforms will be added soon.
 
+## TLS backends
+
+Lightway supports two TLS/DTLS backends, selected at compile time via cargo
+features:
+
+ - **wolfSSL** (default) - the main, recommended backend. Enabled by the
+   `wolfssl` feature (on by default).
+ - **BoringSSL** - now supported as an alternative backend, provided by the
+   `lightway-boring` crate. Enabled by the `boringssl` feature.
+
+The two backends are mutually exclusive: exactly one of `wolfssl` or
+`boringssl` must be enabled, otherwise the build fails with a compile error.
+To switch to BoringSSL, disable the default features (which include
+`wolfssl`) and enable `boringssl` instead:
+
+The equivalent Earthly targets are `+build-wolfssl` and `+build-boringssl`,
+with matching `+test-wolfssl` / `+test-boringssl` targets for the test
+suites.
+
+See [TLS backends](docs/tls_backends.md) for more details on how the feature
+gates are wired through the crates.
+
 ## Development steps
 
 Lightway core and reference applications can be built using [Earthly](https://github.com/earthly/earthly)
@@ -39,13 +62,13 @@ without setting up the complete development environment locally.
 Refer to [Earthly](https://docs.earthly.dev/) documentation on how to install earthly.
 
 ```bash
-earthly +build
+earthly +build-wolfssl
 ```
 
 For running unit-tests,
 
 ```bash
-earthly +test
+earthly +test-wolfssl
 ```
 
 To format code:
