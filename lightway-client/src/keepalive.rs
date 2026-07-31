@@ -186,10 +186,8 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         timeout.as_mut().set(None.into())
                     },
                     Message::NetworkChange => {
-                        if !matches!(state, State::Pending) {
-                            tracing::info!("sending keepalives because of {:?}", msg);
-                            state = State::Needed;
-                        }
+                        tracing::info!("sending keepalives because of {:?}", msg);
+                        state = State::Needed;
                         // Reset timeout to make sure we start again
                         // When there is a network interruption, mobile clients may send
                         // suspend to avoid keepalive dropping the connection.
@@ -432,6 +430,29 @@ mod tests {
             sleep(Duration::from_millis(10)).await;
             assert_eq!(connection.keepalive_count(), exp_start + i);
         }
+
+        drop(keepalive);
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
+    }
+
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
+    async fn network_change_while_reply_pending_resends(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+        assert_eq!(connection.keepalive_count(), 1);
+
+        // No reply arrives (roam in progress, first ping lost). A later
+        // network change event must re-send immediately, not wait for the
+        // interval.
+        keepalive.network_changed().await;
+        sleep(Duration::from_millis(10)).await;
+        assert_eq!(connection.keepalive_count(), 2);
 
         drop(keepalive);
         let result = task.await.unwrap().unwrap();
