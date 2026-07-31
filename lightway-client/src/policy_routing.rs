@@ -18,56 +18,57 @@
 //! determine which table is consulted:
 //!
 //! ```text
-//! priority 100:  fwmark <MARK>              lookup main   # (1) tunnel socket → WAN
-//! priority 105:  to <SERVER_IP>/32          lookup main   # (2) rp_filter fix (see below)
-//! priority 107:  fwmark <MARK>              unreachable   # (3) loop-breaker (see below)
-//! priority 110:  (no condition)             lookup <TABLE># (4) all other traffic → tunnel
+//! Rule MARKED:          fwmark <MARK>              lookup main   # (1) tunnel socket → WAN
+//! Rule SERVER:          to <SERVER_IP>/32          lookup main   # (2) rp_filter fix (see below)
+//! Rule MARKED_FALLBACK: fwmark <MARK>              unreachable   # (3) loop-breaker (see below)
+//! Rule TUNNEL:          (no condition)             lookup <TABLE># (4) all other traffic → tunnel
 //! ```
 //!
 //! The tunnel's outside socket carries `<MARK>` (set via
 //! [`lightway_app_utils::sockopt::set_so_mark`]), so its outgoing packets hit
-//! rule 100 and resolve via *main* — whose default route the kernel keeps
+//! Rule MARKED and resolve via *main* — whose default route the kernel keeps
 //! current on its own, with no Lightway-managed entry involved.
 //!
-//! # Rule 105 — rp_filter fix
+//! # Rule SERVER — rp_filter fix
 //!
 //! Linux's reverse-path filter (strict mode, `rp_filter=1`) checks incoming
 //! packets by looking up the *source* IP through the routing rules — but using
 //! the *incoming packet's* mark, which is 0 for plain packets from the WAN.
 //!
-//! After rule 110 is installed, an unmarked lookup for the server IP falls
-//! through rules 100 and 107 (both require `fwmark <MARK>`) and lands on
-//! rule 110 → tunnel table → `0.0.0.0/1 via lightway`.  Strict rp_filter
-//! would then consider `SERVER_IP` routed via `lightway`, but the server's
-//! reply packet arrived on `wlan0` (or whichever physical interface), producing
-//! an interface mismatch and silently **dropping** every pong — which the
-//! keepalive mechanism observes as a timeout.
+//! After Rule TUNNEL is installed, an unmarked lookup for the server IP falls
+//! through Rules MARKED and MARKED_FALLBACK (both require `fwmark <MARK>`) and
+//! lands on Rule TUNNEL → tunnel table → `0.0.0.0/1 via lightway`.  Strict
+//! rp_filter would then consider `SERVER_IP` routed via `lightway`, but the
+//! server's reply packet arrived on `wlan0` (or whichever physical interface),
+//! producing an interface mismatch and silently **dropping** every pong — which
+//! the keepalive mechanism observes as a timeout.
 //!
-//! Rule 105 intercepts the unmarked lookup for `<SERVER_IP>/32` and redirects
+//! Rule SERVER intercepts the unmarked lookup for `<SERVER_IP>/32` and redirects
 //! it to *main*, where the WAN default route sends it back out the physical
 //! interface.  rp_filter sees a consistent interface and accepts the packet.
 //!
-//! # Rule 107 — loop-breaker
+//! # Rule MARKED_FALLBACK — loop-breaker
 //!
 //! `ip rule` falls through to the next rule when the selected table returns no
 //! matching route.  During a Wi-Fi roam, the kernel removes the old default
 //! route from *main* before a new one arrives.  In that brief window:
 //!
-//! 1. Rule 100: `fwmark <MARK> → lookup main` — no route → **fall through**
-//! 2. Rule 105: `to <SERVER_IP>/32 → lookup main` — no route → **fall through**
-//! 3. Rule 107: (absent without this fix) — skipped
-//! 4. Rule 110: `→ lookup <TABLE>` — `0.0.0.0/1` and `128.0.0.0/1` via `tun`
+//! 1. Rule MARKED: `fwmark <MARK> → lookup main` — no route → **fall through**
+//! 2. Rule SERVER: `to <SERVER_IP>/32 → lookup main` — no route → **fall through**
+//! 3. Rule MARKED_FALLBACK: (absent without this fix) — skipped
+//! 4. Rule TUNNEL: `→ lookup <TABLE>` — `0.0.0.0/1` and `128.0.0.0/1` via `tun`
 //!    — the VPN socket's own encrypted packet is read back off the tun device
 //!    as an inside packet, re-encapsulated (+69 bytes per lap), and re-sent →
 //!    **encapsulation loop**.
 //!
-//! Rule 107 (`fwmark <MARK> unreachable`) intercepts the fall-through:
-//! - During normal operation marked packets are already handled by rule 100 and
-//!   rule 107 is never reached.
-//! - During a roam, marked packets fall through rules 100 and 105 (both consult
-//!   *main*, which has no route) and hit rule 107, which returns `ENETUNREACH`
-//!   to the caller.  The outside I/O callback already treats this as a transient
-//!   send failure, dropping the packet cleanly and preventing the loop.
+//! Rule MARKED_FALLBACK (`fwmark <MARK> unreachable`) intercepts the fall-through:
+//! - During normal operation marked packets are already handled by Rule MARKED and
+//!   Rule MARKED_FALLBACK is never reached.
+//! - During a roam, marked packets fall through Rules MARKED and SERVER (both
+//!   consult *main*, which has no route) and hit Rule MARKED_FALLBACK, which
+//!   returns `ENETUNREACH` to the caller.  The outside I/O callback already treats
+//!   this as a transient send failure, dropping the packet cleanly and preventing
+//!   the loop.
 
 use std::net::Ipv4Addr;
 
