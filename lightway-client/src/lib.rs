@@ -1503,6 +1503,15 @@ pub async fn client<
         let _ = conn.stop_signal.take().unwrap().send(());
     }
 
+    #[cfg(desktop)]
+    let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
+    #[cfg(desktop)]
+    if config.network_change_signal.is_none() && !config.keepalive_interval.is_zero() {
+        let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
+        config.network_change_signal = Some(monitor.subscribe());
+        network_change_monitor = Some(monitor);
+    }
+
     if let Some(mut network_change_signal) = config.network_change_signal.clone() {
         let connection_network_change_signal = connection.network_change_signal.clone();
         tokio::spawn(async move {
@@ -1540,8 +1549,6 @@ pub async fn client<
 
     connection.set_connection_inside_io();
 
-    #[cfg(desktop)]
-    let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
     #[cfg(desktop)]
     {
         let rx = if let Some(ref rx) = config.network_change_signal {
