@@ -16,6 +16,7 @@
 
 mod aes256;
 mod cert;
+mod chacha20_poly1305;
 mod config;
 mod context;
 #[cfg(feature = "debug")]
@@ -30,6 +31,7 @@ mod types;
 pub use aes256::{Aes256Gcm, Aes256GcmError};
 pub use boring::version::version as get_version_string;
 pub use cert::{RootCertificate, Secret};
+pub use chacha20_poly1305::{Chacha20Poly1305Aead, Chacha20Poly1305Error};
 pub use config::SessionConfig;
 pub use context::{Context, ContextBuilder};
 pub use error::{Error, ErrorKind, NewContextBuilderError, NewSessionError, TlsError};
