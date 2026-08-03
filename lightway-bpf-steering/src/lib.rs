@@ -20,7 +20,9 @@
 #![warn(missing_docs)]
 
 mod header;
+mod outside;
 
 pub use header::{
     EXPRESSLANE_FLAG_OFFSET, HEADER_LEN, MAGIC, SESSION_ID_OFFSET, is_expresslane_datagram,
 };
+pub use outside::OutsideSplit;

@@ -23,7 +23,10 @@ unnecessary_safety_comment = "deny"
 
 [dependencies]
 bytes.workspace = true
+libc.workspace = true
 lightway-core = { path = "../lightway-core", version = "0.1.0" }
+# "all" is what gates socket2's SO_REUSEPORT setter.
+socket2 = { workspace = true, features = ["all"] }
 
 # The crate is `#![cfg(target_os = "linux")]`, so the BPF toolchain must not be
 # reachable from anywhere else: a macOS workspace `cargo clippy` would

@@ -1622,7 +1622,9 @@ dependencies = [
  "libbpf-cargo",
  "libbpf-rs",
  "libbpf-sys",
+ "libc",
  "lightway-core",
+ "socket2",
 ]
 
 [[package]]
