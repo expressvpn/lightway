@@ -42,7 +42,7 @@ use crate::debug::WiresharkKeyLogger;
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
-use crate::route_manager::{RouteManager, RouteMode};
+use crate::route_manager::{RouteManager, RouteMode, RouteUpdater};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
@@ -769,6 +769,36 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
     ClientResult::UserDisconnect
 }
 
+/// Single consumer for network-change wake-ups. Reacts to each one with the
+/// steps in order: refresh the server route, then re-`connect()` the outside
+/// socket (Apple platforms). Owns the [`RouteUpdater`], so aborting the task removes
+/// the installed routes.
+#[cfg(desktop)]
+async fn network_event_coordinator(
+    mut route_updater: RouteUpdater,
+    mut route_rx: watch::Receiver<()>,
+    #[cfg(apple)] outside_io: Weak<dyn OutsideIO>,
+) {
+    tracing::info!("Reacting to network change events...");
+    loop {
+        if route_rx.changed().await.is_err() {
+            // Wake source gone; dropping the updater clears routes.
+            break;
+        }
+
+        if let Err(e) = route_updater.check_and_update_server_route().await {
+            tracing::warn!("Updating server route failed: {:?}", e);
+        }
+
+        // The connected outside socket pins the route resolved at connect()
+        // time; re-resolve it now that the routing table is up to date.
+        #[cfg(apple)]
+        if let Some(io) = outside_io.upgrade() {
+            io.reconnect();
+        }
+    }
+}
+
 pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
     conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
@@ -902,13 +932,15 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         }
     }
 
+    /// Install routes and spawn the network-event coordinator, which reacts
+    /// to `route_rx` wake-ups (see `network_event_coordinator`).
     #[cfg(desktop)]
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
-        network_change_rx: Option<watch::Receiver<()>>,
+        route_rx: watch::Receiver<()>,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -923,7 +955,16 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         );
         let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
-        route_manager.start(network_change_rx).await?;
+        let route_updater = route_manager.start().await?;
+
+        // A weak ref keeps the coordinator task from extending the outside
+        // socket's lifetime.
+        route_manager.set_task(tokio::spawn(network_event_coordinator(
+            route_updater,
+            route_rx,
+            #[cfg(apple)]
+            Arc::downgrade(&self.outside_io),
+        )));
 
         self.route_manager = Some(route_manager);
         info!("Routes configured");
@@ -1527,8 +1568,16 @@ pub async fn client<
 
     if let Some(mut network_change_signal) = config.network_change_signal.clone() {
         let connection_network_change_signal = connection.network_change_signal.clone();
+        #[cfg(apple)]
+        let outside_io = Arc::downgrade(&connection.outside_io);
         tokio::spawn(async move {
             while network_change_signal.changed().await.is_ok() {
+                // Re-pin the connected outside socket first so the keepalive
+                // probe rides the new path.
+                #[cfg(apple)]
+                if let Some(io) = outside_io.upgrade() {
+                    io.reconnect();
+                }
                 if let Err(e) = connection_network_change_signal.send(()).await {
                     tracing::error!("Failed to send network_change_signal: {e}");
                 }
@@ -1566,13 +1615,14 @@ pub async fn client<
     let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
     #[cfg(desktop)]
     {
-        let rx = if let Some(ref rx) = config.network_change_signal {
+        // Wake source for the network-event coordinator.
+        let route_rx = if let Some(ref rx) = config.network_change_signal {
             rx.clone()
         } else {
             let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
-            let rx = monitor.subscribe();
+            let route_rx = monitor.subscribe();
             network_change_monitor = Some(monitor);
-            rx
+            route_rx
         };
 
         connection
@@ -1580,7 +1630,7 @@ pub async fn client<
                 config.route_mode,
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
-                Some(rx),
+                route_rx,
             )
             .await?;
     }
