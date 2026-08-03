@@ -150,6 +150,62 @@ impl<AppState: Send> Expresslane<AppState> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::MAX_RETRANSMISSION_ATTEMPTS;
+
+    const ROTATION_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+    fn expresslane() -> Expresslane<()> {
+        Expresslane::new(ExpresslaneState::Inactive, None, None, ROTATION_INTERVAL)
+    }
+
+    /// A config exchange that burns its whole budget leaves the counter at
+    /// MAX. Without a reset the next exchange schedules one 3s tick that
+    /// immediately re-enters the exhaustion branch, spending no retransmits.
+    #[test]
+    fn exhausted_budget_leaves_a_single_shot_wait() {
+        let mut xp = expresslane();
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_millis(500));
+
+        xp.retransmit_count = MAX_RETRANSMISSION_ATTEMPTS;
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_secs(3));
+
+        xp.retransmit_count = 0;
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn wait_time_grows_with_each_attempt() {
+        let mut xp = expresslane();
+        let mut prev = Duration::ZERO;
+        for attempt in 0..=MAX_RETRANSMISSION_ATTEMPTS {
+            xp.retransmit_count = attempt;
+            let wait = xp.retransmit_wait_time();
+            assert!(wait > prev, "attempt {attempt} did not back off: {wait:?}");
+            prev = wait;
+        }
+    }
+
+    /// The rotation stamp is taken before the peer has acked. Clearing it on
+    /// the timeout path is what lets the next inside packet re-arm.
+    #[test]
+    fn cleared_stamp_reopens_the_rotation_gate() {
+        let mut xp = expresslane();
+        assert!(xp.time_to_rotate_key(), "first rotation is always allowed");
+
+        xp.last_key_rotation = Some(Instant::now());
+        assert!(
+            !xp.time_to_rotate_key(),
+            "a fresh stamp holds the gate shut for the rotation interval"
+        );
+
+        xp.last_key_rotation = None;
+        assert!(xp.time_to_rotate_key());
+    }
+}
+
 /// Expresslane connection state
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ExpresslaneState {

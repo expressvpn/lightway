@@ -1943,6 +1943,9 @@ impl<AppState: Send> Connection<AppState> {
         if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
             warn!("Expresslane config transmit timed out, setting expresslane to inactive");
             self.set_expresslane_state(ExpresslaneState::Inactive);
+            // The stamp was taken before the outcome was known. Drop it so
+            // recovery does not wait a whole rotation interval.
+            self.expresslane.last_key_rotation = None;
             return Ok(());
         }
 
@@ -2131,6 +2134,7 @@ impl<AppState: Send> Connection<AppState> {
         let _ = self.send_frame_or_queue(msg);
 
         self.expresslane.last_key_rotation = Some(Instant::now());
+        self.expresslane.retransmit_count = 0;
 
         // Callback to schedule re-transmission if required
         (self.schedule_tick_cb)(
@@ -2164,6 +2168,8 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_queue(msg);
+
+        self.expresslane.retransmit_count = 0;
 
         // Callback to schedule re-transmission if required
         // reuses same retry logic as key rotation
