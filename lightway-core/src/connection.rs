@@ -2936,4 +2936,12 @@ mod tests {
             (u8::MAX, true)
         );
     }
+
+    /// An FFI host must be able to name and inspect the tick payload; without
+    /// it, dropping the tick silently loses retransmission and its timeout.
+    #[test]
+    fn tick_data_is_nameable_and_debuggable() {
+        fn assert_traits<T: std::fmt::Debug + Clone>() {}
+        assert_traits::<crate::ExpresslaneTickData>();
+    }
 }
