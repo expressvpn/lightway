@@ -24,6 +24,24 @@ const TAG_SET_ACTIVE: u8 = 4;
 const TAG_STATS_REQUEST: u8 = 5;
 const TAG_STATS_REPLY: u8 = 6;
 
+/// Bytes of length prefix in front of every message.
+const LEN_PREFIX: usize = 4;
+
+/// The longest message this protocol can encode, prefix included.
+///
+/// A stream reader accumulates until a message is complete, so without an
+/// upper bound a peer that declared a huge length could make it buffer without
+/// limit. [`ControlMsg::decode`] refuses any declared length above this as soon
+/// as the prefix arrives, which keeps that buffer bounded by this constant.
+pub const MAX_CONTROL_MSG_LEN: usize = ControlMsg::PushKeys {
+    session_id: [0; 8],
+    version: 0,
+    lightway_version: [0; 2],
+    self_key: ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]),
+    peer_key: ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]),
+}
+.encoded_len();
+
 /// Why a buffer could not be decoded.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IpcError {
@@ -112,7 +130,7 @@ pub enum ControlMsg {
     },
 }
 
-fn payload_len(msg: &ControlMsg) -> usize {
+const fn payload_len(msg: &ControlMsg) -> usize {
     match msg {
         ControlMsg::Attach => 1,
         ControlMsg::PushKeys { .. } => 1 + 8 + 1 + 2 + 2 * EXPRESSLANE_KEY_SIZE,
@@ -124,6 +142,11 @@ fn payload_len(msg: &ControlMsg) -> usize {
 }
 
 impl ControlMsg {
+    /// How many bytes [`encode`](Self::encode) appends, length prefix included.
+    pub const fn encoded_len(&self) -> usize {
+        LEN_PREFIX + payload_len(self)
+    }
+
     /// Append this message, length-prefixed, to `out`.
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(payload_len(self) as u32).to_be_bytes());
@@ -179,15 +202,22 @@ impl ControlMsg {
     }
 
     /// Decode one message, returning it and how many bytes it consumed.
+    ///
+    /// A length no variant can have is [`IpcError::BadLength`] straight away
+    /// rather than [`IpcError::Incomplete`], so a caller accumulating a
+    /// stream never buffers more than [`MAX_CONTROL_MSG_LEN`] waiting for a
+    /// message that cannot arrive.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), IpcError> {
-        if buf.len() < 4 {
+        if buf.len() < LEN_PREFIX {
             return Err(IpcError::Incomplete);
         }
         let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if len == 0 {
+        // Tested against the bound before it is added to, so a declared length
+        // near usize::MAX cannot overflow the sum.
+        if len == 0 || len > MAX_CONTROL_MSG_LEN - LEN_PREFIX {
             return Err(IpcError::BadLength);
         }
-        let total = 4 + len;
+        let total = LEN_PREFIX + len;
         if buf.len() < total {
             return Err(IpcError::Incomplete);
         }
@@ -353,6 +383,58 @@ mod tests {
         assert_eq!(first, ControlMsg::StatsRequest { session_id: [1; 8] });
         let (second, _) = ControlMsg::decode(&buf[used..]).unwrap();
         assert_eq!(second, ControlMsg::SetActive { active: true });
+    }
+
+    /// `MAX_CONTROL_MSG_LEN` is what a stream reader sizes its buffer by, so
+    /// every variant has to fit under it and `encoded_len` has to agree with
+    /// what `encode` actually writes.
+    #[test]
+    fn no_variant_exceeds_the_accumulation_bound() {
+        let all = [
+            ControlMsg::Attach,
+            push_keys(),
+            ControlMsg::DropSession { session_id: [9; 8] },
+            ControlMsg::SetActive { active: true },
+            ControlMsg::StatsRequest { session_id: [5; 8] },
+            stats_reply(),
+        ];
+        for msg in &all {
+            let mut buf = Vec::new();
+            msg.encode(&mut buf);
+            assert_eq!(buf.len(), msg.encoded_len(), "encoded_len lies for {msg:?}");
+            assert!(
+                msg.encoded_len() <= MAX_CONTROL_MSG_LEN,
+                "{msg:?} does not fit the bound readers size their buffers by"
+            );
+        }
+    }
+
+    /// The reason the bound exists: a peer declaring a length no variant can
+    /// have must be refused at once, not waited on, or a reader accumulating a
+    /// stream would grow its buffer to whatever the peer asked for.
+    #[test]
+    fn a_length_no_variant_can_have_is_rejected_rather_than_awaited() {
+        let mut buf = (u32::MAX).to_be_bytes().to_vec();
+        assert_eq!(ControlMsg::decode(&buf), Err(IpcError::BadLength));
+
+        buf = ((MAX_CONTROL_MSG_LEN - LEN_PREFIX + 1) as u32)
+            .to_be_bytes()
+            .to_vec();
+        buf.push(TAG_PUSH_KEYS);
+        assert_eq!(
+            ControlMsg::decode(&buf),
+            Err(IpcError::BadLength),
+            "one byte over the bound must not read as Incomplete"
+        );
+    }
+
+    /// A known tag at a length that variant cannot have is a protocol error,
+    /// not a short read: waiting for more bytes would stall the loop forever.
+    #[test]
+    fn a_known_tag_at_the_wrong_length_is_rejected() {
+        // StatsRequest's tag at Attach's length.
+        let buf = [0u8, 0, 0, 1, TAG_STATS_REQUEST];
+        assert_eq!(ControlMsg::decode(&buf), Err(IpcError::BadLength));
     }
 
     #[test]

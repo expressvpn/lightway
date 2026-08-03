@@ -8,6 +8,7 @@
 #![cfg(target_os = "linux")]
 #![warn(missing_docs)]
 
+pub mod control;
 pub mod engine;
 pub mod fdpass;
 pub mod ipc;

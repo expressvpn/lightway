@@ -20,22 +20,23 @@ missing_safety_doc = "deny"
 multiple_unsafe_ops_per_block = "deny"
 unnecessary_safety_comment = "deny"
 
+[[bin]]
+name = "lightway-offload-engine"
+path = "src/bin/engine.rs"
+
 [dependencies]
 bytes.workspace = true
 lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 lightway-bpf-steering = { path = "../lightway-bpf-steering", version = "0.1.0" }
 
-# Integration tests in tests/ do not see [dependencies]; the roundtrip test
-# builds ControlMsg::PushKeys and so needs the key types directly.
-# lightway-core lets engine.rs's own tests check header bytes against the
-# real serializer instead of trusting that a hand-rolled copy still matches.
+# Test targets get [dependencies] as well as these, so only what tests alone
+# need belongs here. lightway-core lets engine.rs's own tests check header
+# bytes against the real serializer instead of trusting that a hand-rolled
+# copy still matches; nothing else depends on it.
 [dev-dependencies]
 lightway-core = { path = "../lightway-core", version = "0.1.0" }
-lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-libc.workspace = true

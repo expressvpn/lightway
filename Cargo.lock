@@ -1729,6 +1729,7 @@ dependencies = [
  "lightway-core",
  "lightway-expresslane",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
