@@ -243,6 +243,12 @@ impl RawGro {
 
     /// Send one packet. Outside an open window the batch is not even
     /// locked and the packet goes straight to the device.
+    ///
+    /// Inside a window, `Ok(len)` may mean "absorbed into the run, not
+    /// yet written". The write happens at the next flush or run
+    /// boundary, and a failure there is counted and logged but never
+    /// reported to the caller, which already treated the packet as
+    /// sent (so `Tun::send` records it as a successful write too).
     pub(crate) fn send(&self, tun: &impl RawTunIo, buf: BytesMut) -> IOCallbackResult<usize> {
         if !self.open.load(Ordering::Relaxed) {
             return tun.send_owned(buf);

@@ -77,6 +77,39 @@ fn get_tls_library_version() -> String {
     lightway_core::tls::get_version_string().to_string()
 }
 
+/// Allow or forbid downlink TCP coalescing on the TUN write path.
+/// Android only; a logged no-op on other platforms. Defaults to
+/// **forbidden** — an app that never calls this gets plain per-packet
+/// writes.
+///
+/// This is a correctness gate, not a tuning knob. A coalesced packet
+/// that the kernel *forwards* (a tethered client's traffic) instead of
+/// delivering locally is dropped with an ICMP frag-needed aimed at the
+/// remote origin, permanently blackholing that flow. Whether a packet
+/// will be forwarded is invisible to the library, so the app owns the
+/// contract:
+///
+/// - call with `true` only while no tethering / local forwarding is
+///   active;
+/// - subscribe to tethering state changes and call with `false`
+///   **synchronously** the moment tethering comes up — the flag takes
+///   effect for every packet offered after the call returns, mid-batch
+///   included.
+///
+/// Safe to call at any time relative to the tunnel lifecycle; the
+/// device capability itself is probed on first use and coalescing
+/// silently stays off where the probe fails.
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
+fn set_tun_tcp_coalescing_allowed(allowed: bool) {
+    #[cfg(android)]
+    crate::set_tun_tcp_coalescing_allowed(allowed);
+    #[cfg(not(android))]
+    info!(
+        allowed,
+        "tun TCP coalescing is not available on this platform"
+    );
+}
+
 /// Sets up a global default logging bridge between Rust and the mobile app, while
 /// installing a panic hook for proper crash reporting.
 /// Invoking this multiple times replaces the previously registered logger so that the latest callback is used.
