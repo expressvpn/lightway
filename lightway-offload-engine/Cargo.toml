@@ -39,6 +39,13 @@ rand.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+# Linux-only, like the steering crate: the client binary is a stub off Linux,
+# so nothing outside this target needs the VPN stack or a tokio runtime.
 [target.'cfg(target_os = "linux")'.dependencies]
+anyhow.workspace = true
+clap.workspace = true
 libc.workspace = true
+lightway-app-utils.workspace = true
 lightway-bpf-steering = { path = "../lightway-bpf-steering", version = "0.1.0" }
+lightway-client = { path = "../lightway-client", version = "0.1.0" }
+tokio.workspace = true

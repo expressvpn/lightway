@@ -22,6 +22,7 @@
 pub mod control;
 pub mod engine;
 pub mod fdpass;
+pub mod gate;
 pub mod ipc;
 pub mod ipc_client;
 pub mod packet;

@@ -90,11 +90,8 @@ fn start_engine(
 /// Translating lightway-core's expresslane callbacks into control messages.
 ///
 /// One `#[cfg]` on the module rather than one per item: everything in here
-/// needs the Linux-only library. `dead_code` is allowed for the same reason
-/// the module exists ahead of its caller - Task 4 hands these to
-/// `lightway_client::ClientConfig`; until then only the tests below reach them.
+/// needs the Linux-only library.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 mod offload {
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -105,6 +102,7 @@ mod offload {
         Event, EventCallback, ExpresslaneCb, ExpresslaneCbData, ExpresslaneMetrics,
         ExpresslanePacketStats, ExpresslaneState, ExpresslaneStatsError, SessionId, Version,
     };
+    use lightway_offload_engine::gate::ArmingLog;
     use lightway_offload_engine::ipc::ControlMsg;
     use lightway_offload_engine::ipc_client::IpcClient;
 
@@ -273,6 +271,7 @@ mod offload {
     pub struct OffloadEvents {
         ipc: Arc<IpcClient>,
         steering: Arc<dyn SteeringFlag>,
+        arming: Arc<ArmingLog>,
         active: bool,
     }
 
@@ -283,8 +282,15 @@ mod offload {
             Self {
                 ipc,
                 steering,
+                arming: Arc::default(),
                 active: false,
             }
+        }
+
+        /// A handle on what this handler saw, for the caller to read after
+        /// lightway-client has taken the handler itself and not given it back.
+        pub fn arming_log(&self) -> Arc<ArmingLog> {
+            self.arming.clone()
         }
 
         /// Set both switches, in the order that leaves no window where the
@@ -355,7 +361,14 @@ mod offload {
             if let Event::ExpresslaneStateChanged(state) = event {
                 // Active is the only state in which offloaded traffic is real:
                 // Degraded is the D/TLS fallback and the rest are before it.
-                self.set(matches!(state, ExpresslaneState::Active));
+                let active = matches!(state, ExpresslaneState::Active);
+                // Recorded from the state core announced, not from whether the
+                // two switches below then moved. The question the gate asks is
+                // what the *protocol* did with the fast path; a switch that
+                // refused to follow is a separate fault, and it is already
+                // logged as one.
+                self.arming.record(active);
+                self.set(active);
             }
         }
     }
@@ -516,6 +529,56 @@ mod offload {
             // A repeat of the state in force must not churn either switch.
             events.event(Event::ExpresslaneStateChanged(ExpresslaneState::Inactive));
             assert!(flag.taken().is_empty(), "an unchanged state moved the flag");
+
+            drop(events);
+            Arc::into_inner(ipc).expect("one holder left").shutdown();
+            let _ = served.join();
+        }
+
+        /// The failure `--require-offload` is named for, and the one no
+        /// counter can see: the tunnel reaches Active, carries a little
+        /// traffic, then drops back to D/TLS for the rest of its life. Both
+        /// steering counters are cumulative and read once at exit, so that
+        /// session and a wholly offloaded one leave identical totals. Only the
+        /// state machine knows, and this is where it is written down.
+        #[test]
+        fn a_degrade_after_arming_is_remembered_for_the_verdict() {
+            let (ipc, _engine, served) = engine_pair();
+            let flag = Arc::new(RecordingFlag::default());
+            let mut events = OffloadEvents::new(ipc.clone(), flag.clone());
+            let log = events.arming_log();
+
+            events.event(Event::ExpresslaneStateChanged(ExpresslaneState::Active));
+            assert!(
+                !log.left_active_after_arming(),
+                "reaching Active is not a fault"
+            );
+
+            events.event(Event::ExpresslaneStateChanged(ExpresslaneState::Degraded));
+            assert!(
+                log.left_active_after_arming(),
+                "a drop back to D/TLS went unrecorded, so the gate would pass \
+                 on totals from before it"
+            );
+
+            drop(events);
+            Arc::into_inner(ipc).expect("one holder left").shutdown();
+            let _ = served.join();
+        }
+
+        /// The states before Active are not a degrade. A session that never
+        /// got there fails the gate on its zero counters, and must not be
+        /// reported as a fast path that fell over.
+        #[test]
+        fn the_states_before_active_are_not_a_degrade() {
+            let (ipc, _engine, served) = engine_pair();
+            let flag = Arc::new(RecordingFlag::default());
+            let mut events = OffloadEvents::new(ipc.clone(), flag.clone());
+            let log = events.arming_log();
+
+            events.event(Event::ExpresslaneStateChanged(ExpresslaneState::Inactive));
+            events.event(Event::ExpresslaneStateChanged(ExpresslaneState::Degraded));
+            assert!(!log.left_active_after_arming());
 
             drop(events);
             Arc::into_inner(ipc).expect("one holder left").shutdown();
@@ -772,13 +835,342 @@ mod offload {
     }
 }
 
+/// Command line, and turning it into the two configs lightway-client wants.
 #[cfg(target_os = "linux")]
-fn main() -> std::io::Result<()> {
-    use std::io;
+mod cli {
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::time::Duration;
 
+    use clap::Parser;
+    use lightway_app_utils::args::ConnectionType;
+    use lightway_client::config::Config;
+
+    /// The MTU lightway-client's own config path puts on its TUN.
+    ///
+    /// Set here because it is not set anywhere else: `TunConfig::fd` short
+    /// circuits `create_as_async` before any device setup, so a client handed
+    /// a descriptor configures nothing.
+    pub const TUN_MTU: u16 = 1350;
+
+    /// Two-process ExpressLane client: this half keeps the handshake, a child
+    /// engine gets the packets.
+    #[derive(Parser, Debug)]
+    #[command(about, long_about = None)]
+    pub struct Args {
+        /// Server to connect to, as `<host>:<port>`.
+        #[arg(long)]
+        pub server: String,
+
+        /// Server domain name to validate the certificate against.
+        #[arg(long)]
+        pub server_dn: Option<String>,
+
+        /// CA certificate: a path, or the PEM text itself.
+        #[arg(long)]
+        pub ca_cert: String,
+
+        /// Username, for user/password auth.
+        #[arg(long)]
+        pub user: Option<String>,
+
+        /// Password, for user/password auth.
+        #[arg(long)]
+        pub password: Option<String>,
+
+        /// Auth token, used in preference to user/password.
+        #[arg(long)]
+        pub token: Option<String>,
+
+        /// Name of the multiqueue TUN this process creates.
+        #[arg(long, default_value = "lwoffload0")]
+        pub tun_name: String,
+
+        /// Inside address to put on the TUN.
+        #[arg(long, default_value_t = Ipv4Addr::new(100, 64, 0, 6))]
+        pub tun_local_ip: Ipv4Addr,
+
+        /// Inside address of the far end of the TUN.
+        #[arg(long, default_value_t = Ipv4Addr::new(100, 64, 0, 5))]
+        pub tun_peer_ip: Ipv4Addr,
+
+        /// Address the tunnel's DNS is rewritten to.
+        #[arg(long, default_value_t = Ipv4Addr::new(100, 64, 0, 1))]
+        pub tun_dns_ip: Ipv4Addr,
+
+        /// Local address for the outside socket pair.
+        #[arg(long, default_value = "0.0.0.0:0")]
+        pub bind: SocketAddr,
+
+        /// Connect without offering ExpressLane at all.
+        ///
+        /// The tunnel then runs entirely over D/TLS, which is what
+        /// `--require-offload` exists to tell apart from a tunnel that
+        /// offered ExpressLane and silently fell back to it.
+        #[arg(long)]
+        pub no_expresslane: bool,
+
+        /// Exit non-zero unless the kernel really steered traffic to the
+        /// engine.
+        ///
+        /// This proves steering, never delivery: it counts where the kernel
+        /// sent packets, not whether anything arrived. A wrong --tun-local-ip
+        /// still passes it, exits 0, and loses 100% of the traffic.
+        #[arg(long)]
+        pub require_offload: bool,
+
+        /// The engine binary to spawn. Defaults to `$LW_ENGINE_BIN`, then to
+        /// `lightway-offload-engine` on `PATH`.
+        #[arg(long)]
+        pub engine: Option<String>,
+    }
+
+    impl Args {
+        /// The engine binary this run should spawn.
+        pub fn engine_path(&self) -> String {
+            self.engine
+                .clone()
+                .or_else(|| std::env::var("LW_ENGINE_BIN").ok())
+                .unwrap_or_else(|| "lightway-offload-engine".to_string())
+        }
+
+        /// The lightway-client config this run implies.
+        ///
+        /// Built through `Config` rather than by naming every `ClientConfig`
+        /// field, so the fields this binary has no opinion about - and the
+        /// ones that exist only under some `cfg` - keep whatever the client
+        /// itself defaults them to.
+        ///
+        /// Routes and resolver are left alone. Redirecting the host's default
+        /// route is not what this binary is for, and the gate reads kernel
+        /// counters rather than reachability, so it does not need them.
+        pub fn to_config(&self) -> Config {
+            // Field by field rather than struct-update syntax: `servers` is
+            // private, so `..Default::default()` is not allowed from here.
+            let mut config = Config::default();
+            config.server = self.server.clone();
+            config.mode = ConnectionType::Udp;
+            config.server_dn = self.server_dn.clone().unwrap_or_default();
+            config.ca_cert = self.ca_cert.clone();
+            config.user = self.user.clone();
+            config.password = self.password.clone();
+            config.token = self.token.clone();
+            config.tun_name = Some(self.tun_name.clone());
+            config.tun_local_ip = self.tun_local_ip;
+            config.tun_peer_ip = self.tun_peer_ip;
+            config.tun_dns_ip = self.tun_dns_ip;
+            config.enable_expresslane = !self.no_expresslane;
+            config.route_mode = lightway_client::route_manager::RouteMode::NoExec;
+            config.dns_config_mode = lightway_client::dns_manager::DnsConfigMode::NoExec;
+            config
+        }
+    }
+}
+
+/// Give the TUN an address and bring it up.
+///
+/// Nothing else will: handing `TunConfig` a descriptor makes
+/// `create_as_async` return the wrapped fd before it touches address, MTU or
+/// link state, so a device this process created stays down with no address
+/// and no inside packet ever reaches either queue. `ip` rather than the
+/// ioctls behind it because those are the only reason this binary would grow
+/// a second `unsafe` block.
+///
+/// `name` must be the name the device actually has. A "%d" pattern is not:
+/// the kernel substitutes an index and only `InsideSplit` learns the result,
+/// which is why `run` refuses one before any device is created.
+#[cfg(target_os = "linux")]
+fn configure_tun(
+    name: &str,
+    local: std::net::Ipv4Addr,
+    peer: std::net::Ipv4Addr,
+    mtu: u16,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let mtu = mtu.to_string();
+    let addr = format!("{local}/32");
+    let peer = peer.to_string();
+    let steps: [&[&str]; 2] = [
+        &["addr", "add", &addr, "peer", &peer, "dev", name],
+        &["link", "set", "dev", name, "mtu", &mtu, "up"],
+    ];
+
+    for args in steps {
+        let out = std::process::Command::new("ip")
+            .args(args)
+            .output()
+            .with_context(|| format!("running `ip {}`", args.join(" ")))?;
+        anyhow::ensure!(
+            out.status.success(),
+            "`ip {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Bring up both halves, run the client, then report what the kernel steered.
+#[cfg(target_os = "linux")]
+async fn run(args: cli::Args) -> anyhow::Result<std::process::ExitCode> {
+    use std::os::fd::IntoRawFd;
+    use std::process::ExitCode;
+    use std::sync::Arc;
+
+    use lightway_client::{ClientConfig, ClientConnectionConfig, ClientConnectionMode};
+    use lightway_offload_engine::gate;
     use lightway_offload_engine::ipc_client::IpcClient;
+
+    use offload::{OffloadCb, OffloadEvents, OffloadMetrics};
+
+    // `InsideSplit::create` takes an interface *pattern*, and the kernel
+    // substitutes a "%d" for the first free index - but it only reports the
+    // name it settled on back into the split, which keeps it private. Every
+    // later use here is by the name that was asked for, so a pattern would
+    // configure some other device or none. Refuse it before a device exists.
+    anyhow::ensure!(
+        !args.tun_name.contains('%'),
+        "--tun-name must be a literal interface name, not a pattern: {}",
+        args.tun_name
+    );
+
+    // Arc because the same split is two things at once: the steering flag the
+    // event handler flips, and the counter map the verdict is read from.
+    let inside = Arc::new(InsideSplit::create(&args.tun_name)?);
+    let outside = OutsideSplit::bind(args.bind)?;
+    configure_tun(
+        &args.tun_name,
+        args.tun_local_ip,
+        args.tun_peer_ip,
+        cli::TUN_MTU,
+    )?;
+
+    let (mut child, control) = start_engine(&inside, &outside, &args.engine_path())?;
+    tracing::info!(
+        tun = %args.tun_name,
+        if_index = inside.if_index()?,
+        addr = %outside.local_addr()?,
+        "engine attached"
+    );
+    // A second handle on the control socket, kept out of the client entirely.
+    // See the teardown below for why the `Arc` cannot be used for this.
+    let hangup = control.try_clone()?;
+    let ipc = Arc::new(IpcClient::new(control)?);
+
+    let mut config = args.to_config();
+    let servers = config.take_servers()?;
+    let mut config = ClientConfig::<()>::try_from_reload_sig_and_config(None, config)?;
+    // A dup of queue 0, handed over outright: the split keeps the original, so
+    // it stays alive - and with it the steering program and the device - for
+    // as long as this function holds it, whatever the client does with its
+    // copy. `close_fd_on_drop` defaults true, so the client's device closes
+    // this dup and not the split's original. Between here and the device being
+    // built the dup is owned by nothing, so a failure in that window leaks it -
+    // one descriptor, in a process that is about to exit, and closing it here
+    // instead would race the device that may already have taken it.
+    config.tun_config.fd = Some(inside.clone_control_queue()?.into_raw_fd());
+    config.expresslane_cb = Some(Arc::new(OffloadCb::new(ipc.clone())));
+    config.expresslane_metrics = Some(Arc::new(OffloadMetrics::new(ipc.clone())));
+
+    // A dup of the control socket, for the same reason. It must reach the
+    // client unconnected - `OutsideSplit` will not steer for a socket the
+    // four-tuple lookup can answer directly - which is what lightway-client's
+    // datagram IO does with it.
+    let control_socket = outside.clone_control()?;
+    control_socket.set_nonblocking(true)?;
+    let control_socket = tokio::net::UdpSocket::from_std(control_socket)?;
+
+    // One split means one outside socket and one steering flag, so exactly one
+    // connection can be offloaded. `--server` takes a single address and
+    // `take_servers` turns it into one entry, so this holds today; it is
+    // checked rather than assumed because the alternative failure is silent -
+    // extra connections would quietly run over D/TLS with the socket and the
+    // handler on whichever one happened to be first.
+    anyhow::ensure!(
+        servers.len() == 1,
+        "the offloaded client drives exactly one connection, got {}",
+        servers.len()
+    );
+
+    let events = OffloadEvents::new(ipc.clone(), inside.clone());
+    let arming = events.arming_log();
+    let server = servers
+        .into_iter()
+        .next()
+        .expect("exactly one server, checked above");
+    let mut conf =
+        ClientConnectionConfig::try_from_event_handler_and_connection_config(Some(events), server)
+            .await?;
+    conf.mode = ClientConnectionMode::Datagram(Some(control_socket));
+    let conn_confs = vec![conf];
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("SIGINT handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+        let _ = stop_tx.send(());
+    });
+
+    let result = lightway_client::client(config, stop_rx, conn_confs).await;
+
+    // Shutting the socket is what lets the engine's control loop see EOF and
+    // return, so it must happen before the wait below, not after: waiting
+    // first would deadlock against an engine still blocked reading a socket
+    // this process never let go of.
+    //
+    // Dropping `ipc` will not do it. lightway-client hands clones of the
+    // callbacks to tasks it spawns, and those only go away when the runtime
+    // does, which is after this function returns - so the count is not
+    // reliably one here and `IpcClient::shutdown` consumes `self`. The extra
+    // handle sidesteps the question: `shutdown(2)` acts on the socket, not on
+    // the descriptor, so this ends the connection for every handle on it.
+    drop(ipc);
+    let _ = hangup.shutdown(std::net::Shutdown::Both);
+    let status = child.wait()?;
+
+    // Both splits are still alive here - `inside` and `outside` are owned by
+    // this frame - so this reads the maps the kernel has been counting into
+    // all along, not a snapshot taken earlier.
+    let verdict = gate::verdict(&inside, &outside, &arming);
+    tracing::info!(
+        inside_engine = verdict.inside_engine,
+        inside_control = verdict.inside_control,
+        outside_engine = verdict.outside_engine,
+        outside_control = verdict.outside_control,
+        outside_failed = verdict.outside_failed,
+        left_active_after_arming = verdict.left_active_after_arming,
+        offloaded = verdict.offloaded(),
+        "steering verdict"
+    );
+
+    let outcome = result?;
+    tracing::info!(?outcome, engine = %status, "client finished");
+    if !status.success() {
+        anyhow::bail!("engine exited with {status}");
+    }
+
+    if args.require_offload && !verdict.offloaded() {
+        // The whole point of the flag. A tunnel that fell back to D/TLS looks
+        // exactly like one that did not, right down to carrying the traffic,
+        // so nothing but this counter says which happened.
+        tracing::error!(
+            ?verdict,
+            "--require-offload: nothing took the offloaded path"
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    use clap::Parser as _;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -788,45 +1180,13 @@ fn main() -> std::io::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let engine_path =
-        std::env::var("LW_ENGINE_BIN").unwrap_or_else(|_| "lightway-offload-engine".to_string());
-
-    let inside = InsideSplit::create("lwoffload0")?;
-    let outside = OutsideSplit::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))?;
-
-    let (mut child, control) = start_engine(&inside, &outside, &engine_path)?;
-    tracing::info!(
-        tun = %inside.if_index()?,
-        addr = %outside.local_addr()?,
-        "engine attached"
-    );
-
-    // Task 4 replaces this with the real client. What it proves today is the
-    // piece Task 3 adds: a request and the reply to it crossing the socket
-    // between the two processes, over the descriptor the child inherited.
-    let ipc = IpcClient::new(control)?;
-    let Some(reply) = ipc.stats([0u8; 8], Duration::from_secs(2)) else {
-        return Err(io::Error::other(
-            "the engine did not answer a stats request; the control channel is one-way",
-        ));
-    };
-    tracing::info!(?reply, "engine answered over the control socket");
-
-    // Shutting the socket is what lets the engine's control loop see EOF and
-    // return, so it must happen before the wait below, not after: waiting
-    // first would deadlock against an engine still blocked reading a socket
-    // this process never let go of.
-    ipc.shutdown();
-    let status = child.wait()?;
-    if !status.success() {
-        // A bad fd 3, or a descriptor count the protocol refuses, both
-        // surface as a non-zero exit from the engine - propagate it rather
-        // than reporting success for a handoff that did not land.
-        return Err(io::Error::other(format!(
-            "engine exited with {status}; the handoff did not complete"
-        )));
+    match run(cli::Args::parse()).await {
+        Ok(code) => code,
+        Err(e) => {
+            tracing::error!(error = %e, "offload client failed");
+            std::process::ExitCode::FAILURE
+        }
     }
-    Ok(())
 }
 
 /// The real implementation is Linux-only and a binary still needs an entry
@@ -858,5 +1218,38 @@ mod tests {
     #[test]
     fn the_engine_is_spawned_with_the_control_socket_on_fd_three() {
         assert_eq!(ENGINE_CONTROL_FD, 3);
+    }
+
+    fn args(extra: &[&str]) -> cli::Args {
+        use clap::Parser as _;
+        let mut argv = vec![
+            "lightway-offload-client",
+            "--server",
+            "10.0.0.1:443",
+            "--ca-cert",
+            "ca.crt",
+        ];
+        argv.extend_from_slice(extra);
+        cli::Args::parse_from(argv)
+    }
+
+    /// Both halves of what makes this client an *offload* client, and neither
+    /// is visible at runtime until it is too late. ExpressLane is UDP-only -
+    /// the server refuses the combination outright - so a client that came up
+    /// in the default TCP mode would negotiate no ExpressLane at all, and
+    /// `--require-offload` would be permanently red for a reason no counter
+    /// names.
+    #[test]
+    fn the_default_run_is_one_that_can_reach_expresslane_at_all() {
+        let config = args(&[]).to_config();
+        assert!(config.mode.is_udp(), "ExpressLane does not run over TCP");
+        assert!(config.enable_expresslane);
+    }
+
+    /// The other side of the gate's proof: a run that never offers ExpressLane
+    /// is the D/TLS baseline `--require-offload` has to come back red for.
+    #[test]
+    fn no_expresslane_really_turns_it_off() {
+        assert!(!args(&["--no-expresslane"]).to_config().enable_expresslane);
     }
 }

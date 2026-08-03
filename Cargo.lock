@@ -1723,12 +1723,17 @@ dependencies = [
 name = "lightway-offload-engine"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
+ "clap",
  "libc",
+ "lightway-app-utils",
  "lightway-bpf-steering",
+ "lightway-client",
  "lightway-core",
  "lightway-expresslane",
  "rand 0.10.2",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
