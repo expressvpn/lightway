@@ -38,7 +38,7 @@ tracing.workspace = true
 wolfssl = { workspace = true, optional = true }
 boringssl = { path = "../lightway-boring", package = "lightway-boring", optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 internet-checksum.workspace = true
 
 [build-dependencies]
