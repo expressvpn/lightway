@@ -452,6 +452,18 @@ impl Tun {
         }
     }
 
+    /// Send a packet to `Tun` from a borrowed slice, so the caller can
+    /// retain the bytes on failure. The direct backend writes without
+    /// copying; the io_uring backend must own its buffers, so it
+    /// copies into one.
+    pub fn try_send_slice(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.try_send_slice(buf),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.try_send(BytesMut::from(buf)),
+        }
+    }
+
     /// Send a packet with an explicit virtio header (e.g. a TSO
     /// superpacket assembled by userspace GRO). Requires the device to
     /// have been opened with offload ([`TunConfig::offload`]). Only the
@@ -759,6 +771,14 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
+        self.try_send_slice(&buf[..])
+    }
+
+    /// Try write from Tun, borrowing the packet bytes instead of
+    /// consuming a buffer. Lets a caller retain the packet on failure
+    /// (e.g. to re-send it segment-by-segment) without cloning it up
+    /// front.
+    pub fn try_send_slice(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         #[cfg(target_os = "linux")]
         if self.vnet_hdr {
             // IFF_VNET_HDR requires a zeroed `virtio_net_hdr` prefix on
@@ -766,7 +786,7 @@ impl TunDirect {
             // header is not copied onto the packet; the returned count
             // excludes it to match a plain send.
             let hdr = [0u8; tun_rs::VIRTIO_NET_HDR_LEN];
-            let chunks = [std::io::IoSlice::new(&hdr), std::io::IoSlice::new(&buf[..])];
+            let chunks = [std::io::IoSlice::new(&hdr), std::io::IoSlice::new(buf)];
             return Self::map_send_result(
                 self.send_chunks(&chunks)
                     .map(|n| n.saturating_sub(hdr.len())),
@@ -774,7 +794,7 @@ impl TunDirect {
         }
 
         let tun = self.tun.as_ref().unwrap();
-        Self::map_send_result(tun.try_send(&buf[..]))
+        Self::map_send_result(tun.try_send(buf))
     }
 
     /// Map the result of a TUN write onto an [`IOCallbackResult`], shared by
