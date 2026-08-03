@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lightway-core",
+    "lightway-expresslane",
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",

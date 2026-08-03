@@ -44,7 +44,7 @@ source:
     FROM +install-build-dependencies
     COPY --keep-ts Cargo.toml Cargo.lock Makefile.toml ./
     COPY --keep-ts deny.toml ./
-    COPY --keep-ts --dir lightway-core lightway-app-utils lightway-client uniffi-bindgen lightway-server tests ./
+    COPY --keep-ts --dir lightway-core lightway-expresslane lightway-app-utils lightway-client uniffi-bindgen lightway-server tests ./
 
 # build runs cargo to build native binaries for the host platform.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.
@@ -157,6 +157,9 @@ fmt:
 lint:
     FROM +source
     DO lib-rust+CARGO --args="clippy -p lightway-client --no-default-features --all-targets -- -D warnings"
+    # The point of lightway-expresslane is an offload engine that links no TLS
+    # stack, so it has to keep building with every backend feature off.
+    DO lib-rust+CARGO --args="check -p lightway-expresslane --no-default-features"
     ENV RUSTDOCFLAGS="-D warnings"
     DO lib-rust+CARGO --args="doc --document-private-items"
     # Run lint for shell scripts inside tests/ directory
