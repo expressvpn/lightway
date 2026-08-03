@@ -1781,6 +1781,7 @@ dependencies = [
  "itertools 0.14.0",
  "lightway-app-utils",
  "lightway-boring",
+ "lightway-expresslane",
  "lru",
  "metrics",
  "more-asserts",

@@ -2,58 +2,26 @@ use crate::borrowed_bytesmut::BorrowedBytesMut;
 use bitfield_struct::bitfield;
 use bytes::{Buf, BufMut, BytesMut};
 
-use super::{FromWireError, FromWireResult, expresslane_data::ExpresslaneKey};
+use super::{
+    FromWireError, FromWireResult,
+    expresslane_data::{ExpresslaneKey, ExpresslaneVersion},
+};
 
-/// On-wire expresslane version.
+/// Negotiate the wire version against a peer's advertised value.
+/// Forward-compatible by design: if the peer advertised a version
+/// we don't recognise, we fall back to `ExpresslaneVersion::MAX`.
+/// Otherwise we take the lower of our local max and the peer's
+/// advertised version.
 ///
-/// Unknown represents both "byte 0 (never advertised)" and "a future
-/// version byte this build does not yet recognise". Both cases are
-/// handled the same way at negotiation time - fall back to our local
-/// max - so collapsing them into one variant keeps the type simple
-/// without giving up forward compat.
-#[repr(u8)]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone, Default)]
-pub enum ExpresslaneVersion {
-    #[default]
-    // Not used
-    Unknown = 0,
-    // Initial Expresslane format
-    Version1 = 1,
-    /// same wire layout as V1, but the expresslane flags field
-    /// is bound into the AEAD AAD. Incompatible with V1 builds
-    Version2 = 2,
-}
-
-impl ExpresslaneVersion {
-    /// Highest expresslane version this build supports.
-    pub const MAX: Self = Self::Version2;
-
-    /// Negotiate the wire version against a peer's advertised value.
-    /// Forward-compatible by design: if the peer advertised a version
-    /// we don't recognise, we fall back to `Self::MAX`. Otherwise
-    /// we take the lower of our local max and the peer's advertised
-    /// version.
-    ///
-    /// Scenarios:
-    ///   * V1 peer + V1 build -> V1.
-    ///   * V1 peer + V2 build -> V2 build downgrades, both at V1.
-    ///   * V2 peer + V1 build -> V1 build sees Unknown, replies with
-    ///     its own MAX (V1). V2 peer downgrades on its side and stay at V1.
-    pub(crate) fn negotiate(peer: Self) -> Self {
-        match peer {
-            Self::Unknown => Self::MAX,
-            v => Self::MAX.min(v),
-        }
-    }
-}
-
-impl From<u8> for ExpresslaneVersion {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => Self::Version1,
-            2 => Self::Version2,
-            _ => Self::Unknown,
-        }
+/// Scenarios:
+///   * V1 peer + V1 build -> V1.
+///   * V1 peer + V2 build -> V2 build downgrades, both at V1.
+///   * V2 peer + V1 build -> V1 build sees Unknown, replies with
+///     its own MAX (V1). V2 peer downgrades on its side and stay at V1.
+pub(crate) fn negotiate_version(peer: ExpresslaneVersion) -> ExpresslaneVersion {
+    match peer {
+        ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
+        v => ExpresslaneVersion::MAX.min(v),
     }
 }
 
@@ -99,13 +67,25 @@ struct Header {
 /// E - enabled
 /// A - Ack
 
-#[derive(PartialEq, Debug, Default, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub(crate) struct ExpresslaneConfig {
     pub(crate) version: ExpresslaneVersion,
     pub(crate) enabled: bool,
     pub(crate) ack: bool,
     pub(crate) counter: u64,
     pub(crate) key: ExpresslaneKey,
+}
+
+impl Default for ExpresslaneConfig {
+    fn default() -> Self {
+        Self {
+            version: ExpresslaneVersion::Unknown,
+            enabled: false,
+            ack: false,
+            counter: 0,
+            key: ExpresslaneKey::INVALID,
+        }
+    }
 }
 
 impl ExpresslaneConfig {
@@ -170,7 +150,7 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.ack);
         assert_eq!(config.counter, 0);
-        assert_eq!(config.key, ExpresslaneKey::default());
+        assert_eq!(config.key, ExpresslaneKey::INVALID);
     }
 
     #[test_case(&[0_u8; 0]; "no data")]
@@ -254,18 +234,18 @@ mod tests {
 
         // Peer advertised V1 → V1 (peer is the constraint).
         assert_eq!(
-            ExpresslaneVersion::negotiate(ExpresslaneVersion::Version1),
+            negotiate_version(ExpresslaneVersion::Version1),
             ExpresslaneVersion::Version1
         );
 
         // Peer advertised V2 → V2 (matched).
         assert_eq!(
-            ExpresslaneVersion::negotiate(ExpresslaneVersion::Version2),
+            negotiate_version(ExpresslaneVersion::Version2),
             ExpresslaneVersion::Version2
         );
 
         assert_eq!(
-            ExpresslaneVersion::negotiate(ExpresslaneVersion::Unknown),
+            negotiate_version(ExpresslaneVersion::Unknown),
             ExpresslaneVersion::MAX,
         );
     }

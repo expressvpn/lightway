@@ -26,7 +26,6 @@ use crate::context::ExpresslaneTickData;
 use crate::{
     ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
     TCP_HEADER_SIZE, Version,
-    borrowed_bytesmut::BorrowedBytesMut,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
     metrics,
@@ -43,7 +42,10 @@ use crate::{
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
-use crate::wire::{AuthSuccessWithConfigV4, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion};
+use crate::wire::{
+    AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
+    ExpresslaneVersion,
+};
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
@@ -301,6 +303,124 @@ impl ConnectionError {
                     Tls(_) => false,
                 }
             }
+        }
+    }
+}
+
+/// The expresslane crate reports a missing key as an error rather than
+/// counting it, so the metric is raised here instead.
+fn expresslane_encrypt_error(err: ExpresslaneError) -> ConnectionError {
+    if matches!(err, ExpresslaneError::NoKey) {
+        metrics::expresslane_encrypt_no_key();
+    }
+    err.into()
+}
+
+/// Map a decrypt failure onto the wire error [`ConnectionError::is_fatal`]
+/// already classifies, raising the metric for the same reasons as above.
+fn expresslane_decrypt_error(err: ExpresslaneError) -> wire::FromWireError {
+    match err {
+        ExpresslaneError::NoKey => {
+            metrics::expresslane_decrypt_no_key();
+            wire::FromWireError::InvalidExpressData
+        }
+        ExpresslaneError::Replayed => wire::FromWireError::ReplayedExpressData,
+        ExpresslaneError::InsufficientData => wire::FromWireError::InsufficientData,
+        err => {
+            metrics::expresslane_decrypt_failed(&err);
+            wire::FromWireError::InvalidExpressData
+        }
+    }
+}
+
+#[cfg(test)]
+mod expresslane_error_mapping_tests {
+    use super::*;
+
+    /// Restates the classification independently of the code under test.
+    /// Exhaustive on purpose: a new `ExpresslaneError` variant fails to compile
+    /// here rather than silently inheriting the catch-all arm, which decides
+    /// what [`ConnectionError::is_fatal`] sees.
+    fn expected(err: &ExpresslaneError) -> wire::FromWireError {
+        match err {
+            ExpresslaneError::Replayed => wire::FromWireError::ReplayedExpressData,
+            ExpresslaneError::InsufficientData => wire::FromWireError::InsufficientData,
+            ExpresslaneError::NoKey
+            | ExpresslaneError::AuthFailed
+            | ExpresslaneError::EncryptFailed
+            | ExpresslaneError::PayloadTooLarge
+            | ExpresslaneError::NewCipherFailed
+            | ExpresslaneError::SetKeyFailed => wire::FromWireError::InvalidExpressData,
+        }
+    }
+
+    /// Keep in step with `expected`, which will not compile if a variant is
+    /// added without a decision.
+    fn all() -> Vec<ExpresslaneError> {
+        vec![
+            ExpresslaneError::NewCipherFailed,
+            ExpresslaneError::SetKeyFailed,
+            ExpresslaneError::NoKey,
+            ExpresslaneError::EncryptFailed,
+            ExpresslaneError::AuthFailed,
+            ExpresslaneError::Replayed,
+            ExpresslaneError::InsufficientData,
+            ExpresslaneError::PayloadTooLarge,
+        ]
+    }
+
+    #[test]
+    fn decrypt_error_mapping_is_pinned() {
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::NoKey),
+            wire::FromWireError::InvalidExpressData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::Replayed),
+            wire::FromWireError::ReplayedExpressData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::InsufficientData),
+            wire::FromWireError::InsufficientData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::AuthFailed),
+            wire::FromWireError::InvalidExpressData
+        ));
+    }
+
+    /// A bad packet must never kill a datagram connection, so every decrypt
+    /// failure has to land on a wire error `is_fatal` treats as transient.
+    #[test]
+    fn every_decrypt_error_is_classified_and_transient() {
+        for err in all() {
+            let want = expected(&err);
+            let got = expresslane_decrypt_error(err);
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&want),
+                "misclassified: got {got:?}, want {want:?}"
+            );
+            let err = ConnectionError::WireError(got);
+            assert!(
+                !err.is_fatal(ConnectionType::Datagram),
+                "{err:?} would tear down the connection"
+            );
+        }
+    }
+
+    #[test]
+    fn every_encrypt_error_is_transient() {
+        for err in all() {
+            let err = expresslane_encrypt_error(err);
+            assert!(
+                matches!(err, ConnectionError::ExpresslaneError(_)),
+                "unexpected variant: {err:?}"
+            );
+            assert!(
+                !err.is_fatal(ConnectionType::Datagram),
+                "{err:?} would tear down the connection"
+            );
         }
     }
 }
@@ -1623,7 +1743,8 @@ impl<AppState: Send> Connection<AppState> {
             let (data, is_encoded) = self
                 .expresslane
                 .data
-                .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
+                .try_from_wire(buf, *hdr.session.as_bytes())
+                .map_err(expresslane_decrypt_error)?;
 
             self.handle_outside_data_bytes(data, is_encoded)?;
             return Ok(1);
@@ -2019,22 +2140,25 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        let neg_version = ExpresslaneVersion::negotiate(config.version);
-        if neg_version != self.expresslane.data.version {
+        let neg_version = wire::negotiate_version(config.version);
+        if neg_version != self.expresslane.data.version() {
             info!(
                 "Negotiated expresslane version: {:?} [max:{:?} peer:{:?}]",
                 neg_version,
                 ExpresslaneVersion::MAX,
                 config.version,
             );
-            self.expresslane.data.version = neg_version;
+            if !self.expresslane.data.set_version(neg_version) {
+                warn!("Ignoring expresslane version change, data already sent");
+            }
         }
 
         // Handle acknowledgement from peer
         if config.ack {
             if config.counter == self.expresslane.config_counter {
                 // Peer acknowledged, can update local key now
-                self.expresslane.data.update_self_key();
+                self.expresslane.data.promote_self_key();
+                debug!("Updating expresslane self keys");
                 self.publish_expresslane_key();
                 self.expresslane.retransmit_count = 0;
                 // Self key updated, check if expresslane is now ready.
@@ -2068,6 +2192,7 @@ impl<AppState: Send> Connection<AppState> {
         if config.enabled {
             debug!("Peer has updated expresslane key");
             self.expresslane.data.update_peer_key(config.key)?;
+            debug!("Updating expresslane peer keys");
             self.publish_expresslane_key();
             if self.expresslane.data.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
@@ -2080,7 +2205,7 @@ impl<AppState: Send> Connection<AppState> {
         // Send acknowledgement with the negotiated version
         let mut config = config;
         config.ack = true;
-        config.version = self.expresslane.data.version;
+        config.version = self.expresslane.data.version();
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_queue(msg);
 
@@ -2106,17 +2231,20 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        let key: ExpresslaneKey = StandardUniform.sample(&mut *self.rng.lock().unwrap());
+        let key_bytes: [u8; EXPRESSLANE_KEY_SIZE] =
+            StandardUniform.sample(&mut *self.rng.lock().unwrap());
+        let key = ExpresslaneKey::from(key_bytes);
         // Do not update current encrpytion key. Just update self key and
         // share it with peer. Only after peer acknowledged, update it in
         // [`self::handle_expresslane_config`]
         //
         // If updating key failed, send disabled to peer
         let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
+        debug!("Updating expresslane next self keys: enabled={enabled}");
 
         // Outgoing version: if we have already negotiated a version
         // with the peer, use that. Otherwise advertise our local max
-        let version = match self.expresslane.data.version {
+        let version = match self.expresslane.data.version() {
             ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
             v => v,
         };
@@ -2152,7 +2280,7 @@ impl<AppState: Send> Connection<AppState> {
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.data.update_next_self_key(key);
 
-        let version = match self.expresslane.data.version {
+        let version = match self.expresslane.data.version() {
             ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
             v => v,
         };
@@ -2188,7 +2316,7 @@ impl<AppState: Send> Connection<AppState> {
                 self_key,
                 peer_key,
                 peer_sockaddr: self.peer_addr(),
-                version: self.expresslane.data.version,
+                version: self.expresslane.data.version(),
             };
             xp_config_cb.update(self.session_id, data, &self.app_state);
         }
@@ -2209,7 +2337,14 @@ impl<AppState: Send> Connection<AppState> {
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
         self.expresslane
             .data
-            .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
+            .append_to_wire(
+                &mut buf,
+                *session_id.as_bytes(),
+                data.as_ref(),
+                iv,
+                is_encoded,
+            )
+            .map_err(expresslane_encrypt_error)?;
         self.activity.last_data_traffic_from_peer = Instant::now();
 
         // `udp_send` coalesces into the per-connection `GsoBuffer`

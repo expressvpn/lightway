@@ -119,7 +119,7 @@ impl<AppState: Send> Expresslane<AppState> {
             last_snapshot_recv: 0,
             inbound_strikes: 0,
             outbound_strikes: 0,
-            data: ExpresslaneData::default(),
+            data: ExpresslaneData::new(ExpresslaneVersion::Unknown),
             cb,
             metrics,
             keys_rotation_interval,
@@ -203,6 +203,14 @@ mod tests {
 
         xp.last_key_rotation = None;
         assert!(xp.time_to_rotate_key());
+    }
+
+    /// `ExpresslaneCbData.version` is a public field, so its type must be
+    /// nameable by an external crate without casting.
+    #[test]
+    fn callback_version_type_is_publicly_nameable() {
+        let v: crate::ExpresslaneVersion = crate::ExpresslaneVersion::MAX;
+        assert_eq!(v, crate::ExpresslaneVersion::Version2);
     }
 }
 
