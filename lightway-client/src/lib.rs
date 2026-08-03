@@ -4,7 +4,10 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
-#[cfg(linux)]
+// `linux` for the vnet-hdr offload paths, `android` for the raw TCP
+// coalescer, `test` so the host test build of `io::inside::raw_gro`
+// (compiled for any host) always finds it.
+#[cfg(any(linux, android, test))]
 mod metrics;
 pub mod platform;
 #[cfg(desktop)]
