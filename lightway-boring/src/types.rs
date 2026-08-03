@@ -10,6 +10,8 @@ use super::error::{Error, TlsError};
 /// Protocol method for TLS/DTLS connections
 #[derive(Debug, Clone, Copy)]
 pub enum Method {
+    /// TLS 1.2 client (TCP)
+    TlsClientV1_2,
     /// TLS 1.3 client (TCP)
     TlsClientV1_3,
     /// TLS 1.3 server (TCP)
@@ -66,6 +68,8 @@ impl CurveGroup {
 pub enum ProtocolVersion {
     /// Unknown protocol version
     Unknown,
+    /// TLS 1.2
+    TlsV1_2,
     /// TLS 1.3 (alias for compatibility)
     TlsV1_3,
     /// DTLS 1.3
@@ -79,6 +83,7 @@ impl ProtocolVersion {
             ProtocolVersion::Unknown => "unknown",
             ProtocolVersion::TlsV1_3 => "tls_1_3",
             ProtocolVersion::DtlsV1_3 => "dtls_1_3",
+            ProtocolVersion::TlsV1_2 => "tls_1_2",
         }
     }
 }

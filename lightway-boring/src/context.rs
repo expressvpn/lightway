@@ -38,36 +38,37 @@ impl ContextBuilder {
     /// Create a new BoringSSL context builder
     pub fn new(method: Method) -> std::result::Result<Self, NewContextBuilderError> {
         let mut builder = match method {
-            Method::TlsClientV1_3 => SslContext::builder(SslMethod::tls()),
-            Method::TlsServerV1_3 => SslContext::builder(SslMethod::tls()),
+            Method::TlsClientV1_3 | Method::TlsServerV1_3 | Method::TlsClientV1_2 => {
+                SslContext::builder(SslMethod::tls())
+            }
             Method::DtlsClientV1_3 | Method::DtlsServerV1_3 => {
                 SslContext::builder(SslMethod::dtls())
             }
         }
         .map_err(|e| NewContextBuilderError(e.to_string()))?;
 
-        if matches!(method, Method::DtlsClientV1_3 | Method::TlsClientV1_3) {
+        if matches!(
+            method,
+            Method::DtlsClientV1_3 | Method::TlsClientV1_3 | Method::TlsClientV1_2
+        ) {
             builder.set_verify(SslVerifyMode::PEER);
         }
 
-        // Set TLS 1.3 or DTLS 1.3 only
-        match method {
-            Method::TlsClientV1_3 | Method::TlsServerV1_3 => {
-                builder
-                    .set_min_proto_version(Some(SslVersion::TLS1_3))
-                    .map_err(|e| NewContextBuilderError(e.to_string()))?;
-                builder
-                    .set_max_proto_version(Some(SslVersion::TLS1_3))
-                    .map_err(|e| NewContextBuilderError(e.to_string()))?;
-            }
-            Method::DtlsClientV1_3 | Method::DtlsServerV1_3 => {
-                builder
-                    .set_min_proto_version(Some(SslVersion::DTLS1_3))
-                    .map_err(|e| NewContextBuilderError(e.to_string()))?;
-                builder
-                    .set_max_proto_version(Some(SslVersion::DTLS1_3))
-                    .map_err(|e| NewContextBuilderError(e.to_string()))?;
-            }
+        // Pin the context to the requested protocol version
+        {
+            let version = match method {
+                Method::TlsClientV1_3 | Method::TlsServerV1_3 => SslVersion::TLS1_3,
+                Method::DtlsClientV1_3 | Method::DtlsServerV1_3 => SslVersion::DTLS1_3,
+                Method::TlsClientV1_2 => SslVersion::TLS1_2,
+            };
+
+            builder
+                .set_min_proto_version(Some(version))
+                .map_err(|e| NewContextBuilderError(e.to_string()))?;
+
+            builder
+                .set_max_proto_version(Some(version))
+                .map_err(|e| NewContextBuilderError(e.to_string()))?;
         }
 
         Ok(Self { builder, method })
@@ -181,14 +182,39 @@ impl ContextBuilder {
         Ok(self)
     }
 
-    /// Set the cipher list (no-op for TLS 1.3 / DTLS 1.3).
+    /// Set the cipher list for (D)TLS 1.2 ciphersuites.
     ///
-    /// BoringSSL uses secure defaults for TLS 1.3 ciphersuites.
-    /// This method exists only for API compatibility with the WolfSSL backend.
-    pub fn with_cipher_list(self, _cipher_list: &str) -> Result<Self> {
-        tracing::warn!(
-            "BoringSSL does not support cipher list restriction for (D)TLS 1.3; ignoring"
-        );
+    /// BoringSSL's (D)TLS 1.3 ciphersuites are fixed and cannot be
+    /// restricted via `SSL_CTX_set_cipher_list`, so wolfSSL-style
+    /// `TLS13-*` entries are dropped with a warning. Only the remaining
+    /// TLS 1.2 entries are applied.
+    pub fn with_cipher_list(mut self, cipher_list: &str) -> Result<Self> {
+        if matches!(
+            self.method,
+            Method::TlsClientV1_3
+                | Method::TlsServerV1_3
+                | Method::DtlsClientV1_3
+                | Method::DtlsServerV1_3
+        ) {
+            tracing::warn!(
+                "BoringSSL does not support cipher list restriction for (D)TLS 1.3, ignoring \"with_cipher_list\"."
+            );
+            return Ok(self);
+        }
+
+        // We remove all TLS1.3 ciphers and supply the rest to BoringSSL
+        let entries: Vec<&str> = cipher_list.split(':').filter(|c| !c.is_empty()).collect();
+        let tls12: Vec<&str> = entries
+            .iter()
+            .copied()
+            .filter(|c| !c.starts_with("TLS13-"))
+            .collect();
+        if !tls12.is_empty() {
+            self.builder
+                .set_cipher_list(&tls12.join(":"))
+                .map_err(TlsError::BoringSSL)?;
+        }
+
         Ok(self)
     }
 
@@ -374,13 +400,34 @@ mod tests {
     }
 
     #[test]
-    fn with_cipher_list_is_noop() {
-        // TLS 1.3 ignores the cipher list; method must return Ok regardless.
-        ContextBuilder::new(Method::TlsClientV1_3)
+    fn with_cipher_list_applied_for_tls12_client() {
+        // Mixing TLS13-* and 1.2 entries should still build (with_cipher_list should remove the TLS1.3)
+        ContextBuilder::new(Method::TlsClientV1_2)
             .unwrap()
-            .with_cipher_list("ECDHE-RSA-AES256-GCM-SHA384")
+            .with_cipher_list("TLS13-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384")
             .unwrap()
             .build();
+
+        // An invalid cipher list must be rejected rather than silently ignored.
+        assert!(
+            ContextBuilder::new(Method::TlsClientV1_2)
+                .unwrap()
+                .with_cipher_list("NOT-A-REAL-CIPHER")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn with_cipher_list_ignores_tls13_only_list() {
+        // Pure TLS13-* lists (the core stream defaults) must be ignored
+        // entirely rather than producing an empty-list error.
+        for method in [Method::TlsClientV1_3, Method::TlsClientV1_2] {
+            ContextBuilder::new(method)
+                .unwrap()
+                .with_cipher_list("TLS13-AES256-GCM-SHA384")
+                .unwrap()
+                .build();
+        }
     }
 
     #[test]

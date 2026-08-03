@@ -418,6 +418,7 @@ where
     /// Get protocol version (WolfSSL compatibility alias)
     pub fn version(&self) -> ProtocolVersion {
         match self.ssl_stream.ssl().version_str() {
+            "TLSv1.2" => ProtocolVersion::TlsV1_2,
             "TLSv1.3" => ProtocolVersion::TlsV1_3,
             "DTLSv1.3" => ProtocolVersion::DtlsV1_3,
             _ => ProtocolVersion::Unknown,
