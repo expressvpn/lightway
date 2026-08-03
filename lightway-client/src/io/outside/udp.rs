@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use lightway_app_utils::sockopt;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 #[cfg(apple)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -29,6 +30,9 @@ pub struct Udp {
     /// [`OutsideIO::reconnect`] on the next network-change event.
     #[cfg(apple)]
     connected: AtomicBool,
+    /// Consecutive swallowed send errors, reset by a successful send; see
+    /// [`Udp::note_swallowed_send`].
+    swallowed_sends: AtomicU64,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
 }
@@ -63,6 +67,7 @@ impl Udp {
             connect_requested: false,
             #[cfg(apple)]
             connected: AtomicBool::new(false),
+            swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
         })
@@ -90,7 +95,10 @@ impl Udp {
         self.connect_requested = true;
         self.connect_socket()?;
         self.connected.store(true, Ordering::Relaxed);
-        tracing::info!("Outside UDP socket connected; using connected send");
+        tracing::info!(
+            "Outside UDP socket connected; using connected send (local address {})",
+            local_addr_str(&self.sock)
+        );
         Ok(())
     }
 
@@ -104,6 +112,7 @@ impl Udp {
     /// network-change reconnect restores the fast path.
     #[cfg(apple)]
     fn downgrade(&self) {
+        let pinned = local_addr_str(&self.sock);
         // Flip first so concurrent senders switch to `send_to`; a send racing
         // the dissolve gets `EISCONN`/`ENOTCONN`, which `send` swallows.
         self.connected.store(false, Ordering::Relaxed);
@@ -117,8 +126,20 @@ impl Udp {
             }
         }
         tracing::info!(
-            "Outside UDP socket downgraded to unconnected send until next network change"
+            "Outside UDP socket (was pinned to {pinned}) downgraded to unconnected send until next network change"
         );
+    }
+
+    /// Send errors around a network change are expected and absorbed (DTLS
+    /// retransmission recovers), but a sustained stream of them means the
+    /// tunnel is down with no trace in the logs. Log the 1st, 2nd, 4th, ...
+    /// of each consecutive run, so onset and magnitude stay visible without
+    /// flooding.
+    fn note_swallowed_send(&self, err: &std::io::Error) {
+        let count = self.swallowed_sends.fetch_add(1, Ordering::Relaxed) + 1;
+        if count.is_power_of_two() {
+            tracing::debug!("Swallowing outside UDP send error ({count} consecutive): {err}");
+        }
     }
 
     #[cfg(batch_receive)]
@@ -246,10 +267,14 @@ impl OutsideIO for Udp {
         // socket lock (see soconnectlock in xnu's uipc_socket.c), so this both
         // refreshes the pinned route and re-selects the local address — on the
         // same fd and local port.
+        let before = local_addr_str(&self.sock);
         match self.connect_socket() {
             Ok(()) => {
                 self.connected.store(true, Ordering::Relaxed);
-                tracing::debug!("Reconnected outside UDP socket after network change");
+                tracing::debug!(
+                    "Reconnected outside UDP socket after network change, local address {before} -> {}",
+                    local_addr_str(&self.sock)
+                );
             }
             Err(e) => {
                 // Better a slow socket than a wedged one: drop to unconnected
@@ -293,7 +318,10 @@ impl OutsideIOSendCallback for Udp {
         let result = self.sock.try_send_to(buf, self.peer_addr);
 
         match result {
-            Ok(nr) => IOCallbackResult::Ok(nr),
+            Ok(nr) => {
+                self.swallowed_sends.store(0, Ordering::Relaxed);
+                IOCallbackResult::Ok(nr)
+            }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
@@ -310,19 +338,23 @@ impl OutsideIOSendCallback for Udp {
                 // Otherwise, TLS perceives that no data is sent and try
                 // to send the same data again, creating a live-lock until
                 // the network is reachable.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
                 // This case indicates network unreachable error.
                 // Possibly there is a network change at the moment.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
                 // No buffer space available
                 // UDP sockets may have this error when the system is overloaded.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             #[cfg(apple)]
@@ -341,6 +373,7 @@ impl OutsideIOSendCallback for Udp {
                 if connected {
                     self.downgrade();
                 }
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             #[cfg(apple)]
@@ -350,6 +383,7 @@ impl OutsideIOSendCallback for Udp {
                 // network change refreshes it; swallow so TLS does not enter an
                 // error state in the meantime. Only relevant when we explicitly
                 // use `send`; `send_to` should surface this error as before.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             #[cfg(apple)]
@@ -362,6 +396,7 @@ impl OutsideIOSendCallback for Udp {
                 // association (`send` on a just-dissolved socket, or `send_to`
                 // on a just-connected one). The next send takes the settled
                 // path; DTLS retransmission covers this packet.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
             Err(err) => {
@@ -386,6 +421,12 @@ impl OutsideIOSendCallback for Udp {
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
         sockopt::set_ip_mtu_discover(self.sock.as_ref(), self.default_ip_pmtudisc)
     }
+}
+
+#[cfg(apple)]
+fn local_addr_str(sock: &tokio::net::UdpSocket) -> String {
+    sock.local_addr()
+        .map_or_else(|e| e.to_string(), |a| a.to_string())
 }
 
 /// ICMP errors (port/host/net unreachable) are delivered asynchronously to a
