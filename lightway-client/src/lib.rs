@@ -4,6 +4,11 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
+// Counters for the Android raw TCP coalescer; `test` so the host
+// test build of `io::inside::raw_gro` (compiled for any host) always
+// finds it.
+#[cfg(any(android, test))]
+mod metrics;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
