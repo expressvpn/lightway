@@ -105,7 +105,9 @@ pub enum ControlMsg {
         /// against the engine's.
         refused: u64,
         /// False when the engine has no such session - the caller must NOT
-        /// treat that as zero traffic. See the design doc's `get_stats` task.
+        /// treat that as zero traffic. This is the distinction
+        /// `ExpresslaneMetrics::get_stats` in `lightway-core` cannot make,
+        /// since it returns a plain counter struct.
         known_session: bool,
     },
 }

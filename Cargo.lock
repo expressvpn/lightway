@@ -1726,7 +1726,9 @@ dependencies = [
  "bytes",
  "libc",
  "lightway-bpf-steering",
+ "lightway-core",
  "lightway-expresslane",
+ "tracing",
 ]
 
 [[package]]
