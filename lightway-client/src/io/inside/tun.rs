@@ -1,3 +1,5 @@
+#[cfg(android)]
+use std::os::fd::AsRawFd;
 #[cfg(linux)]
 use std::sync::{
     Mutex,
@@ -24,6 +26,8 @@ use lightway_core::{
 
 #[cfg(linux)]
 use crate::io::inside::InsideIORecvGso;
+#[cfg(android)]
+use crate::io::inside::raw_gro::{self, RawGro, RawTunIo};
 use crate::{ConnectionState, io::inside::InsideIORecv};
 
 pub struct Tun {
@@ -32,6 +36,12 @@ pub struct Tun {
     dns_ip: Ipv4Addr,
     #[cfg(linux)]
     gro: Gro,
+    /// Raw downlink TCP coalescer for the `VpnService` fd, which has
+    /// no `virtio_net_hdr` framing (see [`raw_gro`]). Gated off by
+    /// default; the app opts in via
+    /// [`crate::io::inside::raw_gro::set_tun_tcp_coalescing_allowed`].
+    #[cfg(android)]
+    raw_gro: RawGro,
 }
 
 impl Tun {
@@ -59,6 +69,8 @@ impl Tun {
             dns_ip,
             #[cfg(linux)]
             gro: Gro::new(),
+            #[cfg(android)]
+            raw_gro: RawGro::new(raw_gro::DEFAULT_MAX_SUPERPACKET),
         }
     }
 
@@ -77,12 +89,63 @@ impl Tun {
         self.gro.send(&self.tun, buf)
     }
 
+    /// Write one already-address-rewritten packet to the device,
+    /// through the raw TCP coalescer when a window is open. The
+    /// `VpnService` fd has no `virtio_net_hdr` framing (and cannot
+    /// gain it — `TUNSETIFF` on an attached fd fails with `EEXIST`),
+    /// so coalesced runs are injected as single oversized IPv4
+    /// packets; see [`raw_gro`] for the constraints and gates.
+    #[cfg(android)]
+    fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
+        self.raw_gro.send(&self.tun, buf)
+    }
+
     /// Write one already-address-rewritten packet to the device. No
-    /// coalescing off Linux — `virtio_net_hdr` writes are a Linux TUN
-    /// feature.
-    #[cfg(not(linux))]
+    /// coalescing on the remaining platforms — `virtio_net_hdr` writes
+    /// are a Linux TUN feature, and the raw oversized write is only
+    /// probed and used on Android.
+    #[cfg(not(any(linux, android)))]
     fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         self.tun.try_send(buf)
+    }
+}
+
+/// The device writes the raw coalescer performs, on the real TUN.
+/// `send_slice` borrows so a rejected superpacket can be re-split and
+/// re-sent from the same bytes.
+#[cfg(android)]
+impl RawTunIo for AppUtilsTun {
+    fn vnet_hdr_framing(&self) -> Option<bool> {
+        /// `IFF_VNET_HDR` in `ifreq.ifr_flags`.
+        const IFF_VNET_HDR: libc::c_short = 0x4000;
+        Some(tun_iff_flags(self.as_raw_fd())? & IFF_VNET_HDR != 0)
+    }
+
+    fn send_slice(&self, pkt: &[u8]) -> IOCallbackResult<usize> {
+        AppUtilsTun::try_send_slice(self, pkt)
+    }
+
+    fn send_owned(&self, pkt: BytesMut) -> IOCallbackResult<usize> {
+        AppUtilsTun::try_send(self, pkt)
+    }
+}
+
+/// Read the interface flags via `TUNGETIFF` — `_IOR('T', 210, unsigned
+/// int)`, the one tun ioctl Android's SELinux policy whitelists for
+/// app domains (`TUNSETIFF`/`TUNSETOFFLOAD` and friends all return
+/// `EACCES` or fail structurally). `None` if the ioctl failed.
+#[cfg(android)]
+fn tun_iff_flags(fd: std::os::fd::RawFd) -> Option<libc::c_short> {
+    const TUNGETIFF: libc::c_int = 0x800454d2u32 as libc::c_int;
+    // SAFETY: `ifreq` is plain old data the kernel fills in; a zeroed
+    // one is a valid argument, and `TUNGETIFF` writes only within it.
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        if libc::ioctl(fd, TUNGETIFF, &mut ifr) != 0 {
+            return None;
+        }
+        Some(ifr.ifr_ifru.ifru_flags)
     }
 }
 
@@ -295,6 +358,16 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
     #[cfg(linux)]
     fn gro_flush(&self) {
         self.gro.flush(&self.tun);
+    }
+
+    #[cfg(android)]
+    fn gro_open(&self) {
+        self.raw_gro.open(&self.tun, self.ip);
+    }
+
+    #[cfg(android)]
+    fn gro_flush(&self) {
+        self.raw_gro.flush(&self.tun);
     }
 
     fn into_io_send_callback(

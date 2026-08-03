@@ -25,6 +25,11 @@ use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
 #[cfg(linux)]
 pub use io::inside::InsideIORecvGso;
+/// The Android downlink TCP coalescing kill switch — re-exported so
+/// embedders (which own the tethering state) can drive it without
+/// reaching into the io module tree.
+#[cfg(android)]
+pub use io::inside::raw_gro::set_tun_tcp_coalescing_allowed;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -595,11 +600,21 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
+///
+/// When `inside_io` is provided (the mobile data plane does), a TUN
+/// coalescing window is opened around each decrypt batch: decrypted
+/// same-flow TCP segments delivered through the inside send callback
+/// may be merged into superpackets and the window is flushed before
+/// the batch's conn lock is released, so packets never wait on future
+/// traffic. On backends without a coalescing-capable device the
+/// window calls are no-ops; `None` keeps the historical behaviour.
+#[cfg_attr(not(any(linux, android)), allow(unused_variables))]
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
     connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
+    inside_io: Option<Arc<dyn io::inside::InsideIORecv<ExtAppState>>>,
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
@@ -633,13 +648,32 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             IOCallbackResult::Err(err) => return Err(err.into()),
         };
 
-        let pkts = bufs
-            .iter_mut()
-            .take(count)
-            .map(|b| OutsidePacket::Wire(b, connection_type));
-        conn.lock()
-            .unwrap()
-            .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
+        // Open one TUN coalescing window across the whole decrypt
+        // batch (`gro_open` is idempotent and a no-op on incapable
+        // backends). The flush runs while the conn lock is still held,
+        // for the same reason `outside_io_task_gro` does it: `send()`
+        // can only run under this mutex, so closing the window here
+        // leaves no gap in which another task coalesces into an
+        // already-drained batch.
+        #[cfg(any(linux, android))]
+        if let Some(inside_io) = &inside_io {
+            inside_io.gro_open();
+        }
+        let result = {
+            let mut conn = conn.lock().unwrap();
+            let pkts = bufs
+                .iter_mut()
+                .take(count)
+                .map(|b| OutsidePacket::Wire(b, connection_type));
+            let result =
+                conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
+            #[cfg(any(linux, android))]
+            if let Some(inside_io) = &inside_io {
+                inside_io.gro_flush();
+            }
+            result
+        };
+        result?;
 
         for b in &mut bufs[..count] {
             b.clear();
@@ -1413,6 +1447,11 @@ pub async fn connect<
             config.outside_mtu,
             connection_type,
             outside_io.clone(),
+            // No per-batch coalescing window on the desktop fallback
+            // loop: the offloaded path above owns windowing when
+            // `enable_tun_offload` is set, and without it the window
+            // would be a no-op anyway.
+            None,
             keepalive.clone(),
             None,
         )),
@@ -1423,6 +1462,7 @@ pub async fn connect<
         config.outside_mtu,
         connection_type,
         outside_io.clone(),
+        None,
         keepalive.clone(),
         None,
     ));

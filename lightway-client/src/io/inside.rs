@@ -40,14 +40,16 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
 
     /// Open a GRO coalescing window on the send path. Until the matching
     /// [`Self::gro_flush`], packets delivered via the inside send callback
-    /// may be coalesced into TSO superpackets instead of written
-    /// individually. Backends without TUN offload leave this a no-op.
-    #[cfg(linux)]
+    /// may be coalesced into superpackets instead of written individually
+    /// — TSO aggregates behind a `virtio_net_hdr` on Linux, raw oversized
+    /// packets on Android. Backends without a coalescing-capable device
+    /// leave this a no-op.
+    #[cfg(any(linux, android))]
     fn gro_open(&self) {}
 
     /// Flush any coalesced packets and close the window opened by
     /// [`Self::gro_open`].
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     fn gro_flush(&self) {}
 
     fn into_io_send_callback(
