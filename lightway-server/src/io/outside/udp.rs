@@ -299,6 +299,30 @@ impl UdpServer {
 
         let session = hdr.session;
 
+        // DIAGNOSTIC (UDP roaming): the float decision, in one place.
+        //
+        // `update_peer_address` is true when the datagram did NOT match a
+        // connection by socket address but DID match one by session id -- i.e.
+        // the peer appears to have roamed. The address is only actually moved
+        // after a successful decrypt (see the `Ok(_)` arm below), so a decrypt
+        // failure here means the session can never recover: the server keeps
+        // replying to the old, dead address.
+        //
+        // `incoming` is the source address of *this* datagram; `stored` is the
+        // address the connection currently believes in. Logging both is what
+        // distinguishes "arrived on the new NAT binding" from "arrived on the
+        // old one", which cannot be told apart from `stored` alone.
+        if update_peer_address {
+            tracing::debug!(
+                target: "lw_float",
+                incoming = ?peer_addr,
+                stored = ?conn.peer_addr(),
+                wire_session = ?session,
+                conn_session = ?conn.session_id(),
+                "float candidate: session matched, address changed"
+            );
+        }
+
         match conn.outside_data_received(pkt) {
             Ok(0) => {
                 // We will hit this case when there is UDP packet duplication.
@@ -307,9 +331,19 @@ impl UdpServer {
                 // and replay it. In any case, skip processing further
                 if update_peer_address {
                     metrics::udp_session_rotation_attempted_via_replay();
+                    // DIAGNOSTIC: the roamed datagram produced no frames, so the
+                    // float below is skipped and the peer address is NOT updated.
+                    // This is the silent dead end: no reply, no reject, no error.
+                    tracing::warn!(
+                        target: "lw_float",
+                        incoming = ?peer_addr,
+                        stored = ?conn.peer_addr(),
+                        wire_session = ?session,
+                        "float REJECTED: decrypt produced 0 frames (treated as replay)"
+                    );
                 }
             }
-            Ok(_) => {
+            Ok(n) => {
                 // NOTE: We wait until the first successful TLS
                 // decrypt to protect against the case where a crafted
                 // packet with a session ID causes us to change the
@@ -317,12 +351,33 @@ impl UdpServer {
                 // first
                 if update_peer_address {
                     metrics::udp_conn_recovered_via_session(session);
+                    // DIAGNOSTIC: this is the success path -- the only place the
+                    // peer address is allowed to move.
+                    tracing::info!(
+                        target: "lw_float",
+                        incoming = ?peer_addr,
+                        stored = ?conn.peer_addr(),
+                        wire_session = ?session,
+                        frames = n,
+                        "float ACCEPTED: moving peer address"
+                    );
                     conn.begin_session_id_rotation();
                     self.conn_manager.set_peer_addr(&conn, peer_addr);
                 }
             }
             Err(err) => {
                 warn!("Failed to process outside data: {err}");
+                // DIAGNOSTIC: an error (as opposed to Ok(0)) on a roamed
+                // datagram is a different failure mode and worth separating.
+                if update_peer_address {
+                    tracing::warn!(
+                        target: "lw_float",
+                        incoming = ?peer_addr,
+                        stored = ?conn.peer_addr(),
+                        wire_session = ?session,
+                        "float REJECTED: outside_data_received returned error"
+                    );
+                }
                 let _ = conn.handle_outside_data_error(&err);
                 // Fatal or not, we are done with this packet.
             }
