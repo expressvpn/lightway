@@ -3,8 +3,7 @@
 //! The receive-side mirror of [`crate::gso`]: where `gso` splits a TSO
 //! superpacket into per-segment wire packets, this module merges
 //! decrypted, same-flow IPv4 TCP segments (each with valid checksums,
-//! arriving in order from the tunnel) into one TSO superpacket that is
-//! written to a Linux TUN device behind a `virtio_net_hdr`, so the
+//! arriving in order from the tunnel) into one TSO superpacket, so the
 //! kernel traverses its receive path once per batch instead of once
 //! per segment.
 //!
@@ -15,6 +14,25 @@
 //! checksum and the PSH/FIN bits). Anything else — including a short
 //! or PSH/FIN-marked segment — ends the batch, exactly where the
 //! kernel flushes.
+//!
+//! An accumulated batch can be finalized two ways, matching the two
+//! kinds of device it can be written to:
+//!
+//! - [`TcpGroBatch::take`]: for a Linux TUN opened with
+//!   `IFF_VNET_HDR`. The superpacket is written behind a
+//!   `virtio_net_hdr` carrying `gso_size` and checksum metadata; the
+//!   TCP checksum field holds only the pseudo-header partial, which
+//!   the kernel completes.
+//! - [`TcpGroBatch::take_raw`]: for a TUN with **no metadata channel**
+//!   (an Android `VpnService` fd, where `IFF_VNET_HDR` cannot be
+//!   enabled and `TUNSETOFFLOAD` is blocked by SELinux). The result is
+//!   a plain oversized IPv4 packet, fully self-contained — lengths and
+//!   both checksums valid — injected with an ordinary `write()`. The
+//!   local stack accepts it because `tun_get_user()` performs no MTU
+//!   check and TCP sockets have no packet boundaries. Such a packet
+//!   must never exceed 65535 bytes (`tot_len` is a u16 and
+//!   `ip_rcv_core()` trims to it); [`TcpGroBatch::with_max_len`]
+//!   enforces a cap at or below that ceiling.
 
 use bytes::BytesMut;
 use pnet_packet::tcp::TcpFlags;
@@ -163,11 +181,26 @@ pub struct TcpGroBatch {
     /// PSH/FIN bits accumulated from absorbed segments, OR'd into the
     /// superpacket's flags by [`Self::take`].
     psh_fin: u8,
+    /// Superpacket size cap in bytes (headers + payload), at most
+    /// [`MAX_IPV4_PACKET_LEN`]. See [`Self::with_max_len`].
+    max_len: usize,
 }
 
 impl TcpGroBatch {
-    /// Create an empty batch.
+    /// Create an empty batch capped at the largest IPv4 packet.
     pub fn new() -> Self {
+        Self::with_max_len(MAX_IPV4_PACKET_LEN)
+    }
+
+    /// Create an empty batch whose superpackets never exceed `max_len`
+    /// bytes (IP header + TCP header + payload).
+    ///
+    /// `max_len` is clamped to [`MAX_IPV4_PACKET_LEN`]: IPv4
+    /// `total_length` is a u16 and the kernel trims the packet to it,
+    /// so anything larger would lose data silently. Raw-write callers
+    /// ([`Self::take_raw`]) should configure a target well below the
+    /// ceiling to bound per-write latency and buffer memory.
+    pub fn with_max_len(max_len: usize) -> Self {
         Self {
             buf: BytesMut::new(),
             segs: 0,
@@ -175,6 +208,7 @@ impl TcpGroBatch {
             tcp_hdr_len: 0,
             next_seq: 0,
             psh_fin: 0,
+            max_len: max_len.min(MAX_IPV4_PACKET_LEN),
         }
     }
 
@@ -206,10 +240,15 @@ impl TcpGroBatch {
             if info.psh_fin != 0 {
                 return GroAppend::Incompatible;
             }
+            // A packet that alone exceeds the cap can never seed a
+            // batch (only reachable with a cap below the device MTU).
+            if pkt.len() > self.max_len {
+                return GroAppend::Incompatible;
+            }
             debug_assert!(self.buf.is_empty());
             // Reserve the full superpacket size up front so absorbing
             // segments never grows the buffer by doubling.
-            self.buf.reserve(MAX_IPV4_PACKET_LEN);
+            self.buf.reserve(self.max_len);
             self.buf.extend_from_slice(pkt);
             self.segs = 1;
             self.gso_size = info.payload_len;
@@ -275,8 +314,9 @@ impl TcpGroBatch {
         if info.payload_len > self.gso_size {
             return GroAppend::Incompatible;
         }
-        // The superpacket's IP total_length is a u16.
-        if self.buf.len() + info.payload_len > MAX_IPV4_PACKET_LEN {
+        // The superpacket's IP total_length is a u16; `max_len` may
+        // cap the batch further below that ceiling.
+        if self.buf.len() + info.payload_len > self.max_len {
             return GroAppend::Incompatible;
         }
 
@@ -322,6 +362,80 @@ impl TcpGroBatch {
     /// flags, and the TCP checksum field seeded with the pseudo-header
     /// partial sum as `VIRTIO_NET_HDR_F_NEEDS_CSUM` requires.
     pub fn take(&mut self) -> Option<(BytesMut, VirtioNetHdr)> {
+        let run = self.take_run()?;
+        if run.segs == 1 {
+            return Some((run.buf, VirtioNetHdr::default()));
+        }
+        let mut buf = run.buf;
+
+        // Seed the checksum field with the pseudo-header partial
+        // (big-endian, not complemented — `set_checksum` writes a host
+        // `u16` big-endian). The partial is computed before the
+        // mutable TCP view is taken; it reads only the IP addresses
+        // and the total length, which `take_run` already fixed up.
+        let partial = pseudo_header_partial(&buf);
+        {
+            use pnet_packet::tcp::MutableTcpPacket;
+            let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HDR_LEN..])
+                .expect("batch buffer always holds a full TCP header");
+            tcp.set_checksum(partial);
+        }
+
+        let vhdr = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: (IPV4_HDR_LEN + run.tcp_hdr_len) as u16,
+            gso_size: run.gso_size as u16,
+            csum_start: IPV4_HDR_LEN as u16,
+            csum_offset: 16,
+        };
+        Some((buf, vhdr))
+    }
+
+    /// Take the assembled run as a self-contained raw superpacket,
+    /// resetting the batch. None if empty.
+    ///
+    /// For devices with no offload metadata channel (no
+    /// `IFF_VNET_HDR`), where the packet must be injected as one plain
+    /// oversized `write()`: unlike [`Self::take`] there is no
+    /// `NEEDS_CSUM` contract to lean on, so the TCP checksum is
+    /// computed in full over the coalesced payload. A single-segment
+    /// run is returned byte-identical to the packet that seeded it.
+    pub fn take_raw(&mut self) -> Option<RawSuperpacket> {
+        let run = self.take_run()?;
+        let mut buf = run.buf;
+
+        if run.segs > 1 {
+            use pnet_packet::ipv4::Ipv4Packet;
+            use pnet_packet::tcp::MutableTcpPacket;
+            let (src, dst) = {
+                let ip = Ipv4Packet::new(&buf[..IPV4_HDR_LEN])
+                    .expect("batch buffer always holds a full IPv4 header");
+                (ip.get_source(), ip.get_destination())
+            };
+            let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HDR_LEN..])
+                .expect("batch buffer always holds a full TCP header");
+            tcp.set_checksum(0);
+            let csum = pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src, &dst);
+            tcp.set_checksum(csum);
+        }
+
+        Some(RawSuperpacket {
+            pkt: buf,
+            segs: run.segs,
+            gso_size: run.gso_size,
+            hdr_len: IPV4_HDR_LEN + run.tcp_hdr_len,
+        })
+    }
+
+    /// Shared prologue of [`Self::take`]/[`Self::take_raw`]: reset the
+    /// batch and hand back the accumulated run. A single-segment run's
+    /// bytes are untouched; a multi-segment run gets its IP header
+    /// fixed up (total length over the whole aggregate, first
+    /// segment's id kept, header checksum recomputed) and the
+    /// accumulated PSH/FIN bits OR'd into the TCP flags. The TCP
+    /// checksum field is left for the caller to finalize.
+    fn take_run(&mut self) -> Option<TakenRun> {
         if self.segs == 0 {
             return None;
         }
@@ -336,49 +450,89 @@ impl TcpGroBatch {
         self.next_seq = 0;
         self.psh_fin = 0;
 
-        if segs == 1 {
-            return Some((buf, VirtioNetHdr::default()));
+        if segs > 1 {
+            {
+                use pnet_packet::ipv4::MutableIpv4Packet;
+                let total_len = buf.len() as u16;
+                let mut ip = MutableIpv4Packet::new(&mut buf[..IPV4_HDR_LEN])
+                    .expect("batch buffer always holds a full IPv4 header");
+                ip.set_total_length(total_len);
+                ip.set_checksum(0);
+                let csum = pnet_packet::ipv4::checksum(&ip.to_immutable());
+                ip.set_checksum(csum);
+            }
+            {
+                use pnet_packet::tcp::MutableTcpPacket;
+                let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HDR_LEN..])
+                    .expect("batch buffer always holds a full TCP header");
+                tcp.set_flags(tcp.get_flags() | psh_fin);
+            }
         }
 
-        // IP-layer fixups: total length over the whole aggregate,
-        // first segment's id kept, header checksum recomputed.
-        {
-            use pnet_packet::ipv4::MutableIpv4Packet;
-            let total_len = buf.len() as u16;
-            let mut ip = MutableIpv4Packet::new(&mut buf[..IPV4_HDR_LEN])
-                .expect("batch buffer always holds a full IPv4 header");
-            ip.set_total_length(total_len);
-            ip.set_checksum(0);
-            let csum = pnet_packet::ipv4::checksum(&ip.to_immutable());
-            ip.set_checksum(csum);
-        }
+        Some(TakenRun {
+            buf,
+            segs,
+            gso_size,
+            tcp_hdr_len,
+        })
+    }
+}
 
-        // TCP fixups: propagate PSH/FIN collected from absorbed
-        // segments, seed the checksum field with the pseudo-header
-        // partial (big-endian, not complemented — `set_checksum`
-        // writes a host `u16` big-endian).
-        //
-        // The partial is computed before the mutable TCP view is taken;
-        // it reads only the IP addresses and the total length, none of
-        // which the fixups below touch.
-        let partial = pseudo_header_partial(&buf);
-        {
-            use pnet_packet::tcp::MutableTcpPacket;
-            let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HDR_LEN..])
-                .expect("batch buffer always holds a full TCP header");
-            tcp.set_flags(tcp.get_flags() | psh_fin);
-            tcp.set_checksum(partial);
-        }
+/// A run pulled out of a [`TcpGroBatch`] by [`TcpGroBatch::take_run`],
+/// before the finalizer-specific checksum treatment.
+struct TakenRun {
+    buf: BytesMut,
+    segs: usize,
+    gso_size: usize,
+    tcp_hdr_len: usize,
+}
 
+/// A finalized coalesced run for devices with no offload metadata
+/// channel: one self-contained IPv4 TCP packet — lengths and both
+/// checksums valid — to be injected with a single plain `write()`.
+///
+/// Produced by [`TcpGroBatch::take_raw`]. If the device rejects the
+/// oversized write, [`Self::build_segment`] regenerates the individual
+/// wire segments so the run can be written packet-by-packet instead of
+/// being dropped.
+pub struct RawSuperpacket {
+    /// The packet bytes.
+    pub pkt: BytesMut,
+    /// Number of TCP segments coalesced into `pkt`.
+    pub segs: usize,
+    /// Payload bytes per segment — the run's MSS, fixed by its first
+    /// segment. The last segment may be shorter.
+    pub gso_size: usize,
+    /// IP + TCP header length in bytes.
+    pub hdr_len: usize,
+}
+
+impl RawSuperpacket {
+    /// Rebuild wire segment `idx` (`0..self.segs`) into `out`,
+    /// replacing its contents: per-segment lengths, sequence number
+    /// advanced by `gso_size`, IP ids sequential from the first
+    /// segment's, FIN/PSH only on the last segment, both checksums
+    /// recomputed. Returns false for an out-of-range index or a
+    /// malformed superpacket (unreachable for one built by
+    /// [`TcpGroBatch::take_raw`]).
+    ///
+    /// This is the no-loss fallback for a failed oversized write, not
+    /// a byte-exact undo: the original segments' IP ids are not
+    /// retained (the same information TSO discards), which no
+    /// non-fragmented TCP flow observes.
+    pub fn build_segment(&self, idx: usize, out: &mut BytesMut) -> bool {
+        if idx >= self.segs {
+            return false;
+        }
         let vhdr = VirtioNetHdr {
-            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            flags: 0,
             gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
-            hdr_len: (IPV4_HDR_LEN + tcp_hdr_len) as u16,
-            gso_size: gso_size as u16,
+            hdr_len: self.hdr_len as u16,
+            gso_size: self.gso_size as u16,
             csum_start: IPV4_HDR_LEN as u16,
             csum_offset: 16,
         };
-        Some((buf, vhdr))
+        crate::gso::build_segment(&vhdr, self.hdr_len, &self.pkt, idx, out).is_ok()
     }
 }
 
@@ -1025,6 +1179,186 @@ mod tests {
         let (sp, vhdr) = batch.take().unwrap();
         assert_eq!(sp.len(), IPV4_HDR_LEN + TCP_MIN_HDR_LEN + MAX_GSO_SEGS * p);
         assert_eq!(vhdr.gso_size as usize, p);
+    }
+
+    // ---- take_raw / RawSuperpacket tests ----
+
+    /// A raw superpacket must be fully self-contained: IP total length
+    /// matching the bytes, IP header checksum valid, and the *complete*
+    /// TCP checksum valid — no `NEEDS_CSUM` receiver exists to finish a
+    /// partial.
+    fn check_raw_superpacket(sp: &RawSuperpacket) {
+        assert_eq!(sp.pkt.len(), sp.hdr_len + expected_payload_len(sp));
+        let ip = Ipv4Packet::new(&sp.pkt[..IPV4_HDR_LEN]).unwrap();
+        assert_eq!(ip.get_total_length() as usize, sp.pkt.len(), "IP total_len");
+        check_ip_csum(&sp.pkt);
+
+        let mut l4 = sp.pkt[IPV4_HDR_LEN..].to_vec();
+        let mut tcp = MutableTcpPacket::new(&mut l4).unwrap();
+        let stored = tcp.get_checksum();
+        tcp.set_checksum(0);
+        assert_eq!(
+            stored,
+            pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src(), &dst()),
+            "full TCP csum"
+        );
+    }
+
+    /// Payload length implied by `segs`/`gso_size` — an upper bound
+    /// only when the last segment is short, so derive from the packet.
+    fn expected_payload_len(sp: &RawSuperpacket) -> usize {
+        sp.pkt.len() - sp.hdr_len
+    }
+
+    /// Three equal segments plus a PSH tail: `take_raw` yields one
+    /// packet with the first seq, PSH propagated, and independently
+    /// valid IP and full TCP checksums.
+    #[test]
+    fn take_raw_full_checksums_and_psh_propagation() {
+        let p = 500usize;
+        let seq0 = 0x1100_0000u32;
+        let mut batch = TcpGroBatch::new();
+        for i in 0..2u32 {
+            let pkt = Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build();
+            assert_eq!(batch.append(&pkt), GroAppend::Coalesced, "seg {i}");
+        }
+        let psh = Seg::new(seq0 + 2 * p as u32, 3, p)
+            .flags(TCP_FLAG_ACK | TCP_FLAG_PSH)
+            .build();
+        assert_eq!(batch.append(&psh), GroAppend::CoalescedFlush);
+
+        let sp = batch.take_raw().unwrap();
+        assert!(batch.is_empty());
+        assert_eq!(sp.segs, 3);
+        assert_eq!(sp.gso_size, p);
+        assert_eq!(sp.hdr_len, IPV4_HDR_LEN + TCP_MIN_HDR_LEN);
+        assert_eq!(sp.pkt.len(), sp.hdr_len + 3 * p);
+        assert_eq!(
+            u32::from_be_bytes(sp.pkt[24..28].try_into().unwrap()),
+            seq0,
+            "first seq preserved"
+        );
+        assert_eq!(sp.pkt[33], TCP_FLAG_ACK | TCP_FLAG_PSH, "PSH propagated");
+        check_raw_superpacket(&sp);
+    }
+
+    /// Odd MSS with an odd short tail — every segment boundary lands
+    /// off word alignment, exercising the checksum fold paths. The
+    /// spec's acceptance criteria call this case out explicitly.
+    #[test]
+    fn take_raw_odd_mss_and_short_tail_checksums() {
+        let p = 501usize;
+        let tail = 7usize;
+        let seq0 = 0x1200_0000u32;
+        let mut batch = TcpGroBatch::new();
+        for i in 0..2u32 {
+            let pkt = Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build();
+            assert_eq!(batch.append(&pkt), GroAppend::Coalesced, "seg {i}");
+        }
+        let short = Seg::new(seq0 + 2 * p as u32, 3, tail).build();
+        assert_eq!(batch.append(&short), GroAppend::CoalescedFlush);
+
+        let sp = batch.take_raw().unwrap();
+        assert_eq!(sp.segs, 3);
+        assert_eq!(sp.pkt.len(), IPV4_HDR_LEN + TCP_MIN_HDR_LEN + 2 * p + tail);
+        check_raw_superpacket(&sp);
+    }
+
+    /// A single-segment `take_raw` hands back the seeding packet
+    /// byte-identical — its checksums are already valid and must not
+    /// be perturbed.
+    #[test]
+    fn take_raw_single_segment_untouched() {
+        let pkt = Seg::new(0x1300_0000, 0x0066, 333).build();
+        let mut batch = TcpGroBatch::new();
+        assert_eq!(batch.append(&pkt), GroAppend::Coalesced);
+        let sp = batch.take_raw().unwrap();
+        assert_eq!(&sp.pkt[..], &pkt[..], "bytes untouched");
+        assert_eq!(sp.segs, 1);
+        assert_eq!(sp.gso_size, 333);
+        assert_eq!(sp.hdr_len, IPV4_HDR_LEN + TCP_MIN_HDR_LEN);
+        check_raw_superpacket(&sp);
+    }
+
+    /// The no-loss fallback: coalesce N segments with sequential IP
+    /// ids, `take_raw`, then rebuild every wire segment. Each must be
+    /// byte-identical to its original, and out-of-range indices must
+    /// be refused.
+    #[test]
+    fn take_raw_resplit_round_trip() {
+        let p = 1000usize;
+        let n = 4usize;
+        let seq0 = 0x1400_0000u32;
+        let id0 = 0x0200u16;
+        let originals: Vec<Vec<u8>> = (0..n)
+            .map(|i| Seg::new(seq0 + (i * p) as u32, id0 + i as u16, p).build())
+            .collect();
+
+        let mut batch = TcpGroBatch::new();
+        for (i, pkt) in originals.iter().enumerate() {
+            assert_eq!(batch.append(pkt), GroAppend::Coalesced, "seg {i}");
+        }
+        let sp = batch.take_raw().unwrap();
+        assert_eq!(sp.segs, n);
+        check_raw_superpacket(&sp);
+
+        let mut out = BytesMut::with_capacity(2048);
+        for (i, orig) in originals.iter().enumerate() {
+            assert!(sp.build_segment(i, &mut out), "seg {i} rebuilds");
+            assert_eq!(&out[..], &orig[..], "rebuilt segment {i} differs");
+        }
+        assert!(!sp.build_segment(n, &mut out), "out of range refused");
+    }
+
+    /// `with_max_len` caps the aggregate below the IPv4 ceiling: an
+    /// append that would cross the cap is refused with nothing
+    /// absorbed, and the flushed superpacket respects the cap.
+    #[test]
+    fn with_max_len_caps_batch_size() {
+        let p = 900usize;
+        let hdr = IPV4_HDR_LEN + TCP_MIN_HDR_LEN;
+        // Room for exactly two segments.
+        let cap = hdr + 2 * p;
+        let seq0 = 0x1500_0000u32;
+        let mut batch = TcpGroBatch::with_max_len(cap);
+        for i in 0..2u32 {
+            let pkt = Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build();
+            assert_eq!(batch.append(&pkt), GroAppend::Coalesced, "seg {i}");
+        }
+        let third = Seg::new(seq0 + 2 * p as u32, 3, p).build();
+        assert_eq!(batch.append(&third), GroAppend::Incompatible);
+
+        let sp = batch.take_raw().unwrap();
+        assert_eq!(sp.pkt.len(), cap, "exactly at the cap");
+        assert_eq!(sp.segs, 2);
+        check_raw_superpacket(&sp);
+    }
+
+    /// A `max_len` above 65535 is clamped: IPv4 `total_length` is a
+    /// u16 and the kernel trims to it, so the coalescer must refuse,
+    /// never the kernel.
+    #[test]
+    fn with_max_len_clamps_to_ipv4_ceiling() {
+        let p = 30000usize;
+        let seq0 = 0x1600_0000u32;
+        let mut batch = TcpGroBatch::with_max_len(1_000_000);
+        for i in 0..2u32 {
+            let pkt = Seg::new(seq0 + i * p as u32, 1 + i as u16, p).build();
+            assert_eq!(batch.append(&pkt), GroAppend::Coalesced, "seg {i}");
+        }
+        // 60040 + 30000 > 65535 — refused despite the huge requested cap.
+        let third = Seg::new(seq0 + 2 * p as u32, 3, p).build();
+        assert_eq!(batch.append(&third), GroAppend::Incompatible);
+    }
+
+    /// A packet that alone exceeds a small cap cannot seed the batch.
+    #[test]
+    fn with_max_len_rejects_oversized_seed() {
+        let mut batch = TcpGroBatch::with_max_len(100);
+        let pkt = Seg::new(0x1700_0000, 1, 100).build(); // 140 bytes total
+        assert_eq!(batch.append(&pkt), GroAppend::Incompatible);
+        assert!(batch.is_empty());
+        assert!(batch.take_raw().is_none());
     }
 
     // ---- TcpGroTable tests ----

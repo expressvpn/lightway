@@ -53,7 +53,7 @@ static METRIC_GSO_BATCH_DROPPED_BY_PLUGINS: LazyLock<Counter> =
 const METRIC_GSO_BUILD_SEGMENT_FAILED: &str = "gso_build_segment_failed";
 #[cfg(target_os = "linux")]
 const GSO_BUILD_REASON_LABEL: &str = "reason";
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 static METRIC_GSO_NONE_CHECKSUM_SKIPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("gso_none_checksum_skipped"));
 #[cfg(target_os = "linux")]
@@ -193,7 +193,7 @@ pub(crate) fn gso_build_segment_failed(reason: &'static str) {
 /// pointing outside the packet buffer — no checksum is written and
 /// the packet is forwarded with whatever value the kernel left in
 /// place. Indicates a malformed virtio_net_hdr from the TUN.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 pub(crate) fn gso_none_checksum_skipped() {
     METRIC_GSO_NONE_CHECKSUM_SKIPPED.increment(1);
 }

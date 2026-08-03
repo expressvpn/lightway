@@ -47,6 +47,9 @@ pub(crate) const MAX_GSO_SEGS: usize = 64;
 
 /// Upper bound on the bytes a single GSO coalescing buffer can hold:
 /// `MAX_GSO_SEGS` segments, each at most `MAX_OUTSIDE_MTU`.
+// Only the Linux vnet-hdr offload paths consult this; Android compiles
+// the module for `gro`'s raw coalescer only.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const MAX_GSO_FRAME_BYTES: usize = MAX_GSO_SEGS * crate::MAX_OUTSIDE_MTU;
 
 /// Upper bound on the UDP payload bytes a single `sendmsg` with
@@ -250,6 +253,9 @@ const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 const VIRTIO_NET_HDR_GSO_ECN: u8 = 0x80;
 
 /// Why `calc_hdr_len` could not decode the protocol header length.
+// Only the Linux vnet-hdr offload paths parse superpackets handed in
+// by the kernel; see `MAX_GSO_FRAME_BYTES` above.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GsoHdrError {
     /// Buffer was empty.
@@ -267,6 +273,7 @@ pub(crate) enum GsoHdrError {
     UnsupportedL4Proto(u8),
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl GsoHdrError {
     /// Stable, low-cardinality label used as the `reason` field of the
     /// `gso_dropped_invalid_hdr_len` counter. Production has no
@@ -331,6 +338,7 @@ impl GsoSegError {
 /// roughly the size of the first segment (≈ MTU), not the headers, so any
 /// code that copies a per-segment header template based on `vhdr.hdr_len`
 /// will get a wildly wrong value. Parse the real length from the packet.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn calc_hdr_len(pkt: &[u8]) -> Result<usize, GsoHdrError> {
     use pnet_packet::ip::IpNextHeaderProtocols;
     use pnet_packet::ipv4::Ipv4Packet;
@@ -373,6 +381,7 @@ pub(crate) fn calc_hdr_len(pkt: &[u8]) -> Result<usize, GsoHdrError> {
 }
 
 /// Number of segments in a GSO superpacket.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn calc_gso_segs(pkt_len: usize, hdr_len: usize, gso_size: usize) -> usize {
     if gso_size == 0 {
         return 0;
