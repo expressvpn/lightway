@@ -222,6 +222,7 @@ pub(crate) async fn async_lightway_start(
                     online_signal_sender: online_signal_sender.clone(),
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
+                    inside_io: inside_io.clone(),
                 })
                 .instrument(info_span!("LightwayConnection", instance_id = instance_id)),
             );
@@ -449,11 +450,17 @@ struct OutsideIOConfig {
 async fn restartable_outside_io_task(
     conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
     outside_io_config: OutsideIOConfig,
+    inside_io: Arc<io::inside::Tun>,
     keepalive: Keepalive,
     notify_keepalive_reply: Arc<Notify>,
     mut new_outside_io_receiver: MpscReceiver<()>,
     external_event_handler: Arc<dyn EventHandlers>,
 ) -> uniffi::Result<()> {
+    // Handed to `outside_io_task` so decrypted TCP segments coalesce
+    // on the TUN write path within each decrypt batch (Android's raw
+    // coalescer / the Linux vnet-hdr path in mobile-test builds; a
+    // no-op elsewhere or while gated off).
+    let inside_io: Arc<dyn io::inside::InsideIORecv<TunnelState>> = inside_io;
     let mut current_outside_io = outside_io_config.outside_io;
     let mut first_run = true;
 
@@ -483,7 +490,7 @@ async fn restartable_outside_io_task(
         };
 
         tokio::select! {
-            result = outside_io_task(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), keepalive.clone(), ready_tx) => return result,
+            result = outside_io_task(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), Some(inside_io.clone()), keepalive.clone(), ready_tx) => return result,
 
             new_outside_io_result = new_outside_io_receiver.recv() => {
                 match new_outside_io_result {
@@ -571,6 +578,13 @@ struct LightwayClientConnectArgs {
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
     external_event_handler: Arc<dyn EventHandlers>,
+    /// The shared tunnel device, handed to `outside_io_task` so it can
+    /// bracket each decrypt batch with a TUN coalescing window. Every
+    /// parallel connection attempt opens and flushes windows on it,
+    /// winner or not; inner packets only reach it once this connection
+    /// wins and the tunnel is attached to its state. A no-op where
+    /// coalescing is gated off.
+    inside_io: Arc<io::inside::Tun>,
 }
 
 /// Individual connection to a lightway server
@@ -586,6 +600,7 @@ async fn lightway_client_connect(
         online_signal_sender,
         event_stream_handler,
         external_event_handler,
+        inside_io: tunnel_inside_io,
     }: LightwayClientConnectArgs,
 ) -> uniffi::Result<LightwayConnection> {
     let mut join_set = JoinSet::new();
@@ -703,6 +718,7 @@ async fn lightway_client_connect(
                 connection_type,
                 outside_io,
             },
+            tunnel_inside_io,
             keepalive.clone(),
             notify_keepalive_reply,
             new_outside_io_receiver,
