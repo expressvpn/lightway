@@ -5,6 +5,8 @@ pub mod args;
 #[cfg(apple)]
 pub mod recvmsg_x;
 pub mod sockopt;
+#[cfg(apple)]
+pub mod udp_disconnect;
 
 #[cfg(feature = "tokio")]
 mod connection_ticker;
