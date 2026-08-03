@@ -9,6 +9,7 @@
 mod aead;
 mod error;
 mod key;
+mod replay_window;
 mod version;
 
 pub use aead::ExpresslaneAead;
