@@ -1620,7 +1620,7 @@ pub async fn client<
             rx.clone()
         } else {
             let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
-            let route_rx = monitor.subscribe();
+            let route_rx = monitor.subscribe_routes();
             network_change_monitor = Some(monitor);
             route_rx
         };
