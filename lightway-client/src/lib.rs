@@ -204,6 +204,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
+    /// Firewall mark applied to the outside socket (Linux only).
+    #[cfg(linux)]
+    pub fwmark: u32,
+
     /// DNS configuration mode
     #[cfg(desktop)]
     pub dns_config_mode: DnsConfigMode,
@@ -338,6 +342,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
             route_mode: config.route_mode,
+            #[cfg(linux)]
+            fwmark: config.fwmark,
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -983,10 +989,15 @@ pub async fn connect<
         match mode {
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(server, maybe_sock)
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
-                    .context("Outside IO UDP")?;
+                let mut sock = io::outside::Udp::new(
+                    server,
+                    maybe_sock,
+                    #[cfg(all(linux, not(feature = "mobile")))]
+                    config.fwmark,
+                )
+                .await
+                .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
+                .context("Outside IO UDP")?;
 
                 #[cfg(batch_receive)]
                 if config.enable_batch_receive {

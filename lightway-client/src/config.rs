@@ -212,6 +212,19 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub route_mode: RouteMode,
 
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(
+        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
+        The tunnel's own encrypted packets carry this mark so policy routing
+        rules can keep them out of the tunnel.
+        In Linux networking, a fwmark of 0 represents the default unmarked state
+        and will not apply SO_MARK to the socket."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub fwmark: u32,
+
     #[cfg(desktop)]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"DNS configuration mode
@@ -491,6 +504,8 @@ impl Default for Config {
             enable_batch_receive: false,
             #[cfg(desktop)]
             route_mode: RouteMode::default(),
+            #[cfg(linux)]
+            fwmark: 0,
             #[cfg(desktop)]
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
