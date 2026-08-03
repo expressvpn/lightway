@@ -27,3 +27,11 @@ lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", fe
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 lightway-bpf-steering = { path = "../lightway-bpf-steering", version = "0.1.0" }
+
+# Integration tests in tests/ do not see [dependencies]; the roundtrip test
+# builds ControlMsg::PushKeys and so needs the key types directly.
+[dev-dependencies]
+lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
