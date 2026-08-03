@@ -185,10 +185,10 @@ pub struct RouteUpdater {
 
 impl RouteUpdater {
     /// Refresh the server route if the default route changed (a no-op in
-    /// NoExec mode).
-    pub async fn check_and_update_server_route(&mut self) -> Result<(), RoutingTableError> {
+    /// NoExec mode). Returns whether the server route was actually replaced.
+    pub async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
         if self.inner.routing_mode == RouteMode::NoExec {
-            return Ok(());
+            return Ok(false);
         }
         self.inner.check_and_update_server_route().await
     }
@@ -497,8 +497,9 @@ impl RouteManagerInner {
         Ok(())
     }
 
-    /// Check if server route needs updating due to network changes
-    async fn check_and_update_server_route(&mut self) -> Result<(), RoutingTableError> {
+    /// Check if server route needs updating due to network changes. Returns
+    /// whether the server route was actually replaced.
+    async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
         // Find the current default route to the server
         let server_ip = self.server_ip;
         let current_route = self.find_best_default_route(&server_ip)?;
@@ -540,10 +541,11 @@ impl RouteManagerInner {
                 self.add_route_server(new_server_route).await?;
 
                 tracing::info!("Updated server route for network change");
+                return Ok(true);
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1079,7 +1081,7 @@ mod tests {
 
         // Test check_and_update_server_route when no change is needed
         let result = inner.check_and_update_server_route().await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(false)));
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
@@ -1202,7 +1204,7 @@ mod tests {
 
         // Test check_and_update_server_route when no change is needed
         let result = inner.check_and_update_server_route().await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(false)));
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
