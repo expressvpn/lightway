@@ -21,7 +21,11 @@ pub struct Udp {
 }
 
 impl Udp {
-    pub async fn new(remote_addr: SocketAddr, sock: Option<UdpSocket>) -> Result<Self> {
+    pub async fn new(
+        remote_addr: SocketAddr,
+        sock: Option<UdpSocket>,
+        #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+    ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
             .next()
@@ -37,6 +41,19 @@ impl Udp {
             Some(s) => s,
             None => tokio::net::UdpSocket::bind((unspecified_ip, 0)).await?,
         };
+
+        // Apply the firewall mark *before* the socket is used for anything, so
+        // that no packet can escape unmarked and be captured by the tunnel's
+        // own routes.
+        #[cfg(all(linux, not(feature = "mobile")))]
+        if fwmark != 0 {
+            let socket = socket2::SockRef::from(&sock);
+            match socket.set_mark(fwmark) {
+                Ok(_) => tracing::info!("Applied firewall mark to outside socket"),
+                Err(e) => tracing::warn!("Fail to set so mark on socket: {}", e),
+            }
+        }
+
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
         // Check for the socket's writable ready status, so that it can be used
         // successfuly in TLS's `OutsideIOSendCallback` callback
