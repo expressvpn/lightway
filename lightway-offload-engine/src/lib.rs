@@ -12,3 +12,4 @@ pub mod control;
 pub mod engine;
 pub mod fdpass;
 pub mod ipc;
+pub mod packet;

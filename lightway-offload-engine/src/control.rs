@@ -157,6 +157,7 @@ mod tests {
             lightway_version: [1, 3],
             self_key: ExpresslaneKey([0x21; EXPRESSLANE_KEY_SIZE]),
             peer_key: ExpresslaneKey([0x22; EXPRESSLANE_KEY_SIZE]),
+            peer: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 4500)),
         }
     }
 
@@ -350,6 +351,8 @@ mod tests {
                 received_bytes: 0,
                 decrypt_failures: 0,
                 refused: 0,
+                tx_dropped: 0,
+                rx_dropped: 0,
                 known_session: false,
             }
         );

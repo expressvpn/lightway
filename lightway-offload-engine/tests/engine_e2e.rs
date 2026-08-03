@@ -23,6 +23,8 @@ mod common;
 
 const SID: [u8; 8] = [0xA5; 8];
 const LW_VERSION: [u8; 2] = [1, 3];
+const PEER: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4)), 4500);
 
 fn push_keys(engine: &Engine, key: ExpresslaneKey) {
     engine.apply(&ControlMsg::PushKeys {
@@ -31,6 +33,7 @@ fn push_keys(engine: &Engine, key: ExpresslaneKey) {
         lightway_version: LW_VERSION,
         self_key: key,
         peer_key: key,
+        peer: PEER,
     });
 }
 
@@ -147,6 +150,7 @@ fn real_descriptors_and_keys_cross_into_a_running_engine() {
         lightway_version: LW_VERSION,
         self_key: ExpresslaneKey([1; EXPRESSLANE_KEY_SIZE]),
         peer_key: ExpresslaneKey([2; EXPRESSLANE_KEY_SIZE]),
+        peer: PEER,
     }
     .encode(&mut payload);
     ControlMsg::StatsRequest { session_id: SID }.encode(&mut payload);

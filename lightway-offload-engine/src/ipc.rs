@@ -15,6 +15,8 @@
 //! rotation. A version carried on `Attach` would be structurally always
 //! "not negotiated yet".
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
 use lightway_expresslane::{EXPRESSLANE_KEY_SIZE, ExpresslaneKey};
 
 const TAG_ATTACH: u8 = 1;
@@ -26,6 +28,58 @@ const TAG_STATS_REPLY: u8 = 6;
 
 /// Bytes of length prefix in front of every message.
 const LEN_PREFIX: usize = 4;
+
+/// Bytes a peer address takes: an IPv6 address then a port, with IPv4 carried
+/// in its mapped form so the field is fixed-width either way and every variant
+/// keeps the single fixed length `decode` checks it against.
+///
+/// # What this encoding does not carry
+///
+/// An IPv6 `flowinfo` and `scope_id` are dropped, so a *scoped* peer - a
+/// link-local `fe80::/10` address that means nothing without the interface it
+/// is scoped to - cannot round-trip. [`put_peer`] says so at `warn` rather than
+/// letting it fail later as an unexplained `EINVAL` from `send_to`. A VPN
+/// server reached over a link-local address is not a case this protocol has,
+/// which is why the field stays fixed-width instead of growing six bytes for
+/// it.
+///
+/// The mapped form also means an address genuinely written `::ffff:a.b.c.d`
+/// decodes as the IPv4 address it maps to. That collision is accepted: the two
+/// name the same host, `send_to` reaches it either way, and the alternative -
+/// a family byte - buys a distinction with no consequence at the cost of an
+/// encoding that has invalid values in it.
+const PEER_LEN: usize = 16 + 2;
+
+fn put_peer(out: &mut Vec<u8>, peer: &SocketAddr) {
+    let addr = match peer.ip() {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+        IpAddr::V6(v6) => v6,
+    };
+    if let SocketAddr::V6(v6) = peer
+        && (v6.scope_id() != 0 || v6.flowinfo() != 0)
+    {
+        tracing::warn!(
+            peer = %peer,
+            "peer address scope and flow label are not carried; the engine will send unscoped"
+        );
+    }
+    out.extend_from_slice(&addr.octets());
+    out.extend_from_slice(&peer.port().to_be_bytes());
+}
+
+/// Total by construction: every index below is a constant the array's own type
+/// proves in bounds, so this cannot depend on its caller having checked a
+/// length.
+fn take_peer(bytes: &[u8; PEER_LEN]) -> SocketAddr {
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(&bytes[..16]);
+    let port = u16::from_be_bytes([bytes[16], bytes[17]]);
+    let v6 = Ipv6Addr::from(octets);
+    match v6.to_ipv4_mapped() {
+        Some(v4) => SocketAddr::from((v4, port)),
+        None => SocketAddr::from((v6, port)),
+    }
+}
 
 /// The longest message this protocol can encode, prefix included.
 ///
@@ -39,6 +93,7 @@ pub const MAX_CONTROL_MSG_LEN: usize = ControlMsg::PushKeys {
     lightway_version: [0; 2],
     self_key: ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]),
     peer_key: ExpresslaneKey([0; EXPRESSLANE_KEY_SIZE]),
+    peer: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
 }
 .encoded_len();
 
@@ -80,6 +135,13 @@ pub enum ControlMsg {
         self_key: ExpresslaneKey,
         /// Key this engine decrypts with.
         peer_key: ExpresslaneKey,
+        /// Where this session's datagrams go.
+        ///
+        /// It rides here rather than on `Attach` for the same reason the
+        /// versions do - it is not known at hand-over - and because the roam
+        /// that changes it republishes the keys anyway, so the address the
+        /// engine sends to is always the one that came with the newest keys.
+        peer: SocketAddr,
     },
     /// Forget a session entirely.
     ///
@@ -105,7 +167,12 @@ pub enum ControlMsg {
     StatsReply {
         /// The session these counters describe, echoed from the request.
         session_id: [u8; 8],
-        /// Packets this engine encrypted for this session.
+        /// Packets this engine put on the wire for this session.
+        ///
+        /// Counted after the send, not after the encrypt: lightway-core
+        /// degrades ExpressLane by weighing this against what the peer says it
+        /// received, so a packet that failed to encrypt or failed to send must
+        /// not appear here - it is in `tx_dropped` and nowhere else.
         sent: u64,
         /// Packets this engine decrypted and accepted for this session.
         received: u64,
@@ -122,6 +189,18 @@ pub enum ControlMsg {
         /// Without it the kernel's steering counters cannot be reconciled
         /// against the engine's.
         refused: u64,
+        /// Outbound packets the engine took off the TUN and did not put on the
+        /// wire: no session, no valid keys, a send that failed, or an engine
+        /// told to stand down. Engine-wide, like `refused`, and for the same
+        /// reason - most of them happen precisely because there is no session
+        /// to charge them to. A tunnel that has gone quiet shows up here and
+        /// nowhere else.
+        tx_dropped: u64,
+        /// Inside packets the engine decrypted and then could not write to the
+        /// TUN. Engine-wide, and the RX mirror of `tx_dropped`: the kernel
+        /// steered those datagrams here, so nothing else was ever going to
+        /// carry them, and a device refusing writes is silent without this.
+        rx_dropped: u64,
         /// False when the engine has no such session - the caller must NOT
         /// treat that as zero traffic. This is the distinction
         /// `ExpresslaneMetrics::get_stats` in `lightway-core` cannot make,
@@ -133,11 +212,11 @@ pub enum ControlMsg {
 const fn payload_len(msg: &ControlMsg) -> usize {
     match msg {
         ControlMsg::Attach => 1,
-        ControlMsg::PushKeys { .. } => 1 + 8 + 1 + 2 + 2 * EXPRESSLANE_KEY_SIZE,
+        ControlMsg::PushKeys { .. } => 1 + 8 + 1 + 2 + 2 * EXPRESSLANE_KEY_SIZE + PEER_LEN,
         ControlMsg::DropSession { .. } => 1 + 8,
         ControlMsg::SetActive { .. } => 1 + 1,
         ControlMsg::StatsRequest { .. } => 1 + 8,
-        ControlMsg::StatsReply { .. } => 1 + 8 + 8 * 6 + 1,
+        ControlMsg::StatsReply { .. } => 1 + 8 + 8 * 8 + 1,
     }
 }
 
@@ -158,6 +237,7 @@ impl ControlMsg {
                 lightway_version,
                 self_key,
                 peer_key,
+                peer,
             } => {
                 out.push(TAG_PUSH_KEYS);
                 out.extend_from_slice(session_id);
@@ -165,6 +245,7 @@ impl ControlMsg {
                 out.extend_from_slice(lightway_version);
                 out.extend_from_slice(&self_key.0);
                 out.extend_from_slice(&peer_key.0);
+                put_peer(out, peer);
             }
             ControlMsg::DropSession { session_id } => {
                 out.push(TAG_DROP_SESSION);
@@ -186,6 +267,8 @@ impl ControlMsg {
                 received_bytes,
                 decrypt_failures,
                 refused,
+                tx_dropped,
+                rx_dropped,
                 known_session,
             } => {
                 out.push(TAG_STATS_REPLY);
@@ -196,6 +279,8 @@ impl ControlMsg {
                 out.extend_from_slice(&received_bytes.to_be_bytes());
                 out.extend_from_slice(&decrypt_failures.to_be_bytes());
                 out.extend_from_slice(&refused.to_be_bytes());
+                out.extend_from_slice(&tx_dropped.to_be_bytes());
+                out.extend_from_slice(&rx_dropped.to_be_bytes());
                 out.push(*known_session as u8);
             }
         }
@@ -225,21 +310,27 @@ impl ControlMsg {
 
         let msg = match body[0] {
             TAG_ATTACH if len == 1 => ControlMsg::Attach,
-            TAG_PUSH_KEYS if len == 1 + 8 + 1 + 2 + 2 * EXPRESSLANE_KEY_SIZE => {
+            TAG_PUSH_KEYS if len == 1 + 8 + 1 + 2 + 2 * EXPRESSLANE_KEY_SIZE + PEER_LEN => {
                 let mut session_id = [0u8; 8];
                 session_id.copy_from_slice(&body[1..9]);
                 let version = body[9];
                 let lightway_version = [body[10], body[11]];
                 let mut self_key = [0u8; EXPRESSLANE_KEY_SIZE];
                 self_key.copy_from_slice(&body[12..12 + EXPRESSLANE_KEY_SIZE]);
+                let keys_end = 12 + 2 * EXPRESSLANE_KEY_SIZE;
                 let mut peer_key = [0u8; EXPRESSLANE_KEY_SIZE];
-                peer_key.copy_from_slice(&body[12 + EXPRESSLANE_KEY_SIZE..]);
+                peer_key.copy_from_slice(&body[12 + EXPRESSLANE_KEY_SIZE..keys_end]);
                 ControlMsg::PushKeys {
                     session_id,
                     version,
                     lightway_version,
                     self_key: ExpresslaneKey(self_key),
                     peer_key: ExpresslaneKey(peer_key),
+                    peer: take_peer(
+                        body[keys_end..]
+                            .try_into()
+                            .expect("the length guard above fixes this slice at PEER_LEN"),
+                    ),
                 }
             }
             TAG_DROP_SESSION if len == 9 => {
@@ -255,7 +346,7 @@ impl ControlMsg {
                 session_id.copy_from_slice(&body[1..9]);
                 ControlMsg::StatsRequest { session_id }
             }
-            TAG_STATS_REPLY if len == 58 => {
+            TAG_STATS_REPLY if len == 1 + 8 + 8 * 8 + 1 => {
                 let mut session_id = [0u8; 8];
                 session_id.copy_from_slice(&body[1..9]);
                 let u64_at = |at: usize| {
@@ -269,7 +360,9 @@ impl ControlMsg {
                     received_bytes: u64_at(33),
                     decrypt_failures: u64_at(41),
                     refused: u64_at(49),
-                    known_session: body[57] != 0,
+                    tx_dropped: u64_at(57),
+                    rx_dropped: u64_at(65),
+                    known_session: body[73] != 0,
                 }
             }
             TAG_ATTACH | TAG_PUSH_KEYS | TAG_DROP_SESSION | TAG_SET_ACTIVE | TAG_STATS_REQUEST
@@ -293,6 +386,8 @@ mod tests {
         assert_eq!(decoded, msg);
     }
 
+    const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 4500);
+
     fn push_keys() -> ControlMsg {
         ControlMsg::PushKeys {
             session_id: [7; 8],
@@ -300,6 +395,7 @@ mod tests {
             lightway_version: [1, 3],
             self_key: ExpresslaneKey([1; EXPRESSLANE_KEY_SIZE]),
             peer_key: ExpresslaneKey([2; EXPRESSLANE_KEY_SIZE]),
+            peer: PEER,
         }
     }
 
@@ -312,6 +408,8 @@ mod tests {
             received_bytes: 2424,
             decrypt_failures: 3,
             refused: 9,
+            tx_dropped: 11,
+            rx_dropped: 13,
             known_session: true,
         }
     }
@@ -325,6 +423,45 @@ mod tests {
         roundtrip(ControlMsg::SetActive { active: false });
         roundtrip(ControlMsg::StatsRequest { session_id: [5; 8] });
         roundtrip(stats_reply());
+    }
+
+    /// IPv4 rides in its mapped form so `PushKeys` keeps the single fixed
+    /// length `decode` checks, and it has to come back as IPv4: a peer decoded
+    /// as `::ffff:a.b.c.d` would be sent to over a v6 socket the engine has not
+    /// got, and `send_to` would fail every packet.
+    #[test]
+    fn a_peer_of_either_family_survives_the_mapped_encoding() {
+        for expected in [
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)), 443),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                u16::MAX,
+            ),
+        ] {
+            let mut buf = Vec::new();
+            let ControlMsg::PushKeys {
+                self_key, peer_key, ..
+            } = push_keys()
+            else {
+                panic!("expected PushKeys")
+            };
+            ControlMsg::PushKeys {
+                session_id: [7; 8],
+                version: 2,
+                lightway_version: [1, 3],
+                self_key,
+                peer_key,
+                peer: expected,
+            }
+            .encode(&mut buf);
+
+            let (decoded, used) = ControlMsg::decode(&buf).unwrap();
+            assert_eq!(used, buf.len(), "both families must encode to one length");
+            let ControlMsg::PushKeys { peer, .. } = decoded else {
+                panic!("expected PushKeys")
+            };
+            assert_eq!(peer, expected);
+        }
     }
 
     /// Every field of the two messages that carry more than one number must
@@ -342,6 +479,7 @@ mod tests {
             lightway_version,
             self_key,
             peer_key,
+            peer,
         } = decoded
         else {
             panic!("expected PushKeys")
@@ -351,6 +489,7 @@ mod tests {
         assert_eq!(lightway_version, [1, 3]);
         assert_eq!(self_key, ExpresslaneKey([1; EXPRESSLANE_KEY_SIZE]));
         assert_eq!(peer_key, ExpresslaneKey([2; EXPRESSLANE_KEY_SIZE]));
+        assert_eq!(peer, PEER);
 
         let mut buf = Vec::new();
         stats_reply().encode(&mut buf);
@@ -456,6 +595,7 @@ mod tests {
             lightway_version: [1, 3],
             self_key: ExpresslaneKey([0xAB; EXPRESSLANE_KEY_SIZE]),
             peer_key: ExpresslaneKey([0xCD; EXPRESSLANE_KEY_SIZE]),
+            peer: PEER,
         };
         let rendered = format!("{msg:?}");
         assert!(!rendered.contains("171"), "key bytes leaked: {rendered}");

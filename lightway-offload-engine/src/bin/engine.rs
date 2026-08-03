@@ -2,12 +2,16 @@
 //!
 //! Started by the VPN process with one inherited unix socket on fd 3, over
 //! which it receives its TUN queue and UDP socket, then a stream of control
-//! messages. Packets never arrive here - the kernel's BPF steering delivers
-//! them straight to the descriptors handed over.
+//! messages. No packet ever crosses that socket - the kernel's BPF steering
+//! delivers offloaded traffic straight to the descriptors handed over, and
+//! `PacketLoops` carries it from there.
 //!
-//! There is deliberately no packet loop: which descriptors this process reads,
-//! and on how many threads, is the VPN process's decision to make, and it does
-//! not exist yet. Everything below is what that decision cannot change.
+//! The loops start in the attach callback, before any keys exist. They need
+//! none: the session and the peer come from the engine per packet, and until
+//! the first key push there is nothing to encrypt for - which is also when the
+//! VPN process sets the steering flag, so nothing is being steered here yet
+//! either. Starting them here is what keeps the control loop free of them:
+//! nothing borrows the engine or holds a lock across its blocking read.
 
 /// The descriptor the parent leaves the control socket on.
 #[cfg(target_os = "linux")]
@@ -92,9 +96,11 @@ fn check_control_fd(fd: std::os::fd::RawFd) -> std::io::Result<()> {
 fn main() -> std::io::Result<()> {
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
 
     use lightway_offload_engine::control::run_engine;
     use lightway_offload_engine::engine::Engine;
+    use lightway_offload_engine::packet::PacketLoops;
 
     // Without a subscriber the crate's warnings - a key that would not install,
     // a version that arrived too late - go nowhere, and the engine's only way
@@ -119,18 +125,53 @@ fn main() -> std::io::Result<()> {
     // documented startup contract.
     let control = unsafe { UnixStream::from(OwnedFd::from_raw_fd(CONTROL_FD)) };
 
-    // Shared, never owned by the loop: the same reference is what a packet
-    // path would take, and versions and keys arrive per session over the
-    // control socket.
-    let engine = Engine::new();
+    // Shared, never owned by the control loop: the packet loops hold the same
+    // engine while it is blocked in `recvmsg`, and keys and versions arrive
+    // per session over the control socket.
+    let engine = Arc::new(Engine::new());
 
-    // Held for the life of the process: these are the TUN queue and the UDP
-    // socket the kernel steers to, and closing either one ends the offload.
-    // Process A's packet loop moves them out of this callback instead.
-    let mut fds: Vec<OwnedFd> = Vec::new();
-    let result = run_engine(&control, &engine, |handed_over| fds = handed_over);
-    tracing::info!(descriptors = fds.len(), "engine stopped");
+    // The loops own the descriptors from here. That also makes a failure to
+    // start them safe rather than silent: the descriptors close with the
+    // attempt, the device's `numqueues` drops back to 1, and the kernel puts
+    // the inside path back on queue 0 - the VPN process - instead of steering
+    // it at an engine that would never read it.
+    let mut loops: Option<PacketLoops> = None;
+    let result = run_engine(&control, &engine, |handed_over| {
+        loops = start(engine.clone(), handed_over)
+            .inspect_err(
+                |e| tracing::error!(error = %e, "packet loops did not start, offload is off"),
+            )
+            .ok();
+    });
+    // Before the return value is reported, so the threads are gone while the
+    // process still exists to say so.
+    drop(loops);
+    tracing::info!("engine stopped");
     result
+}
+
+/// Take the two descriptors in the order the protocol passes them - TUN queue,
+/// then UDP socket - and start the loops on them.
+#[cfg(target_os = "linux")]
+fn start(
+    engine: std::sync::Arc<lightway_offload_engine::engine::Engine>,
+    handed_over: Vec<std::os::fd::OwnedFd>,
+) -> std::io::Result<lightway_offload_engine::packet::PacketLoops> {
+    use lightway_offload_engine::control::EXPECTED_FDS;
+    use lightway_offload_engine::packet::PacketLoops;
+    use std::os::fd::OwnedFd;
+
+    let [tun, sock]: [OwnedFd; EXPECTED_FDS] = handed_over.try_into().map_err(|v: Vec<_>| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("attach delivered {} descriptors", v.len()),
+        )
+    })?;
+    PacketLoops::spawn(
+        engine,
+        std::fs::File::from(tun),
+        std::net::UdpSocket::from(sock),
+    )
 }
 
 /// The library is empty off Linux and a binary still needs an entry point.

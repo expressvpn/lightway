@@ -1728,6 +1728,7 @@ dependencies = [
  "lightway-bpf-steering",
  "lightway-core",
  "lightway-expresslane",
+ "rand 0.10.2",
  "tracing",
  "tracing-subscriber",
 ]

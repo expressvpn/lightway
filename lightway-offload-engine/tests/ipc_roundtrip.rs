@@ -85,6 +85,7 @@ fn a_message_with_no_descriptors_is_fine() {
         lightway_version: [1, 3],
         self_key: ExpresslaneKey([5; EXPRESSLANE_KEY_SIZE]),
         peer_key: ExpresslaneKey([6; EXPRESSLANE_KEY_SIZE]),
+        peer: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 4500)),
     }
     .encode(&mut payload);
     send_with_fds(&a, &payload, &[]).unwrap();

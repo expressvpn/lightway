@@ -27,6 +27,7 @@ path = "src/bin/engine.rs"
 [dependencies]
 bytes.workspace = true
 lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }
+rand.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
