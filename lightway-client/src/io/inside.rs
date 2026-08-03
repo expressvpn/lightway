@@ -1,3 +1,8 @@
+// Compiled for `test` as well as `android` so the coalescer's logic
+// (probe, kill switch, fallback) is unit-testable on any host; only
+// the wiring in `tun` is Android-only.
+#[cfg(any(android, test))]
+pub(crate) mod raw_gro;
 pub mod tun;
 
 use anyhow::Result;
