@@ -24,3 +24,18 @@ unnecessary_safety_comment = "deny"
 [dependencies]
 bytes.workspace = true
 lightway-core = { path = "../lightway-core", version = "0.1.0" }
+
+# The crate is `#![cfg(target_os = "linux")]`, so the BPF toolchain must not be
+# reachable from anywhere else: a macOS workspace `cargo clippy` would
+# otherwise build libbpf-sys - and the build script that drives it - for a
+# library that compiles to nothing there.
+[target.'cfg(target_os = "linux")'.dependencies]
+libbpf-rs = "0.24"
+
+# Musl static builds have no shared system libelf/zlib to link against;
+# vendored builds them from source and links them statically.
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+libbpf-sys = { version = "1.7", features = ["vendored"] }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+libbpf-cargo = "0.24"

@@ -160,6 +160,57 @@
           };
           isStatic = true;
           defaultTarget = nativeMuslToolchain.rustTarget;
+          # BPF toolchain for lightway-bpf-steering: clang + headers compile
+          # the BPF programs; libbpf-sys's build script insists on pkg-config;
+          # flex/bison/gawk/gettext are needed by its vendored elfutils build
+          # for the musl target. All run on the build machine, hence
+          # buildPackages, not target packages.
+          extraBuildPkgs = with nativeMuslToolchain.pkgsCross.buildPackages; [
+            clang
+            libbpf
+            linuxHeaders
+            pkg-config
+            flex
+            bison
+            gawk
+            gettext
+          ];
+          # Musl-target libs for the vendored elfutils build: musl has no
+          # glibc argp/obstack/fts, elfutils's configure wants all three.
+          extraTargetPkgs = with nativeMuslToolchain.pkgsCross; [
+            argp-standalone
+            musl-obstack
+            musl-fts
+          ];
+          # clang rejects -fzero-call-used-regs=used-gpr for -target bpf.
+          shellEnvVar = {
+            hardeningDisable = [ "zerocallusedregs" ];
+          };
+          # libbpf-cargo's build-side libbpf-sys compiles libbpf for the build
+          # platform and links its glibc libelf/zlib. The cc crate would fall
+          # back to $CC (the musl cross gcc) for those units, so pin HOST_CC to
+          # the build-platform cc and point it at glibc elfutils/zlib. The
+          # LIBBPF_SYS_LIBRARY_PATH_* var is libbpf-sys's own escape hatch for
+          # the link search path, scoped to the build-platform triple only.
+          # LW_BPF_CLANG_ARGS hands the kernel include path to the BPF skeleton
+          # build, whose plain clang is unwrapped in this shell.
+          extraShellHook =
+            let
+              bp = nativeMuslToolchain.pkgsCross.buildPackages;
+              buildTriple =
+                lib.replaceStrings
+                  [ "-" ]
+                  [
+                    "_"
+                  ]
+                  nativeMuslToolchain.pkgsCross.stdenv.buildPlatform.config;
+            in
+            ''
+              export HOST_CC=cc
+              export HOST_CFLAGS="-I${lib.getDev bp.elfutils}/include -I${lib.getDev bp.zlib}/include"
+              export LIBBPF_SYS_LIBRARY_PATH_${buildTriple}="${lib.getLib bp.elfutils}/lib:${lib.getLib bp.zlib}/lib"
+              export LW_BPF_CLANG_ARGS="-I${bp.linuxHeaders}/include"
+            '';
         };
       };
     };

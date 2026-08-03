@@ -16,6 +16,7 @@
   defaultTarget ? null,
   shellEnvVar ? { },
   extraBuildPkgs ? [ ],
+  extraTargetPkgs ? [ ],
   extraShellHook ? "",
 }:
 
@@ -54,6 +55,8 @@ mkShell (
       rustc
     ]
     ++ extraBuildPkgs;
+
+    buildInputs = extraTargetPkgs;
   }
   // shellEnvVar
 )

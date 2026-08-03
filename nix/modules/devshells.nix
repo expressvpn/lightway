@@ -19,7 +19,8 @@
           rustc = rustStable.default;
           # BPF toolchain for lightway-bpf-steering (kp_lwt-style kernel offload
           # steering programs): clang/libclang to compile the programs, libbpf +
-          # bpftools to load and inspect them, linuxHeaders for uapi/linux/bpf.h.
+          # bpftools to load and inspect them, linuxHeaders for uapi/linux/bpf.h,
+          # pkg-config + elfutils/zlib for libbpf-sys's vendored libbpf build.
           #
           # Linux-only, and gated rather than merely unused elsewhere: bpftools
           # and linuxHeaders have no Darwin build, so an unguarded reference
@@ -32,8 +33,17 @@
               libbpf
               bpftools
               linuxHeaders
+              pkg-config
+              elfutils
+              zlib
             ]
           );
+          # cc-wrapper injects -fzero-call-used-regs=used-gpr by default, which
+          # clang rejects for -target bpf ("unsupported option"). Only that one
+          # flag is turned off; every other hardening default stays on.
+          shellEnvVar = {
+            hardeningDisable = [ "zerocallusedregs" ];
+          };
         };
         nightly = pkgs.callPackage ../shell.nix {
           rustc = rustNightly.default;
