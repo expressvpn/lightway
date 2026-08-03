@@ -24,6 +24,10 @@ unnecessary_safety_comment = "deny"
 name = "lightway-offload-engine"
 path = "src/bin/engine.rs"
 
+[[bin]]
+name = "lightway-offload-client"
+path = "src/bin/client.rs"
+
 [dependencies]
 bytes.workspace = true
 lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }

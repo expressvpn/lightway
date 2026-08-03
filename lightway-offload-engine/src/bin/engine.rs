@@ -142,6 +142,13 @@ fn main() -> std::io::Result<()> {
                 |e| tracing::error!(error = %e, "packet loops did not start, offload is off"),
             )
             .ok();
+        if loops.is_some() {
+            // Reached only once `run_engine` has verified `EXPECTED_FDS`
+            // descriptors arrived and the loops took them: proof, for a
+            // caller watching this process's own log, that the descriptors
+            // - not just a message announcing them - crossed the socket.
+            tracing::info!("attach received, packet loops started");
+        }
     });
     // Before the return value is reported, so the threads are gone while the
     // process still exists to say so.
