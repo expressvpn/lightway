@@ -2,6 +2,7 @@
 members = [
     "lightway-core",
     "lightway-boring",
+    "lightway-expresslane",
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",

@@ -1801,6 +1801,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightway-expresslane"
+version = "0.1.0"
+dependencies = [
+ "bitfield-struct",
+ "bytes",
+ "thiserror 2.0.18",
+ "wolfssl",
+]
+
+[[package]]
 name = "lightway-server"
 version = "0.1.0"
 dependencies = [
