@@ -211,6 +211,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Connect the outside UDP socket to the server so sends skip the
+    /// per-packet route lookup (Apple platforms, Datagram only). The socket
+    /// is re-connected when the network changes.
+    #[cfg(apple)]
+    pub enable_connected_udp: bool,
+
     /// Interval between Expresslane key rotations
     pub expresslane_keys_rotation_interval: std::time::Duration,
 
@@ -324,6 +330,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "postquantum")]
             keyshare: config.keyshare,
             enable_expresslane: config.enable_expresslane,
+            #[cfg(apple)]
+            enable_connected_udp: config.enable_connected_udp,
             expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
@@ -995,6 +1003,20 @@ pub async fn connect<
 
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+
+                // On Apple platforms a connected UDP socket lets `send` skip
+                // the per-packet route lookup, improving throughput. Safe
+                // because a network change re-connects the socket: via the
+                // network-event coordinator on desktop (see
+                // `initialize_routes`), via the network-change signal
+                // forwarder elsewhere.
+                #[cfg(apple)]
+                if config.enable_connected_udp
+                    && let Err(e) = sock.enable_connected_send()
+                {
+                    tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
+                }
+
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
