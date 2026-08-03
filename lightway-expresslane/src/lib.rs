@@ -6,10 +6,14 @@
 //! the protocol.
 #![warn(missing_docs)]
 
+mod aead;
 mod error;
 mod key;
 mod version;
 
+pub use aead::ExpresslaneAead;
+#[cfg(feature = "wolfssl-backend")]
+pub use aead::wolfssl::WolfsslAead;
 pub use error::{ExpresslaneError, ExpresslaneResult};
 pub use key::{EXPRESSLANE_KEY_SIZE, ExpresslaneKey};
 pub use version::ExpresslaneVersion;
