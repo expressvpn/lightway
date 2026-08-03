@@ -46,9 +46,9 @@ pub trait ExpresslaneAead: Send + Sync + Sized {
 
 #[cfg(all(test, feature = "wolfssl-backend"))]
 mod tests {
+    use self::wolfssl::WolfsslAead;
     use super::*;
     use crate::EXPRESSLANE_KEY_SIZE;
-    use self::wolfssl::WolfsslAead;
 
     fn key() -> ExpresslaneKey {
         ExpresslaneKey([7u8; EXPRESSLANE_KEY_SIZE])
