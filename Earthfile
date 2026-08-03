@@ -47,7 +47,7 @@ source:
     FROM +install-build-dependencies
     COPY --keep-ts Cargo.toml Cargo.lock Makefile.toml ./
     COPY --keep-ts deny.toml ./
-    COPY --keep-ts --dir lightway-core lightway-expresslane lightway-app-utils lightway-bpf-steering lightway-client uniffi-bindgen lightway-server tests ./
+    COPY --keep-ts --dir lightway-core lightway-expresslane lightway-app-utils lightway-bpf-steering lightway-offload-engine lightway-client uniffi-bindgen lightway-server tests ./
 
 # build runs cargo to build native binaries for the host platform.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.

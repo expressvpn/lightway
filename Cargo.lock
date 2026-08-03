@@ -1720,6 +1720,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightway-offload-engine"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "lightway-bpf-steering",
+ "lightway-expresslane",
+]
+
+[[package]]
 name = "lightway-server"
 version = "0.1.0"
 dependencies = [

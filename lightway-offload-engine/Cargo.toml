@@ -1,0 +1,29 @@
+[package]
+name = "lightway-offload-engine"
+description = "Out-of-process ExpressLane data-plane engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# NOT `workspace = true`: SCM_RIGHTS needs unsafe. Every other workspace lint
+# is restated, and undocumented_unsafe_blocks stays denied.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_unsafe = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+
+[dependencies]
+bytes.workspace = true
+lightway-expresslane = { path = "../lightway-expresslane", version = "0.1.0", features = ["wolfssl-backend"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+lightway-bpf-steering = { path = "../lightway-bpf-steering", version = "0.1.0" }
