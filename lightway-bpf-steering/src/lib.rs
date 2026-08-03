@@ -20,9 +20,12 @@
 #![warn(missing_docs)]
 
 mod header;
+mod inside;
+mod load;
 mod outside;
 
 pub use header::{
     EXPRESSLANE_FLAG_OFFSET, HEADER_LEN, MAGIC, SESSION_ID_OFFSET, is_expresslane_datagram,
 };
+pub use inside::InsideSplit;
 pub use outside::OutsideSplit;
