@@ -16,7 +16,7 @@
 //! - `has_valid_keys` is two atomic loads and must never take a lock, since
 //!   the TX path calls it per packet
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use bitfield_struct::bitfield;
@@ -71,8 +71,26 @@ struct Keys<A> {
 }
 
 /// An ExpressLane packet session.
+///
+/// Frame layout, after the Lightway header and before the inside packet:
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                     Counter (8 bytes)                         |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                       IV (12 bytes)                           |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    AuthTag (16 bytes)                         |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |        data length            |E|       RESERVED              |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// | ... length bytes of ciphertext
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
 pub struct ExpresslaneSession<A: ExpresslaneAead> {
-    version: ExpresslaneVersion,
+    version: AtomicU8,
     wire_counter: AtomicU64,
     packets_received: AtomicU64,
     replay: Mutex<ReplayWindow>,
@@ -96,7 +114,7 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
     /// Build an empty session. Keys are installed separately.
     pub fn new(version: ExpresslaneVersion) -> Self {
         Self {
-            version,
+            version: AtomicU8::new(version.into()),
             wire_counter: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             replay: Mutex::new(ReplayWindow::default()),
@@ -111,9 +129,29 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         }
     }
 
-    /// The wire version fixed at construction.
+    /// The wire version currently in force.
     pub fn version(&self) -> ExpresslaneVersion {
-        self.version
+        ExpresslaneVersion::from(self.version.load(Ordering::Relaxed))
+    }
+
+    /// Adopt a negotiated wire version.
+    ///
+    /// The version arrives from the peer after the session exists, and by then
+    /// a key may already be staged. Rebuilding the session instead would drop
+    /// that staged key along with the counters and the replay window, so the
+    /// version is stored rather than fixed at construction.
+    ///
+    /// Only honoured before the first data packet: the version selects the AAD
+    /// layout, so adopting a new one mid-stream would fail every packet already
+    /// in flight. Once [`Self::packets_sent`] is non-zero the call is refused
+    /// and the version left alone. Returns whether it was adopted.
+    #[must_use]
+    pub fn set_version(&self, version: ExpresslaneVersion) -> bool {
+        if self.packets_sent() > 0 {
+            return false;
+        }
+        self.version.store(version.into(), Ordering::Relaxed);
+        true
     }
 
     fn keys_read(&self) -> std::sync::RwLockReadGuard<'_, Keys<A>> {
@@ -231,7 +269,7 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
 
         let flags = Flags::new().with_encoded(is_encoded);
         let counter = self.reserve_counter();
-        let (aad_buf, aad_len) = build_aad(self.version, &session_id, counter, flags);
+        let (aad_buf, aad_len) = build_aad(self.version(), &session_id, counter, flags);
 
         let (cipher_text, auth_tag) = {
             let keys = self.keys_read();
@@ -295,7 +333,7 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
             return Err(ExpresslaneError::Replayed);
         }
 
-        let (aad_buf, aad_len) = build_aad(self.version, &session_id, wire_counter, flags);
+        let (aad_buf, aad_len) = build_aad(self.version(), &session_id, wire_counter, flags);
         let aad = &aad_buf[..aad_len];
         // Borrowed, not split off: the prev_peer retry sees the original bytes
         // and a shared reference is one a backend cannot scribble on.
@@ -415,7 +453,10 @@ mod tests {
             .unwrap();
         // flags occupy the two bytes at offset 38
         buf[38] ^= 0x80;
-        assert!(s.try_from_wire(&mut buf, SID).is_err());
+        assert!(matches!(
+            s.try_from_wire(&mut buf, SID),
+            Err(ExpresslaneError::AuthFailed)
+        ));
     }
 
     #[test]
@@ -454,6 +495,135 @@ mod tests {
     }
 
     #[test]
+    fn keys_read_back_after_install() {
+        let s: ExpresslaneSession<WolfsslAead> =
+            ExpresslaneSession::new(ExpresslaneVersion::Version2);
+        assert!(s.self_key().is_invalid());
+        assert!(s.peer_key().is_invalid());
+
+        let tx = ExpresslaneKey([3u8; EXPRESSLANE_KEY_SIZE]);
+        let rx = ExpresslaneKey([4u8; EXPRESSLANE_KEY_SIZE]);
+        s.update_next_self_key(tx).unwrap();
+        assert!(s.self_key().is_invalid(), "staged, not current");
+        s.promote_self_key();
+        s.update_peer_key(rx).unwrap();
+        assert_eq!(s.self_key(), tx);
+        assert_eq!(s.peer_key(), rx);
+    }
+
+    #[test]
+    fn short_frame_rejected() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::from(&[0u8; 39][..]);
+        assert!(matches!(
+            s.try_from_wire(&mut buf, SID),
+            Err(ExpresslaneError::InsufficientData)
+        ));
+    }
+
+    /// A truncated payload: the header claims more ciphertext than arrived.
+    #[test]
+    fn truncated_payload_rejected() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::new();
+        s.append_to_wire(&mut buf, SID, b"payload", [2u8; 12], false)
+            .unwrap();
+        buf.truncate(buf.len() - 3);
+        assert!(matches!(
+            s.try_from_wire(&mut buf, SID),
+            Err(ExpresslaneError::InsufficientData)
+        ));
+    }
+
+    #[test]
+    fn decrypt_without_peer_key_reports_no_key() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx: ExpresslaneSession<WolfsslAead> =
+            ExpresslaneSession::new(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"payload", [2u8; 12], false)
+            .unwrap();
+        assert!(matches!(
+            rx.try_from_wire(&mut buf, SID),
+            Err(ExpresslaneError::NoKey)
+        ));
+    }
+
+    /// V1 sender against a V2 receiver must fail: the AAD layouts differ, so
+    /// authentication cannot match. Negotiation is what prevents this pairing.
+    #[test]
+    fn cross_version_decrypt_fails() {
+        let tx = keyed(ExpresslaneVersion::Version1);
+        let rx = keyed(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"payload", [2u8; 12], false)
+            .unwrap();
+        assert!(matches!(
+            rx.try_from_wire(&mut buf, SID),
+            Err(ExpresslaneError::AuthFailed)
+        ));
+    }
+
+    /// The version is negotiated after the session exists, and the client has
+    /// a key staged by then. Adopting it must not disturb any other state.
+    #[test]
+    fn set_version_keeps_staged_key_and_counters() {
+        let s: ExpresslaneSession<WolfsslAead> =
+            ExpresslaneSession::new(ExpresslaneVersion::Unknown);
+        let staged = ExpresslaneKey([5u8; EXPRESSLANE_KEY_SIZE]);
+        s.update_next_self_key(staged).unwrap();
+        s.update_peer_key(staged).unwrap();
+
+        assert!(s.set_version(ExpresslaneVersion::Version2));
+        assert_eq!(s.version(), ExpresslaneVersion::Version2);
+
+        s.promote_self_key();
+        assert_eq!(s.self_key(), staged, "staged key survived the version bump");
+        assert!(s.has_valid_keys());
+
+        let mut buf = BytesMut::new();
+        s.append_to_wire(&mut buf, SID, b"after", [6u8; 12], false)
+            .unwrap();
+        let (pt, _) = s.try_from_wire(&mut buf, SID).unwrap();
+        assert_eq!(&pt[..], b"after");
+    }
+
+    /// UDP reorders, so a run of frames must decrypt in any order and each
+    /// still be rejected on a second showing.
+    #[test]
+    fn frames_decrypt_out_of_order_then_replay_is_rejected() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let frames: Vec<BytesMut> = (0..5u8)
+            .map(|i| {
+                let mut buf = BytesMut::new();
+                tx.append_to_wire(&mut buf, SID, b"ordered", [i; 12], false)
+                    .unwrap();
+                assert_eq!(
+                    u64::from_be_bytes(buf[0..8].try_into().unwrap()),
+                    i as u64 + 1,
+                    "counters increment by one per frame"
+                );
+                buf
+            })
+            .collect();
+
+        for idx in [0, 2, 4, 1, 3] {
+            let mut buf = frames[idx].clone();
+            rx.try_from_wire(&mut buf, SID)
+                .unwrap_or_else(|e| panic!("frame {idx} rejected out of order: {e:?}"));
+        }
+        assert_eq!(rx.packets_received(), 5);
+
+        let mut replayed = frames[2].clone();
+        assert!(matches!(
+            rx.try_from_wire(&mut replayed, SID),
+            Err(ExpresslaneError::Replayed)
+        ));
+    }
+
+    #[test]
     fn wrong_session_id_rejected() {
         let tx = keyed(ExpresslaneVersion::Version2);
         let rx = keyed(ExpresslaneVersion::Version2);
@@ -461,6 +631,26 @@ mod tests {
         tx.append_to_wire(&mut buf, SID, b"payload", [9u8; 12], false)
             .unwrap();
         assert!(rx.try_from_wire(&mut buf, [0xFF; 8]).is_err());
+    }
+
+    /// The AAD layout is chosen by the version, so a change once packets are
+    /// on the wire would break every one of them. The guard is the API, not
+    /// just the doc comment.
+    #[test]
+    fn set_version_refused_once_packets_are_sent() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::new();
+        s.append_to_wire(&mut buf, SID, b"first", [1u8; 12], false)
+            .unwrap();
+
+        assert!(!s.set_version(ExpresslaneVersion::Version1));
+        assert_eq!(
+            s.version(),
+            ExpresslaneVersion::Version2,
+            "version unchanged"
+        );
+        // The frame already sent still decrypts, which is the point.
+        assert!(s.try_from_wire(&mut buf, SID).is_ok());
     }
 
     /// The wire length field is 16 bits: a longer plaintext would truncate it
@@ -504,6 +694,8 @@ mod tests {
             .update_peer_key(ExpresslaneKey([0xEF; EXPRESSLANE_KEY_SIZE]))
             .unwrap();
 
+        // NoKey, AuthFailed, InsufficientData (short header), InsufficientData
+        // (truncated payload), and Replayed.
         let mut truncated = frame.clone();
         truncated.truncate(frame.len() - 1);
         let short = BytesMut::from(&frame[..ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD - 1]);

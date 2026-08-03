@@ -1635,6 +1635,7 @@ dependencies = [
  "delegate",
  "itertools 0.14.0",
  "lightway-app-utils",
+ "lightway-expresslane",
  "lru",
  "metrics",
  "more-asserts",
