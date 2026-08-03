@@ -46,6 +46,9 @@ rustPlatform.buildRustPackage {
 
   buildFeatures = features;
   cargoBuildFlags = "-p ${package}";
+  # Scope the check phase to the same package. The default is the whole
+  # workspace, which would drag in lightway-bpf-steering and its BPF toolchain.
+  cargoTestFlags = "-p ${package}";
 
   nativeBuildInputs = [
     autoconf

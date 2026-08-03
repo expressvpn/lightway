@@ -17,6 +17,23 @@
 
         stable = pkgs.callPackage ../shell.nix {
           rustc = rustStable.default;
+          # BPF toolchain for lightway-bpf-steering (kp_lwt-style kernel offload
+          # steering programs): clang/libclang to compile the programs, libbpf +
+          # bpftools to load and inspect them, linuxHeaders for uapi/linux/bpf.h.
+          #
+          # Linux-only, and gated rather than merely unused elsewhere: bpftools
+          # and linuxHeaders have no Darwin build, so an unguarded reference
+          # fails `nix flake check` at *evaluation* on the macOS runner.
+          extraBuildPkgs = lib.optionals (lib.hasSuffix "linux" system) (
+            with pkgs;
+            [
+              clang
+              llvmPackages.libclang
+              libbpf
+              bpftools
+              linuxHeaders
+            ]
+          );
         };
         nightly = pkgs.callPackage ../shell.nix {
           rustc = rustNightly.default;

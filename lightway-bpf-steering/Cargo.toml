@@ -1,0 +1,26 @@
+[package]
+name = "lightway-bpf-steering"
+description = "eBPF packet steering for an out-of-process ExpressLane offload engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# NOT `workspace = true`: this crate needs `unsafe` for BPF loading, SCM_RIGHTS
+# and TUN ioctls. Every other workspace lint is re-stated here, and
+# undocumented_unsafe_blocks stays denied so each block must justify itself.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_unsafe = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+
+[dependencies]
+bytes.workspace = true
+lightway-core = { path = "../lightway-core", version = "0.1.0" }

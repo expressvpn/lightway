@@ -1574,6 +1574,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightway-bpf-steering"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "lightway-core",
+]
+
+[[package]]
 name = "lightway-client"
 version = "0.1.0"
 dependencies = [

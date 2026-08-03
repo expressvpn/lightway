@@ -18,8 +18,11 @@ install-build-dependencies:
         cmake \
         g++-aarch64-linux-gnu \
         libc6:arm64 \
+        libelf-dev \
         libtool-bin \
+        pkg-config \
         qemu-user-static \
+        zlib1g-dev \
         shellcheck \ 
         g++-riscv64-linux-gnu \ 
         gcc-riscv64-linux-gnu
@@ -44,7 +47,7 @@ source:
     FROM +install-build-dependencies
     COPY --keep-ts Cargo.toml Cargo.lock Makefile.toml ./
     COPY --keep-ts deny.toml ./
-    COPY --keep-ts --dir lightway-core lightway-expresslane lightway-app-utils lightway-client uniffi-bindgen lightway-server tests ./
+    COPY --keep-ts --dir lightway-core lightway-expresslane lightway-app-utils lightway-bpf-steering lightway-client uniffi-bindgen lightway-server tests ./
 
 # build runs cargo to build native binaries for the host platform.
 # You may use `--platform linux/[amd64|arm64]` to override the host platform, to natively compile in emulation.
@@ -57,12 +60,17 @@ build:
     SAVE ARTIFACT ./target/release/lightway-server AS LOCAL ./target/release/
 
 # build-cross-arm64 cross-compiles to arm64 from an amd64 host.
+#
+# lightway-bpf-steering (and lightway-offload-engine, which depends on it) are
+# excluded from every cross target: libbpf-sys links target-arch libelf and
+# zlib, and Debian bookworm has no riscv64 multiarch of either. They are a
+# reference implementation and no release path emits them, so nothing is lost.
 build-cross-arm64:
     FROM +source
     LET target = "aarch64-unknown-linux-gnu"
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
 
-    DO lib-rust+CARGO --args="build --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --workspace --exclude lightway-bpf-steering --exclude lightway-offload-engine --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
@@ -73,7 +81,7 @@ build-cross-riscv64:
     LET target = "riscv64gc-unknown-linux-gnu"
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="riscv64-linux-gnu-gcc"
 
-    DO lib-rust+CARGO --args="build --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --workspace --exclude lightway-bpf-steering --exclude lightway-offload-engine --release --features io-uring --target=$target" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
@@ -105,8 +113,8 @@ test-cross-arm64:
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
     ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64-static"
 
-    # Run all tests except privileged tests
-    DO lib-rust+CARGO --args="test --target=$target"
+    # Run all tests except privileged tests. Excludes as in +build-cross-arm64.
+    DO lib-rust+CARGO --args="test --workspace --exclude lightway-bpf-steering --exclude lightway-offload-engine --target=$target"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored
@@ -118,8 +126,8 @@ test-cross-riscv64:
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="riscv64-linux-gnu-gcc"
     ENV CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64"
 
-    # Run all tests except privileged tests
-    DO lib-rust+CARGO --args="test --target=$target"
+    # Run all tests except privileged tests. Excludes as in +build-cross-arm64.
+    DO lib-rust+CARGO --args="test --workspace --exclude lightway-bpf-steering --exclude lightway-offload-engine --target=$target"
 
     # Run only privileged tests with sudo permissions
     RUN --privileged cargo test --package lightway-client --target=$target test_privileged -- --ignored

@@ -3,6 +3,7 @@ members = [
     "lightway-core",
     "lightway-expresslane",
     "lightway-app-utils",
+    "lightway-bpf-steering",
     "lightway-client",
     "lightway-server",
     "uniffi-bindgen",
