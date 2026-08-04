@@ -247,6 +247,39 @@ impl OutsideIOSendCallback for Udp {
         Self::map_send_result(self.sock.try_send_to(buf, self.peer_addr), buf.len())
     }
 
+    /// Send concatenated wire packets in one `sendmsg` with a
+    /// `UDP_SEGMENT` control message; the kernel splits the payload
+    /// into `gso_size`-byte datagrams.
+    #[cfg(linux)]
+    fn send_gso(&self, bufs: &[std::io::IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize> {
+        use lightway_app_utils::cmsg;
+        use socket2::{MsgHdr, SockRef};
+        use tokio::io::Interest;
+
+        const CMSG_SIZE: usize = cmsg::Message::space::<u16>();
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        let peer_addr = socket2::SockAddr::from(self.peer_addr);
+
+        let res = self.sock.try_io(Interest::WRITABLE, || {
+            let sock = SockRef::from(self.sock.as_ref());
+
+            let mut cmsg = cmsg::BufferMut::<CMSG_SIZE>::zeroed();
+            let mut builder = cmsg.builder();
+            builder.fill_next(libc::SOL_UDP, libc::UDP_SEGMENT, gso_size)?;
+
+            let msghdr = MsgHdr::new()
+                .with_addr(&peer_addr)
+                .with_buffers(bufs)
+                .with_control(cmsg.as_ref());
+
+            sock.sendmsg(&msghdr, 0)
+        });
+
+        Self::map_send_result(res, total_len)
+    }
+
+    #[cfg(not(linux))]
     fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
         IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
