@@ -85,6 +85,19 @@ impl VirtioNetHdr {
         let base = self.gso_type & !VIRTIO_NET_HDR_GSO_ECN;
         base == VIRTIO_NET_HDR_GSO_TCPV4 || base == VIRTIO_NET_HDR_GSO_TCPV6
     }
+
+    /// True if `gso_type` indicates a non-GSO packet, i.e. a single
+    /// segment rather than an aggregate.
+    ///
+    /// Masks `VIRTIO_NET_HDR_GSO_ECN` for the same reason [`Self::is_tcp`]
+    /// does. Prefer this over comparing `gso_type` to
+    /// [`VIRTIO_NET_HDR_GSO_NONE`] directly: the raw comparison
+    /// misclassifies an ECN-marked packet as an aggregate, and keeping the
+    /// mask here means the ECN constant never has to be mirrored outside
+    /// this module.
+    pub fn is_gso_none(&self) -> bool {
+        self.gso_type & !VIRTIO_NET_HDR_GSO_ECN == VIRTIO_NET_HDR_GSO_NONE
+    }
 }
 
 /// IPv4/IPv6 protocol number for UDP, needed to decide whether the
@@ -453,6 +466,33 @@ pub(crate) fn build_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gso_type` is a bitfield: Linux ORs `VIRTIO_NET_HDR_GSO_ECN` into
+    /// it for ECN-marked flows, so a raw comparison against
+    /// `VIRTIO_NET_HDR_GSO_NONE` misclassifies an ECN-marked single packet
+    /// as an aggregate.
+    #[test]
+    fn is_gso_none_masks_the_ecn_bit() {
+        let h = |gso_type| VirtioNetHdr {
+            gso_type,
+            ..Default::default()
+        };
+
+        assert!(h(VIRTIO_NET_HDR_GSO_NONE).is_gso_none());
+        assert!(
+            h(VIRTIO_NET_HDR_GSO_NONE | VIRTIO_NET_HDR_GSO_ECN).is_gso_none(),
+            "an ECN-marked non-GSO packet is still non-GSO"
+        );
+
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV4).is_gso_none());
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV4 | VIRTIO_NET_HDR_GSO_ECN).is_gso_none());
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV6).is_gso_none());
+
+        // The raw comparison this replaces gets the ECN case wrong.
+        let ecn = h(VIRTIO_NET_HDR_GSO_NONE | VIRTIO_NET_HDR_GSO_ECN);
+        assert_ne!(ecn.gso_type, VIRTIO_NET_HDR_GSO_NONE);
+        assert!(ecn.is_gso_none());
+    }
 
     /// RFC 768 / RFC 8200 s8.1: a computed UDP checksum of zero must be
     /// transmitted as `0xFFFF`, and TCP must be left alone because

@@ -456,9 +456,7 @@ async fn inside_io_loop_gso(
     ip_manager: Arc<IpManager<Arc<Connection>>>,
     lightway_client_ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
-    use lightway_core::gso::{
-        VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN, gso_none_checksum,
-    };
+    use lightway_core::gso::{VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_LEN, gso_none_checksum};
 
     // Receive buffer reused across iterations. `recv_gso` writes
     // directly into `pkt.spare_capacity_mut()` (a `&mut
@@ -503,7 +501,7 @@ async fn inside_io_loop_gso(
         ipv4_update_destination(pkt.as_mut(), lightway_client_ip);
 
         if let Some(conn) = conn {
-            let result = if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+            let result = if hdr.is_gso_none() {
                 conn.inside_data_received(&mut pkt)
             } else {
                 conn.inside_data_received_gso(&mut pkt, &hdr)
