@@ -231,6 +231,42 @@ impl Udp {
             }
         }
     }
+
+    /// Map the result of the GSO `sendmsg` into an [`IOCallbackResult`],
+    /// swallowing the same transient errors the per-datagram `send` path
+    /// does so the TLS socket does not enter the error state. `len` is the
+    /// batch's total byte count, reported as "sent" for the swallowed
+    /// cases — the aggregate is treated as delivered and DTLS
+    /// retransmission covers it rather than live-locking the TLS record.
+    #[cfg(linux)]
+    fn map_send_result(res: std::io::Result<usize>, len: usize) -> IOCallbackResult<usize> {
+        match res {
+            Ok(nr) => IOCallbackResult::Ok(nr),
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            // Server may not be listening yet; swallow so DTLS retransmits
+            // rather than live-locking the TLS record on repeated resends.
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
+                IOCallbackResult::Ok(len)
+            }
+            // Transient around a network change.
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
+                IOCallbackResult::Ok(len)
+            }
+            // Send buffer momentarily full under load.
+            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) => {
+                tracing::warn!("Outside IO GSO send failed: {err:?}");
+                IOCallbackResult::Err(err)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -483,6 +519,39 @@ impl OutsideIOSendCallback for Udp {
         }
     }
 
+    /// Send concatenated wire packets in one `sendmsg` with a
+    /// `UDP_SEGMENT` control message; the kernel splits the payload
+    /// into `gso_size`-byte datagrams.
+    #[cfg(linux)]
+    fn send_gso(&self, bufs: &[std::io::IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize> {
+        use lightway_app_utils::cmsg;
+        use socket2::{MsgHdr, SockRef};
+        use tokio::io::Interest;
+
+        const CMSG_SIZE: usize = cmsg::Message::space::<u16>();
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        let peer_addr = socket2::SockAddr::from(self.peer_addr);
+
+        let res = self.sock.try_io(Interest::WRITABLE, || {
+            let sock = SockRef::from(self.sock.as_ref());
+
+            let mut cmsg = cmsg::BufferMut::<CMSG_SIZE>::zeroed();
+            let mut builder = cmsg.builder();
+            builder.fill_next(libc::SOL_UDP, libc::UDP_SEGMENT, gso_size)?;
+
+            let msghdr = MsgHdr::new()
+                .with_addr(&peer_addr)
+                .with_buffers(bufs)
+                .with_control(cmsg.as_ref());
+
+            sock.sendmsg(&msghdr, 0)
+        });
+
+        Self::map_send_result(res, total_len)
+    }
+
+    #[cfg(not(linux))]
     fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
         IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
