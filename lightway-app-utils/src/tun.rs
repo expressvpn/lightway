@@ -311,6 +311,11 @@ impl Tun {
     /// The [`Tun::Direct`] backend fills `buf` in place. The `IoUring` backend
     /// swaps `buf` for a buffer from its internal pool, so the underlying
     /// allocation may differ between calls.
+    ///
+    /// If the device negotiated `IFF_VNET_HDR`, the [`Tun::Direct`] backend
+    /// strips the `virtio_net_hdr` the kernel prepends, so `buf` always holds
+    /// a bare IP packet regardless of framing. Size the buffer
+    /// [`Tun::mtu`] + [`Tun::vnet_headroom`].
     pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self {
             Tun::Direct(t) => t.recv_buf(buf).await,
@@ -444,8 +449,9 @@ pub struct TunDirect {
     fd: RawFd,
     #[cfg(unix)]
     close_fd_on_drop: bool,
-    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 12-byte
-    /// `virtio_net_hdr`, reads include it.
+    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 10-byte
+    /// `virtio_net_hdr` (`size_of::<VirtioNetHdr>()`, the kernel's
+    /// `TUNGETVNETHDRSZ` default), reads include it.
     #[cfg(target_os = "linux")]
     vnet_hdr: bool,
 }
@@ -484,6 +490,10 @@ impl TunDirect {
             Ok(0) => IOCallbackResult::WouldBlock,
             Ok(nr) => {
                 buf.truncate(nr);
+                #[cfg(target_os = "linux")]
+                if self.vnet_hdr {
+                    return Self::strip_vnet_hdr(buf);
+                }
                 IOCallbackResult::Ok(nr)
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
@@ -491,6 +501,52 @@ impl TunDirect {
             }
             Err(err) => IOCallbackResult::Err(err),
         }
+    }
+
+    /// Strip the leading `virtio_net_hdr` from a packet just read from a
+    /// device opened with offload, leaving `buf` holding the IP payload.
+    ///
+    /// A read no longer than the header carries no packet, so it is
+    /// discarded and reported as [`IOCallbackResult::WouldBlock`] to make
+    /// the caller's recv loop retry rather than treat it as a hard error.
+    ///
+    /// Also checks the IPv4 length field against what was actually read.
+    /// They disagree only if the buffer was not sized
+    /// `mtu + vnet_headroom()` and the kernel truncated the tail — a
+    /// caller bug that is otherwise silent, since the packet still looks
+    /// well-formed. Warn rather than drop: with `TUN_F_TSO*` enabled the
+    /// kernel may also deliver an aggregate here whose length field
+    /// legitimately exceeds one MTU, and dropping those would trade a
+    /// diagnostic for data loss.
+    #[cfg(target_os = "linux")]
+    fn strip_vnet_hdr(buf: &mut BytesMut) -> IOCallbackResult<usize> {
+        use bytes::Buf;
+        use lightway_core::gso::VIRTIO_NET_HDR_LEN;
+
+        if buf.len() <= VIRTIO_NET_HDR_LEN {
+            tracing::warn!(
+                n = buf.len(),
+                "tun recv_buf: read shorter than the virtio header"
+            );
+            buf.clear();
+            return IOCallbackResult::WouldBlock;
+        }
+
+        buf.advance(VIRTIO_NET_HDR_LEN);
+
+        if buf.len() >= 4 && (buf[0] >> 4) == 4 {
+            let total_length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+            if total_length > buf.len() {
+                tracing::warn!(
+                    have = buf.len(),
+                    total_length,
+                    "tun recv_buf: IPv4 length exceeds the bytes read; \
+                     receive buffer is missing Tun::vnet_headroom()"
+                );
+            }
+        }
+
+        IOCallbackResult::Ok(buf.len())
     }
 
     /// Recv one packet from Tun, appending it to `pkts` as a buffer
