@@ -1009,10 +1009,15 @@ pub async fn connect<
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(server, maybe_sock)
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
-                    .context("Outside IO TCP")?;
+                let sock = io::outside::Tcp::new(
+                    server,
+                    maybe_sock,
+                    #[cfg(all(linux, not(feature = "mobile")))]
+                    config.fwmark,
+                )
+                .await
+                .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
+                .context("Outside IO TCP")?;
 
                 // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
                 // autotuning, capping the bandwidth-delay product and throttling

@@ -5,14 +5,61 @@ use tokio::net::TcpStream;
 
 use super::{OutsideIO, OutsideSocket};
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+use socket2::{Domain, Protocol, Socket, Type};
 
 pub struct Tcp(tokio::net::TcpStream, SocketAddr);
 
 impl Tcp {
-    pub async fn new(remote_addr: SocketAddr, maybe_sock: Option<TcpStream>) -> Result<Self> {
+    pub async fn new(
+        remote_addr: SocketAddr,
+        maybe_sock: Option<TcpStream>,
+        #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+    ) -> Result<Self> {
         let sock = match maybe_sock {
-            Some(s) => s,
-            None => tokio::net::TcpStream::connect(remote_addr).await?,
+            Some(s) => {
+                #[cfg(all(linux, not(feature = "mobile")))]
+                if fwmark != 0 {
+                    let socket = socket2::SockRef::from(&s);
+                    match socket.set_mark(fwmark) {
+                        Ok(_) => tracing::info!("Applied firewall mark to outside TCP socket"),
+                        Err(e) => tracing::warn!("Failed to set SO_MARK on TCP socket: {}", e),
+                    }
+                }
+                s
+            }
+            None => {
+                let domain = if remote_addr.is_ipv6() {
+                    Domain::IPV6
+                } else {
+                    Domain::IPV4
+                };
+
+                let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+                socket.set_nonblocking(true)?;
+
+                // Creates a TCP connection with SO_MARK set before connect() so that the
+                // SYN packet is also marked, ensuring all traffic (including connection
+                // setup) is subject to policy routing rules based on the mark.
+                #[cfg(all(linux, not(feature = "mobile")))]
+                if fwmark != 0 {
+                    match socket.set_mark(fwmark) {
+                        Ok(_) => tracing::info!("Applied firewall mark to outside TCP socket"),
+                        Err(e) => tracing::warn!("Failed to set SO_MARK on TCP socket: {}", e),
+                    }
+                }
+
+                let addr: socket2::SockAddr = remote_addr.into();
+                match socket.connect(&addr) {
+                    Ok(()) => {}
+                    Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+                    Err(e) => return Err(e.into()),
+                }
+
+                let std_stream: std::net::TcpStream = socket.into();
+                let stream = TcpStream::from_std(std_stream)?;
+                stream.writable().await?;
+                stream
+            }
         };
         sock.set_nodelay(true)?;
         let peer_addr = sock.peer_addr()?;
