@@ -22,6 +22,34 @@ pub enum Method {
     DtlsServerV1_3,
 }
 
+impl Method {
+    pub fn is_dtls(self) -> bool {
+        !self.is_tls()
+    }
+    pub fn is_tls(self) -> bool {
+        match self {
+            Method::TlsClientV1_2 | Method::TlsServerV1_3 | Method::TlsClientV1_3 => true,
+            Method::DtlsClientV1_3 | Method::DtlsServerV1_3 => false,
+        }
+    }
+    pub fn is_v1_3(self) -> bool {
+        match self {
+            Method::TlsClientV1_2 => false,
+            Method::TlsClientV1_3 | Method::TlsServerV1_3 => true,
+            Method::DtlsClientV1_3 | Method::DtlsServerV1_3 => true,
+        }
+    }
+    pub fn is_server(self) -> bool {
+        match self {
+            Method::TlsClientV1_2 | Method::DtlsClientV1_3 | Method::TlsClientV1_3 => false,
+            Method::TlsServerV1_3 | Method::DtlsServerV1_3 => true,
+        }
+    }
+    pub fn is_client(self) -> bool {
+        !self.is_server()
+    }
+}
+
 /// Elliptic curve groups for key exchange.
 ///
 /// A subset of the wolfssl `CurveGroup` enum, listing only the groups

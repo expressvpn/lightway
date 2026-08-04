@@ -8,7 +8,7 @@
 #![allow(unsafe_code)]
 
 // Required for BoringSSL FFI
-use super::{IOCallbackResult, IOCallbacks, Method, ProtocolVersion, TlsError};
+use super::{IOCallbackResult, IOCallbacks, ProtocolVersion, TlsError};
 use boring::ssl::{ErrorCode, ShutdownResult, Ssl, SslMode, SslStream};
 use boring::x509::X509VerifyError;
 use boring::x509::verify::X509VerifyFlags;
@@ -108,11 +108,8 @@ where
         ssl.set_mode(SslMode::ACCEPT_MOVING_WRITE_BUFFER);
 
         // Determine if we're client or server, and if we're using DTLS
-        let is_client = matches!(
-            context.method,
-            Method::TlsClientV1_3 | Method::DtlsClientV1_3
-        );
-        let is_dtls = context.is_dtls();
+        let is_client = context.method.is_client();
+        let is_dtls = context.method.is_dtls();
 
         // Configure DTLS-specific settings
         if is_dtls && let Some(mtu) = config.dtls_mtu {

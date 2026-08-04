@@ -47,10 +47,7 @@ impl ContextBuilder {
         }
         .map_err(|e| NewContextBuilderError(e.to_string()))?;
 
-        if matches!(
-            method,
-            Method::DtlsClientV1_3 | Method::TlsClientV1_3 | Method::TlsClientV1_2
-        ) {
+        if method.is_client() {
             builder.set_verify(SslVerifyMode::PEER);
         }
 
@@ -189,13 +186,7 @@ impl ContextBuilder {
     /// `TLS13-*` entries are dropped with a warning. Only the remaining
     /// TLS 1.2 entries are applied.
     pub fn with_cipher_list(mut self, cipher_list: &str) -> Result<Self> {
-        if matches!(
-            self.method,
-            Method::TlsClientV1_3
-                | Method::TlsServerV1_3
-                | Method::DtlsClientV1_3
-                | Method::DtlsServerV1_3
-        ) {
+        if self.method.is_v1_3() {
             tracing::warn!(
                 "BoringSSL does not support cipher list restriction for (D)TLS 1.3, ignoring \"with_cipher_list\"."
             );
@@ -304,11 +295,6 @@ impl Context {
         IOCB: IOCallbacks,
     {
         Session::new(self, config).map_err(|e| super::NewSessionError(e.to_string()))
-    }
-
-    /// Check if this is a DTLS context
-    pub(crate) fn is_dtls(&self) -> bool {
-        matches!(self.method, Method::DtlsClientV1_3 | Method::DtlsServerV1_3)
     }
 }
 
@@ -434,13 +420,13 @@ mod tests {
     fn is_dtls_classification() {
         let dtls_ctx = ContextBuilder::new(Method::DtlsClientV1_3).unwrap().build();
         assert!(
-            dtls_ctx.is_dtls(),
+            dtls_ctx.method.is_dtls(),
             "DtlsClientV1_3 should report is_dtls()=true"
         );
 
         let tls_ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
         assert!(
-            !tls_ctx.is_dtls(),
+            !tls_ctx.method.is_dtls(),
             "TlsClientV1_3 should report is_dtls()=false"
         );
     }
