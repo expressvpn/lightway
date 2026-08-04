@@ -154,10 +154,12 @@ impl InsideIOSendCallback<ConnectionState<TunnelState>> for MobileInsideIo {
     }
 }
 
+#[cfg_attr(not(android), allow(unused_variables))]
 async fn setup_tunnel_interface(
     tun_fd: RawFd,
     local_ip: Ipv4Addr,
     dns_ip: Ipv4Addr,
+    enable_tcp_coalescing: bool,
 ) -> uniffi::Result<Arc<io::inside::Tun>> {
     let mut tun_config = TunConfig::default();
 
@@ -165,11 +167,18 @@ async fn setup_tunnel_interface(
     // used by further connection
     tun_config.raw_fd(tun_fd).close_fd_on_drop(false);
 
-    Ok(Arc::new(
-        io::inside::Tun::new(&tun_config, local_ip, dns_ip)
-            .await
-            .context("Tun creation")?,
-    ))
+    #[cfg_attr(not(android), allow(unused_mut))]
+    let mut tun = io::inside::Tun::new(&tun_config, local_ip, dns_ip)
+        .await
+        .context("Tun creation")?;
+
+    // The static rollout gate for downlink TCP coalescing
+    // (`enable_tun_tcp_coalescing`); the runtime tethering kill switch
+    // and the capability probe still gate it at each window.
+    #[cfg(android)]
+    tun.set_tcp_coalescing_configured(enable_tcp_coalescing);
+
+    Ok(Arc::new(tun))
 }
 
 pub(crate) async fn async_lightway_start(
@@ -188,7 +197,13 @@ pub(crate) async fn async_lightway_start(
     let server_len = servers.len();
     let tcp_connections_only = servers.iter().all(|s| s.mode.is_tcp());
 
-    let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
+    let inside_io = setup_tunnel_interface(
+        tun_fd,
+        config.tun_local_ip,
+        config.tun_dns_ip,
+        config.enable_tun_tcp_coalescing,
+    )
+    .await?;
 
     let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
 
