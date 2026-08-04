@@ -387,6 +387,25 @@ impl Tun {
         }
     }
 
+    /// Extra bytes a [`Tun::recv_buf`] buffer needs on top of [`Tun::mtu`].
+    ///
+    /// When the device negotiated `IFF_VNET_HDR` the kernel prepends a
+    /// `virtio_net_hdr` to every read, so a buffer sized to the MTU alone
+    /// cannot hold a full-size packet. The kernel truncates in that case
+    /// and reports only the bytes it wrote — no flag the caller inspects
+    /// says the tail was lost — so the shortfall is silent. Callers must
+    /// size their buffer `mtu() + vnet_headroom()`.
+    ///
+    /// Zero unless offload is in use, and zero for the `IoUring` backend,
+    /// which reads with its own pooled buffers.
+    pub fn vnet_headroom(&self) -> usize {
+        match self {
+            Tun::Direct(t) => t.vnet_headroom(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => 0,
+        }
+    }
+
     /// Interface index of 'Tun' interface
     pub fn if_index(&self) -> std::io::Result<u32> {
         match self {
@@ -479,9 +498,11 @@ impl TunDirect {
     /// read, so this is the single-packet counterpart of the io_uring
     /// backend's `recv_buf_many`.
     pub async fn recv_buf_many(&self, pkts: &mut Vec<BytesMut>) -> IOCallbackResult<usize> {
-        let mtu = self.mtu();
-        let mut buf = BytesMut::with_capacity(mtu);
-        buf.resize(mtu, 0);
+        // `mtu + vnet_headroom` so an `IFF_VNET_HDR` read is not
+        // truncated by the length of the prepended header.
+        let cap = self.mtu() + self.vnet_headroom();
+        let mut buf = BytesMut::with_capacity(cap);
+        buf.resize(cap, 0);
         match self.recv_buf(&mut buf).await {
             IOCallbackResult::Ok(_n) => {
                 pkts.push(buf);
@@ -597,6 +618,17 @@ impl TunDirect {
     #[cfg(linux)]
     pub fn supports_gso(&self) -> bool {
         self.vnet_hdr
+    }
+
+    /// See [`Tun::vnet_headroom`].
+    pub fn vnet_headroom(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            if self.vnet_hdr {
+                return lightway_core::gso::VIRTIO_NET_HDR_LEN;
+            }
+        }
+        0
     }
 
     /// Interface index of Tun
