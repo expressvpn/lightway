@@ -85,6 +85,21 @@ impl VirtioNetHdr {
         unsafe { Ok(&*(ptr as *const VirtioNetHdr)) }
     }
 
+    /// Serialize to the on-wire layout used by the TUN vnet header.
+    ///
+    /// virtio-net fields are guest-endian, which is native endian for
+    /// every target we build for.
+    pub fn to_bytes(&self) -> [u8; VIRTIO_NET_HDR_LEN] {
+        let mut b = [0u8; VIRTIO_NET_HDR_LEN];
+        b[0] = self.flags;
+        b[1] = self.gso_type;
+        b[2..4].copy_from_slice(&self.hdr_len.to_ne_bytes());
+        b[4..6].copy_from_slice(&self.gso_size.to_ne_bytes());
+        b[6..8].copy_from_slice(&self.csum_start.to_ne_bytes());
+        b[8..10].copy_from_slice(&self.csum_offset.to_ne_bytes());
+        b
+    }
+
     /// True if `gso_type` indicates a TCP segmentation aggregate (v4 or v6).
     ///
     /// Linux ORs `VIRTIO_NET_HDR_GSO_ECN` (0x80) into `gso_type` for
@@ -113,7 +128,7 @@ impl VirtioNetHdr {
 /// RFC 768 zero substitution applies.
 const IPPROTO_UDP: u8 = pnet_packet::ip::IpNextHeaderProtocols::Udp.0;
 /// IPv4/IPv6 protocol number for TCP (see [`IPPROTO_UDP`]).
-const IPPROTO_TCP: u8 = pnet_packet::ip::IpNextHeaderProtocols::Tcp.0;
+pub(crate) const IPPROTO_TCP: u8 = pnet_packet::ip::IpNextHeaderProtocols::Tcp.0;
 
 /// Read the layer-4 protocol number out of the IP header at the start of
 /// `buf`.
@@ -226,7 +241,7 @@ fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u1
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
-const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+pub(crate) const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
 /// GSO type: TCP segmentation aggregate over IPv6.
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 /// ECN flag OR'd into `gso_type` for ECN-marked aggregates.
