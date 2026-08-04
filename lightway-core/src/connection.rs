@@ -1946,14 +1946,46 @@ impl<AppState: Send> Connection<AppState> {
     /// Check expresslane health from keepalive pong payload
     ///  and disable if packet drops detected
     fn check_expresslane_health(&mut self, mut payload: &[u8]) -> ConnectionResult<()> {
-        if payload.len() != 16 || !self.expresslane_ready() {
+        if !self.expresslane_ready() {
             return Ok(());
         }
+
+        // An empty payload while we are ready means the peer had no stats reading
+        // this window. Tolerated briefly; a peer that has stopped observing its
+        // own health cannot be trusted to detect a dead path, so degrade.
+        if payload.len() != 16 {
+            self.expresslane.missing_peer_reports =
+                self.expresslane.missing_peer_reports.saturating_add(1);
+            if self.expresslane.missing_peer_reports >= expresslane::EXPRESSLANE_MISSING_STATS_LIMIT
+            {
+                warn!("Expresslane peer stopped reporting stats, falling back to DTLS");
+                self.set_expresslane_degraded();
+            }
+            return Ok(());
+        }
+        self.expresslane.missing_peer_reports = 0;
 
         let total_peer_sent = payload.get_u64();
         let total_peer_recv = payload.get_u64();
 
-        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
+        // A failed reading skips the window: committing anything here would poison
+        // the next window's deltas. Tolerated briefly, then fail safe - a
+        // connection that cannot observe its own health must not keep flying blind.
+        let (current_sent, current_recv) = match self.expresslane.stats(self.session_id) {
+            Ok(counters) => counters,
+            Err(e) => {
+                self.expresslane.missing_local_readings =
+                    self.expresslane.missing_local_readings.saturating_add(1);
+                if self.expresslane.missing_local_readings
+                    >= expresslane::EXPRESSLANE_MISSING_STATS_LIMIT
+                {
+                    warn!(error = %e, "Expresslane stats unavailable, falling back to DTLS");
+                    self.set_expresslane_degraded();
+                }
+                return Ok(());
+            }
+        };
+        self.expresslane.missing_local_readings = 0;
 
         // Detect counter reset: cumulative stats should never decrease.
         // If they do, an external stats provider re-initialized its state
@@ -2137,7 +2169,11 @@ impl<AppState: Send> Connection<AppState> {
             return Default::default();
         }
 
-        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
+        // An empty payload tells the peer "no reading this window" - better than
+        // zeros it would read as total loss.
+        let Ok((current_sent, current_recv)) = self.expresslane.stats(self.session_id) else {
+            return Default::default();
+        };
 
         let mut buf = bytes::BytesMut::with_capacity(16);
         buf.put_u64(current_sent);

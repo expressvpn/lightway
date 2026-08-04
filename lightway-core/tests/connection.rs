@@ -48,6 +48,7 @@ async fn run_test<S: TestSock>(
                 pqc,
                 enable_expresslane.then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
                 None,
+                None,
             ),
             client(
                 client_sock,
@@ -136,7 +137,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
     };
 
     // Server reflects inside data and ACKs the client's encoding requests.
-    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None));
+    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None));
 
     let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
     let (tun, _inside_rx) = ChannelTun::new();
@@ -383,7 +384,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let auth = Arc::new(TestAuth::default());
     let test = async move {
         tokio::join!(
-            server(server_sock, auth, pqc, None, None),
+            server(server_sock, auth, pqc, None, None, None),
             client(client_sock, None, pqc, server_dn, false, false, false)
         )
     };
@@ -476,6 +477,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         },
         Some(INTERVAL),
         Some(conn_tx),
+        None,
     );
 
     let client_task = async move {
@@ -581,4 +583,275 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
     tokio::time::timeout(std::time::Duration::from_secs(10), test)
         .await
         .expect("server nudge did not cascade into a client rotation");
+}
+
+/// Drives a client/server pair through repeated keepalive windows and
+/// reports how the client's expresslane health check reacted: the final
+/// state, which window (if any) first saw it go Degraded, and how many
+/// probe packets came back reflected (proof traffic actually flowed).
+async fn expresslane_health_probe(
+    client_metrics: Option<Arc<dyn ExpresslaneMetrics + Send + Sync>>,
+    server_metrics: Option<ExpresslaneMetricsType>,
+) -> (ExpresslaneState, Option<usize>, usize) {
+    // Comfortably above MIN_PACKETS_FOR_LOSS_CHECK (10) so a bad window is
+    // unambiguous; WINDOWS above EXPRESSLANE_MISSING_STATS_LIMIT (3) so
+    // "degrades at the limit, not before" is observable.
+    const WINDOWS: usize = 5;
+    const BURST: usize = 12;
+
+    // A small yield between sends, rather than one lock held over the whole
+    // burst: the server needs several of its own select! iterations (decode,
+    // deliver, reflect) to drain one packet, and firing all BURST packets
+    // back-to-back can outrun that pipeline faster than it drains.
+    async fn send_burst(conn: &Arc<Mutex<lightway_core::Connection<ConnectionState>>>) {
+        for _ in 0..BURST {
+            let mut pkt = BytesMut::from(&b"\x40Health probe"[..]);
+            conn.lock()
+                .unwrap()
+                .inside_data_received(&mut pkt)
+                .expect("send probe packet");
+            tokio::time::sleep(std::time::Duration::from_micros(200)).await;
+        }
+    }
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+
+    let auth = Arc::new(TestAuth::default());
+    // A long rotation interval on purpose: rotation must not interfere with
+    // the health-check windows this probe measures.
+    let server_task = server(
+        server_sock,
+        auth,
+        pqc,
+        Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+        None,
+        server_metrics,
+    );
+
+    let client_task = async move {
+        let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+        let (tun, mut inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+        let (event_cb, mut event_stream) = EventStreamCallback::new();
+
+        let client = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+        .when_some(client_metrics, |b, m| b.with_expresslane_metrics(m));
+
+        // Match the shared client helper: the server asserts the negotiated
+        // curve against PQCrypto::expected_curve, which assumes this.
+        #[cfg(feature = "postquantum")]
+        let client = client.enable_pq_crypto().unwrap();
+
+        let conn = client
+            .build()
+            .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+            .unwrap()
+            .with_auth_token("LET ME IN")
+            .with_event_cb(Box::new(event_cb))
+            .connect(state)
+            .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut el_state = ExpresslaneState::Disabled;
+        let mut windows_done = 0usize;
+        let mut degraded_at: Option<usize> = None;
+        let mut reflected = 0usize;
+        let mut grace = 0usize;
+        let mut keepalive_countdown: Option<usize> = None;
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                Some(event) = event_stream.next() => {
+                    match event {
+                        Event::ExpresslaneStateChanged(s) => {
+                            if matches!(s, ExpresslaneState::Active)
+                                && !matches!(el_state, ExpresslaneState::Active)
+                                && windows_done == 0
+                            {
+                                send_burst(&conn).await;
+                                keepalive_countdown = Some(3);
+                            }
+                            if matches!(s, ExpresslaneState::Degraded) && degraded_at.is_none() {
+                                degraded_at = Some(windows_done);
+                            }
+                            el_state = s;
+                        }
+                        Event::KeepaliveReply => {
+                            windows_done += 1;
+                            if windows_done < WINDOWS {
+                                send_burst(&conn).await;
+                                keepalive_countdown = Some(3);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Some(_buf) = inside_rx.recv() => {
+                    reflected += 1;
+                }
+
+                _ = ticks.tick() => {
+                    // The reflecting server counts through an async channel,
+                    // so the countdown gives the whole burst time to land
+                    // before the pong that snapshots it goes out.
+                    if let Some(n) = keepalive_countdown {
+                        if n == 0 {
+                            keepalive_countdown = None;
+                            conn.lock().unwrap().keepalive().expect("send keepalive");
+                        } else {
+                            keepalive_countdown = Some(n - 1);
+                        }
+                    }
+
+                    if matches!(el_state, ExpresslaneState::Degraded) {
+                        grace += 1;
+                        if grace >= 2 {
+                            break;
+                        }
+                    } else if windows_done >= WINDOWS {
+                        grace += 1;
+                        if grace >= 4 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        conn.lock().unwrap().disconnect().unwrap();
+        (el_state, degraded_at, reflected)
+    };
+
+    let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(15), async move {
+        tokio::join!(server_task, client_task)
+    })
+    .await
+    .expect("expresslane health probe timed out");
+
+    result
+}
+
+/// A provider that is always reachable but always reports total loss.
+/// Distinguishes it from a missing reading: the health check must treat
+/// persistent zeros as a real 100% loss window, not as "no data yet".
+struct AlwaysZeroStats;
+impl ExpresslaneMetrics for AlwaysZeroStats {
+    fn get_stats(
+        &self,
+        _session_id: SessionId,
+    ) -> Result<ExpresslanePacketStats, ExpresslaneStatsError> {
+        Ok(ExpresslanePacketStats::default())
+    }
+}
+
+/// A provider that always fails to produce a reading.
+struct AlwaysUnavailableStats;
+impl ExpresslaneMetrics for AlwaysUnavailableStats {
+    fn get_stats(
+        &self,
+        _session_id: SessionId,
+    ) -> Result<ExpresslanePacketStats, ExpresslaneStatsError> {
+        Err(ExpresslaneStatsError::Unavailable)
+    }
+}
+
+/// A provider returning zeros - a claim of total loss - degrades exactly
+/// like real total loss would. This is the behavior the error return exists
+/// to be distinguishable from: an installed provider that has genuinely
+/// nothing to report must say so, not fabricate zeros.
+#[tokio::test]
+async fn zero_stats_readings_degrade_as_total_loss() {
+    let (state, _degraded_at, reflected) =
+        expresslane_health_probe(Some(Arc::new(AlwaysZeroStats)), None).await;
+
+    assert_eq!(
+        state,
+        ExpresslaneState::Degraded,
+        "persistent zeros ARE a reading, read as 100% loss - the safe default \
+         the error return exists to be distinguishable from"
+    );
+    assert!(
+        reflected >= 12,
+        "a probe that carried no traffic proves nothing"
+    );
+}
+
+/// A provider that cannot read is tolerated for two windows (skip, touch no
+/// snapshots) and fail-safes on the third, never earlier.
+#[tokio::test]
+async fn failed_local_readings_skip_briefly_then_degrade() {
+    let (state, degraded_at, reflected) =
+        expresslane_health_probe(Some(Arc::new(AlwaysUnavailableStats)), None).await;
+
+    assert_eq!(state, ExpresslaneState::Degraded);
+    assert!(
+        reflected >= 12,
+        "a probe that carried no traffic proves nothing"
+    );
+    assert_eq!(
+        degraded_at,
+        Some(3),
+        "the first two windows must be tolerated (skip) and the third fail-safe"
+    );
+}
+
+/// A peer that stops reporting its own stats is exactly as untrustworthy as
+/// one that has gone dark: the client must count the missing reports itself
+/// and degrade, even though its own local counters read fine throughout.
+#[tokio::test]
+async fn peer_that_stops_reporting_degrades() {
+    let (state, degraded_at, reflected) =
+        expresslane_health_probe(None, Some(Arc::new(AlwaysUnavailableStats))).await;
+
+    assert_eq!(state, ExpresslaneState::Degraded);
+    assert!(
+        reflected >= 12,
+        "a probe that carried no traffic proves nothing"
+    );
+    assert_eq!(
+        degraded_at,
+        Some(3),
+        "the first two windows must be tolerated (skip) and the third fail-safe"
+    );
 }

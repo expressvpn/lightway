@@ -233,6 +233,7 @@ pub async fn server<S: TestSock>(
     pqc: PQCrypto,
     expresslane: Option<std::time::Duration>,
     conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
+    metrics: Option<ExpresslaneMetricsType>,
 ) {
     let server_key = Secret::Asn1Buffer(SERVER_KEY);
     let server_cert = Secret::Asn1Buffer(SERVER_CERT);
@@ -269,6 +270,7 @@ pub async fn server<S: TestSock>(
 
     let server_ctx = server_ctx
         .when_some(expresslane, |s, interval| s.with_expresslane(interval))
+        .when_some(metrics, |s, m| s.with_expresslane_metrics(m))
         .build()
         .unwrap();
 
