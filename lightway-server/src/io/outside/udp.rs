@@ -317,8 +317,10 @@ impl UdpServer {
                 // first
                 if update_peer_address {
                     metrics::udp_conn_recovered_via_session(session);
-                    conn.begin_session_id_rotation();
+                    // Address first: the rotation announce must go to the
+                    // address the client roamed to.
                     self.conn_manager.set_peer_addr(&conn, peer_addr);
+                    conn.begin_session_id_rotation();
                 }
             }
             Err(err) => {
