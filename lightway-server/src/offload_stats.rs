@@ -37,11 +37,11 @@ fn decide(prev: Option<Seen>, cur: ExpresslanePacketStats) -> (bool, bool, u64, 
 /// Default interval between offload-stats polls.
 pub const DEFAULT_OFFLOAD_STATS_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Periodically pull each online session's kernel-offload counters via the
+/// Periodically pull each online session's offload counters via the
 /// ExpresslaneMetrics provider and (a) refresh the connection activity
 /// timestamps so offloaded sessions classify active / don't idle-evict, and
-/// (b) emit aggregate offload byte metrics. Kernel-ref-free: the ioctl lives
-/// behind `metrics`.
+/// (b) emit aggregate offload byte metrics. The counter source lives behind
+/// `metrics`.
 pub(crate) async fn run(
     conn_manager: Arc<ConnectionManager>,
     metrics: ExpresslaneMetricsType,
@@ -64,7 +64,12 @@ pub(crate) async fn run(
         for conn in conns {
             let sid = conn.session_id();
             live.insert(sid);
-            let cur = metrics.get_stats(sid);
+            // No reading: skip the session this poll, keeping the previous baseline
+            // so the next reading's deltas span the gap. The provider logs its own
+            // failures.
+            let Ok(cur) = metrics.get_stats(sid) else {
+                continue;
+            };
             let (rx, tx, rx_bytes, tx_bytes) = decide(seen.get(&sid).copied(), cur);
             if rx || tx {
                 conn.mark_offload_activity(rx, tx);
