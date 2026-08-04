@@ -2062,6 +2062,13 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
+            // Degraded is terminal for the session; an unacked degrade notice
+            // lands here too and must not undo it.
+            if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
+                warn!("Expresslane degrade notice transmit timed out");
+                return Ok(());
+            }
+
             warn!("Expresslane config transmit timed out, setting expresslane to inactive");
             self.set_expresslane_state(ExpresslaneState::Inactive);
             // The stamp was taken before the outcome was known. Drop it so
