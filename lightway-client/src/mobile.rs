@@ -99,6 +99,12 @@ fn get_tls_library_version() -> String {
 /// Safe to call at any time relative to the tunnel lifecycle; the
 /// device capability itself is probed on first use and coalescing
 /// silently stays off where the probe fails.
+///
+/// This runtime gate composes with a static one: the connection config
+/// must also set `enable_tun_tcp_coalescing` (default off), so the
+/// feature can be rolled out via config exactly like
+/// `enable_tun_offload` gates the Linux offload paths. Allowing it
+/// here has no effect on connections configured without the flag.
 #[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
 fn set_tun_tcp_coalescing_allowed(allowed: bool) {
     #[cfg(android)]

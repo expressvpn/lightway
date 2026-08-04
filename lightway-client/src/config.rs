@@ -271,6 +271,19 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable downlink TCP coalescing on the TUN write path (Android only; \
+               ignored elsewhere). Even when enabled, coalescing engages only after \
+               the app also permits it at runtime via the tethering kill switch \
+               (set_tun_tcp_coalescing_allowed) and the device passes the \
+               oversized-write capability probe"
+    ))]
+    #[schemars(extend("x-cfg" = "android"))]
+    pub enable_tun_tcp_coalescing: bool,
+
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
     #[schemars(extend("x-cfg" = "linux"))]
     pub enable_tun_iouring: bool,
@@ -523,6 +536,7 @@ impl Default for Config {
             enable_pmtud: false,
             pmtud_base_mtu: None,
             enable_tun_offload: false,
+            enable_tun_tcp_coalescing: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),

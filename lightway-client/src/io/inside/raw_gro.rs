@@ -38,7 +38,11 @@
 //!   after our write), so coalescing is gated on a global allow flag
 //!   that **defaults to off** and must only be enabled by the app
 //!   layer while no tethering or local forwarding is active — see
-//!   [`set_tun_tcp_coalescing_allowed`].
+//!   [`set_tun_tcp_coalescing_allowed`]. On top of that runtime gate
+//!   sits a static one: the `enable_tun_tcp_coalescing` config flag
+//!   (also default off, [`RawGro::set_configured`]), so the feature
+//!   can be rolled out per connection config exactly like
+//!   `enable_tun_offload` gates the Linux offload paths.
 //! - **Probed capability, permanent fallback.** Unbounded tun writes
 //!   are a fuzzed attack surface and a future GKI may bound the write
 //!   path, so the oversized write is probed at runtime (after
@@ -154,7 +158,18 @@ pub(crate) trait RawTunIo {
 
 /// Single-run downlink TCP coalescer over a raw (no `virtio_net_hdr`)
 /// TUN write path. See the module docs for the whole contract.
+///
+/// Coalescing engages only when every gate agrees: the
+/// `enable_tun_tcp_coalescing` config flag ([`Self::set_configured`],
+/// the static rollout control), the app's runtime allow flag
+/// ([`set_tun_tcp_coalescing_allowed`], the tethering kill switch),
+/// the one-shot capability probe, and no permanent fallback tripped.
 pub(crate) struct RawGro {
+    /// The `enable_tun_tcp_coalescing` config flag: static rollout
+    /// gate, fixed before the device is shared. Off means windows
+    /// never open and the probe never runs, regardless of the runtime
+    /// allow flag.
+    configured: bool,
     /// Whether a coalescing window is open (between the outside IO
     /// loop's `gro_open` and `gro_flush` around one decrypt batch).
     /// Kept outside the batch mutex so the send path pays only a
@@ -189,6 +204,7 @@ impl RawGro {
     fn with_allowed(max_len: usize, allowed: &'static AtomicBool) -> Self {
         let max_len = max_len.min(MAX_IPV4_PACKET_LEN);
         Self {
+            configured: false,
             open: AtomicBool::new(false),
             capable: OnceLock::new(),
             fell_back: AtomicBool::new(false),
@@ -198,15 +214,24 @@ impl RawGro {
         }
     }
 
+    /// Set the `enable_tun_tcp_coalescing` config gate. `&mut self`
+    /// pins this to device setup, before the `Tun` is shared: the
+    /// static feature flag is not a runtime toggle — that role belongs
+    /// to [`set_tun_tcp_coalescing_allowed`].
+    pub(crate) fn set_configured(&mut self, enabled: bool) {
+        self.configured = enabled;
+    }
+
     fn allowed(&self) -> bool {
         self.allowed.load(Ordering::Relaxed)
     }
 
     /// Open a coalescing window for one decrypt batch. No-op unless
-    /// the app has allowed coalescing and the device passed (or now
-    /// passes — the probe is lazy) the capability probe.
+    /// the feature is configured on, the app has allowed coalescing at
+    /// runtime, and the device passed (or now passes — the probe is
+    /// lazy) the capability probe.
     pub(crate) fn open(&self, tun: &impl RawTunIo, local_ip: Ipv4Addr) {
-        if !self.allowed() || self.fell_back.load(Ordering::Relaxed) {
+        if !self.configured || !self.allowed() || self.fell_back.load(Ordering::Relaxed) {
             return;
         }
         let capable = *self
@@ -512,8 +537,12 @@ mod tests {
         Box::leak(Box::new(AtomicBool::new(initial)))
     }
 
+    /// A coalescer with the config gate on — the baseline for tests
+    /// exercising the runtime gates behind it.
     fn raw_gro(allowed: bool) -> RawGro {
-        RawGro::with_allowed(MAX_LEN, allow_flag(allowed))
+        let mut gro = RawGro::with_allowed(MAX_LEN, allow_flag(allowed));
+        gro.set_configured(true);
+        gro
     }
 
     /// TUN stand-in recording every write in call order. Queued
@@ -654,6 +683,30 @@ mod tests {
         let len = pkt.len();
         let r = gro.send(tun, pkt);
         assert!(matches!(r, IOCallbackResult::Ok(n) if n == len));
+    }
+
+    /// The static config gate (`enable_tun_tcp_coalescing`): while it
+    /// is off — the constructor default — the runtime allow flag is
+    /// irrelevant, windows never open, no probe packet is ever
+    /// injected and every packet is written 1:1.
+    #[test]
+    fn unconfigured_never_probes_or_coalesces_even_when_allowed() {
+        let tun = FakeRawTun::new();
+        let gro = RawGro::with_allowed(MAX_LEN, allow_flag(true));
+
+        gro.open(&tun, local_ip());
+        assert!(!gro.open.load(Ordering::Relaxed));
+        assert_eq!(tun.write_count(), 0, "no probe write attempted");
+
+        for seq in [0, MSS as u32] {
+            send_ok(&gro, &tun, data(seq));
+        }
+        gro.flush(&tun);
+
+        let writes = tun.writes();
+        assert_eq!(writes.len(), 2, "1:1 writes");
+        assert_eq!(writes[0], data(0).to_vec());
+        assert_eq!(writes[1], data(MSS as u32).to_vec());
     }
 
     /// The default-off gate (the tethering kill switch): without the
@@ -839,7 +892,8 @@ mod tests {
     fn kill_switch_mid_window_drains_per_segment_in_order() {
         let allowed = allow_flag(true);
         let tun = FakeRawTun::new();
-        let gro = RawGro::with_allowed(MAX_LEN, allowed);
+        let mut gro = RawGro::with_allowed(MAX_LEN, allowed);
+        gro.set_configured(true);
 
         gro.open(&tun, local_ip());
         for seq in [0, MSS as u32] {

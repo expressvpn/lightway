@@ -78,6 +78,18 @@ impl Tun {
         self.tun.if_index()
     }
 
+    /// Apply the `enable_tun_tcp_coalescing` config flag — the static
+    /// rollout gate for the raw downlink TCP coalescer, mirroring how
+    /// `enable_tun_offload` gates the Linux offload paths. Off by
+    /// default. `&mut self` restricts this to device setup, before the
+    /// `Tun` is shared; the runtime tethering gate
+    /// ([`raw_gro::set_tun_tcp_coalescing_allowed`]) and the
+    /// capability probe still apply on top.
+    #[cfg(android)]
+    pub fn set_tcp_coalescing_configured(&mut self, enabled: bool) {
+        self.raw_gro.set_configured(enabled);
+    }
+
     fn name(&self) -> std::io::Result<String> {
         self.tun.name()
     }
