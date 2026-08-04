@@ -3,10 +3,14 @@ use lightway_app_utils::{
     ConnectionTicker, EventStreamCallback, PacketCodecFactory, connection_ticker_cb,
 };
 use lightway_core::*;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 use test_case::test_case;
 use tokio::{
     net::{UnixDatagram, UnixStream},
+    sync::oneshot,
     task::JoinSet,
 };
 use tokio_stream::StreamExt;
@@ -38,7 +42,13 @@ async fn run_test<S: TestSock>(
 
     let test = async move {
         tokio::join!(
-            server(server_sock, auth, pqc, enable_expresslane),
+            server(
+                server_sock,
+                auth,
+                pqc,
+                enable_expresslane.then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+                None,
+            ),
             client(
                 client_sock,
                 cipher,
@@ -126,7 +136,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
     };
 
     // Server reflects inside data and ACKs the client's encoding requests.
-    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, false));
+    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None));
 
     let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
     let (tun, _inside_rx) = ChannelTun::new();
@@ -373,7 +383,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let auth = Arc::new(TestAuth::default());
     let test = async move {
         tokio::join!(
-            server(server_sock, auth, pqc, false),
+            server(server_sock, auth, pqc, None, None),
             client(client_sock, None, pqc, server_dn, false, false, false)
         )
     };
@@ -429,4 +439,146 @@ async fn mark_offload_activity_bumps_by_rule() {
     let after_rx = conn.activity();
     assert!(after_rx.last_data_traffic_from_peer > before.last_data_traffic_from_peer);
     assert!(after_rx.last_outside_data_received > after_tx.last_outside_data_received);
+}
+
+/// Proves the offload-nudge chain end to end: a server-side
+/// `mark_offload_activity` call (exactly what the offload-stats poller
+/// does) rotates the expresslane key on both ends while the client sees
+/// no inside/outside traffic of its own.
+#[tokio::test]
+async fn server_nudge_rotates_both_ends_while_client_is_idle() {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    // Collects the distinct real (non-sentinel) self keys the client publishes.
+    struct KeyCollector(Mutex<HashSet<Vec<u8>>>);
+    impl<T> ExpresslaneCb<T> for KeyCollector {
+        fn update(&self, _sid: SessionId, data: ExpresslaneCbData, _s: &T) {
+            if !data.self_key.is_invalid() {
+                self.0.lock().unwrap().insert(data.self_key.0.to_vec());
+            }
+        }
+    }
+    let keys = Arc::new(KeyCollector(Mutex::new(HashSet::new())));
+
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let server_task = server(
+        server_sock,
+        auth,
+        PQCrypto {
+            server_pqc: false,
+            keyshare: None,
+        },
+        Some(INTERVAL),
+        Some(conn_tx),
+    );
+
+    let client_task = async move {
+        // The server sends this before any handshake traffic, so this
+        // cannot deadlock.
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(INTERVAL)
+        .with_expresslane_cb(keys.clone())
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut phase = 1u8;
+        let mut phase1_at: Option<std::time::Instant> = None;
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    let key_count = keys.0.lock().unwrap().len();
+                    match phase {
+                        1 => {
+                            // Initial exchange done.
+                            if key_count >= 1 {
+                                phase1_at = Some(std::time::Instant::now());
+                                phase = 2;
+                            }
+                        }
+                        2 => {
+                            // More than 2 rotation intervals of pure idle.
+                            if phase1_at.unwrap().elapsed()
+                                >= std::time::Duration::from_millis(700)
+                            {
+                                assert_eq!(
+                                    key_count, 1,
+                                    "an idle offloaded client must not rotate on its own - that is the point"
+                                );
+                                phase = 3;
+                            }
+                        }
+                        3 => {
+                            // Exactly the call the offload-stats poller makes
+                            // when offload counters show traffic.
+                            server_conn.lock().unwrap().mark_offload_activity(true, false);
+                            phase = 4;
+                        }
+                        4 => {
+                            if key_count >= 2 {
+                                conn.lock().unwrap().disconnect().unwrap();
+                                return;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    };
+
+    let test = async move { tokio::join!(server_task, client_task) };
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), test)
+        .await
+        .expect("server nudge did not cascade into a client rotation");
 }
