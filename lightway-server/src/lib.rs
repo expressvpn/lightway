@@ -361,11 +361,14 @@ async fn inside_io_loop_default(
     ip_manager: Arc<IpManager<Arc<Connection>>>,
     lightway_client_ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
-    let mtu = inside_io.mtu();
-    let mut buf = BytesMut::with_capacity(mtu);
+    // `mtu + vnet_headroom` so a read from a TUN opened with offload is
+    // not truncated by the length of the virtio header the kernel
+    // prepends. Zero extra unless offload is in use.
+    let cap = inside_io.mtu() + inside_io.vnet_headroom();
+    let mut buf = BytesMut::with_capacity(cap);
     loop {
         buf.clear();
-        buf.resize(mtu, 0);
+        buf.resize(cap, 0);
         match inside_io.recv_buf(&mut buf).await {
             IOCallbackResult::Ok(_n) => {}
             IOCallbackResult::WouldBlock => continue,
