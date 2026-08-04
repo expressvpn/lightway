@@ -174,11 +174,16 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
     }
 
     /// Promote the staged TX key.
+    ///
+    /// Promoting the all-zero sentinel (a degrade notice's key) clears the
+    /// validity flag instead of setting it, so [`Self::has_valid_keys`] never
+    /// reports the session usable under a publicly known key.
     pub fn promote_self_key(&self) {
         let mut keys = self.keys_write();
         if let Some(next) = keys.next_self.take() {
+            self.has_self
+                .store(!next.key.is_invalid(), Ordering::Relaxed);
             keys.current_self = Some(next);
-            self.has_self.store(true, Ordering::Relaxed);
         }
     }
 
@@ -190,8 +195,8 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
             aead: A::new(&key)?,
         };
         let mut keys = self.keys_write();
+        self.has_peer.store(!key.is_invalid(), Ordering::Relaxed);
         keys.prev_peer = keys.current_peer.replace(keyed);
-        self.has_peer.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -213,11 +218,13 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
             .unwrap_or(ExpresslaneKey::INVALID)
     }
 
-    /// True when both directions have a key installed.
+    /// True when both directions have a real key installed - the all-zero
+    /// sentinel does not count.
     ///
     /// Deliberately lock-free: the TX path calls this per packet, and taking
     /// the key lock here would make every outbound packet contend with the
-    /// inbound worker.
+    /// inbound worker. The flags are maintained at key installation instead
+    /// of inspected here.
     pub fn has_valid_keys(&self) -> bool {
         self.has_self.load(Ordering::Relaxed) && self.has_peer.load(Ordering::Relaxed)
     }
@@ -422,6 +429,37 @@ mod tests {
         s.promote_self_key();
         assert!(!s.has_valid_keys(), "still no peer key");
         s.update_peer_key(ExpresslaneKey([2u8; EXPRESSLANE_KEY_SIZE]))
+            .unwrap();
+        assert!(s.has_valid_keys());
+    }
+
+    /// A degrade notice stages the all-zero sentinel; if its ack promotes it,
+    /// the session must not report itself usable under that key.
+    #[test]
+    fn promoted_sentinel_key_defeats_has_valid_keys() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        assert!(s.has_valid_keys());
+
+        s.update_next_self_key(ExpresslaneKey::INVALID).unwrap();
+        s.promote_self_key();
+        assert!(!s.has_valid_keys(), "all-zero self key must not count");
+
+        // A later real key restores the session.
+        s.update_next_self_key(ExpresslaneKey([3u8; EXPRESSLANE_KEY_SIZE]))
+            .unwrap();
+        s.promote_self_key();
+        assert!(s.has_valid_keys());
+    }
+
+    #[test]
+    fn sentinel_peer_key_defeats_has_valid_keys() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        assert!(s.has_valid_keys());
+
+        s.update_peer_key(ExpresslaneKey::INVALID).unwrap();
+        assert!(!s.has_valid_keys(), "all-zero peer key must not count");
+
+        s.update_peer_key(ExpresslaneKey([3u8; EXPRESSLANE_KEY_SIZE]))
             .unwrap();
         assert!(s.has_valid_keys());
     }
