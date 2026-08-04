@@ -655,6 +655,14 @@ impl TunDirect {
         };
         #[cfg(not(target_os = "linux"))]
         let res = tun.try_send(&buf[..]);
+        Self::map_send_result(res)
+    }
+
+    /// Map the result of a TUN write onto an [`IOCallbackResult`], shared by
+    /// every send path. A full write queue is retried by the caller;
+    /// anything else is fatal. Mirrors `map_send_result` on the outside UDP
+    /// path.
+    fn map_send_result(res: std::io::Result<usize>) -> IOCallbackResult<usize> {
         match res {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
