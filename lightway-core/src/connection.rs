@@ -91,6 +91,15 @@ const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 /// Maximum number of retransmissions attempts for each encoding request packet.
 const ENCODING_REQUEST_PKT_MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
 
+/// Whether a GSO superpacket of `gso_segs` segments fits in a single
+/// `sendmsg(UDP_SEGMENT)` batch. An aggregate with more segments than one
+/// send may carry is put on the wire one datagram per segment instead of
+/// being dropped.
+#[cfg(target_os = "linux")]
+fn gso_fits_one_batch(gso_segs: usize) -> bool {
+    gso_segs <= crate::gso::MAX_GSO_SEGS
+}
+
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -1284,18 +1293,6 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        if gso_segs > gso::MAX_GSO_SEGS {
-            tracing::warn!(
-                gso_segs,
-                MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
-                "too many segments in superpacket, dropping"
-            );
-            crate::metrics::gso_dropped_iov_overflow();
-            return Err(ConnectionError::InvalidInsidePacket(
-                InvalidPacketError::InvalidGsoPacket,
-            ));
-        }
-
         // Per-segment MTU guard: when TUN_F_TSO4 is enabled the kernel
         // hands us GSO aggregates without enforcing per-segment MTU.
         // If anything upstream (TS-unaware MSS, missing MSS clamp, a
@@ -1323,10 +1320,26 @@ impl<AppState: Send> Connection<AppState> {
         // we only need capacity here — no zero-init.
         let mut segment = BytesMut::with_capacity(mtu);
 
+        // Can this aggregate travel as one `UDP_SEGMENT` batch? If not,
+        // fall back to one datagram per segment rather than dropping it.
+        let batched = gso_fits_one_batch(gso_segs);
+        if !batched {
+            crate::metrics::gso_batch_skipped();
+            tracing::warn!(
+                gso_segs,
+                MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
+                "GSO batching skipped, sending segments individually"
+            );
+        }
+
         // Open the GSO coalescing buffer — IO callback will coalesce
         // here. Both DTLS and expresslane paths detect this and
         // append encrypted segments instead of sending immediately.
-        self.session.io_cb_mut().gso_buf.open();
+        // Left closed on the fallback path, where `udp_send` passes each
+        // segment straight to the socket.
+        if batched {
+            self.session.io_cb_mut().gso_buf.open();
+        }
 
         let mut result = Ok(());
 
@@ -1349,7 +1362,15 @@ impl<AppState: Send> Connection<AppState> {
                 break;
             }
 
-            if let Err(e) = self.send_outside_data(&mut segment, false) {
+            // Batched: `send_outside_data` coalesces into `gso_buf`.
+            // Fallback: `send_to_outside`, which is the same call the
+            // non-offload path makes for an individual packet.
+            let sent = if batched {
+                self.send_outside_data(&mut segment, false)
+            } else {
+                self.send_to_outside(&mut segment, false)
+            };
+            if let Err(e) = sent {
                 result = Err(e);
                 break;
             }
@@ -1357,20 +1378,25 @@ impl<AppState: Send> Connection<AppState> {
 
         if result.is_ok() {
             self.activity.last_data_traffic_from_peer = Instant::now();
-            match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
-                IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
-                IOCallbackResult::Err(e) => {
-                    tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
-                    crate::metrics::gso_send_failed();
-                }
-            }
         }
 
-        // Always reset the GSO coalescing buffer on exit. udp_send_gso
-        // borrows it; this returns to Passthrough and clears the
-        // bytes in place so the underlying allocation is reused on
-        // the next batch.
-        self.session.io_cb_mut().gso_buf.reset();
+        if batched {
+            if result.is_ok() {
+                match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
+                    IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
+                    IOCallbackResult::Err(e) => {
+                        tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
+                        crate::metrics::gso_send_failed();
+                    }
+                }
+            }
+
+            // Always reset the GSO coalescing buffer on exit. udp_send_gso
+            // borrows it; this returns to Passthrough and clears the
+            // bytes in place so the underlying allocation is reused on
+            // the next batch.
+            self.session.io_cb_mut().gso_buf.reset();
+        }
 
         result
     }
@@ -2913,6 +2939,23 @@ impl<AppState: Send> Connection<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    mod gso_batch_tests {
+        use super::super::gso_fits_one_batch;
+
+        /// An aggregate up to the segment cap is batched; one past it is
+        /// not. Pins the boundary at `MAX_GSO_SEGS` inclusive so the
+        /// aggregate is degraded to per-segment sends rather than dropped.
+        #[test]
+        fn batches_up_to_the_cap_inclusive() {
+            assert!(gso_fits_one_batch(1));
+            assert!(gso_fits_one_batch(crate::gso::MAX_GSO_SEGS));
+            assert!(!gso_fits_one_batch(crate::gso::MAX_GSO_SEGS + 1));
+            // 65535 / 536 -- the small-MSS peer case.
+            assert!(!gso_fits_one_batch(122));
+        }
+    }
 
     /// `advance_strikes` ignores AppState; pick the simplest `Send` type.
     type Conn = Connection<()>;
