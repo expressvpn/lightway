@@ -56,3 +56,11 @@ allow-git = ["https://github.com/cloudflare/boring"]
 name = "ring"
 expression = "ISC AND MIT AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# internet-checksum (Fuchsia) ships a BSD-2-Clause LICENSE file but sets
+# no `license` field in its manifest, so cargo-deny cannot classify it
+# without this clarification.
+[[licenses.clarify]]
+name = "internet-checksum"
+expression = "BSD-2-Clause"
+license-files = [{ path = "LICENSE", hash = 0x336921c7 }]
