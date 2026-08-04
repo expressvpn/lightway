@@ -467,6 +467,44 @@ impl TunDirect {
         // This currently is not supported for Android and IOS
         #[cfg(mobile)]
         let mtu = 1350;
+
+        // Reflect the offload capability the device actually negotiated,
+        // not what was requested: `build_async` succeeds even when the
+        // kernel rejects `TUNSETOFFLOAD` (tun-rs only logs a warning) and
+        // `tcp_gso()` then reports false.
+        //
+        // Careful about what that false does *not* mean. tun-rs issues
+        // `TUNSETIFF` first, and it has already succeeded with
+        // `IFF_VNET_HDR` set; on a later `TUNSETOFFLOAD` failure tun-rs
+        // clears only its own bookkeeping bool and never re-issues
+        // `TUNSETIFF` to drop the flag. So the fd keeps vnet framing
+        // (verified on a live kernel: `TUNGETIFF` still returns
+        // `IFF_VNET_HDR`, `TUNGETVNETHDRSZ` still returns 10, and reads
+        // still carry the header) while this flag says it does not. Two
+        // properties are collapsed into one bool: the framing granted by
+        // `TUNSETIFF`, and the TSO/USO capability granted by
+        // `TUNSETOFFLOAD`. Only the second is what `tcp_gso()` tracks after
+        // the fallback.
+        //
+        // Traffic never flows in that state: `supports_gso()` returns this
+        // flag, so the `as_gso()` check on the client/server startup path
+        // aborts with an error before any packet moves when offload was
+        // requested but not negotiated. And
+        // `TUN_F_CSUM|TUN_F_TSO4|TUN_F_TSO6` has been supported since Linux
+        // 2.6, so on any ordinary kernel that granted `IFF_VNET_HDR` this
+        // is a no-op.
+        #[cfg(target_os = "linux")]
+        let vnet_hdr = {
+            let negotiated = tun_device.tcp_gso();
+            if config.offload && !negotiated {
+                tracing::warn!(
+                    "TUN offload requested but the kernel did not negotiate IFF_VNET_HDR; \
+                     continuing without GSO/GRO offload"
+                );
+            }
+            negotiated
+        };
+
         let tun = Some(tun_device);
 
         Ok(TunDirect {
@@ -477,7 +515,7 @@ impl TunDirect {
             #[cfg(unix)]
             close_fd_on_drop: config.close_fd_on_drop,
             #[cfg(target_os = "linux")]
-            vnet_hdr: config.offload,
+            vnet_hdr,
         })
     }
 
