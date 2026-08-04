@@ -48,8 +48,8 @@ const GSO_BUILD_REASON_LABEL: &str = "reason";
 static METRIC_GSO_NONE_CHECKSUM_SKIPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("gso_none_checksum_skipped"));
 #[cfg(target_os = "linux")]
-static METRIC_GSO_DROPPED_IOV_OVERFLOW: LazyLock<Counter> =
-    LazyLock::new(|| counter!("gso_dropped_iov_overflow"));
+static METRIC_GSO_BATCH_SKIPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("gso_batch_skipped"));
 
 /// [`crate::Connection`] has allocated its [`crate::Connection::fragment_map`]
 pub(crate) fn connection_alloc_frag_map() {
@@ -161,11 +161,10 @@ pub(crate) fn gso_none_checksum_skipped() {
     METRIC_GSO_NONE_CHECKSUM_SKIPPED.increment(1);
 }
 
-/// Server dropped a GSO superpacket whose segment count exceeds the
-/// `IOV_MAX`-derived cap. Each segment contributes 2 iovecs to the
-/// outbound `sendmsg`, so the cap protects against `EMSGSIZE` /
-/// `EINVAL` from the kernel under malformed virtio_net_hdr input.
+/// A GSO superpacket held more segments than one `sendmsg(UDP_SEGMENT)`
+/// batch may carry, so its segments were sent individually instead. Not a
+/// drop: the aggregate still reaches the peer, just without wire batching.
 #[cfg(target_os = "linux")]
-pub(crate) fn gso_dropped_iov_overflow() {
-    METRIC_GSO_DROPPED_IOV_OVERFLOW.increment(1);
+pub(crate) fn gso_batch_skipped() {
+    METRIC_GSO_BATCH_SKIPPED.increment(1);
 }
