@@ -59,10 +59,21 @@ setup_ip_snat() {
     dev=$3
     basenet=$4
 
-    ip netns exec "${ns}" iptables -P INPUT ACCEPT
-    ip netns exec "${ns}" iptables -P OUTPUT ACCEPT
-    ip netns exec "${ns}" iptables -P FORWARD ACCEPT
-    ip netns exec "${ns}" iptables -t nat -A POSTROUTING -s "${subnet}" -o "${dev}" -j SNAT --to "${basenet}"
+    if command -v nft > /dev/null; then
+        # A fresh netns has an empty nft ruleset, which is already
+        # accept-all, so only the SNAT rule is needed.
+        ip netns exec "${ns}" nft add table ip nat
+        ip netns exec "${ns}" nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; }'
+        ip netns exec "${ns}" nft add rule ip nat postrouting ip saddr "${subnet}" oifname "${dev}" snat to "${basenet}"
+    elif command -v iptables > /dev/null; then
+        ip netns exec "${ns}" iptables -P INPUT ACCEPT
+        ip netns exec "${ns}" iptables -P OUTPUT ACCEPT
+        ip netns exec "${ns}" iptables -P FORWARD ACCEPT
+        ip netns exec "${ns}" iptables -t nat -A POSTROUTING -s "${subnet}" -o "${dev}" -j SNAT --to "${basenet}"
+    else
+        echo "setup_ip_snat: neither nft nor iptables is available" >&2
+        return 1
+    fi
 }
 
 setup_ip_forward() {
