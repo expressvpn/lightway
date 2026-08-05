@@ -37,15 +37,16 @@ static METRIC_OUTSIDE_GSO_BATCH_SHED: LazyLock<Counter> =
 static METRIC_OUTSIDE_GSO_SEGMENTS_SHED: LazyLock<Counter> =
     LazyLock::new(|| counter!("outside_gso_segments_shed"));
 
-// The raw coalescer (`io::inside::raw_gro`) is compiled for Android
-// and for host test builds.
-#[cfg(any(android, test))]
+// The raw coalescer (`io::inside::raw_gro`) is compiled for Android,
+// for Linux (devices opened without `enable_tun_offload`), and for
+// host test builds.
+#[cfg(any(linux, android, test))]
 static METRIC_TUN_RAW_GRO_PROBE_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("tun_raw_gro_probe_failed"));
-#[cfg(any(android, test))]
+#[cfg(any(linux, android, test))]
 static METRIC_TUN_RAW_GRO_PERMANENT_FALLBACK: LazyLock<Counter> =
     LazyLock::new(|| counter!("tun_raw_gro_permanent_fallback"));
-#[cfg(any(android, test))]
+#[cfg(any(linux, android, test))]
 static METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("tun_raw_gro_resplit_segment_dropped"));
 
@@ -84,21 +85,21 @@ pub(crate) fn outside_gso_batch_shed(segments: u64) {
     METRIC_OUTSIDE_GSO_SEGMENTS_SHED.increment(segments);
 }
 
-/// The Android raw-write capability probe failed (`IFF_VNET_HDR`
+/// The raw oversized-write capability probe failed (`IFF_VNET_HDR`
 /// framing present, `TUNGETIFF` refused, or the oversized write did
 /// not return the full count): TCP coalescing stays disabled for the
 /// life of the device. At most once per tunnel.
-#[cfg(any(android, test))]
+#[cfg(any(linux, android, test))]
 pub(crate) fn tun_raw_gro_probe_failed() {
     METRIC_TUN_RAW_GRO_PROBE_FAILED.increment(1);
 }
 
 /// An oversized raw TUN write was rejected (`EMSGSIZE`, `EINVAL` or a
 /// short write) after the probe had succeeded — the kernel changed
-/// its mind, e.g. a GKI that bounded the tun write path. The client
+/// its mind, e.g. a kernel that bounded the tun write path. The client
 /// permanently reverted to per-packet writes. At most once per tunnel;
 /// any occurrence in the field is worth investigating.
-#[cfg(any(android, test))]
+#[cfg(any(linux, android, test))]
 pub(crate) fn tun_raw_gro_permanent_fallback() {
     METRIC_TUN_RAW_GRO_PERMANENT_FALLBACK.increment(1);
 }
@@ -106,7 +107,7 @@ pub(crate) fn tun_raw_gro_permanent_fallback() {
 /// A segment of a re-split run (the no-loss fallback after a rejected
 /// oversized write) could not be rebuilt or written and was dropped —
 /// the inner TCP flow must retransmit it.
-#[cfg(any(android, test))]
+#[cfg(any(linux, android, test))]
 pub(crate) fn tun_raw_gro_resplit_segment_dropped() {
     METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED.increment(1);
 }

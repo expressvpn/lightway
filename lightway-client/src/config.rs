@@ -272,13 +272,18 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(
-        doc = "Enable downlink TCP coalescing on the TUN write path (Android only; \
-               ignored elsewhere). Even when enabled, coalescing engages only after \
-               the app also permits it at runtime via the tethering kill switch \
-               (set_tun_tcp_coalescing_allowed) and the device passes the \
-               oversized-write capability probe"
+        doc = "Enable downlink TCP coalescing on the TUN write path, by merging \
+               same-flow TCP segments into one oversized packet per write. For \
+               devices with no virtio_net_hdr framing: the Android VpnService fd, \
+               or a Linux TUN opened without enable_tun_offload (mutually exclusive \
+               with it). Coalescing still engages only once the device passes the \
+               oversized-write capability probe. \
+               Do NOT enable on a host that forwards tunnel traffic (e.g. a gateway \
+               with net.ipv4.ip_forward on): a coalesced packet that is forwarded \
+               rather than delivered locally is dropped with ICMP frag-needed, \
+               blackholing that flow"
     ))]
-    #[schemars(extend("x-cfg" = "android"))]
+    #[schemars(extend("x-cfg" = "linux"))]
     pub enable_tun_tcp_coalescing: bool,
 
     #[patch(attribute(clap(long)))]

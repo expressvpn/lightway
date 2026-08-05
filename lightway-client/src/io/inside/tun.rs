@@ -1,4 +1,4 @@
-#[cfg(android)]
+#[cfg(any(linux, android))]
 use std::os::fd::AsRawFd;
 #[cfg(linux)]
 use std::sync::{
@@ -26,7 +26,7 @@ use lightway_core::{
 
 #[cfg(linux)]
 use crate::io::inside::InsideIORecvGso;
-#[cfg(android)]
+#[cfg(any(linux, android))]
 use crate::io::inside::raw_gro::{self, RawGro, RawTunIo};
 use crate::{ConnectionState, io::inside::InsideIORecv};
 
@@ -36,11 +36,15 @@ pub struct Tun {
     dns_ip: Ipv4Addr,
     #[cfg(linux)]
     gro: Gro,
-    /// Raw downlink TCP coalescer for the `VpnService` fd, which has
-    /// no `virtio_net_hdr` framing (see [`raw_gro`]). Gated off by
-    /// default; the app opts in via
-    /// [`crate::io::inside::raw_gro::set_tun_tcp_coalescing_allowed`].
-    #[cfg(android)]
+    /// Raw downlink TCP coalescer for a device with no
+    /// `virtio_net_hdr` framing (see [`raw_gro`]): the Android
+    /// `VpnService` fd, which can never have it, or a Linux device
+    /// opened without `enable_tun_offload`. Gated off by default —
+    /// callers opt in via [`Self::set_tcp_coalescing_configured`] plus
+    /// [`raw_gro::set_tun_tcp_coalescing_allowed`]. Where the device
+    /// *did* negotiate `IFF_VNET_HDR`, [`Self::gro`] is used instead
+    /// and this stays dormant.
+    #[cfg(any(linux, android))]
     raw_gro: RawGro,
 }
 
@@ -69,7 +73,7 @@ impl Tun {
             dns_ip,
             #[cfg(linux)]
             gro: Gro::new(),
-            #[cfg(android)]
+            #[cfg(any(linux, android))]
             raw_gro: RawGro::new(raw_gro::DEFAULT_MAX_SUPERPACKET),
         }
     }
@@ -79,13 +83,17 @@ impl Tun {
     }
 
     /// Apply the `enable_tun_tcp_coalescing` config flag — the static
-    /// rollout gate for the raw downlink TCP coalescer, mirroring how
-    /// `enable_tun_offload` gates the Linux offload paths. Off by
+    /// rollout gate for the raw downlink TCP coalescer. Off by
     /// default. `&mut self` restricts this to device setup, before the
-    /// `Tun` is shared; the runtime tethering gate
+    /// `Tun` is shared; the runtime kill switch
     /// ([`raw_gro::set_tun_tcp_coalescing_allowed`]) and the
     /// capability probe still apply on top.
-    #[cfg(android)]
+    ///
+    /// Has no effect on a device that negotiated `IFF_VNET_HDR`
+    /// (`enable_tun_offload`): there the kernel is told `gso_size`
+    /// explicitly and the vnet-hdr path is strictly better, so
+    /// [`Self::send_packet`] never consults the raw coalescer.
+    #[cfg(any(linux, android))]
     pub fn set_tcp_coalescing_configured(&mut self, enabled: bool) {
         self.raw_gro.set_configured(enabled);
     }
@@ -95,27 +103,33 @@ impl Tun {
     }
 
     /// Write one already-address-rewritten packet to the device,
-    /// through the GRO coalescer when a window is open.
-    #[cfg(linux)]
+    /// through whichever coalescer this device can use when a window
+    /// is open.
+    ///
+    /// A device that negotiated `IFF_VNET_HDR` takes the vnet-hdr
+    /// path: the superpacket carries `gso_size` and checksum metadata,
+    /// so the kernel re-splits it properly and the write is a real TSO
+    /// frame. Without that framing — the Android `VpnService` fd, or a
+    /// Linux device opened without `enable_tun_offload` — coalesced
+    /// runs must instead be injected as single oversized IPv4 packets;
+    /// see [`raw_gro`] for the constraints and gates on that.
+    ///
+    /// The two are mutually exclusive by construction: exactly one
+    /// coalescer is ever consulted for a given device, and the other's
+    /// window is never opened (see [`Self::gro_open`]).
+    #[cfg(any(linux, android))]
     fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        self.gro.send(&self.tun, buf)
-    }
-
-    /// Write one already-address-rewritten packet to the device,
-    /// through the raw TCP coalescer when a window is open. The
-    /// `VpnService` fd has no `virtio_net_hdr` framing (and cannot
-    /// gain it — `TUNSETIFF` on an attached fd fails with `EEXIST`),
-    /// so coalesced runs are injected as single oversized IPv4
-    /// packets; see [`raw_gro`] for the constraints and gates.
-    #[cfg(android)]
-    fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
+        #[cfg(linux)]
+        if self.tun.supports_gso() {
+            return self.gro.send(&self.tun, buf);
+        }
         self.raw_gro.send(&self.tun, buf)
     }
 
     /// Write one already-address-rewritten packet to the device. No
     /// coalescing on the remaining platforms — `virtio_net_hdr` writes
-    /// are a Linux TUN feature, and the raw oversized write is only
-    /// probed and used on Android.
+    /// are a Linux TUN feature, and the raw oversized write is probed
+    /// only where its kernel behaviour is known.
     #[cfg(not(any(linux, android)))]
     fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         self.tun.try_send(buf)
@@ -125,7 +139,7 @@ impl Tun {
 /// The device writes the raw coalescer performs, on the real TUN.
 /// `send_slice` borrows so a rejected superpacket can be re-split and
 /// re-sent from the same bytes.
-#[cfg(android)]
+#[cfg(any(linux, android))]
 impl RawTunIo for AppUtilsTun {
     fn vnet_hdr_framing(&self) -> Option<bool> {
         /// `IFF_VNET_HDR` in `ifreq.ifr_flags`.
@@ -143,22 +157,36 @@ impl RawTunIo for AppUtilsTun {
 }
 
 /// Read the interface flags via `TUNGETIFF` — `_IOR('T', 210, unsigned
-/// int)`, the one tun ioctl Android's SELinux policy whitelists for
+/// int)`. On Android this is the one tun ioctl SELinux whitelists for
 /// app domains (`TUNSETIFF`/`TUNSETOFFLOAD` and friends all return
-/// `EACCES` or fail structurally). `None` if the ioctl failed.
-#[cfg(android)]
+/// `EACCES` or fail structurally); on Linux it is simply the cheapest
+/// way to confirm the fd's framing before probing an oversized write.
+/// `None` if the ioctl failed.
+#[cfg(any(linux, android))]
 fn tun_iff_flags(fd: std::os::fd::RawFd) -> Option<libc::c_short> {
-    const TUNGETIFF: libc::c_int = 0x800454d2u32 as libc::c_int;
-    // SAFETY: `ifreq` is plain old data the kernel fills in; a zeroed
-    // one is a valid argument, and `TUNGETIFF` writes only within it.
+    // `ioctl`'s request argument is `c_ulong` on glibc/musl and
+    // `c_int` on bionic, so keep the constant untyped-ish and let the
+    // `as _` at the call site pick the right width. The value is
+    // bit-identical either way.
+    const TUNGETIFF: u32 = 0x800454d2;
+
+    // SAFETY: `ifreq` is plain old data — an all-zero bit pattern is a
+    // valid value of it, and the kernel fills in the parts it needs.
     #[allow(unsafe_code)]
-    unsafe {
-        let mut ifr: libc::ifreq = std::mem::zeroed();
-        if libc::ioctl(fd, TUNGETIFF, &mut ifr) != 0 {
-            return None;
-        }
-        Some(ifr.ifr_ifru.ifru_flags)
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+
+    // SAFETY: `TUNGETIFF` only writes within the `ifreq` handed to it,
+    // which is live and exclusively borrowed for the call.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::ioctl(fd, TUNGETIFF as _, &mut ifr) };
+    if rc != 0 {
+        return None;
     }
+
+    // SAFETY: on success `TUNGETIFF` has populated the flags variant of
+    // the `ifr_ifru` union.
+    #[allow(unsafe_code)]
+    Some(unsafe { ifr.ifr_ifru.ifru_flags })
 }
 
 /// The device writes the GRO coalescer performs. Implemented for
@@ -362,23 +390,26 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         }
     }
 
-    #[cfg(linux)]
+    /// Open a window on whichever coalescer this device can use. The
+    /// same predicate as [`Tun::send_packet`], so only one of the two
+    /// ever holds an open window.
+    #[cfg(any(linux, android))]
     fn gro_open(&self) {
-        self.gro.open(&self.tun);
-    }
-
-    #[cfg(linux)]
-    fn gro_flush(&self) {
-        self.gro.flush(&self.tun);
-    }
-
-    #[cfg(android)]
-    fn gro_open(&self) {
+        #[cfg(linux)]
+        if self.tun.supports_gso() {
+            self.gro.open(&self.tun);
+            return;
+        }
         self.raw_gro.open(&self.tun, self.ip);
     }
 
-    #[cfg(android)]
+    #[cfg(any(linux, android))]
     fn gro_flush(&self) {
+        #[cfg(linux)]
+        if self.tun.supports_gso() {
+            self.gro.flush(&self.tun);
+            return;
+        }
         self.raw_gro.flush(&self.tun);
     }
 

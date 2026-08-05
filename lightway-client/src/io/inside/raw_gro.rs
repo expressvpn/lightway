@@ -1,14 +1,20 @@
-//! Downlink TCP coalescing for a TUN with no offload metadata channel
-//! — the Android `VpnService` fd.
+//! Downlink TCP coalescing for a TUN with no offload metadata channel.
 //!
-//! The fd handed over by `VpnService.establish()` is already attached
-//! to the tun, so `TUNSETIFF` with `IFF_VNET_HDR` fails with `EEXIST`
-//! before any capability check, and SELinux ioctl xperms block
-//! `TUNSETOFFLOAD` (only `TUNGETIFF` is whitelisted for app domains).
-//! There is therefore no `virtio_net_hdr` framing in either direction:
-//! one `write()` injects exactly one packet, and neither `gso_size`
-//! nor checksum metadata can accompany it. The vnet-hdr GRO path in
-//! [`super::tun`] does not apply.
+//! Two devices land here. The Android `VpnService` fd *can never* have
+//! the channel: the fd handed over by `VpnService.establish()` is
+//! already attached to the tun, so `TUNSETIFF` with `IFF_VNET_HDR`
+//! fails with `EEXIST` before any capability check, and SELinux ioctl
+//! xperms block `TUNSETOFFLOAD` (only `TUNGETIFF` is whitelisted for
+//! app domains). A Linux device simply *does not* have it whenever it
+//! was opened without `enable_tun_offload`.
+//!
+//! Either way there is no `virtio_net_hdr` framing in either
+//! direction: one `write()` injects exactly one packet, and neither
+//! `gso_size` nor checksum metadata can accompany it. The vnet-hdr GRO
+//! path in [`super::tun`] does not apply — where a device *did*
+//! negotiate that framing it is used instead and this module stays
+//! dormant, since telling the kernel the real `gso_size` is strictly
+//! better than the technique below.
 //!
 //! What does work — verified on Android GKI 6.6 — is that
 //! `tun_get_user()` performs no MTU check: a single oversized IPv4
@@ -27,22 +33,33 @@
 //!   QUIC, DNS, RTP and DTLS. [`TcpGroBatch`]'s predicate (a port of
 //!   the kernel's `tcp_gro_receive`) admits only IPv4 TCP payload
 //!   segments; everything else passes through 1:1.
-//! - **Tethering kill switch.** A coalesced packet that is *forwarded*
-//!   rather than locally delivered is dropped by `ip_forward()` with
-//!   an ICMP frag-needed sent to the remote origin — which already
-//!   respects the path MTU and has nothing to fix — so its
-//!   retransmission is coalesced and dropped again: a permanent
-//!   blackhole for tethered flows. Locally-delivered and forwarded
-//!   packets cannot be told apart here (Android masquerades tethered
-//!   clients to the tun address; the fork happens inside conntrack
-//!   after our write), so coalescing is gated on a global allow flag
-//!   that **defaults to off** and must only be enabled by the app
-//!   layer while no tethering or local forwarding is active — see
-//!   [`set_tun_tcp_coalescing_allowed`]. On top of that runtime gate
-//!   sits a static one: the `enable_tun_tcp_coalescing` config flag
-//!   (also default off, [`RawGro::set_configured`]), so the feature
-//!   can be rolled out per connection config exactly like
-//!   `enable_tun_offload` gates the Linux offload paths.
+//! - **Locally delivered only.** These oversized packets are safe
+//!   because the local stack reassembles them; a coalesced packet that
+//!   the kernel *forwards* instead would be dropped by `ip_forward()`
+//!   with an ICMP frag-needed sent to the remote origin — which
+//!   already respects the path MTU and has nothing to fix — so its
+//!   retransmission would be coalesced and dropped again: a permanent
+//!   blackhole for that flow, not a slowdown. Nothing here can tell a
+//!   to-be-forwarded packet from a locally-delivered one, so the
+//!   condition cannot be handled per packet; it is governed by the
+//!   two gates below instead.
+//!
+//!   On Android the condition is not reachable through this device:
+//!   tethered-client traffic is forwarded between interfaces by the
+//!   kernel and never enters the app's `VpnService` tun. The runtime
+//!   allow flag ([`set_tun_tcp_coalescing_allowed`]) is retained
+//!   anyway as a defensive control for configurations where inner
+//!   packets could be forwarded — other platforms, OEM variations, a
+//!   future Android that routes tethered traffic through the VPN, or a
+//!   rooted device with `ip_forward` into the tun — and so an embedder
+//!   that knows it is in one can revoke coalescing synchronously. It
+//!   **defaults to off**, so a caller that never opts in keeps the
+//!   per-packet write path.
+//! - **Config-gated rollout.** Independently of the runtime flag, the
+//!   `enable_tun_tcp_coalescing` config flag (also default off,
+//!   [`RawGro::set_configured`]) gates the feature per connection
+//!   config, exactly as `enable_tun_offload` gates the Linux offload
+//!   paths.
 //! - **Probed capability, permanent fallback.** Unbounded tun writes
 //!   are a fuzzed attack surface and a future GKI may bound the write
 //!   path, so the oversized write is probed at runtime (after
@@ -72,10 +89,10 @@
 //! `IP_MTU`, and QUIC would start probing oversized datagrams if it
 //! were raised.
 
-// On non-Android targets this module exists only for its unit tests
-// (see the declaration in `io::inside`), so the items the Android
-// wiring consumes look unused there.
-#![cfg_attr(not(android), allow(dead_code))]
+// Where neither Linux nor Android wiring is compiled this module
+// exists only for its unit tests (see the declaration in
+// `io::inside`), so the items that wiring consumes look unused.
+#![cfg_attr(not(any(linux, android)), allow(dead_code))]
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,25 +127,25 @@ pub(crate) const DEFAULT_MAX_SUPERPACKET: usize = 32 * 1024;
 const EINVAL: i32 = 22;
 const EMSGSIZE: i32 = 90;
 
-/// The global coalescing allow flag — the tethering kill switch.
+/// The global coalescing allow flag — the runtime kill switch.
 /// Defaults to **off**: an app that never opts in gets the plain
 /// per-packet write path.
 static COALESCING_ALLOWED: AtomicBool = AtomicBool::new(false);
 
 /// Allow or forbid downlink TCP coalescing on the Android TUN write
-/// path. **Correctness gate, not a tuning knob** — the caller owns the
-/// tethering contract:
+/// path. **Correctness gate, not a tuning knob**: it exists so an
+/// embedder can revoke coalescing when inner packets might be
+/// *forwarded* rather than delivered locally, which would blackhole
+/// those flows (see the module docs).
 ///
-/// - Enable only while no tethering or local packet forwarding is
-///   active. A coalesced packet that gets forwarded is blackholed
-///   (see the module docs), and the split between locally-delivered
-///   and forwarded packets is invisible at this layer.
-/// - Subscribe to tethering state changes and call
-///   `set_tun_tcp_coalescing_allowed(false)` the moment tethering
-///   comes up. The store is immediate: every packet offered after
-///   this returns is written per-packet (at most one already
-///   in-flight oversized write can still complete), so there is no
-///   need to wait for a batch boundary.
+/// The Android app can enable this unconditionally — tethered-client
+/// traffic never enters the `VpnService` tun, so the forwarding
+/// condition is unreachable there. Callers that can reach it (other
+/// platforms, OEM variations, a rooted device forwarding into the tun)
+/// should revoke as soon as they know: the store is immediate, so every
+/// packet offered after this returns is written per-packet (at most one
+/// already in-flight oversized write can still complete) and there is
+/// no need to wait for a batch boundary.
 ///
 /// Enabling is lazy and safe to call before the tunnel exists: the
 /// first coalescing window after enablement runs the capability probe,
@@ -162,8 +179,9 @@ pub(crate) trait RawTunIo {
 /// Coalescing engages only when every gate agrees: the
 /// `enable_tun_tcp_coalescing` config flag ([`Self::set_configured`],
 /// the static rollout control), the app's runtime allow flag
-/// ([`set_tun_tcp_coalescing_allowed`], the tethering kill switch),
-/// the one-shot capability probe, and no permanent fallback tripped.
+/// ([`set_tun_tcp_coalescing_allowed`], the kill switch for
+/// forwarding-capable setups), the one-shot capability probe, and no
+/// permanent fallback tripped.
 pub(crate) struct RawGro {
     /// The `enable_tun_tcp_coalescing` config flag: static rollout
     /// gate, fixed before the device is shared. Off means windows
@@ -492,7 +510,7 @@ impl RawGro {
 /// `ip_rcv` accepts it) of `len` total bytes, protocol 253
 /// (experimental — no handler, silently discarded), addressed from and
 /// to the tun's own address so it is always locally delivered and can
-/// never be forwarded, even mid-probe on a tethered device.
+/// never be forwarded, whatever the device's forwarding state.
 fn probe_packet(local_ip: Ipv4Addr, len: usize) -> Vec<u8> {
     use pnet_packet::ipv4::MutableIpv4Packet;
 
@@ -709,9 +727,9 @@ mod tests {
         assert_eq!(writes[1], data(MSS as u32).to_vec());
     }
 
-    /// The default-off gate (the tethering kill switch): without the
-    /// app's opt-in, opening a window is a no-op — no probe packet is
-    /// ever injected and every packet is written 1:1.
+    /// The default-off runtime gate: without the app's opt-in, opening
+    /// a window is a no-op — no probe packet is ever injected and every
+    /// packet is written 1:1.
     #[test]
     fn disallowed_never_probes_or_coalesces() {
         let tun = FakeRawTun::new();
@@ -884,10 +902,10 @@ mod tests {
         assert_eq!(tun.writes()[2].len(), HDR_LEN + 2 * MSS);
     }
 
-    /// The kill switch honours R5's "immediately and synchronously":
-    /// flipped mid-window, the held run is drained *per segment* (no
-    /// further oversized packet) before the triggering packet's direct
-    /// write, preserving within-flow order.
+    /// The kill switch revokes immediately and synchronously: flipped
+    /// mid-window, the held run is drained *per segment* (no further
+    /// oversized packet) before the triggering packet's direct write,
+    /// preserving within-flow order.
     #[test]
     fn kill_switch_mid_window_drains_per_segment_in_order() {
         let allowed = allow_flag(true);
@@ -900,7 +918,7 @@ mod tests {
             send_ok(&gro, &tun, data(seq));
         }
 
-        // Tethering comes up.
+        // The embedder revokes: forwarding may now be in play.
         allowed.store(false, Ordering::Relaxed);
 
         let third = data(2 * MSS as u32);
