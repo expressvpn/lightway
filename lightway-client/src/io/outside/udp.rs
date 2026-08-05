@@ -1,3 +1,5 @@
+#[cfg(linux)]
+use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -46,6 +48,8 @@ pub struct Udp {
     swallowed_sends: AtomicU64,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    #[cfg(linux)]
+    gro_enabled: bool,
 }
 
 impl Udp {
@@ -102,6 +106,8 @@ impl Udp {
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            #[cfg(linux)]
+            gro_enabled: false,
         })
     }
 
@@ -189,6 +195,30 @@ impl Udp {
         let count = self.swallowed_sends.fetch_add(1, Ordering::Relaxed) + 1;
         if count.is_power_of_two() {
             tracing::debug!("Swallowing outside UDP send error ({count} consecutive): {err}");
+        }
+    }
+
+    /// Switch this socket to the GRO receive path and ask the kernel to
+    /// coalesce trains of equal-size datagrams into one buffer per
+    /// `recvmsg`. The receive path moves to
+    /// [`OutsideIORecvGro::recv_gro_batch`] unconditionally; the
+    /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
+    /// this logs and continues, with that path degrading to one wire
+    /// packet per slot.
+    #[cfg(linux)]
+    pub fn enable_gro(&mut self) {
+        // Route receives through `recv_gro_batch` whenever offload is
+        // requested, not only when the sockopt succeeds: socket-read
+        // coalescing (the `UDP_GRO` sockopt) is what makes the kernel
+        // coalesce, but the path degrades to single-datagram slots when it
+        // does not (old kernel, or a zero-checksum peer the GRO engine
+        // skips), and the independent TUN-write coalescing still applies.
+        self.gro_enabled = true;
+        match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Err(e) => tracing::warn!(
+                "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
+            ),
         }
     }
 
@@ -337,6 +367,11 @@ impl OutsideIO for Udp {
         })
     }
 
+    #[cfg(linux)]
+    fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
+        if self.gro_enabled { Some(self) } else { None }
+    }
+
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
         self
     }
@@ -387,6 +422,19 @@ impl OutsideIO for Udp {
         #[cfg(windows)]
         let handle = self.sock.as_raw_socket();
         OutsideSocket::Udp(handle)
+    }
+}
+
+#[cfg(linux)]
+impl OutsideIORecvGro for Udp {
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; lightway_core::MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; lightway_core::MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
+        use std::os::fd::AsRawFd;
+        let fd = self.sock.as_raw_fd();
+        self.try_readable_io(|| batch_receive::recv_multiple_gro(fd, bufs, gro_sizes))
     }
 }
 
@@ -548,6 +596,10 @@ impl OutsideIOSendCallback for Udp {
             sock.sendmsg(&msghdr, 0)
         });
 
+        // Note `map_send_result` swallows several transient errors as
+        // `Ok(len)` so TLS does not live-lock resending the same record.
+        // That contract was written for a single datagram; applied here
+        // it reports an entire discarded batch as fully sent.
         Self::map_send_result(res, total_len)
     }
 

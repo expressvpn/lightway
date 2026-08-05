@@ -656,6 +656,120 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+/// Split a GRO aggregate into per-datagram buffers on `gro_size`
+/// boundaries; the final segment may be shorter. The split-off views
+/// share the aggregate's backing slab — no copies.
+#[cfg(linux)]
+fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
+    debug_assert!(gro_size > 0);
+    while !buf.is_empty() {
+        let take = buf.len().min(gro_size);
+        segments.push(buf.split_to(take));
+    }
+}
+
+/// Outside traffic handler when TUN offload is enabled on a UDP
+/// connection. Two independent receive optimizations run here:
+///
+/// - **Socket read coalescing** (kernel `UDP_GRO`): the socket sets the
+///   `UDP_GRO` sockopt, so the kernel returns an equal-size datagram train
+///   as one buffer with the segment size in a control message; we split on
+///   it. The sockopt does the work — valid peer checksums are necessary but
+///   not sufficient. Without coalescing (old kernel, or zero-checksum peer)
+///   each slot just holds one datagram.
+///
+/// - **TUN write coalescing** (userspace `TcpGroTable`): in-order TCP
+///   segments are merged into TSO superpackets and written once. This needs
+///   only several same-flow segments in one window, not socket-level
+///   coalescing, so we hold the window open across a bounded drain of the
+///   ready datagrams and flush when the socket empties or the cap is hit.
+#[cfg(linux)]
+pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    connection_type: ConnectionType,
+    outside_io: Arc<dyn io::outside::OutsideIORecvGro>,
+    inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
+    keepalive: Keepalive,
+    mut ready_signal: Option<oneshot::Sender<()>>,
+) -> Result<()> {
+    // A GRO aggregate can be up to the maximum IP datagram size.
+    const RECV_CAP: usize = lightway_core::gro::MAX_IPV4_PACKET_LEN;
+    const BATCH: usize = lightway_core::MAX_IO_BATCH_SIZE;
+
+    let mut bufs: [BytesMut; BATCH] = std::array::from_fn(|_| BytesMut::with_capacity(RECV_CAP));
+    let mut gro_sizes: [Option<u16>; BATCH] = [None; BATCH];
+    let mut segments: Vec<BytesMut> = Vec::new();
+    loop {
+        // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
+        outside_io.poll(tokio::io::Interest::READABLE).await?;
+
+        // Send ready signal after first successful poll
+        if let Some(tx) = ready_signal.take() {
+            let _ = tx.send(());
+        }
+
+        // One syscall pulls up to BATCH datagrams. Each may itself be a
+        // kernel-coalesced aggregate (gro_sizes[i] set) or a single
+        // datagram (None) — both feed the userspace TUN coalescer.
+        let count = match outside_io.recv_gro_batch(&mut bufs, &mut gro_sizes) {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
+        };
+
+        // Open one TUN GRO window across the whole batch and flush it
+        // before releasing the conn lock. `gro_open` is idempotent; the
+        // flush must run even on error, so capture the result and propagate
+        // it after the lock is dropped.
+        inside_io.gro_open();
+        let result = {
+            let mut conn = conn.lock().unwrap();
+            let mut acc = Ok(());
+            for i in 0..count {
+                if bufs[i].is_empty() {
+                    continue;
+                }
+                // A datagram the kernel did not coalesce splits into
+                // exactly one segment (whole-buffer boundary).
+                let seg_size = match gro_sizes[i] {
+                    Some(gro_size) if gro_size > 0 => gro_size as usize,
+                    _ => bufs[i].len(),
+                };
+                segments.clear();
+                split_gro_segments(&mut bufs[i], seg_size, &mut segments);
+                let pkts = segments
+                    .iter_mut()
+                    .map(|b| OutsidePacket::Wire(b, connection_type));
+                let r =
+                    conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
+                if let Err(e) = r {
+                    acc = Err(e);
+                    break;
+                }
+            }
+            // Flush while the conn lock is still held. `send()` only runs
+            // under this mutex, so closing the window here leaves no gap for
+            // another task to coalesce past the drain and strand a packet
+            // until the next receive. `write_super` only does non-blocking
+            // `try_send`s, so holding the lock a moment longer costs
+            // nothing.
+            inside_io.gro_flush();
+            acc
+        };
+        result?;
+
+        // Reset the buffers consumed this round. Drop the split-off
+        // views first so the last buffer's slab can be reused.
+        segments.clear();
+        for b in &mut bufs[..count] {
+            b.clear();
+            b.reserve(RECV_CAP);
+        }
+
+        keepalive.outside_activity().await
+    }
+}
+
 const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Tracks the tracer trigger for the inside IO loops: fires
@@ -1232,6 +1346,15 @@ pub async fn connect<
                     sock.enable_batch_receive();
                 }
 
+                // GRO delivery replaces per-packet receive entirely
+                // (a plain recv would merge separate datagrams), so
+                // only flip the sockopt when the GRO outside loop
+                // below will consume it.
+                #[cfg(linux)]
+                if config.enable_tun_offload {
+                    sock.enable_gro();
+                }
+
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
@@ -1386,6 +1509,29 @@ pub async fn connect<
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
+    // GRO capability is present only when `enable_tun_offload` flipped
+    // the sockopt on a UDP socket above; TCP mode and non-Linux targets
+    // fall back to the per-packet loop.
+    #[cfg(linux)]
+    let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = match outside_io.clone().as_gro() {
+        Some(gro_io) => tokio::spawn(outside_io_task_gro(
+            conn.clone(),
+            connection_type,
+            gro_io,
+            inside_io.clone(),
+            keepalive.clone(),
+            None,
+        )),
+        None => tokio::spawn(outside_io_task(
+            conn.clone(),
+            config.outside_mtu,
+            connection_type,
+            outside_io.clone(),
+            keepalive.clone(),
+            None,
+        )),
+    };
+    #[cfg(not(linux))]
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),
         config.outside_mtu,
@@ -2356,6 +2502,26 @@ mod tests {
             result.unwrap_err().to_string(),
             "All connections disconnected"
         );
+    }
+
+    /// GRO aggregates split on `gro_size` boundaries: full segments
+    /// plus a shorter trailing one; an exact multiple has no short
+    /// tail; content is preserved byte-for-byte across the views.
+    #[test_case(3300, 1350 => vec![1350, 1350, 600] ; "short trailing segment")]
+    #[test_case(2700, 1350 => vec![1350, 1350]      ; "exact multiple")]
+    #[test_case(600,  1350 => vec![600]             ; "single short packet")]
+    #[cfg(linux)]
+    fn gro_split_segment_sizes(total: usize, gro_size: usize) -> Vec<usize> {
+        let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let mut buf = BytesMut::from(&payload[..]);
+        let mut segments = Vec::new();
+
+        split_gro_segments(&mut buf, gro_size, &mut segments);
+
+        assert!(buf.is_empty());
+        let rejoined: Vec<u8> = segments.iter().flat_map(|s| s.iter().copied()).collect();
+        assert_eq!(rejoined, payload, "content preserved");
+        segments.iter().map(|s| s.len()).collect()
     }
 
     #[test_case(Some(true),  Some(true)  => None       ; "unchanged")]
