@@ -18,7 +18,8 @@
 //!   the kernel completes.
 //! - [`TcpGroBatch::take_raw`]: for a TUN with **no metadata channel**
 //!   (an Android `VpnService` fd, where `IFF_VNET_HDR` cannot be
-//!   enabled and `TUNSETOFFLOAD` is blocked by SELinux). The result is
+//!   enabled and `TUNSETOFFLOAD` is blocked by SELinux, or a Linux
+//!   TUN opened without offload). The result is
 //!   a plain oversized IPv4 packet, fully self-contained — lengths and
 //!   both checksums valid — injected with an ordinary `write()`. The
 //!   local stack accepts it because `tun_get_user()` performs no MTU
