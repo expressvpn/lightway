@@ -5,7 +5,6 @@ use tokio::net::TcpStream;
 
 use super::{OutsideIO, OutsideSocket};
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
-use socket2::{Domain, Protocol, Socket, Type};
 
 pub struct Tcp(tokio::net::TcpStream, SocketAddr);
 
@@ -28,37 +27,24 @@ impl Tcp {
                 s
             }
             None => {
-                let domain = if remote_addr.is_ipv6() {
-                    Domain::IPV6
+                let socket = if remote_addr.is_ipv6() {
+                    tokio::net::TcpSocket::new_v6()?
                 } else {
-                    Domain::IPV4
+                    tokio::net::TcpSocket::new_v4()?
                 };
 
-                let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-                socket.set_nonblocking(true)?;
-
-                // Creates a TCP connection with SO_MARK set before connect() so that the
-                // SYN packet is also marked, ensuring all traffic (including connection
-                // setup) is subject to policy routing rules based on the mark.
+                // SO_MARK must be set before connect() so that the SYN packet is also
+                // marked, ensuring all traffic (including connection setup) is subject
+                // to policy routing rules based on the mark.
                 #[cfg(all(linux, not(feature = "mobile")))]
                 if fwmark != 0 {
-                    match socket.set_mark(fwmark) {
+                    match socket2::SockRef::from(&socket).set_mark(fwmark) {
                         Ok(_) => tracing::info!("Applied firewall mark to outside TCP socket"),
                         Err(e) => tracing::warn!("Failed to set SO_MARK on TCP socket: {}", e),
                     }
                 }
 
-                let addr: socket2::SockAddr = remote_addr.into();
-                match socket.connect(&addr) {
-                    Ok(()) => {}
-                    Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
-                    Err(e) => return Err(e.into()),
-                }
-
-                let std_stream: std::net::TcpStream = socket.into();
-                let stream = TcpStream::from_std(std_stream)?;
-                stream.writable().await?;
-                stream
+                socket.connect(remote_addr).await?
             }
         };
         sock.set_nodelay(true)?;
