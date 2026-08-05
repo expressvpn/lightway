@@ -350,7 +350,8 @@ mod expresslane_error_mapping_tests {
             | ExpresslaneError::EncryptFailed
             | ExpresslaneError::PayloadTooLarge
             | ExpresslaneError::NewCipherFailed
-            | ExpresslaneError::SetKeyFailed => wire::FromWireError::InvalidExpressData,
+            | ExpresslaneError::SetKeyFailed
+            | ExpresslaneError::BufferTooSmall => wire::FromWireError::InvalidExpressData,
         }
     }
 
@@ -366,6 +367,7 @@ mod expresslane_error_mapping_tests {
             ExpresslaneError::Replayed,
             ExpresslaneError::InsufficientData,
             ExpresslaneError::PayloadTooLarge,
+            ExpresslaneError::BufferTooSmall,
         ]
     }
 

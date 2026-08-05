@@ -42,6 +42,37 @@ pub trait ExpresslaneAead: Send + Sync + Sized {
         aad: &[u8],
         tag: &[u8; 16],
     ) -> ExpresslaneResult<BytesMut>;
+
+    /// Encrypt into `out`, which is exactly plaintext-sized. Returns the tag.
+    /// The default routes through [`Self::seal`] and copies; backends that can
+    /// encrypt in place should override to avoid the allocation.
+    fn seal_into(
+        &self,
+        iv: [u8; 12],
+        plaintext: &[u8],
+        aad: &[u8],
+        out: &mut [u8],
+    ) -> ExpresslaneResult<[u8; 16]> {
+        let (ct, tag) = self.seal(iv, plaintext, aad)?;
+        out.copy_from_slice(&ct);
+        Ok(tag)
+    }
+
+    /// Decrypt into `out`, which is exactly ciphertext-sized. Returns the
+    /// plaintext length. Same contract as [`Self::open`] on failure: caller-
+    /// visible buffer contents are unspecified.
+    fn open_into(
+        &self,
+        iv: [u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+        out: &mut [u8],
+    ) -> ExpresslaneResult<usize> {
+        let pt = self.open(iv, ciphertext, aad, tag)?;
+        out[..pt.len()].copy_from_slice(&pt);
+        Ok(pt.len())
+    }
 }
 
 #[cfg(all(test, feature = "wolfssl-backend"))]

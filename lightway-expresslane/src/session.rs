@@ -241,14 +241,16 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
 
     /// Claim the next wire counter.
     ///
-    /// Private: [`Self::append_to_wire`] is the only TX entry point and
-    /// reserves its own counter, so a caller pairing this with an encrypt
-    /// would burn two counters per packet.
+    /// Reserving is decoupled from encrypting so a caller that must carry the
+    /// counter across an FFI boundary - reserve here, encrypt there - can do
+    /// so. [`Self::append_to_wire`] still reserves its own counter
+    /// internally, so pairing this with `append_to_wire` would burn two
+    /// counters per packet; pair it only with [`Self::encrypt_into`].
     ///
     /// Under parallel TX, counters may reach the wire out of order, and a
     /// failed encrypt leaves a gap. Both are fine: the peer's replay window
     /// accepts out-of-order arrivals and gaps within its span.
-    fn reserve_counter(&self) -> u64 {
+    pub fn reserve_counter(&self) -> u64 {
         self.wire_counter
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1)
@@ -292,6 +294,57 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         buf.put_u16(flags.into());
         buf.put(&cipher_text[..]);
         Ok(())
+    }
+
+    /// Encrypt `plaintext` into `out` under a caller-supplied `counter`.
+    ///
+    /// The zero-allocation twin of [`Self::append_to_wire`] for out-of-process
+    /// consumers that must carry the counter across an FFI boundary: reserve
+    /// one with [`Self::reserve_counter`], encrypt with it here. Same
+    /// IV-uniqueness contract as `append_to_wire` - `iv` MUST be unique per
+    /// packet under the current key.
+    ///
+    /// `out` must be at least [`Self::WIRE_OVERHEAD`] + `plaintext.len()`
+    /// bytes; returns the frame length written. On any error `out` contents
+    /// are unspecified and nothing is returned as written.
+    pub fn encrypt_into(
+        &self,
+        counter: u64,
+        session_id: [u8; 8],
+        plaintext: &[u8],
+        iv: [u8; 12],
+        is_encoded: bool,
+        out: &mut [u8],
+    ) -> ExpresslaneResult<usize> {
+        if plaintext.len() > Self::MAX_PLAINTEXT {
+            return Err(ExpresslaneError::PayloadTooLarge);
+        }
+        let frame_len = Self::WIRE_OVERHEAD + plaintext.len();
+        if out.len() < frame_len {
+            return Err(ExpresslaneError::BufferTooSmall);
+        }
+
+        let flags = Flags::new().with_encoded(is_encoded);
+        let (aad_buf, aad_len) = build_aad(self.version(), &session_id, counter, flags);
+
+        let tag = {
+            let keys = self.keys_read();
+            let current = keys.current_self.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            current.aead.seal_into(
+                iv,
+                plaintext,
+                &aad_buf[..aad_len],
+                &mut out[Self::WIRE_OVERHEAD..frame_len],
+            )?
+        };
+
+        out[0..8].copy_from_slice(&counter.to_be_bytes());
+        out[8..20].copy_from_slice(&iv);
+        out[20..36].copy_from_slice(&tag);
+        out[36..38].copy_from_slice(&(plaintext.len() as u16).to_be_bytes());
+        out[38..40].copy_from_slice(&u16::from(flags).to_be_bytes());
+
+        Ok(frame_len)
     }
 
     /// Authenticate and decrypt one ExpressLane frame from `buf`.
@@ -370,6 +423,95 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         buf.advance(frame_len);
 
         Ok((plain_text, is_encoded))
+    }
+
+    /// Authenticate and decrypt one ExpressLane frame from `wire_packet` into
+    /// `out`.
+    ///
+    /// The zero-allocation twin of [`Self::try_from_wire`] for out-of-process
+    /// consumers: `wire_packet` is a caller-owned immutable slice and `out` a
+    /// caller-owned buffer, so no heap allocation happens per packet.
+    ///
+    /// Returns the plaintext length and whether it was inside-codec encoded.
+    /// `wire_packet` is never modified - it is a shared slice, so even a
+    /// failed attempt against the current peer key leaves it intact for the
+    /// prev_peer retry. On failure `out` contents are unspecified.
+    pub fn decrypt_into(
+        &self,
+        session_id: [u8; 8],
+        wire_packet: &[u8],
+        out: &mut [u8],
+    ) -> ExpresslaneResult<(usize, bool)> {
+        if wire_packet.len() < Self::WIRE_OVERHEAD {
+            return Err(ExpresslaneError::InsufficientData);
+        }
+
+        let mut header = &wire_packet[..Self::WIRE_OVERHEAD];
+        let wire_counter = header.get_u64();
+        let mut iv = [0u8; 12];
+        header.copy_to_slice(&mut iv);
+        let mut auth_tag = [0u8; 16];
+        header.copy_to_slice(&mut auth_tag);
+        let data_len = header.get_u16() as usize;
+        let flags = Flags::from(header.get_u16());
+        let is_encoded = flags.encoded();
+
+        let frame_len = Self::WIRE_OVERHEAD + data_len;
+        if wire_packet.len() < frame_len {
+            return Err(ExpresslaneError::InsufficientData);
+        }
+        if out.len() < data_len {
+            return Err(ExpresslaneError::BufferTooSmall);
+        }
+
+        // Preview only, same reasoning as try_from_wire: committing before the
+        // AEAD has authenticated would let a forged counter advance the window
+        // and lock out real traffic.
+        if self
+            .replay
+            .lock()
+            .expect("replay window poisoned")
+            .would_reject(wire_counter)
+        {
+            return Err(ExpresslaneError::Replayed);
+        }
+
+        let (aad_buf, aad_len) = build_aad(self.version(), &session_id, wire_counter, flags);
+        let aad = &aad_buf[..aad_len];
+        let cipher_text = &wire_packet[Self::WIRE_OVERHEAD..frame_len];
+
+        let plain_len = {
+            let keys = self.keys_read();
+            let current = keys.current_peer.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            match current
+                .aead
+                .open_into(iv, cipher_text, aad, &auth_tag, &mut out[..data_len])
+            {
+                Ok(n) => n,
+                Err(e) => match keys.prev_peer.as_ref() {
+                    Some(prev) => prev.aead.open_into(
+                        iv,
+                        cipher_text,
+                        aad,
+                        &auth_tag,
+                        &mut out[..data_len],
+                    )?,
+                    None => return Err(e),
+                },
+            }
+        };
+
+        if !self
+            .replay
+            .lock()
+            .expect("replay window poisoned")
+            .commit(wire_counter)
+        {
+            return Err(ExpresslaneError::Replayed);
+        }
+        self.packets_received.fetch_add(1, Ordering::Relaxed);
+
+        Ok((plain_len, is_encoded))
     }
 }
 
@@ -839,5 +981,134 @@ mod tests {
                 .expect("every parallel frame must decrypt");
             assert_eq!(&pt[..], b"parallel");
         }
+    }
+
+    /// Cross-path interop is the drift guard for the `_into` family: a real
+    /// consumer may mix zero-alloc and BytesMut sessions on either end.
+    #[test]
+    fn encrypt_into_interops_with_try_from_wire() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let counter = tx.reserve_counter();
+        let mut frame = [0u8; ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD + 7];
+        let n = tx
+            .encrypt_into(counter, SID, b"payload", [1u8; 12], true, &mut frame)
+            .unwrap();
+        assert_eq!(n, frame.len());
+
+        let mut buf = BytesMut::from(&frame[..n]);
+        let (pt, encoded) = rx.try_from_wire(&mut buf, SID).unwrap();
+        assert_eq!(&pt[..], b"payload");
+        assert!(encoded);
+    }
+
+    #[test]
+    fn append_to_wire_interops_with_decrypt_into() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"payload", [2u8; 12], true)
+            .unwrap();
+
+        let mut out = [0u8; 7];
+        let (n, encoded) = rx.decrypt_into(SID, &buf, &mut out).unwrap();
+        assert_eq!(&out[..n], b"payload");
+        assert!(encoded);
+    }
+
+    #[test]
+    fn encrypt_into_then_decrypt_into_round_trips() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let counter = tx.reserve_counter();
+        let mut frame = [0u8; ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD + 7];
+        let n = tx
+            .encrypt_into(counter, SID, b"payload", [3u8; 12], false, &mut frame)
+            .unwrap();
+
+        let mut out = [0u8; 7];
+        let (pt_len, encoded) = rx.decrypt_into(SID, &frame[..n], &mut out).unwrap();
+        assert_eq!(&out[..pt_len], b"payload");
+        assert!(!encoded);
+    }
+
+    #[test]
+    fn encrypt_into_buffer_too_small_burns_no_state() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        let counter = s.reserve_counter();
+
+        let mut short = [0u8; ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD + 6];
+        assert!(matches!(
+            s.encrypt_into(counter, SID, b"payload", [4u8; 12], false, &mut short),
+            Err(ExpresslaneError::BufferTooSmall)
+        ));
+
+        // The same counter, retried with a big enough buffer, still succeeds.
+        let mut big = [0u8; ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD + 7];
+        let n = s
+            .encrypt_into(counter, SID, b"payload", [4u8; 12], false, &mut big)
+            .unwrap();
+        assert_eq!(n, big.len());
+    }
+
+    #[test]
+    fn decrypt_into_buffer_too_small_burns_no_replay_state() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"payload", [5u8; 12], false)
+            .unwrap();
+
+        let mut short = [0u8; 6];
+        assert!(matches!(
+            rx.decrypt_into(SID, &buf, &mut short),
+            Err(ExpresslaneError::BufferTooSmall)
+        ));
+
+        // Not committed to the replay window, so the same frame still decrypts.
+        let mut big = [0u8; 7];
+        let (n, _) = rx.decrypt_into(SID, &buf, &mut big).unwrap();
+        assert_eq!(&big[..n], b"payload");
+    }
+
+    #[test]
+    fn decrypt_into_rejects_replayed_frame() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"once", [6u8; 12], false)
+            .unwrap();
+
+        let mut out = [0u8; 4];
+        assert!(rx.decrypt_into(SID, &buf, &mut out).is_ok());
+        assert!(matches!(
+            rx.decrypt_into(SID, &buf, &mut out),
+            Err(ExpresslaneError::Replayed)
+        ));
+    }
+
+    #[test]
+    fn decrypt_into_falls_back_to_prev_peer_key_during_rotation() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"old-key", [7u8; 12], false)
+            .unwrap();
+
+        // Receiver rotates: the key that encrypted this packet becomes prev.
+        rx.update_peer_key(ExpresslaneKey([2u8; EXPRESSLANE_KEY_SIZE]))
+            .unwrap();
+
+        let mut out = [0u8; 7];
+        let (n, _) = rx
+            .decrypt_into(SID, &buf, &mut out)
+            .expect("must fall back to prev_peer");
+        assert_eq!(&out[..n], b"old-key");
     }
 }
