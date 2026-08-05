@@ -1,7 +1,9 @@
-// Compiled for `test` as well as `android` so the coalescer's logic
-// (probe, kill switch, fallback) is unit-testable on any host; only
-// the wiring in `tun` is Android-only.
-#[cfg(any(android, test))]
+// The raw coalescer serves any TUN without `virtio_net_hdr` framing:
+// the Android `VpnService` fd, which can never have it, and a Linux
+// device opened without `enable_tun_offload`. Also compiled for `test`
+// so its logic (probe, kill switch, fallback) is unit-testable on any
+// host.
+#[cfg(any(linux, android, test))]
 pub(crate) mod raw_gro;
 pub mod tun;
 
@@ -65,9 +67,11 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
     /// Open a GRO coalescing window on the send path. Until the matching
     /// [`Self::gro_flush`], packets delivered via the inside send callback
     /// may be coalesced into superpackets instead of written individually
-    /// — TSO aggregates behind a `virtio_net_hdr` on Linux, raw oversized
-    /// packets on Android. Backends without a coalescing-capable device
-    /// leave this a no-op.
+    /// — TSO aggregates behind a `virtio_net_hdr` where the device
+    /// negotiated `IFF_VNET_HDR`, raw oversized packets on a TUN without
+    /// it (the Android `VpnService` fd, or Linux without
+    /// `enable_tun_offload`). Backends without a coalescing-capable
+    /// device leave this a no-op.
     #[cfg(any(linux, android))]
     fn gro_open(&self) {}
 
