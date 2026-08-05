@@ -383,6 +383,26 @@ impl Tun {
         }
     }
 
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]). Only the
+    /// direct backend supports this; the `IoUring` backend reports
+    /// [`std::io::ErrorKind::Unsupported`].
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.try_send_gso(buf, hdr),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => {
+                IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        }
+    }
+
     /// MTU of `Tun` interface
     pub fn mtu(&self) -> usize {
         match self {
@@ -703,9 +723,28 @@ impl TunDirect {
         }
     }
 
-    /// Write `hdr_bytes` (a serialized `virtio_net_hdr`) followed by `buf`
-    /// in one vectored send — no copy, no allocation. The returned count
-    /// excludes the header, matching a plain send.
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]).
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        if !self.vnet_hdr {
+            debug_assert!(false, "try_send_gso called on a Tun opened without offload");
+            // The device won't accept a virtio header; fall back to a
+            // plain write rather than corrupt traffic in release builds.
+            return self.try_send(buf);
+        }
+
+        self.send_with_vnet_hdr(&hdr.to_bytes(), &buf[..])
+    }
+
+    /// Write `hdr_bytes` (a serialized `virtio_net_hdr`) followed by
+    /// `buf` in one vectored send — no copy, no allocation. The
+    /// returned count excludes the header, matching a plain send.
     #[cfg(target_os = "linux")]
     fn send_with_vnet_hdr(&self, hdr_bytes: &[u8], buf: &[u8]) -> IOCallbackResult<usize> {
         let tun = self.tun.as_ref().unwrap();
