@@ -383,6 +383,26 @@ impl Tun {
         }
     }
 
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]). Only the
+    /// direct backend supports this; the `IoUring` backend reports
+    /// [`std::io::ErrorKind::Unsupported`].
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        match self {
+            Tun::Direct(t) => t.try_send_gso(buf, hdr),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => {
+                IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        }
+    }
+
     /// MTU of `Tun` interface
     pub fn mtu(&self) -> usize {
         match self {
@@ -691,6 +711,31 @@ impl TunDirect {
             }
             Err(err) => IOCallbackResult::Err(err),
         }
+    }
+
+    /// Send a packet with an explicit virtio header (e.g. a TSO
+    /// superpacket assembled by userspace GRO). Requires the device to
+    /// have been opened with offload ([`TunConfig::offload`]).
+    #[cfg(target_os = "linux")]
+    pub fn try_send_gso(
+        &self,
+        buf: BytesMut,
+        hdr: &lightway_core::VirtioNetHdr,
+    ) -> IOCallbackResult<usize> {
+        if !self.vnet_hdr {
+            debug_assert!(false, "try_send_gso called on a Tun opened without offload");
+            // The device won't accept a virtio header; fall back to a
+            // plain write rather than corrupt traffic in release builds.
+            return self.try_send(buf);
+        }
+
+        // The returned count excludes the virtio header to match a plain send.
+        let hdr = hdr.to_bytes();
+        let chunks = [std::io::IoSlice::new(&hdr), std::io::IoSlice::new(&buf[..])];
+        Self::map_send_result(
+            self.send_chunks(&chunks)
+                .map(|n| n.saturating_sub(hdr.len())),
+        )
     }
 
     /// Write `chunks` to the TUN in one vectored send — no copy, no
