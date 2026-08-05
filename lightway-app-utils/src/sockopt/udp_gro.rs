@@ -2,7 +2,8 @@
 
 use std::os::fd::AsRawFd;
 
-/// Enable the `UDP_GRO` sockopt (Linux 5.0+).
+/// Enable the `UDP_GRO` sockopt (Linux 5.0+, which includes every
+/// Android GKI kernel).
 ///
 /// The kernel then coalesces trains of equal-size datagrams from the
 /// same flow into a single buffer per `recvmsg(2)`, reporting the

@@ -93,7 +93,7 @@ pub enum Message<'a> {
     /// An `IP_PKTINFO` message.
     IpPktinfo(&'a libc::in_pktinfo),
     /// A `UDP_GRO` message carrying the coalesced segment size.
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     UdpGroSegment(libc::c_int),
     /// Any other control message.
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
@@ -151,7 +151,7 @@ pub fn iter_control(control: &[u8]) -> Iter<'_> {
 /// Scan a raw control-message buffer (see [`iter_control`] for the
 /// alignment contract) for a `UDP_GRO` control message and return its
 /// coalesced segment size, if present.
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 pub fn first_udp_gro_segment(control: &[u8]) -> Option<u16> {
     iter_control(control).find_map(|m| match m {
         Message::UdpGroSegment(seg) => Some(seg as u16),
@@ -201,7 +201,7 @@ impl<'a> Iterator for Iter<'a> {
                 return Some(Message::IpPktinfo(pi));
             }
 
-            #[cfg(linux)]
+            #[cfg(any(linux, android))]
             if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_GRO {
                 // SAFETY: `item` is a valid `cmsghdr` from a prior call
                 // to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
@@ -407,7 +407,9 @@ mod tests {
 
         let mut buf = Buffer::<64>::new();
         assert_eq!(
-            buf.spare_capacity_mut().as_ptr().align_offset(cmsghdr_align),
+            buf.spare_capacity_mut()
+                .as_ptr()
+                .align_offset(cmsghdr_align),
             0,
         );
         assert_eq!(buf.capacity(), 64);

@@ -1,4 +1,4 @@
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Result, anyhow};
@@ -20,7 +20,7 @@ pub struct Udp {
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     gro_enabled: bool,
 }
 
@@ -69,7 +69,7 @@ impl Udp {
             default_ip_pmtudisc,
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
-            #[cfg(linux)]
+            #[cfg(any(linux, android))]
             gro_enabled: false,
         })
     }
@@ -81,7 +81,7 @@ impl Udp {
     /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
     /// this logs and continues, with that path degrading to one wire
     /// packet per slot.
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     pub fn enable_gro(&mut self) {
         // Two independent optimizations are in play here, each worth
         // having on its own:
@@ -271,7 +271,7 @@ impl OutsideIO for Udp {
         })
     }
 
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
         if self.gro_enabled { Some(self) } else { None }
     }
@@ -297,7 +297,7 @@ impl OutsideIO for Udp {
     }
 }
 
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 impl OutsideIORecvGro for Udp {
     fn recv_gro_batch(
         &self,

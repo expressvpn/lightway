@@ -40,7 +40,7 @@ pub(crate) fn recv_multiple(
 ///
 /// This replaces one `recvmsg` per datagram on the download path with
 /// one syscall per batch, independent of whether the kernel coalesces.
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 pub(crate) use linux::recv_multiple_gro;
 
 #[cfg(apple)]
@@ -132,20 +132,20 @@ mod linux {
     use std::{io, mem};
 
     /// Control buffer space for one `UDP_GRO` cmsg.
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     const CTRL_LEN: usize = lightway_app_utils::cmsg::Message::space::<libc::c_int>();
 
     /// Per-message control buffer for one `UDP_GRO` cmsg, aligned for
     /// `cmsghdr` as the `CMSG_*` macros require. Stack-allocated and
     /// reused per call — no heap traffic on the receive hot path.
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     #[repr(C, align(16))]
     struct GroControl([u8; CTRL_LEN]);
 
     /// One `recvmmsg` with per-message `UDP_GRO` control parsing,
     /// always over the full [`MAX_IO_BATCH_SIZE`] slots (the array
     /// types fix the bound).
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     #[allow(unsafe_code)]
     pub(crate) fn recv_multiple_gro(
         fd: libc::c_int,

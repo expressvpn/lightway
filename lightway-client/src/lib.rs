@@ -699,7 +699,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 /// Split a GRO aggregate into per-datagram buffers on `gro_size`
 /// boundaries; the final segment may be shorter. The split-off views
 /// share the aggregate's backing slab — no copies.
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
     debug_assert!(gro_size > 0);
     while !buf.is_empty() {
@@ -739,7 +739,7 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
 ///   bounded drain of the currently-ready datagrams and flush once the
 ///   socket empties (or the batch cap is hit), rather than flushing
 ///   after every datagram.
-#[cfg(linux)]
+#[cfg(any(linux, android))]
 pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     connection_type: ConnectionType,
