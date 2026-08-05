@@ -173,8 +173,8 @@ async fn setup_tunnel_interface(
         .context("Tun creation")?;
 
     // The static rollout gate for downlink TCP coalescing
-    // (`enable_tun_tcp_coalescing`); the runtime tethering kill switch
-    // and the capability probe still gate it at each window.
+    // (`enable_tun_tcp_coalescing`); the runtime kill switch and the
+    // capability probe still gate it at each window.
     #[cfg(android)]
     tun.set_tcp_coalescing_configured(enable_tcp_coalescing);
 
