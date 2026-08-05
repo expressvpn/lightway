@@ -63,6 +63,18 @@ fn emit(v: ExpresslaneVersion, encoded: bool) -> BytesMut {
     buf
 }
 
+/// Same frame as [`emit`], produced through the zero-allocation path.
+fn emit_into(v: ExpresslaneVersion, encoded: bool) -> Vec<u8> {
+    let s = session(v);
+    let counter = s.reserve_counter();
+    let mut out = vec![0u8; 40 + PAYLOAD.len()];
+    let n = s
+        .encrypt_into(counter, SID, PAYLOAD, IV, encoded, &mut out)
+        .unwrap();
+    out.truncate(n);
+    out
+}
+
 /// Every byte of a V1 frame, pinned.
 #[test]
 fn v1_golden_frame() {
@@ -158,5 +170,41 @@ fn each_version_round_trips_itself() {
         let (pt, encoded) = rx.try_from_wire(&mut buf, SID).unwrap();
         assert_eq!(&pt[..], PAYLOAD, "{v:?}");
         assert!(!encoded, "{v:?}");
+    }
+}
+
+/// The pinned bytes must also come out of the zero-allocation entry point -
+/// `encrypt_into` is not a separate implementation of the frame layout.
+#[test]
+fn v1_golden_frame_via_encrypt_into() {
+    let buf = emit_into(ExpresslaneVersion::Version1, true);
+    assert_eq!(
+        hex(&buf),
+        format!("{COUNTER_1}{IV_HEX}{V1_TAG_ENCODED}{LEN_AND_ENCODED_FLAGS}{CIPHERTEXT}"),
+        "whole frame"
+    );
+}
+
+#[test]
+fn v2_golden_frame_via_encrypt_into() {
+    let buf = emit_into(ExpresslaneVersion::Version2, true);
+    assert_eq!(
+        hex(&buf),
+        format!("{COUNTER_1}{IV_HEX}{V2_TAG_ENCODED}{LEN_AND_ENCODED_FLAGS}{CIPHERTEXT}"),
+        "whole frame"
+    );
+}
+
+/// The same pinned bytes must be consumable by the zero-allocation entry
+/// point on the receiving side.
+#[test]
+fn golden_frame_decrypts_via_decrypt_into() {
+    for v in [ExpresslaneVersion::Version1, ExpresslaneVersion::Version2] {
+        let buf = emit(v, true);
+        let rx = session(v);
+        let mut out = vec![0u8; PAYLOAD.len()];
+        let (n, encoded) = rx.decrypt_into(SID, &buf, &mut out).unwrap();
+        assert_eq!(&out[..n], PAYLOAD, "{v:?}");
+        assert!(encoded, "{v:?}");
     }
 }

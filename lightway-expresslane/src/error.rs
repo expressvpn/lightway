@@ -27,6 +27,9 @@ pub enum ExpresslaneError {
     /// The buffer was shorter than the wire format requires
     #[error("Insufficient data")]
     InsufficientData,
+    /// The caller-supplied output buffer is too small for the result
+    #[error("Output buffer too small")]
+    BufferTooSmall,
 }
 
 /// Result alias for the ExpressLane primitives.
