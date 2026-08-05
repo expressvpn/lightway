@@ -3,8 +3,9 @@
 //! Naming and the `LazyLock<Counter>` registration style match
 //! `lightway_core::metrics` and `lightway_app_utils::metrics`.
 //!
-//! These counters cover the Android raw TCP coalescer
-//! (`io::inside::raw_gro`), which sheds load by design — a full TUN
+//! These counters cover the raw TCP coalescer
+//! (`io::inside::raw_gro`, used on Android and on Linux TUNs opened
+//! without `enable_tun_offload`), which sheds load by design — a full TUN
 //! write queue drops the coalesced run and reports success upstream so
 //! the inner TCP flow drives recovery. That is deliberate, but it makes
 //! the sheds invisible without explicit counters. Each shed records the
@@ -12,8 +13,8 @@
 //! one coalesced run can carry many segments: run counts alone
 //! understate the impact.
 
-// Gated at the `mod metrics;` declaration in `lib.rs` (android and
-// host test builds), so no inner `#![cfg]` here — repeating it trips
+// Gated at the `mod metrics;` declaration in `lib.rs` (linux, android
+// and host test builds), so no inner `#![cfg]` here — repeating it trips
 // `duplicated_attributes`.
 
 use ::metrics::{Counter, counter};
@@ -51,7 +52,7 @@ pub(crate) fn tun_gro_batch_dropped_err(segments: u64) {
     METRIC_TUN_GRO_SEGMENTS_DROPPED_ERR.increment(segments);
 }
 
-/// The Android raw-write capability probe failed (`IFF_VNET_HDR`
+/// The raw oversized-write capability probe failed (`IFF_VNET_HDR`
 /// framing present, `TUNGETIFF` refused, or the oversized write did
 /// not return the full count): TCP coalescing stays disabled for the
 /// life of the device. At most once per tunnel.
@@ -61,7 +62,7 @@ pub(crate) fn tun_raw_gro_probe_failed() {
 
 /// An oversized raw TUN write was rejected (`EMSGSIZE`, `EINVAL` or a
 /// short write) after the probe had succeeded — the kernel changed
-/// its mind, e.g. a GKI that bounded the tun write path. The client
+/// its mind, e.g. a kernel that bounded the tun write path. The client
 /// permanently reverted to per-packet writes. At most once per tunnel;
 /// any occurrence in the field is worth investigating.
 pub(crate) fn tun_raw_gro_permanent_fallback() {
