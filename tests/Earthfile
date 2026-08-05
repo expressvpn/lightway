@@ -171,6 +171,10 @@ run-token-auth-test:
 run-udp-fwmark-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--fwmark=1698916352"
 
+# run-tcp-fwmark-test runs e2e test using TCP with fwmark set on the outside socket
+run-tcp-fwmark-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--fwmark=1698916352"
+
 # run-all-tests runs all tests
 run-all-tests:
     BUILD +run-tcp-aes256-test
@@ -203,3 +207,4 @@ run-all-tests:
     BUILD +run-tcp-then-udp-parallel-connect-test
     BUILD +run-udp-then-tcp-parallel-connect-test
     BUILD +run-udp-fwmark-test
+    BUILD +run-tcp-fwmark-test
