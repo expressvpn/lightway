@@ -7,9 +7,14 @@
 //! carries no state between packets (the IV arrives per call, the key is set
 //! once), so identically keyed instances are interchangeable.
 //!
-//! If wolfSSL's one-shot entry point is confirmed to treat `Aes` as read-only,
-//! `encrypt`/`decrypt` could take `&self` upstream and this pool would
-//! collapse to a single instance.
+//! The pool is not a workaround for a missing `&self` API - it is the only
+//! sound way to offer one. wolfSSL's armasm targets pass `aes->tmp`/`aes->reg`
+//! to the assembly as per-call scratch, so two concurrent calls on one context
+//! silently corrupt each other's output; `&mut self` is what makes the crate's
+//! `Sync` impl hold. What the pool should stop doing is serialising on one
+//! mutex: an unshared control reaches 55.8% of linear scaling at 8 threads
+//! where this reaches 3.5%, and this lock is the only one the TX path takes
+//! per packet.
 
 use std::sync::Mutex;
 
@@ -90,5 +95,36 @@ impl ExpresslaneAead for WolfsslAead {
             .map_err(|_| ExpresslaneError::AuthFailed);
         self.give_back(cipher);
         out
+    }
+
+    fn seal_into(
+        &self,
+        iv: [u8; 12],
+        plaintext: &[u8],
+        aad: &[u8],
+        out: &mut [u8],
+    ) -> ExpresslaneResult<[u8; 16]> {
+        let mut cipher = self.take()?;
+        let tag = cipher
+            .encrypt_into(iv, plaintext, aad, out)
+            .map_err(|_| ExpresslaneError::EncryptFailed);
+        self.give_back(cipher);
+        tag
+    }
+
+    fn open_into(
+        &self,
+        iv: [u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+        out: &mut [u8],
+    ) -> ExpresslaneResult<usize> {
+        let mut cipher = self.take()?;
+        let len = cipher
+            .decrypt_into(iv, ciphertext, aad, tag, out)
+            .map_err(|_| ExpresslaneError::AuthFailed);
+        self.give_back(cipher);
+        len
     }
 }
