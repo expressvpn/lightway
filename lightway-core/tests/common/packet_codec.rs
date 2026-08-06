@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Default)]
-pub(crate) struct TestPacketCodecFactory {}
+pub struct TestPacketCodecFactory {}
 
 impl PacketCodecFactory for TestPacketCodecFactory {
     fn build(&self) -> PacketCodec {
@@ -127,7 +127,7 @@ impl PacketDecoder for TestPacketDecoder {
 /// the encoded channel, modelling a codec that silently black-holes the data
 /// plane once encoding is enabled.
 #[derive(Default)]
-pub(crate) struct BlackHolePacketCodecFactory {}
+pub struct BlackHolePacketCodecFactory {}
 
 impl PacketCodecFactory for BlackHolePacketCodecFactory {
     fn build(&self) -> PacketCodec {
