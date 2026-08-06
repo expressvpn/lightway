@@ -154,6 +154,8 @@
             extensions = [
               "rust-src"
               "rust-analyzer"
+              "rustfmt"
+              "clippy"
             ];
           };
           isStatic = true;
