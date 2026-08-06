@@ -266,21 +266,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-linux-gnu
             os: ubuntu-latest
-            package_client: lightway-client
-            package_server: lightway-server
+            build_msrv: false
+          - target: x86_64-linux-gnu
+            os: ubuntu-latest
             build_msrv: true
-          - target: aarch64-apple-darwin
+          - target: aarch64-darwin
             os: macos-26
-            package_client: lightway-client
-            package_server: lightway-server
             build_msrv: false
           # Cross-compile x86_64 Darwin from Apple Silicon (much faster than Intel Mac)
-          - target: x86_64-apple-darwin
+          - target: x86_64-darwin
             os: macos-26
-            package_client: lightway-client-x86_64-darwin
-            package_server: lightway-server-x86_64-darwin
             build_msrv: false
     steps:
       - uses: actions/checkout@v4.3.1
@@ -295,33 +292,27 @@ jobs:
 
       - run: mkdir -p build/
 
-      - name: Build lightway client on MSRV version
+      - name: Build lightway server and client on MSRV version
         if: matrix.build_msrv
-        run: nix build .#lightway-client-msrv
+        run: nix build -j 2 --cores 2 .#lightway-client-${{ matrix.target }}-msrv .#lightway-server-${{ matrix.target }}-msrv --print-build-logs
 
-      - name: Build lightway server on MSRV version
-        if: matrix.build_msrv
-        run: nix build .#lightway-server-msrv
-
-      - name: Build lightway client
-        run: nix build .#${{ matrix.package_client }} -o result-client
-
-      - name: Build lightway server
-        run: nix build .#${{ matrix.package_server }} -o result-server
+      - name: Build lightway server and client
+        if: ${{ !matrix.build_msrv }}
+        run: nix build -j 2 --cores 2 .#lightway-client-${{ matrix.target }} .#lightway-server-${{ matrix.target }} --print-build-logs
 
       - name: Upload lightway-client artifact
-        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
+        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}
-          path: result-client/bin/lightway-client
+          path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact
-        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
+        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
-          path: result-server/bin/lightway-server
+          path: result/bin/lightway-server
 
   nix-tests:
     name: Nix tests (${{ matrix.os }})
