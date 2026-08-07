@@ -104,9 +104,9 @@
 
       # Helper: Build package for a target
       mkPackage =
-        package: toolchain:
+        packages: toolchain:
         toolchain.pkgsCross.callPackage ../. {
-          inherit package;
+          inherit packages;
           rustPlatform = toolchain.rustPlatform;
           isStatic = toolchain.isStatic;
           # Don't pass platformSuffix - rustPlatform adds target triple automatically for cross-compilation
@@ -114,8 +114,13 @@
 
       # Helper: Create both client and server for a target
       mkTargetPackages = targetName: config: toolchain: {
-        "lightway-client-${targetName}" = mkPackage "lightway-client" toolchain;
-        "lightway-server-${targetName}" = mkPackage "lightway-server" toolchain;
+        "lightway-client-${targetName}" = mkPackage [ "lightway-client" ] toolchain;
+        "lightway-server-${targetName}" = mkPackage [ "lightway-server" ] toolchain;
+        # Combined build - compiles the shared dependency graph once
+        "lightway-${targetName}" = mkPackage [
+          "lightway-client"
+          "lightway-server"
+        ] toolchain;
       };
 
       # All cross-compilation toolchains
