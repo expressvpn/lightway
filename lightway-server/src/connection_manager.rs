@@ -532,7 +532,7 @@ impl ConnectionManager {
 
     /// Snapshot of the currently-online connections (Arc clones). The map
     /// lock is released with the returned Vec, so callers can do per-connection
-    /// work (e.g. a kernel ioctl) without holding it - unlike iter_connections.
+    /// work without holding it - unlike iter_connections.
     pub(crate) fn online_connections(self: &Arc<Self>) -> Vec<Arc<Connection>> {
         self.connections
             .lock()

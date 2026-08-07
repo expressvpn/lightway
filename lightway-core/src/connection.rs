@@ -26,7 +26,6 @@ use crate::context::ExpresslaneTickData;
 use crate::{
     ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
     TCP_HEADER_SIZE, Version,
-    borrowed_bytesmut::BorrowedBytesMut,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
     metrics,
@@ -43,7 +42,10 @@ use crate::{
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
-use crate::wire::{AuthSuccessWithConfigV4, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion};
+use crate::wire::{
+    AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
+    ExpresslaneVersion,
+};
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
@@ -301,6 +303,126 @@ impl ConnectionError {
                     Tls(_) => false,
                 }
             }
+        }
+    }
+}
+
+/// The expresslane crate reports a missing key as an error rather than
+/// counting it, so the metric is raised here instead.
+fn expresslane_encrypt_error(err: ExpresslaneError) -> ConnectionError {
+    if matches!(err, ExpresslaneError::NoKey) {
+        metrics::expresslane_encrypt_no_key();
+    }
+    err.into()
+}
+
+/// Map a decrypt failure onto the wire error [`ConnectionError::is_fatal`]
+/// already classifies, raising the metric for the same reasons as above.
+fn expresslane_decrypt_error(err: ExpresslaneError) -> wire::FromWireError {
+    match err {
+        ExpresslaneError::NoKey => {
+            metrics::expresslane_decrypt_no_key();
+            wire::FromWireError::InvalidExpressData
+        }
+        ExpresslaneError::Replayed => wire::FromWireError::ReplayedExpressData,
+        ExpresslaneError::InsufficientData => wire::FromWireError::InsufficientData,
+        err => {
+            metrics::expresslane_decrypt_failed(&err);
+            wire::FromWireError::InvalidExpressData
+        }
+    }
+}
+
+#[cfg(test)]
+mod expresslane_error_mapping_tests {
+    use super::*;
+
+    /// Restates the classification independently of the code under test.
+    /// Exhaustive on purpose: a new `ExpresslaneError` variant fails to compile
+    /// here rather than silently inheriting the catch-all arm, which decides
+    /// what [`ConnectionError::is_fatal`] sees.
+    fn expected(err: &ExpresslaneError) -> wire::FromWireError {
+        match err {
+            ExpresslaneError::Replayed => wire::FromWireError::ReplayedExpressData,
+            ExpresslaneError::InsufficientData => wire::FromWireError::InsufficientData,
+            ExpresslaneError::NoKey
+            | ExpresslaneError::AuthFailed
+            | ExpresslaneError::EncryptFailed
+            | ExpresslaneError::PayloadTooLarge
+            | ExpresslaneError::NewCipherFailed
+            | ExpresslaneError::SetKeyFailed
+            | ExpresslaneError::BufferTooSmall => wire::FromWireError::InvalidExpressData,
+        }
+    }
+
+    /// Keep in step with `expected`, which will not compile if a variant is
+    /// added without a decision.
+    fn all() -> Vec<ExpresslaneError> {
+        vec![
+            ExpresslaneError::NewCipherFailed,
+            ExpresslaneError::SetKeyFailed,
+            ExpresslaneError::NoKey,
+            ExpresslaneError::EncryptFailed,
+            ExpresslaneError::AuthFailed,
+            ExpresslaneError::Replayed,
+            ExpresslaneError::InsufficientData,
+            ExpresslaneError::PayloadTooLarge,
+            ExpresslaneError::BufferTooSmall,
+        ]
+    }
+
+    #[test]
+    fn decrypt_error_mapping_is_pinned() {
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::NoKey),
+            wire::FromWireError::InvalidExpressData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::Replayed),
+            wire::FromWireError::ReplayedExpressData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::InsufficientData),
+            wire::FromWireError::InsufficientData
+        ));
+        assert!(matches!(
+            expresslane_decrypt_error(ExpresslaneError::AuthFailed),
+            wire::FromWireError::InvalidExpressData
+        ));
+    }
+
+    /// A bad packet must never kill a datagram connection, so every decrypt
+    /// failure has to land on a wire error `is_fatal` treats as transient.
+    #[test]
+    fn every_decrypt_error_is_classified_and_transient() {
+        for err in all() {
+            let want = expected(&err);
+            let got = expresslane_decrypt_error(err);
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&want),
+                "misclassified: got {got:?}, want {want:?}"
+            );
+            let err = ConnectionError::WireError(got);
+            assert!(
+                !err.is_fatal(ConnectionType::Datagram),
+                "{err:?} would tear down the connection"
+            );
+        }
+    }
+
+    #[test]
+    fn every_encrypt_error_is_transient() {
+        for err in all() {
+            let err = expresslane_encrypt_error(err);
+            assert!(
+                matches!(err, ConnectionError::ExpresslaneError(_)),
+                "unexpected variant: {err:?}"
+            );
+            assert!(
+                !err.is_fatal(ConnectionType::Datagram),
+                "{err:?} would tear down the connection"
+            );
         }
     }
 }
@@ -649,13 +771,15 @@ impl<AppState: Send> Connection<AppState> {
         self.activity
     }
 
-    /// Refresh activity timestamps from offloaded (kernel-path) traffic that
-    /// never reaches the userspace data path. Kept kernel-ref-free: the caller
-    /// (the offload stats poller) decides when to call it from kernel counter
-    /// deltas. `rx` (peer -> us) bumps both the peer-data and outside-data
+    /// Refresh activity timestamps from offloaded traffic that never reaches
+    /// the userspace data path. The caller (the offload stats poller) decides
+    /// when to call it from offload counter deltas.
+    /// `rx` (peer -> us) bumps both the peer-data and outside-data
     /// timestamps; `tx` (us -> peer) refreshes only the outside-data timestamp
     /// so a download keeps the connection out of idle-eviction without marking
-    /// the peer as actively sending.
+    /// the peer as actively sending. Also nudges the (self-gated) expresslane
+    /// key rotation, since an offloaded data plane never drives it from the
+    /// inside path.
     pub fn mark_offload_activity(&mut self, rx: bool, tx: bool) {
         let now = Instant::now();
         if rx {
@@ -665,6 +789,9 @@ impl<AppState: Send> Connection<AppState> {
         if tx {
             self.activity.last_outside_data_received = now;
         }
+        // Offload traffic consumes nonce budget under the current key; the
+        // inside path that normally drives rotation never sees it.
+        let _ = self.rotate_expresslane_key();
     }
 
     /// Query the TLS protocol version of this connection, only valid
@@ -1623,7 +1750,8 @@ impl<AppState: Send> Connection<AppState> {
             let (data, is_encoded) = self
                 .expresslane
                 .data
-                .try_from_wire(&mut BorrowedBytesMut::from(buf), hdr.session)?;
+                .try_from_wire(buf, *hdr.session.as_bytes())
+                .map_err(expresslane_decrypt_error)?;
 
             self.handle_outside_data_bytes(data, is_encoded)?;
             return Ok(1);
@@ -1820,14 +1948,46 @@ impl<AppState: Send> Connection<AppState> {
     /// Check expresslane health from keepalive pong payload
     ///  and disable if packet drops detected
     fn check_expresslane_health(&mut self, mut payload: &[u8]) -> ConnectionResult<()> {
-        if payload.len() != 16 || !self.expresslane_ready() {
+        if !self.expresslane_ready() {
             return Ok(());
         }
+
+        // An empty payload while we are ready means the peer had no stats reading
+        // this window. Tolerated briefly; a peer that has stopped observing its
+        // own health cannot be trusted to detect a dead path, so degrade.
+        if payload.len() != 16 {
+            self.expresslane.missing_peer_reports =
+                self.expresslane.missing_peer_reports.saturating_add(1);
+            if self.expresslane.missing_peer_reports >= expresslane::EXPRESSLANE_MISSING_STATS_LIMIT
+            {
+                warn!("Expresslane peer stopped reporting stats, falling back to DTLS");
+                self.set_expresslane_degraded();
+            }
+            return Ok(());
+        }
+        self.expresslane.missing_peer_reports = 0;
 
         let total_peer_sent = payload.get_u64();
         let total_peer_recv = payload.get_u64();
 
-        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
+        // A failed reading skips the window: committing anything here would poison
+        // the next window's deltas. Tolerated briefly, then fail safe - a
+        // connection that cannot observe its own health must not keep flying blind.
+        let (current_sent, current_recv) = match self.expresslane.stats(self.session_id) {
+            Ok(counters) => counters,
+            Err(e) => {
+                self.expresslane.missing_local_readings =
+                    self.expresslane.missing_local_readings.saturating_add(1);
+                if self.expresslane.missing_local_readings
+                    >= expresslane::EXPRESSLANE_MISSING_STATS_LIMIT
+                {
+                    warn!(error = %e, "Expresslane stats unavailable, falling back to DTLS");
+                    self.set_expresslane_degraded();
+                }
+                return Ok(());
+            }
+        };
+        self.expresslane.missing_local_readings = 0;
 
         // Detect counter reset: cumulative stats should never decrease.
         // If they do, an external stats provider re-initialized its state
@@ -1941,8 +2101,18 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if self.expresslane.retransmit_count >= MAX_RETRANSMISSION_ATTEMPTS {
+            // Degraded is terminal for the session; an unacked degrade notice
+            // lands here too and must not undo it.
+            if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
+                warn!("Expresslane degrade notice transmit timed out");
+                return Ok(());
+            }
+
             warn!("Expresslane config transmit timed out, setting expresslane to inactive");
             self.set_expresslane_state(ExpresslaneState::Inactive);
+            // The stamp was taken before the outcome was known. Drop it so
+            // recovery does not wait a whole rotation interval.
+            self.expresslane.last_key_rotation = None;
             return Ok(());
         }
 
@@ -2001,7 +2171,11 @@ impl<AppState: Send> Connection<AppState> {
             return Default::default();
         }
 
-        let (current_sent, current_recv) = self.expresslane.stats(self.session_id);
+        // An empty payload tells the peer "no reading this window" - better than
+        // zeros it would read as total loss.
+        let Ok((current_sent, current_recv)) = self.expresslane.stats(self.session_id) else {
+            return Default::default();
+        };
 
         let mut buf = bytes::BytesMut::with_capacity(16);
         buf.put_u64(current_sent);
@@ -2016,22 +2190,25 @@ impl<AppState: Send> Connection<AppState> {
         if !matches!(self.state, State::Online) {
             return Err(ConnectionError::InvalidState);
         }
-        let neg_version = ExpresslaneVersion::negotiate(config.version);
-        if neg_version != self.expresslane.data.version {
+        let neg_version = wire::negotiate_version(config.version);
+        if neg_version != self.expresslane.data.version() {
             info!(
                 "Negotiated expresslane version: {:?} [max:{:?} peer:{:?}]",
                 neg_version,
                 ExpresslaneVersion::MAX,
                 config.version,
             );
-            self.expresslane.data.version = neg_version;
+            if !self.expresslane.data.set_version(neg_version) {
+                warn!("Ignoring expresslane version change, data already sent");
+            }
         }
 
         // Handle acknowledgement from peer
         if config.ack {
             if config.counter == self.expresslane.config_counter {
                 // Peer acknowledged, can update local key now
-                self.expresslane.data.update_self_key();
+                self.expresslane.data.promote_self_key();
+                debug!("Updating expresslane self keys");
                 self.publish_expresslane_key();
                 self.expresslane.retransmit_count = 0;
                 // Self key updated, check if expresslane is now ready.
@@ -2065,6 +2242,7 @@ impl<AppState: Send> Connection<AppState> {
         if config.enabled {
             debug!("Peer has updated expresslane key");
             self.expresslane.data.update_peer_key(config.key)?;
+            debug!("Updating expresslane peer keys");
             self.publish_expresslane_key();
             if self.expresslane.data.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
@@ -2077,7 +2255,7 @@ impl<AppState: Send> Connection<AppState> {
         // Send acknowledgement with the negotiated version
         let mut config = config;
         config.ack = true;
-        config.version = self.expresslane.data.version;
+        config.version = self.expresslane.data.version();
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_queue(msg);
 
@@ -2103,17 +2281,20 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
-        let key: ExpresslaneKey = StandardUniform.sample(&mut *self.rng.lock().unwrap());
+        let key_bytes: [u8; EXPRESSLANE_KEY_SIZE] =
+            StandardUniform.sample(&mut *self.rng.lock().unwrap());
+        let key = ExpresslaneKey::from(key_bytes);
         // Do not update current encrpytion key. Just update self key and
         // share it with peer. Only after peer acknowledged, update it in
         // [`self::handle_expresslane_config`]
         //
         // If updating key failed, send disabled to peer
         let enabled = self.expresslane.data.update_next_self_key(key).is_ok();
+        debug!("Updating expresslane next self keys: enabled={enabled}");
 
         // Outgoing version: if we have already negotiated a version
         // with the peer, use that. Otherwise advertise our local max
-        let version = match self.expresslane.data.version {
+        let version = match self.expresslane.data.version() {
             ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
             v => v,
         };
@@ -2131,6 +2312,7 @@ impl<AppState: Send> Connection<AppState> {
         let _ = self.send_frame_or_queue(msg);
 
         self.expresslane.last_key_rotation = Some(Instant::now());
+        self.expresslane.retransmit_count = 0;
 
         // Callback to schedule re-transmission if required
         (self.schedule_tick_cb)(
@@ -2148,7 +2330,7 @@ impl<AppState: Send> Connection<AppState> {
         let key = ExpresslaneKey::INVALID;
         let _ = self.expresslane.data.update_next_self_key(key);
 
-        let version = match self.expresslane.data.version {
+        let version = match self.expresslane.data.version() {
             ExpresslaneVersion::Unknown => ExpresslaneVersion::MAX,
             v => v,
         };
@@ -2164,6 +2346,8 @@ impl<AppState: Send> Connection<AppState> {
 
         let msg = wire::Frame::ExpresslaneConfig(config);
         let _ = self.send_frame_or_queue(msg);
+
+        self.expresslane.retransmit_count = 0;
 
         // Callback to schedule re-transmission if required
         // reuses same retry logic as key rotation
@@ -2182,7 +2366,7 @@ impl<AppState: Send> Connection<AppState> {
                 self_key,
                 peer_key,
                 peer_sockaddr: self.peer_addr(),
-                version: self.expresslane.data.version,
+                version: self.expresslane.data.version(),
             };
             xp_config_cb.update(self.session_id, data, &self.app_state);
         }
@@ -2203,7 +2387,14 @@ impl<AppState: Send> Connection<AppState> {
         let session_id = self.pending_session_id().unwrap_or(self.session_id);
         self.expresslane
             .data
-            .append_to_wire(&mut buf, session_id, data.as_ref(), iv, is_encoded);
+            .append_to_wire(
+                &mut buf,
+                *session_id.as_bytes(),
+                data.as_ref(),
+                iv,
+                is_encoded,
+            )
+            .map_err(expresslane_encrypt_error)?;
         self.activity.last_data_traffic_from_peer = Instant::now();
 
         // `udp_send` coalesces into the per-connection `GsoBuffer`
@@ -2794,5 +2985,13 @@ mod tests {
             Conn::advance_strikes(u8::MAX, BAD.0, BAD.1),
             (u8::MAX, true)
         );
+    }
+
+    /// An FFI host must be able to name and inspect the tick payload; without
+    /// it, dropping the tick silently loses retransmission and its timeout.
+    #[test]
+    fn tick_data_is_nameable_and_debuggable() {
+        fn assert_traits<T: std::fmt::Debug + Clone>() {}
+        assert_traits::<crate::ExpresslaneTickData>();
     }
 }

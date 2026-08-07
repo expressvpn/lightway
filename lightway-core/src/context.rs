@@ -85,8 +85,9 @@ mod test_connection_type {
     }
 }
 
-/// Struct to control [`ExpresslaneConfig`] visibility
-/// Without this, [`ExpresslaneConfig`] has to be made pub
+/// Struct to control `ExpresslaneConfig` visibility
+/// Without this, `ExpresslaneConfig` has to be made pub
+#[derive(Debug, Clone)]
 pub struct ExpresslaneTickData(pub(crate) ExpresslaneConfig);
 
 /// Tick type

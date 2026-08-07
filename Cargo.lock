@@ -1635,6 +1635,7 @@ dependencies = [
  "delegate",
  "itertools 0.14.0",
  "lightway-app-utils",
+ "lightway-expresslane",
  "lru",
  "metrics",
  "more-asserts",
@@ -1651,6 +1652,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "wolfssl",
+]
+
+[[package]]
+name = "lightway-expresslane"
+version = "0.1.0"
+dependencies = [
+ "bitfield-struct",
+ "bytes",
+ "thiserror 2.0.18",
  "wolfssl",
 ]
 
@@ -2389,7 +2400,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3149,7 +3160,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4142,9 +4153,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wolfssl"
-version = "7.2.0"
+version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a15819c1173cfd9088fcb6c31bf0412d75a51c7c9665f50b6d95cb607809d0aa"
+checksum = "05b88000b1d4f614da6429f3c7b1e6f5cb54c3d381da29dec446a7024cf174ab"
 dependencies = [
  "bytes",
  "log",

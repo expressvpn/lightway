@@ -389,11 +389,11 @@ pub fn tun_recv_batch(sz: usize) {
     METRIC_TUN_RECV_BATCH_SIZE.record(sz as f64);
 }
 
-/// Bytes sent to the peer over the kernel-offload (expresslane) path.
+/// Bytes sent to the peer over the offload (expresslane) path.
 pub fn expresslane_offload_tx_bytes(sz: u64) {
     METRIC_EXPRESSLANE_OFFLOAD_TX_BYTES.increment(sz);
 }
-/// Bytes received from the peer over the kernel-offload (expresslane) path.
+/// Bytes received from the peer over the offload (expresslane) path.
 pub fn expresslane_offload_rx_bytes(sz: u64) {
     METRIC_EXPRESSLANE_OFFLOAD_RX_BYTES.increment(sz);
 }
