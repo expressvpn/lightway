@@ -366,20 +366,12 @@ jobs:
           - target: aarch64-darwin
             os: macos-26
             build_msrv: false
-          # Cross-compile x86_64 Darwin from Apple Silicon (much faster than Intel Mac)
-          - target: x86_64-darwin
-            os: macos-26
-            build_msrv: false
           # BoringSSL backend builds (no MSRV). Validates boring-sys's CMake
           # invocation under the nix toolchain on the platforms we ship to most.
           - target: x86_64-linux-gnu-boringssl-beta
             os: ubuntu-latest
             build_msrv: false
           - target: aarch64-darwin-boringssl-beta
-            os: macos-26
-            build_msrv: false
-          # Cross-compile x86_64 Darwin from Apple Silicon, as for wolfssl above
-          - target: x86_64-darwin-boringssl-beta
             os: macos-26
             build_msrv: false
     steps:
@@ -406,28 +398,28 @@ jobs:
         run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }} --print-build-logs
 
       - name: Upload lightway-client artifact (WolfSSL)
-        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
+        if: matrix.target == 'aarch64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}-wolfssl
           path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact (WolfSSL)
-        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
+        if: matrix.target == 'aarch64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}-wolfssl
-          path: result-1/bin/lightway-server
-        
+          path: result/bin/lightway-server
+
       - name: Upload lightway-client artifact (BoringSSL beta)
-        if: matrix.target == 'aarch64-darwin-boringssl-beta' || matrix.target == 'x86_64-darwin-boringssl-beta'
+        if: matrix.target == 'aarch64-darwin-boringssl-beta'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}
           path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact (BoringSSL beta)
-        if: matrix.target == 'aarch64-darwin-boringssl-beta' || matrix.target == 'x86_64-darwin-boringssl-beta'
+        if: matrix.target == 'aarch64-darwin-boringssl-beta'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
@@ -591,7 +583,7 @@ jobs:
           cp artifacts/lightway-server-aarch64-unknown-linux-gnu-wolfssl/lightway-server release-assets/lightway-server-aarch64-unknown-linux-gnu-wolfssl
           cp artifacts/lightway-client-riscv64gc-unknown-linux-gnu-wolfssl/lightway-client release-assets/lightway-client-riscv64gc-unknown-linux-gnu-wolfssl
           cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu-wolfssl/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu-wolfssl
-          
+
           cp artifacts/lightway-client-x86_64-unknown-linux-gnu-boringssl-beta/lightway-client release-assets/lightway-client-x86_64-unknown-linux-gnu-boringssl-beta
           cp artifacts/lightway-server-x86_64-unknown-linux-gnu-boringssl-beta/lightway-server release-assets/lightway-server-x86_64-unknown-linux-gnu-boringssl-beta
           cp artifacts/lightway-client-aarch64-unknown-linux-gnu-boringssl-beta/lightway-client release-assets/lightway-client-aarch64-unknown-linux-gnu-boringssl-beta
@@ -601,13 +593,9 @@ jobs:
 
           cp artifacts/lightway-client-aarch64-darwin-wolfssl/lightway-client release-assets/lightway-client-aarch64-darwin-wolfssl
           cp artifacts/lightway-server-aarch64-darwin-wolfssl/lightway-server release-assets/lightway-server-aarch64-darwin-wolfssl
-          cp artifacts/lightway-client-x86_64-darwin-wolfssl/lightway-client release-assets/lightway-client-x86_64-darwin-wolfssl
-          cp artifacts/lightway-server-x86_64-darwin-wolfssl/lightway-server release-assets/lightway-server-x86_64-darwin-wolfssl
 
           cp artifacts/lightway-client-aarch64-darwin-boringssl-beta/lightway-client release-assets/lightway-client-aarch64-darwin-boringssl-beta
           cp artifacts/lightway-server-aarch64-darwin-boringssl-beta/lightway-server release-assets/lightway-server-aarch64-darwin-boringssl-beta
-          cp artifacts/lightway-client-x86_64-darwin-boringssl-beta/lightway-client release-assets/lightway-client-x86_64-darwin-boringssl-beta
-          cp artifacts/lightway-server-x86_64-darwin-boringssl-beta/lightway-server release-assets/lightway-server-x86_64-darwin-boringssl-beta
 
           cp artifacts/lightway-client-x86_64-pc-windows-msvc-wolfssl/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc-wolfssl.exe
           cp artifacts/lightway-client-aarch64-pc-windows-msvc-wolfssl/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc-wolfssl.exe
@@ -632,7 +620,7 @@ jobs:
             ## Artifacts
             This release includes pre-built binaries for:
             - **Linux** (x86_64, aarch64, riscv64): lightway-client and lightway-server
-            - **macOS** (x86_64, aarch64): lightway-client and lightway-server
+            - **macOS** (aarch64): lightway-client and lightway-server
             - **Windows** (x86_64, aarch64): lightway-client only
             - **Android**: AAR library and client JSON schema
           files: release-assets/*
