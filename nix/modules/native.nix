@@ -22,9 +22,9 @@
 
       # Helper: Build package
       mkPackage =
-        package: pkgs: rustPlatform:
+        packages: pkgs: rustPlatform:
         pkgs.callPackage ../. {
-          inherit package rustPlatform;
+          inherit packages rustPlatform;
           isStatic = false;
           platformSuffix = nativeSuffix;
         };
@@ -45,12 +45,22 @@
       # Native packages for all platforms
       nativePackages = {
         # Pinned stable builds
-        "lightway-client-${nativeSuffix}" = mkPackage "lightway-client" pkgs rustPlatformStable;
-        "lightway-server-${nativeSuffix}" = mkPackage "lightway-server" pkgs rustPlatformStable;
+        "lightway-client-${nativeSuffix}" = mkPackage [ "lightway-client" ] pkgs rustPlatformStable;
+        "lightway-server-${nativeSuffix}" = mkPackage [ "lightway-server" ] pkgs rustPlatformStable;
 
         # MSRV builds
-        "lightway-client-${nativeSuffix}-msrv" = mkPackage "lightway-client" pkgs rustPlatformMsrv;
-        "lightway-server-${nativeSuffix}-msrv" = mkPackage "lightway-server" pkgs rustPlatformMsrv;
+        "lightway-client-${nativeSuffix}-msrv" = mkPackage [ "lightway-client" ] pkgs rustPlatformMsrv;
+        "lightway-server-${nativeSuffix}-msrv" = mkPackage [ "lightway-server" ] pkgs rustPlatformMsrv;
+
+        # Combined builds - compile the shared dependency graph once
+        "lightway-${nativeSuffix}" = mkPackage [
+          "lightway-client"
+          "lightway-server"
+        ] pkgs rustPlatformStable;
+        "lightway-${nativeSuffix}-msrv" = mkPackage [
+          "lightway-client"
+          "lightway-server"
+        ] pkgs rustPlatformMsrv;
       };
     in
     {

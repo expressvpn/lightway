@@ -6,14 +6,15 @@
   automake,
   libtool,
   buildPackages,
-  package ? "lightway-client",
+  packages ? [ "lightway-client" ],
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
   isStatic ? false,
   platformSuffix ? null,
 }:
 
 let
-  cargoToml = builtins.fromTOML (builtins.readFile ../${package}/Cargo.toml);
+  singlePackage = builtins.length packages == 1;
+  cargoToml = builtins.fromTOML (builtins.readFile ../${builtins.head packages}/Cargo.toml);
 
   # Package-specific metadata
   packageMeta = {
@@ -28,11 +29,8 @@ let
   };
 
   # Construct package name with optional platform suffix
-  packageName =
-    if platformSuffix != null then
-      "${cargoToml.package.name}-${platformSuffix}"
-    else
-      cargoToml.package.name;
+  baseName = if singlePackage then cargoToml.package.name else "lightway";
+  packageName = if platformSuffix != null then "${baseName}-${platformSuffix}" else baseName;
 in
 rustPlatform.buildRustPackage {
   pname = packageName;
@@ -44,8 +42,14 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
   };
 
-  buildFeatures = features;
-  cargoBuildFlags = "-p ${package}";
+  # Features use the pkg/feature form: plain --features only applies to the
+  # first -p package when several are selected
+  cargoBuildFlags = lib.concatStringsSep " " (
+    map (p: "-p ${p}") packages
+    ++ lib.optional (features != [ ]) (
+      "--features " + lib.concatStringsSep "," (lib.concatMap (p: map (f: "${p}/${f}") features) packages)
+    )
+  );
 
   nativeBuildInputs = [
     autoconf
@@ -115,8 +119,14 @@ rustPlatform.buildRustPackage {
     with stdenv.hostPlatform;
     lib.optionalString (isAarch && isLinux) "-march=${gcc.arch}+crypto";
 
-  meta = {
-    inherit (packageMeta.${package}) description mainProgram;
-    platforms = lib.platforms.unix;
-  };
+  meta =
+    (
+      if singlePackage then
+        { inherit (packageMeta.${builtins.head packages}) description mainProgram; }
+      else
+        { description = "Lightway VPN client and server"; }
+    )
+    // {
+      platforms = lib.platforms.unix;
+    };
 }
