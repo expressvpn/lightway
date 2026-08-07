@@ -536,6 +536,33 @@ mod tests {
     #[test_case(true; "continuous")]
     #[test_case(false; "non-continuous")]
     #[tokio::test]
+    async fn outside_activity_cancels_pending_timeout(continuous: bool) {
+        let (sleep_manager, connection) =
+            KeepaliveTestBuilder::new().continuous(continuous).build();
+
+        let (keepalive, task) = Keepalive::new(sleep_manager.clone(), connection.clone());
+        start_keepalives(&keepalive, &sleep_manager, continuous).await;
+
+        // A keepalive is pending, so the dead-man timeout is armed.
+        assert_eq!(connection.keepalive_count(), 1);
+
+        keepalive.outside_activity().await;
+        sleep(Duration::from_millis(10)).await;
+
+        // The timeout was disarmed, so firing it is a no-op rather than a termination. Contrast
+        // timeout_causes_task_termination, where the same trigger without intervening activity
+        // yields KeepaliveResult::Timedout.
+        sleep_manager.trigger_timeout();
+        sleep(Duration::from_millis(10)).await;
+
+        drop(keepalive);
+        let result = task.await.unwrap().unwrap();
+        assert!(matches!(result, KeepaliveResult::Cancelled));
+    }
+
+    #[test_case(true; "continuous")]
+    #[test_case(false; "non-continuous")]
+    #[tokio::test]
     async fn suspend_stops_keepalives(continuous: bool) {
         let (sleep_manager, connection) =
             KeepaliveTestBuilder::new().continuous(continuous).build();
