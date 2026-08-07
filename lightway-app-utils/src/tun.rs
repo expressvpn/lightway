@@ -640,21 +640,22 @@ impl TunDirect {
 
     /// Try write from Tun
     pub fn try_send(&self, buf: BytesMut) -> IOCallbackResult<usize> {
-        let tun = self.tun.as_ref().unwrap();
         #[cfg(target_os = "linux")]
-        let res = if self.vnet_hdr {
+        if self.vnet_hdr {
             // IFF_VNET_HDR requires a zeroed `virtio_net_hdr` prefix
             // on every write (NEEDS_CSUM=0, GSO_NONE).
-            let hdr_len = tun_rs::VIRTIO_NET_HDR_LEN;
-            let mut prefixed = bytes::BytesMut::zeroed(hdr_len);
-            prefixed.extend_from_slice(&buf[..]);
-            tun.try_send(&prefixed[..])
-                .map(|n| n.saturating_sub(hdr_len))
-        } else {
-            tun.try_send(&buf[..])
-        };
-        #[cfg(not(target_os = "linux"))]
-        let res = tun.try_send(&buf[..]);
+            return self.send_with_vnet_hdr(&[0u8; tun_rs::VIRTIO_NET_HDR_LEN], &buf[..]);
+        }
+
+        let tun = self.tun.as_ref().unwrap();
+        Self::map_send_result(tun.try_send(&buf[..]))
+    }
+
+    /// Map the result of a TUN write onto an [`IOCallbackResult`], shared by
+    /// every send path. A full write queue is retried by the caller;
+    /// anything else is fatal. Mirrors `map_send_result` on the outside UDP
+    /// path.
+    fn map_send_result(res: std::io::Result<usize>) -> IOCallbackResult<usize> {
         match res {
             Ok(nr) => IOCallbackResult::Ok(nr),
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
@@ -662,6 +663,19 @@ impl TunDirect {
             }
             Err(err) => IOCallbackResult::Err(err),
         }
+    }
+
+    /// Write `hdr_bytes` (a serialized `virtio_net_hdr`) followed by `buf`
+    /// in one vectored send — no copy, no allocation. The returned count
+    /// excludes the header, matching a plain send.
+    #[cfg(target_os = "linux")]
+    fn send_with_vnet_hdr(&self, hdr_bytes: &[u8], buf: &[u8]) -> IOCallbackResult<usize> {
+        let tun = self.tun.as_ref().unwrap();
+        let iovs = [std::io::IoSlice::new(hdr_bytes), std::io::IoSlice::new(buf)];
+        Self::map_send_result(
+            tun.try_send_vectored(&iovs)
+                .map(|n| n.saturating_sub(hdr_bytes.len())),
+        )
     }
 
     /// MTU of Tun

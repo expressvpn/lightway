@@ -160,53 +160,58 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
 
     // Read the kernel-deposited pseudo-header partial, then zero the
     // field so it doesn't double-count when we sum the segment.
-    let initial = read_u16(&buf[at..at + 2]) as u64;
+    let partial = u16::from_be_bytes([buf[at], buf[at + 1]]);
     buf[at] = 0;
     buf[at + 1] = 0;
 
-    let csum = !checksum(&buf[start..], initial);
+    // Seed with the big-endian partial (one 16-bit word), then sum the
+    // transport bytes from `csum_start` with the field zeroed.
+    let mut c = internet_checksum::Checksum::new();
+    c.add_bytes(&partial.to_be_bytes());
+    c.add_bytes(&buf[start..]);
+    let csum = u16::from_be_bytes(c.checksum());
     // RFC 768: a computed UDP checksum of zero must go on the wire as
     // 0xFFFF, the same value in one's complement, because 0x0000 is the
     // IPv4 "no checksum computed" sentinel and is outright invalid over
     // IPv6 (RFC 8200 s8.1). Never for TCP, where 0x0000 is legal.
     let csum = if is_udp && csum == 0 { 0xFFFF } else { csum };
-    buf[at] = (csum >> 8) as u8;
-    buf[at + 1] = csum as u8;
+    buf[at..at + 2].copy_from_slice(&csum.to_be_bytes());
 }
 
-// Internet checksum used only by `gso_none_checksum` below — the
-// build_segment path uses pnet_packet's protocol-aware helpers.
+/// One's-complement transport checksum over a TCP/UDP pseudo-header
+/// (source address, destination address, zero-padded protocol byte, and
+/// transport length) plus the transport bytes, which must already have
+/// their checksum field zeroed. Works for IPv4 (4-byte) and IPv6 (16-byte)
+/// addresses; returns the host-order value to store via `set_checksum`.
+///
+/// Matches `pnet_packet::{tcp,udp}::ipv{4,6}_checksum` — pnet skips the
+/// checksum word while we zero it, and a zeroed word contributes 0. pnet
+/// does not apply the RFC 768 substitution, so UDP output differs from
+/// pnet's only for the ~1-in-65536 zero case, where pnet is wrong.
 #[inline]
-fn read_u16(b: &[u8]) -> u16 {
-    u16::from_be_bytes(b[..2].try_into().unwrap())
-}
-
-// One's-complement folded checksum with a kernel-seeded initial value.
-// The inner loop unrolls to read 8 bytes per iteration; on x86_64
-// release LLVM auto-vectorizes the resulting straight-line code.
-#[inline]
-fn checksum(mut b: &[u8], initial: u64) -> u16 {
-    let mut acc = initial;
-    while b.len() >= 8 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
-        acc += u32::from_be_bytes(b[4..8].try_into().unwrap()) as u64;
-        b = &b[8..];
+fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u16 {
+    // The pseudo-header length field is 16 bits; a longer slice would wrap
+    // it and silently produce a wrong checksum. Unreachable from
+    // `build_segment`, whose slices are bounded by `gso_size`.
+    debug_assert!(
+        transport.len() <= u16::MAX as usize,
+        "transport too long for pseudo-header"
+    );
+    let transport_len = transport.len() as u16;
+    let mut c = internet_checksum::Checksum::new();
+    c.add_bytes(src);
+    c.add_bytes(dst);
+    // [zero, proto, len_hi, len_lo] — the big-endian pseudo-header trailer.
+    c.add_bytes(&[0, proto, (transport_len >> 8) as u8, transport_len as u8]);
+    c.add_bytes(transport);
+    let csum = u16::from_be_bytes(c.checksum());
+    // Same RFC 768 substitution `gso_none_checksum` applies; here the
+    // protocol is a parameter so it needs no sniffing.
+    if proto == IPPROTO_UDP && csum == 0 {
+        0xFFFF
+    } else {
+        csum
     }
-    if b.len() >= 4 {
-        acc += u32::from_be_bytes(b[..4].try_into().unwrap()) as u64;
-        b = &b[4..];
-    }
-    if b.len() >= 2 {
-        acc += read_u16(&b[..2]) as u64;
-        b = &b[2..];
-    }
-    if let Some(&byte) = b.first() {
-        acc += (byte as u64) << 8;
-    }
-    while acc > 0xFFFF {
-        acc = (acc >> 16) + (acc & 0xFFFF);
-    }
-    acc as u16
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
@@ -366,6 +371,7 @@ pub(crate) fn build_segment(
     gso_idx: usize,
     out: &mut bytes::BytesMut,
 ) -> Result<(), GsoSegError> {
+    use pnet_packet::Packet;
     use pnet_packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
     use pnet_packet::ipv6::{Ipv6Packet, MutableIpv6Packet};
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags};
@@ -419,7 +425,8 @@ pub(crate) fn build_segment(
         ip.set_checksum(csum);
     }
 
-    // Transport-layer fixups.
+    // Transport-layer fixups. See [`transport_checksum`] for the pseudo-
+    // header + zeroed-field formula and its pnet equivalence.
     if hdr.is_tcp() {
         let mut tcp =
             MutableTcpPacket::new(&mut out[csum_start..out_len]).ok_or(GsoSegError::Tcp)?;
@@ -436,10 +443,10 @@ pub(crate) fn build_segment(
         tcp.set_checksum(0);
         let csum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::tcp::ipv4_checksum(&tcp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 6, tcp.packet())
             }
             (None, Some((src, dst))) => {
-                pnet_packet::tcp::ipv6_checksum(&tcp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 6, tcp.packet())
             }
             _ => unreachable!(),
         };
@@ -451,10 +458,10 @@ pub(crate) fn build_segment(
         udp.set_checksum(0);
         let csum = match (v4_addrs, v6_addrs) {
             (Some((src, dst)), None) => {
-                pnet_packet::udp::ipv4_checksum(&udp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 17, udp.packet())
             }
             (None, Some((src, dst))) => {
-                pnet_packet::udp::ipv6_checksum(&udp.to_immutable(), &src, &dst)
+                transport_checksum(&src.octets(), &dst.octets(), 17, udp.packet())
             }
             _ => unreachable!(),
         };
@@ -494,6 +501,67 @@ mod tests {
         assert!(ecn.is_gso_none());
     }
 
+    /// The same RFC 768 rule on the `build_segment` path, where the
+    /// protocol is a parameter rather than sniffed from the IP header.
+    ///
+    /// The protocol number is itself part of the pseudo-header, so a
+    /// payload that folds to zero under one protocol does not under the
+    /// other; each case is searched separately against a local reference
+    /// fold rather than against the function under test.
+    #[test]
+    fn transport_checksum_substitutes_zero_for_udp_only() {
+        /// Plain one's-complement fold of the pseudo-header + transport,
+        /// independent of the implementation being tested.
+        fn reference(src: &[u8], dst: &[u8], proto: u8, t: &[u8]) -> u16 {
+            let len = t.len() as u16;
+            let mut words: Vec<u8> = Vec::new();
+            words.extend_from_slice(src);
+            words.extend_from_slice(dst);
+            words.extend_from_slice(&[0, proto, (len >> 8) as u8, len as u8]);
+            words.extend_from_slice(t);
+            if words.len() % 2 == 1 {
+                words.push(0);
+            }
+            let mut sum: u32 = 0;
+            for c in words.chunks(2) {
+                sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+            !(sum as u16)
+        }
+
+        let src = [10u8, 0, 0, 1];
+        let dst = [96u8, 0, 0, 4];
+        let payload_for = |proto: u8| {
+            (0u32..=0xFFFF)
+                .map(|n| {
+                    let mut t = vec![0u8; 12];
+                    t[8..10].copy_from_slice(&(n as u16).to_be_bytes());
+                    t
+                })
+                .find(|t| reference(&src, &dst, proto, t) == 0)
+                .expect("some payload folds to a zero checksum")
+        };
+
+        // UDP: the zero is substituted.
+        let udp = payload_for(IPPROTO_UDP);
+        assert_eq!(reference(&src, &dst, IPPROTO_UDP, &udp), 0);
+        assert_eq!(
+            transport_checksum(&src, &dst, IPPROTO_UDP, &udp),
+            0xFFFF,
+            "UDP zero checksum must be transmitted as 0xFFFF"
+        );
+
+        // TCP: 0x0000 is legal and must be left alone.
+        let tcp = payload_for(6);
+        assert_eq!(reference(&src, &dst, 6, &tcp), 0);
+        assert_eq!(
+            transport_checksum(&src, &dst, 6, &tcp),
+            0x0000,
+            "0x0000 is a legal TCP checksum and must be left unchanged"
+        );
+    }
+
     /// RFC 768 / RFC 8200 s8.1: a computed UDP checksum of zero must be
     /// transmitted as `0xFFFF`, and TCP must be left alone because
     /// `0x0000` is a legal TCP checksum.
@@ -521,16 +589,17 @@ mod tests {
         };
 
         // Find the kernel-deposited partial for which the completed
-        // checksum folds to zero. Exhaustive over a 16-bit field.
+        // checksum folds to zero. Derived by asking the function under
+        // test, on a TCP packet where no substitution applies, so a
+        // 0x0000 result means the fold really was zero. The sum covers
+        // only the transport bytes from `csum_start`, so a seed found
+        // with protocol 6 is equally valid for protocol 17.
         let seed = (0u32..=0xFFFF)
             .map(|c| c as u16)
             .find(|&c| {
-                let mut p = build(IPPROTO_UDP, c);
-                let at = START + OFFSET;
-                let initial = read_u16(&p[at..at + 2]) as u64;
-                p[at] = 0;
-                p[at + 1] = 0;
-                !checksum(&p[START..], initial) == 0
+                let mut p = build(6, c);
+                gso_none_checksum(&mut p, START as u16, OFFSET as u16);
+                p[START + OFFSET..START + OFFSET + 2] == [0x00, 0x00]
             })
             .expect("some 16-bit seed folds to a zero checksum");
 

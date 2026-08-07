@@ -1,96 +1,163 @@
-//! Encapsulates the control message apis used with `recvmsg(2)`.
+//! Encapsulates the control message apis used with `recvmsg(2)` and
+//! `sendmsg(2)`.
 #![allow(unsafe_code)]
 
-use bytes::BytesMut;
-
+/// The libc type of `msghdr::msg_controllen` on this platform.
 #[cfg(target_vendor = "apple")]
-pub(crate) type LibcControlLen = libc::socklen_t;
+pub type LibcControlLen = libc::socklen_t;
 
+/// The libc type of `msghdr::msg_controllen` on this platform.
 #[cfg(all(not(target_vendor = "apple"), target_env = "musl"))]
-pub(crate) type LibcControlLen = libc::socklen_t;
+pub type LibcControlLen = libc::socklen_t;
 
+/// The libc type of `msghdr::msg_controllen` on this platform.
 #[cfg(all(not(target_vendor = "apple"), not(target_env = "musl")))]
-pub(crate) type LibcControlLen = libc::size_t;
+pub type LibcControlLen = libc::size_t;
 
-pub(crate) struct Buffer<const N: usize>(BytesMut);
+/// A buffer suitable for receiving control messages with `recvmsg(2)`.
+///
+/// The storage is an inline over-aligned array rather than a heap
+/// allocation, so the buffer is *structurally* aligned for a
+/// `libc::cmsghdr` as the `CMSG_*` macros require (see [`iter_control`])
+/// instead of relying on what the global allocator happens to return.
+#[repr(C, align(16))] // Must be suitably aligned for a `libc::cmsghdr`.
+pub struct Buffer<const N: usize>([std::mem::MaybeUninit<u8>; N]);
 
 impl<const N: usize> Buffer<N> {
-    pub(crate) fn new() -> Self {
-        Self(BytesMut::with_capacity(N))
+    /// A new buffer with capacity for `N` bytes of control messages.
+    pub fn new() -> Self {
+        const {
+            assert!(std::mem::align_of::<libc::cmsghdr>() <= 16);
+        }
+        Self([std::mem::MaybeUninit::uninit(); N])
     }
 
-    pub(crate) fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
-        self.0.spare_capacity_mut()
+    /// The spare capacity of the buffer, to be passed to `recvmsg(2)`
+    /// as `msg_control`.
+    ///
+    /// The buffer holds no initialized prefix of its own — the kernel owns
+    /// the whole array on each receive and reports how much of it it
+    /// filled — so this is the entire `N` bytes.
+    pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+        &mut self.0
     }
 
-    pub(crate) fn capacity(&self) -> usize {
-        self.0.capacity()
+    /// Total capacity of the buffer.
+    pub fn capacity(&self) -> usize {
+        N
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.0.clear();
-        self.0.reserve(N);
-    }
+    /// Reset the buffer for reuse in a subsequent `recvmsg(2)` call.
+    ///
+    /// Nothing to do: the initialized region is delimited by the
+    /// `control_len` passed to [`Buffer::iter`] rather than by state held
+    /// here, and [`Buffer::spare_capacity_mut`] always offers the full
+    /// array. Retained so callers need not care which representation backs
+    /// the buffer. Note it does not scrub the previous message's bytes —
+    /// it never did.
+    pub fn reset(&mut self) {}
 
+    /// Iterate over the control messages the kernel wrote.
+    ///
     /// # Safety
     ///
     /// `control_len` must have been set to the number of bytes of the
     /// buffer which have been initialized.
-    pub(crate) unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_, N> {
-        // SAFETY: The outer function here has enforced this requirement already
-        unsafe {
-            // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
-            // apple/musl, so the cast is a no-op on some targets only.
-            #[cfg_attr(linux, allow(clippy::unnecessary_cast))]
-            self.0.set_len(control_len as usize);
-        }
-        // Build a `msghdr` so we can use the `CMSG_*` functionality in
-        // libc. We will only use the `CMSG_*` macros which only use
-        // the `msg_control*` fields.
-        // SAFETY: We're initializing an msghdr struct with zeroed memory, which is safe
-        // as all fields will be explicitly set below before use
-        let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
-        msghdr.msg_name = std::ptr::null_mut();
-        msghdr.msg_namelen = 0;
-        msghdr.msg_iov = std::ptr::null_mut();
-        msghdr.msg_iovlen = 0;
-        msghdr.msg_control = self.0.as_ptr() as *mut _;
-        msghdr.msg_controllen = control_len;
-        msghdr.msg_flags = 0;
-        // SAFETY: We constructed a sufficiently valid `msghdr` above.
-        // `msg_control[..msg_controllen]` are valid initialized bytes
-        // per the safety requirements for calling this method.
-        let cursor = unsafe { libc::CMSG_FIRSTHDR(&msghdr) };
-        Iter {
-            msghdr,
-            cursor,
-            _phantom: std::marker::PhantomData,
-        }
+    pub unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_> {
+        // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
+        // apple/musl, so the cast is a no-op on some targets only.
+        #[allow(clippy::unnecessary_cast)]
+        let control_len = control_len as usize;
+        assert!(
+            control_len <= N,
+            "control_len ({control_len}) exceeds control buffer capacity ({N})"
+        );
+
+        // SAFETY: the caller guarantees the kernel initialized the first
+        // `control_len` bytes, and `MaybeUninit<u8>` has the same layout as
+        // `u8`.
+        let control =
+            unsafe { std::slice::from_raw_parts(self.0.as_ptr() as *const u8, control_len) };
+
+        iter_control(control)
     }
 }
 
+impl<const N: usize> Default for Buffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A control message received from the kernel.
 pub enum Message<'a> {
+    /// An `IP_PKTINFO` message.
     IpPktinfo(&'a libc::in_pktinfo),
+    /// Any other control message.
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
 }
 
 impl Message<'_> {
-    pub(crate) const fn space<T>() -> usize {
+    /// The number of bytes of control buffer space (including padding)
+    /// required to hold a message with a payload of type `T`. See
+    /// `CMSG_SPACE(3)`.
+    pub const fn space<T>() -> usize {
         // SAFETY: CMSG_SPACE is always safe
         unsafe { libc::CMSG_SPACE(std::mem::size_of::<T>() as libc::c_uint) as usize }
     }
 }
 
-pub(crate) struct Iter<'a, const N: usize> {
-    msghdr: libc::msghdr,
-    cursor: *const libc::cmsghdr,
-    // `msghdr` contains a raw pointer into the owning `Buffer` and
-    // `cursor` is within that buffer. Ensure it remains live longer
-    // than this iterator.
-    _phantom: std::marker::PhantomData<&'a Buffer<N>>,
+/// Iterate over the control messages in a raw, fully initialized
+/// control region — the `msg_control` area a `recvmsg`/`recvmmsg`
+/// filled, sliced to the returned `msg_controllen`.
+///
+/// `control` must be aligned for a `libc::cmsghdr` (the `CMSG_*` macros
+/// require it); receive buffers built from [`Buffer`], [`BufferMut`] or
+/// a `#[repr(align(…))]` wrapper satisfy this.
+pub fn iter_control(control: &[u8]) -> Iter<'_> {
+    // Not a `debug_assert!`: `Iter::next` turns the `CMSG_*` pointers into
+    // `&libc::cmsghdr`, and a misaligned reference is UB. Keeping the check
+    // in release turns that into a clean panic, at the cost of one
+    // predictable branch per `recvmsg`.
+    assert!(
+        control.is_empty()
+            || control
+                .as_ptr()
+                .align_offset(std::mem::align_of::<libc::cmsghdr>())
+                == 0,
+        "control buffer must be aligned for cmsghdr"
+    );
+
+    // Build a `msghdr` referencing `control` purely so the `CMSG_*`
+    // macros can walk it — they read only `msg_control`/`msg_controllen`.
+    // SAFETY: a zeroed msghdr is valid; the two fields we use are set
+    // below and the buffer is never written through this pointer.
+    let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+    msghdr.msg_control = control.as_ptr() as *mut _;
+    msghdr.msg_controllen = control.len() as LibcControlLen;
+
+    // SAFETY: `msghdr` is valid and `control` is initialized for its
+    // full length.
+    let cursor = unsafe { libc::CMSG_FIRSTHDR(&msghdr) };
+    Iter {
+        msghdr,
+        cursor,
+        _phantom: std::marker::PhantomData,
+    }
 }
 
-impl<'a, const N: usize> Iterator for Iter<'a, N> {
+/// Iterator over the control messages in a [`Buffer`] or raw control
+/// region (see [`iter_control`]).
+pub struct Iter<'a> {
+    msghdr: libc::msghdr,
+    cursor: *const libc::cmsghdr,
+    // `msghdr` contains a raw pointer into the underlying control
+    // region and `cursor` is within that region. Ensure it remains
+    // live longer than this iterator.
+    _phantom: std::marker::PhantomData<&'a [u8]>,
+}
+
+impl<'a> Iterator for Iter<'a> {
     type Item = Message<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -102,7 +169,7 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
             let item = unsafe { &*self.cursor };
 
             // SAFETY: `msghdr` was constructed as a sufficiently
-            // valid `msghdr` by `Buffer::iter()`. `cursor` is valid
+            // valid `msghdr` by `iter_control()`. `cursor` is valid
             // since it came from a prior `CMSG_FIRSTHDR` or
             // `CMSG_NXTHDR`.
             self.cursor = unsafe { libc::CMSG_NXTHDR(&self.msghdr, self.cursor) };
@@ -118,22 +185,26 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
                 let data = unsafe { libc::CMSG_DATA(item) as *const libc::in_pktinfo };
                 // SAFETY: we constructed `data` above
                 let pi = unsafe { &*data };
-                Some(Message::IpPktinfo(pi))
-            } else {
-                Some(Message::Unknown(item))
+                return Some(Message::IpPktinfo(pi));
             }
+
+            Some(Message::Unknown(item))
         }
     }
 }
 
+/// A buffer for building control messages to pass to `sendmsg(2)`.
 #[repr(C, align(16))] // Must be suitably aligned for a `libc::cmsghdr`.
-pub(crate) struct BufferMut<const N: usize>([u8; N]);
+pub struct BufferMut<const N: usize>([u8; N]);
 
 impl<const N: usize> BufferMut<N> {
-    pub(crate) fn zeroed() -> Self {
+    /// A new zero-initialized buffer.
+    pub fn zeroed() -> Self {
         Self([0; N])
     }
 
+    /// A builder to fill the buffer with control messages.
+    ///
     /// # Safety
     ///
     /// From <https://man7.org/linux/man-pages/man3/cmsg.3.html>:
@@ -145,7 +216,7 @@ impl<const N: usize> BufferMut<N> {
     ///
     /// Note that this is not mentioned in
     /// <https://pubs.opengroup.org/onlinepubs/9699919799.2018edition/basedefs/sys_socket.h.html>.
-    pub(crate) fn builder(&mut self) -> BufferBuilder<'_, N> {
+    pub fn builder(&mut self) -> BufferBuilder<'_, N> {
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.
@@ -173,8 +244,12 @@ impl<const N: usize> BufferMut<N> {
 
     /// Mutable view of the raw buffer, for passing to `msg_control` in
     /// syscalls that need a mutable pointer.
+    ///
+    /// `pub` rather than `pub(crate)`: `lightway-server`'s batched UDP
+    /// send queue needs it, and moving this module out of that crate put
+    /// it across a crate boundary.
     #[cfg(linux)]
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.0
     }
 }
@@ -185,7 +260,8 @@ impl<const N: usize> AsRef<[u8]> for BufferMut<N> {
     }
 }
 
-pub(crate) struct BufferBuilder<'a, const N: usize> {
+/// Sequentially fills a [`BufferMut`] with control messages.
+pub struct BufferBuilder<'a, const N: usize> {
     msghdr: libc::msghdr,
     cmsghdr: *mut libc::cmsghdr,
     // `msghdr` contains a raw pointer into the owning `Buffer` and
@@ -195,7 +271,10 @@ pub(crate) struct BufferBuilder<'a, const N: usize> {
 }
 
 impl<const N: usize> BufferBuilder<'_, N> {
-    pub(crate) fn fill_next<T>(
+    /// Append a control message with the given level, type and payload.
+    ///
+    /// Fails if the buffer has insufficient space remaining.
+    pub fn fill_next<T>(
         &mut self,
         cmsg_level: libc::c_int,
         cmsg_type: libc::c_int,
@@ -289,10 +368,28 @@ impl<const N: usize> BufferBuilder<'_, N> {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 
     use super::*;
-    use more_asserts::*;
+
+    /// Both buffer types are aligned for a `cmsghdr` by construction, so
+    /// the `iter_control` alignment assertion can never fire for them.
+    #[test]
+    fn buffers_are_aligned_for_cmsghdr() {
+        let cmsghdr_align = std::mem::align_of::<libc::cmsghdr>();
+        assert!(std::mem::align_of::<Buffer<64>>() >= cmsghdr_align);
+        assert!(std::mem::align_of::<BufferMut<64>>() >= cmsghdr_align);
+
+        let mut buf = Buffer::<64>::new();
+        assert_eq!(
+            buf.spare_capacity_mut()
+                .as_ptr()
+                .align_offset(cmsghdr_align),
+            0,
+        );
+        assert_eq!(buf.capacity(), 64);
+    }
 
     #[test]
     fn success_single_pktinfo() {
@@ -327,7 +424,7 @@ mod tests {
     #[test]
     fn not_enough_room_for_first_header() {
         let mut cmsg = BufferMut::<4>::zeroed();
-        assert_lt!(cmsg.0.len(), std::mem::size_of::<libc::cmsghdr>());
+        assert!(cmsg.0.len() < std::mem::size_of::<libc::cmsghdr>());
 
         let mut builder = cmsg.builder();
         let err = builder.fill_next(0, 0, 0).unwrap_err();
@@ -370,8 +467,8 @@ mod tests {
         const SIZE: usize =
             std::mem::size_of::<libc::cmsghdr>() + std::mem::size_of::<libc::in_pktinfo>() - 1;
         let mut cmsg = BufferMut::<SIZE>::zeroed();
-        assert_gt!(cmsg.0.len(), std::mem::size_of::<libc::cmsghdr>());
-        assert_lt!(cmsg.0.len(), Message::space::<libc::in_pktinfo>());
+        assert!(cmsg.0.len() > std::mem::size_of::<libc::cmsghdr>());
+        assert!(cmsg.0.len() < Message::space::<libc::in_pktinfo>());
 
         let mut builder = cmsg.builder();
         let err = builder
