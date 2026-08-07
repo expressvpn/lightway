@@ -427,8 +427,8 @@ jobs:
           cp artifacts/lightway-server-aarch64-unknown-linux-gnu/lightway-server release-assets/lightway-server-aarch64-unknown-linux-gnu
           cp artifacts/lightway-client-riscv64gc-unknown-linux-gnu/lightway-client release-assets/lightway-client-riscv64gc-unknown-linux-gnu
           cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu
-          cp artifacts/lightway-client-aarch64-apple-darwin/lightway-client release-assets/lightway-client-aarch64-apple-darwin
-          cp artifacts/lightway-server-aarch64-apple-darwin/lightway-server release-assets/lightway-server-aarch64-apple-darwin
+          cp artifacts/lightway-client-aarch64-darwin/lightway-client release-assets/lightway-client-aarch64-apple-darwin
+          cp artifacts/lightway-server-aarch64-darwin/lightway-server release-assets/lightway-server-aarch64-apple-darwin
           cp artifacts/lightway-client-x86_64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc.exe
           cp artifacts/lightway-client-aarch64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc.exe
           cp artifacts/lightway-android-aar/lightway-release.aar release-assets/lightway-release.aar
