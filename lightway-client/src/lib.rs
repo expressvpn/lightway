@@ -42,7 +42,7 @@ use crate::debug::WiresharkKeyLogger;
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
-use crate::route_manager::{RouteManager, RouteMode};
+use crate::route_manager::{RouteManager, RouteMode, RouteUpdater};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
@@ -215,6 +215,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Enable Expresslane for Udp connections
     pub enable_expresslane: bool,
 
+    /// Connect the outside UDP socket to the server so sends skip the
+    /// per-packet route lookup (Apple platforms, Datagram only). The socket
+    /// is re-connected when the network changes.
+    #[cfg(apple)]
+    pub enable_connected_udp: bool,
+
     /// Interval between Expresslane key rotations
     pub expresslane_keys_rotation_interval: std::time::Duration,
 
@@ -328,6 +334,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "postquantum")]
             keyshare: config.keyshare,
             enable_expresslane: config.enable_expresslane,
+            #[cfg(apple)]
+            enable_connected_udp: config.enable_connected_udp,
             expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
@@ -767,6 +775,84 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
     ClientResult::UserDisconnect
 }
 
+/// Single consumer for network-change wake-ups. Reacts to each one with the
+/// steps in order: refresh the server route, re-`connect()` the outside
+/// socket (Apple platforms) and, when the wake-up represents a network transition,
+/// nudge the connection-level network-change handler. On Apple platforms the
+/// nudge also fires when the server route was actually replaced (Datagram
+/// wiring only). Owns the [`RouteUpdater`], so aborting the task removes the
+/// installed routes.
+#[cfg(desktop)]
+async fn network_event_coordinator(
+    mut route_updater: RouteUpdater,
+    mut route_rx: watch::Receiver<()>,
+    mut transition_rx: Option<watch::Receiver<()>>,
+    nudge_on_route_event: bool,
+    #[cfg(apple)] nudge_on_route_update: bool,
+    #[cfg(apple)] outside_io: Weak<dyn OutsideIO>,
+    network_change_signal: mpsc::Sender<()>,
+) {
+    tracing::info!("Reacting to network change events...");
+    loop {
+        let mut nudge = nudge_on_route_event;
+
+        tokio::select! {
+            changed = route_rx.changed() => {
+                if changed.is_err() {
+                    // Wake source gone; dropping the updater clears routes.
+                    break;
+                }
+                // Fold a transition that fired alongside the route event into
+                // this iteration instead of waking a second time.
+                if let Some(rx) = transition_rx.as_mut()
+                    && rx.has_changed().unwrap_or(false)
+                {
+                    rx.mark_unchanged();
+                    nudge = true;
+                }
+            }
+            changed = async {
+                match transition_rx.as_mut() {
+                    Some(rx) => rx.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    // Transition source gone; keep serving route events.
+                    transition_rx = None;
+                    continue;
+                }
+                nudge = true;
+                // A transition can complete on the address leg alone; consume
+                // any simultaneous route event so the pair is one iteration.
+                if route_rx.has_changed().unwrap_or(false) {
+                    route_rx.mark_unchanged();
+                }
+            }
+        }
+
+        match route_updater.check_and_update_server_route().await {
+            // A replaced server route is ground truth that the path to the
+            // server moved; probe it so the session floats promptly.
+            #[cfg(apple)]
+            Ok(true) if nudge_on_route_update => nudge = true,
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Updating server route failed: {:?}", e),
+        }
+
+        // The connected outside socket pins the route resolved at connect()
+        // time; re-resolve it now that the routing table is up to date.
+        #[cfg(apple)]
+        if let Some(io) = outside_io.upgrade() {
+            io.reconnect();
+        }
+
+        if nudge && let Err(e) = network_change_signal.send(()).await {
+            tracing::error!("Failed to send network_change_signal: {e}");
+        }
+    }
+}
+
 pub async fn handle_encoded_pkt_send<ExtAppState: Send + Sync>(
     conn: Weak<Mutex<lightway_core::Connection<ConnectionState<ExtAppState>>>>,
     rx: Option<UnboundedReceiver<BytesMut>>,
@@ -900,13 +986,24 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         }
     }
 
+    /// Install routes and spawn the network-event coordinator, which reacts
+    /// to `route_rx`/`transition_rx` wake-ups (see
+    /// `network_event_coordinator`). Set `nudge_on_route_event` when
+    /// `route_rx` events are unclassified (an embedder-supplied signal) so
+    /// each one also nudges the connection's network-change handler;
+    /// `nudge_on_route_update` (Apple) nudges when the refresh actually
+    /// replaced the server route.
     #[cfg(desktop)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
-        network_change_rx: Option<watch::Receiver<()>>,
+        route_rx: watch::Receiver<()>,
+        transition_rx: Option<watch::Receiver<()>>,
+        nudge_on_route_event: bool,
+        #[cfg(apple)] nudge_on_route_update: bool,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -921,7 +1018,21 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         );
         let mut route_manager =
             RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
-        route_manager.start(network_change_rx).await?;
+        let route_updater = route_manager.start().await?;
+
+        // A weak ref keeps the coordinator task from extending the outside
+        // socket's lifetime.
+        route_manager.set_task(tokio::spawn(network_event_coordinator(
+            route_updater,
+            route_rx,
+            transition_rx,
+            nudge_on_route_event,
+            #[cfg(apple)]
+            nudge_on_route_update,
+            #[cfg(apple)]
+            Arc::downgrade(&self.outside_io),
+            self.network_change_signal.clone(),
+        )));
 
         self.route_manager = Some(route_manager);
         info!("Routes configured");
@@ -1006,6 +1117,20 @@ pub async fn connect<
 
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+
+                // On Apple platforms a connected UDP socket lets `send` skip
+                // the per-packet route lookup, improving throughput. Safe
+                // because a network change re-connects the socket: via the
+                // network-event coordinator on desktop (see
+                // `initialize_routes`), via the network-change signal
+                // forwarder elsewhere.
+                #[cfg(apple)]
+                if config.enable_connected_udp
+                    && let Err(e) = sock.enable_connected_send()
+                {
+                    tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
+                }
+
                 (ConnectionType::Datagram, Arc::new(sock))
             }
             ClientConnectionMode::Stream(maybe_sock) => {
@@ -1519,10 +1644,22 @@ pub async fn client<
         let _ = conn.stop_signal.take().unwrap().send(());
     }
 
+    // On desktop the network-event coordinator (see `initialize_routes`
+    // below) delivers the embedder signal's nudge after the route and socket
+    // refresh instead, so this forwarder only serves non-desktop builds.
+    #[cfg(not(desktop))]
     if let Some(mut network_change_signal) = config.network_change_signal.clone() {
         let connection_network_change_signal = connection.network_change_signal.clone();
+        #[cfg(apple)]
+        let outside_io = Arc::downgrade(&connection.outside_io);
         tokio::spawn(async move {
             while network_change_signal.changed().await.is_ok() {
+                // Re-pin the connected outside socket first so the keepalive
+                // probe rides the new path.
+                #[cfg(apple)]
+                if let Some(io) = outside_io.upgrade() {
+                    io.reconnect();
+                }
                 if let Err(e) = connection_network_change_signal.send(()).await {
                     tracing::error!("Failed to send network_change_signal: {e}");
                 }
@@ -1560,21 +1697,49 @@ pub async fn client<
     let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
     #[cfg(desktop)]
     {
-        let rx = if let Some(ref rx) = config.network_change_signal {
-            rx.clone()
-        } else {
-            let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
-            let rx = monitor.subscribe();
-            network_change_monitor = Some(monitor);
-            rx
+        // Wake sources for the network-event coordinator. An embedder-supplied
+        // signal is unclassified, so every event serves as both the route hint
+        // and a transition; the internal monitor distinguishes the two.
+        let (route_rx, transition_rx, nudge_on_route_event) = match config.network_change_signal {
+            Some(ref rx) => (rx.clone(), None, true),
+            None => {
+                let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
+                let route_rx = monitor.subscribe_routes();
+
+                // Network transitions drive the connection-level handler
+                // (keepalive burst); macOS only. Gated on keepalives being
+                // enabled, mirroring the embedder-signal validation.
+                #[cfg(macos)]
+                let transition_rx =
+                    (!config.keepalive_interval.is_zero()).then(|| monitor.subscribe_transitions());
+                #[cfg(not(macos))]
+                let transition_rx: Option<watch::Receiver<()>> = None;
+
+                network_change_monitor = Some(monitor);
+                (route_rx, transition_rx, false)
+            }
         };
+
+        // Probe after a server-route replacement - Datagram only: the Stream
+        // handler treats a nudge as a teardown, which a route-only change
+        // does not warrant.
+        #[cfg(apple)]
+        let nudge_on_route_update = !config.keepalive_interval.is_zero()
+            && matches!(
+                connection.conn.lock().unwrap().connection_type(),
+                ConnectionType::Datagram
+            );
 
         connection
             .initialize_routes(
                 config.route_mode,
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
-                Some(rx),
+                route_rx,
+                transition_rx,
+                nudge_on_route_event,
+                #[cfg(apple)]
+                nudge_on_route_update,
             )
             .await?;
     }

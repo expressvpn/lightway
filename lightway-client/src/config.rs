@@ -244,6 +244,18 @@ pub struct Config {
     #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
     pub enable_expresslane: bool,
 
+    #[cfg(apple)]
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
+    Connecting the single-peer outside socket lets sends skip the per-packet
+    route lookup. The socket is re-connected on network changes."#
+    ))]
+    #[schemars(extend("x-cfg" = "apple"))]
+    pub enable_connected_udp: bool,
+
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
     #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
@@ -510,6 +522,8 @@ impl Default for Config {
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
             enable_expresslane: false,
+            #[cfg(apple)]
+            enable_connected_udp: false,
             expresslane_keys_rotation_interval: Duration::from_std_duration(
                 lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
             ),

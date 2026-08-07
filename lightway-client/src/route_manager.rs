@@ -4,7 +4,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{trace, warn};
 
@@ -147,16 +146,23 @@ impl RouteManager {
         Ok(Self { inner, task: None })
     }
 
-    pub async fn start(
-        &mut self,
-        network_change_rx: Option<watch::Receiver<()>>,
-    ) -> Result<(), RoutingTableError> {
-        let Some(inner) = self.inner.take() else {
+    /// Install the routes required to use the tunnel (NoExec installs
+    /// nothing) and hand back the per-event updater. The task that takes
+    /// ownership of the updater should be registered with [`Self::set_task`]
+    /// so [`Self::stop`] can abort it and await route cleanup.
+    pub async fn start(&mut self) -> Result<RouteUpdater, RoutingTableError> {
+        let Some(mut inner) = self.inner.take() else {
             return Err(RoutingTableError::InsufficientPermissions);
         };
 
-        self.task = inner.start(network_change_rx).await?;
-        Ok(())
+        inner.install_routes().await?;
+        Ok(RouteUpdater { inner })
+    }
+
+    /// Register the task owning the [`RouteUpdater`] returned by
+    /// [`Self::start`].
+    pub fn set_task(&mut self, task: JoinHandle<()>) {
+        self.task = Some(task);
     }
 
     pub async fn stop(&mut self) -> Result<(), RoutingTableError> {
@@ -168,6 +174,23 @@ impl RouteManager {
         }
 
         Ok(())
+    }
+}
+
+/// Owns the routes installed by [`RouteManager::start`]; dropping it removes
+/// them. Exposes the per-network-event maintenance step.
+pub struct RouteUpdater {
+    inner: RouteManagerInner,
+}
+
+impl RouteUpdater {
+    /// Refresh the server route if the default route changed (a no-op in
+    /// NoExec mode). Returns whether the server route was actually replaced.
+    pub async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
+        if self.inner.routing_mode == RouteMode::NoExec {
+            return Ok(false);
+        }
+        self.inner.check_and_update_server_route().await
     }
 }
 
@@ -474,42 +497,9 @@ impl RouteManagerInner {
         Ok(())
     }
 
-    /// Install routes required to use tunnel and start monitoring route changes
-    /// to update the routes if needed (mostly during connection floating)
-    async fn start(
-        mut self,
-        network_change_rx: Option<watch::Receiver<()>>,
-    ) -> Result<Option<JoinHandle<()>>, RoutingTableError> {
-        if self.routing_mode == RouteMode::NoExec {
-            return Ok(None);
-        }
-
-        // Install all the required routes
-        self.install_routes().await?;
-
-        let task = tokio::spawn(async move {
-            let mut inner = self;
-            match network_change_rx {
-                Some(mut rx) => {
-                    tracing::info!("Reacting to network changes for route updates...");
-                    while rx.changed().await.is_ok() {
-                        if let Err(e) = inner.check_and_update_server_route().await {
-                            tracing::warn!("Updating server route failed: {:?}", e);
-                        }
-                    }
-                }
-                None => {
-                    // No monitor: keep routes installed until stop()/abort.
-                    std::future::pending::<()>().await;
-                }
-            }
-        });
-
-        Ok(Some(task))
-    }
-
-    /// Check if server route needs updating due to network changes
-    async fn check_and_update_server_route(&mut self) -> Result<(), RoutingTableError> {
+    /// Check if server route needs updating due to network changes. Returns
+    /// whether the server route was actually replaced.
+    async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
         // Find the current default route to the server
         let server_ip = self.server_ip;
         let current_route = self.find_best_default_route(&server_ip)?;
@@ -551,10 +541,11 @@ impl RouteManagerInner {
                 self.add_route_server(new_server_route).await?;
 
                 tracing::info!("Updated server route for network change");
+                return Ok(true);
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -979,7 +970,7 @@ mod tests {
             RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
 
         // Test that we can start the route manager
-        let start_result = route_manager.start(None).await;
+        let start_result = route_manager.start().await;
         if route_mode == RouteMode::NoExec {
             // NoExec mode should succeed but not actually do anything
             assert!(start_result.is_ok());
@@ -995,6 +986,39 @@ mod tests {
         // Test that stopping again is safe
         let stop_again_result = route_manager.stop().await;
         assert!(stop_again_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stop_aborts_task_and_awaits_updater_drop() {
+        struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let mut route_manager = RouteManager::new(
+            RouteMode::NoExec,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        )
+        .unwrap();
+        let updater = route_manager.start().await.unwrap();
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        route_manager.set_task(tokio::spawn(async move {
+            let (_updater, _flag) = (updater, flag);
+            std::future::pending::<()>().await;
+        }));
+
+        route_manager.stop().await.unwrap();
+
+        // stop() must have awaited the aborted task, so the updater (and with
+        // it the installed routes) is gone by the time it returns.
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test_case(RouteMode::Default)]
@@ -1029,14 +1053,13 @@ mod tests {
         .unwrap();
 
         // First start should succeed
-        assert!(route_manager.start(None).await.is_ok());
+        assert!(route_manager.start().await.is_ok());
 
         // Second start should fail since inner is already taken
-        let second_start_result = route_manager.start(None).await;
-        assert!(second_start_result.is_err());
+        let second_start_result = route_manager.start().await;
         assert!(matches!(
-            second_start_result.unwrap_err(),
-            RoutingTableError::InsufficientPermissions
+            second_start_result,
+            Err(RoutingTableError::InsufficientPermissions)
         ));
     }
 
@@ -1058,7 +1081,7 @@ mod tests {
 
         // Test check_and_update_server_route when no change is needed
         let result = inner.check_and_update_server_route().await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(false)));
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
@@ -1072,8 +1095,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_route_manager_start_with_noexec_mode() {
-        // Don't create TUN device for NoExec mode, just test RouteManagerInner directly
-        let inner = RouteManagerInner::new(
+        // Don't create a TUN device for NoExec mode; it needs no privileges
+        let mut route_manager = RouteManager::new(
             RouteMode::NoExec,
             EXTERNAL_IP_V4,
             1,
@@ -1082,10 +1105,10 @@ mod tests {
         )
         .unwrap();
 
-        // NoExec mode should return None (no monitoring task)
-        let monitor_task = inner.start(None).await;
-        assert!(monitor_task.is_ok());
-        assert!(monitor_task.unwrap().is_none());
+        // NoExec installs nothing and the per-event step is a no-op
+        let mut updater = route_manager.start().await.unwrap();
+        assert!(updater.check_and_update_server_route().await.is_ok());
+        assert!(updater.inner.server_route.is_none());
     }
 
     #[tokio::test]
@@ -1181,7 +1204,7 @@ mod tests {
 
         // Test check_and_update_server_route when no change is needed
         let result = inner.check_and_update_server_route().await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(false)));
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
