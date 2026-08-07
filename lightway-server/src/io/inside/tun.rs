@@ -46,6 +46,10 @@ impl AsRawFd for Tun {
 
 #[async_trait]
 impl InsideIORecv for Tun {
+    fn vnet_headroom(&self) -> usize {
+        self.0.vnet_headroom()
+    }
+
     async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self.0.recv_buf(buf).await {
             IOCallbackResult::Ok(n) => {

@@ -655,11 +655,14 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             .unwrap_or(DEFAULT_TRACER_TRIGGER_TIMEOUT)
     };
     let mut tracer_timeout_last_outside_data_rcvd: Option<Instant> = None;
-    let mtu = inside_io.mtu();
-    let mut buf = BytesMut::with_capacity(mtu);
+    // `mtu + vnet_headroom` so a read from a TUN opened with offload is
+    // not truncated by the length of the virtio header the kernel
+    // prepends. Zero extra unless offload is in use.
+    let cap = inside_io.mtu() + inside_io.vnet_headroom();
+    let mut buf = BytesMut::with_capacity(cap);
     loop {
         buf.clear();
-        buf.resize(mtu, 0);
+        buf.resize(cap, 0);
         match inside_io.recv_buf(&mut buf).await {
             IOCallbackResult::Ok(_n) => {}
             IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting

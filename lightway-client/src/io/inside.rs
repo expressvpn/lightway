@@ -23,6 +23,16 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
     /// MTU of the underlying interface.
     fn mtu(&self) -> usize;
 
+    /// Extra capacity a [`Self::recv_buf`] buffer needs beyond [`Self::mtu`].
+    ///
+    /// Non-zero only for a TUN opened with offload, where the kernel
+    /// prepends a `virtio_net_hdr` to every read and silently truncates
+    /// if the buffer has no room for it. Callers size their buffer
+    /// `mtu() + vnet_headroom()`.
+    fn vnet_headroom(&self) -> usize {
+        0
+    }
+
     fn into_io_send_callback(
         self: Arc<Self>,
     ) -> InsideIOSendCallbackArg<ConnectionState<ExtAppState>>;
