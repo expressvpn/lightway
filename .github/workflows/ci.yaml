@@ -275,10 +275,6 @@ jobs:
           - target: aarch64-darwin
             os: macos-26
             build_msrv: false
-          # Cross-compile x86_64 Darwin from Apple Silicon (much faster than Intel Mac)
-          - target: x86_64-darwin
-            os: macos-26
-            build_msrv: false
     steps:
       - uses: actions/checkout@v4.3.1
 
@@ -301,14 +297,14 @@ jobs:
         run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }} --print-build-logs
 
       - name: Upload lightway-client artifact
-        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
+        if: matrix.target == 'aarch64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-client-${{ matrix.target }}
           path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact
-        if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
+        if: matrix.target == 'aarch64-darwin'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
@@ -433,8 +429,6 @@ jobs:
           cp artifacts/lightway-server-riscv64gc-unknown-linux-gnu/lightway-server release-assets/lightway-server-riscv64gc-unknown-linux-gnu
           cp artifacts/lightway-client-aarch64-apple-darwin/lightway-client release-assets/lightway-client-aarch64-apple-darwin
           cp artifacts/lightway-server-aarch64-apple-darwin/lightway-server release-assets/lightway-server-aarch64-apple-darwin
-          cp artifacts/lightway-client-x86_64-apple-darwin/lightway-client release-assets/lightway-client-x86_64-apple-darwin
-          cp artifacts/lightway-server-x86_64-apple-darwin/lightway-server release-assets/lightway-server-x86_64-apple-darwin
           cp artifacts/lightway-client-x86_64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-x86_64-pc-windows-msvc.exe
           cp artifacts/lightway-client-aarch64-pc-windows-msvc/lightway-client.exe release-assets/lightway-client-aarch64-pc-windows-msvc.exe
           cp artifacts/lightway-android-aar/lightway-release.aar release-assets/lightway-release.aar
@@ -456,7 +450,7 @@ jobs:
             ## Artifacts
             This release includes pre-built binaries for:
             - **Linux** (x86_64, aarch64, riscv64): lightway-client and lightway-server
-            - **macOS** (x86_64, aarch64): lightway-client and lightway-server
+            - **macOS** (aarch64): lightway-client and lightway-server
             - **Windows** (x86_64, aarch64): lightway-client only
             - **Android**: AAR library and client JSON schema
           files: release-assets/*
