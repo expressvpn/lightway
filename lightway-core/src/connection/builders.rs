@@ -4,9 +4,6 @@ use bytes::{Bytes, BytesMut};
 use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
-#[cfg(feature = "debug")]
-use crate::tls::Tls13SecretCallbacksArg;
-
 #[cfg(feature = "postquantum")]
 use crate::KeyShare;
 use crate::{
@@ -97,6 +94,14 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
                     .with_dtls_nonblocking(true)
             });
 
+        // wolfSSL logs TLS secrets per session, so apply the context's key
+        // logger (if set) to this session.
+        #[cfg(all(feature = "debug", wolfssl))]
+        let session_config = match ctx.key_logger.clone() {
+            Some(k) => session_config.with_key_logger(k),
+            None => session_config,
+        };
+
         Ok(Self {
             connection_type,
             ctx,
@@ -162,15 +167,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     pub fn with_event_cb(self, event_cb: EventCallbackArg) -> Self {
         Self {
             event_cb: Some(event_cb),
-            ..self
-        }
-    }
-
-    /// Enables TLS1.3 key logging
-    #[cfg(feature = "debug")]
-    pub fn with_key_logger(self, keylog: Tls13SecretCallbacksArg) -> Self {
-        Self {
-            session_config: self.session_config.with_key_logger(keylog),
             ..self
         }
     }

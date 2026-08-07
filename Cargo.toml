@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lightway-core",
+    "lightway-boring",
     "lightway-app-utils",
     "lightway-client",
     "lightway-server",
@@ -48,7 +49,7 @@ educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 ipnet = { version = "2.8.0", features = ["serde"]}
 libc = "0.2.152"
 lightway-app-utils = { path = "./lightway-app-utils" }
-lightway-core = { path = "./lightway-core" }
+lightway-core = { path = "./lightway-core", default-features = false }
 metrics = "0.24.0"
 more-asserts = "0.3.1"
 parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }

@@ -5,6 +5,13 @@ The reason we have a CLA is to be upfront and transparent about what happens whe
 
 As part of any code contribution, we will list the author's name and what was contributed so that the author will get full recognition for their work.
 
+## Which TLS library does Lightway use?
+
+Lightway uses wolfSSL by default, and it remains the main, recommended TLS
+backend. BoringSSL is now also supported as an alternative backend, selected
+at compile time via cargo features (the two are mutually exclusive). See
+[TLS backends](./tls_backends.md) for how to enable each one.
+
 ## Does Lightway client/server applications support IPv6 ?
 
 Lightway apps does not currently provide full IPv6 support on either the client or server.

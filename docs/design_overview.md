@@ -14,6 +14,11 @@ deferring items like "how do I actually send UDP packets?" to the host
 application, which can use the best API for the platform, be it a Windows
 desktop or an iPhone.
 
+TLS/DTLS itself is handled by a compile-time swappable backend: wolfSSL is
+the main backend and the default, with BoringSSL now supported as an
+alternative via the `lightway-boring` crate. See
+[TLS backends](./tls_backends.md) for how to select one.
+
 ## lightway-client
 
 lightway-client is a Linux implementation for a fully working Lightway client with both TCP and UDP support.

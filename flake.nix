@@ -66,6 +66,8 @@
             lightway-server = config.packages."lightway-server-${nativeSuffix}";
             lightway-client-msrv = config.packages."lightway-client-${nativeSuffix}-msrv";
             lightway-server-msrv = config.packages."lightway-server-${nativeSuffix}-msrv";
+            lightway-client-boringssl-beta = config.packages."lightway-client-${nativeSuffix}-boringssl-beta";
+            lightway-server-boringssl-beta = config.packages."lightway-server-${nativeSuffix}-boringssl-beta";
           };
 
           treefmt = {

@@ -125,6 +125,10 @@ pub struct ClientContext<AppState> {
     pub(crate) expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     pub(crate) expresslane_metrics: Option<ExpresslaneMetricsType>,
     pub(crate) expresslane_keys_rotation_interval: std::time::Duration,
+    /// TLS key logger applied to each session created by this context.
+    /// Used by wolfSSL, which logs per session;
+    #[cfg(all(feature = "debug", wolfssl))]
+    pub(crate) key_logger: Option<crate::tls::Tls13SecretCallbacksArg>,
 }
 
 impl<AppState: Send + 'static> ClientContext<AppState> {
@@ -152,6 +156,8 @@ pub struct ClientContextBuilder<AppState> {
     expresslane_cb: Option<ExpresslaneCbType<AppState>>,
     expresslane_metrics: Option<ExpresslaneMetricsType>,
     expresslane_keys_rotation_interval: std::time::Duration,
+    #[cfg(all(feature = "debug", wolfssl))]
+    key_logger: Option<crate::tls::Tls13SecretCallbacksArg>,
 }
 
 impl<AppState> ClientContextBuilder<AppState> {
@@ -184,6 +190,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             expresslane_cb: None,
             expresslane_metrics: None,
             expresslane_keys_rotation_interval: DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            #[cfg(all(feature = "debug", wolfssl))]
+            key_logger: None,
         })
     }
 
@@ -239,6 +247,44 @@ impl<AppState> ClientContextBuilder<AppState> {
         }
     }
 
+    /// Enable post-quantum cryptography by configuring PQC curve groups.
+    ///
+    /// On BoringSSL this adds the PQ groups to the context's supported_groups
+    /// so a per-connection PQ key share can be offered. On wolfSSL it is a
+    /// no-op: PQ groups are configured per session instead.
+    #[cfg(feature = "postquantum")]
+    pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
+        #[cfg(boringssl)]
+        let tls_ctx = self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?;
+        #[cfg(wolfssl)]
+        let tls_ctx = self.tls_ctx;
+        Ok(Self { tls_ctx, ..self })
+    }
+
+    /// Register a TLS key logger on the context.
+    ///
+    /// BoringSSL exposes keylog only at the SSL_CTX level, so the callback is
+    /// set on the context here. wolfSSL logs per session, so the callback is
+    /// stored and applied to each session the context creates. Either way the
+    /// caller registers it once on the context and stays backend agnostic.
+    #[cfg(feature = "debug")]
+    pub fn with_key_logger(self, keylog: crate::tls::Tls13SecretCallbacksArg) -> Self {
+        #[cfg(boringssl)]
+        {
+            Self {
+                tls_ctx: self.tls_ctx.with_key_logger(keylog),
+                ..self
+            }
+        }
+        #[cfg(wolfssl)]
+        {
+            Self {
+                key_logger: Some(keylog),
+                ..self
+            }
+        }
+    }
+
     /// Finalize the builder, creating a [`ClientContext`].
     pub fn build(self) -> ClientContext<AppState> {
         let tls_ctx = self.tls_ctx.build();
@@ -255,6 +301,8 @@ impl<AppState> ClientContextBuilder<AppState> {
             expresslane_cb: self.expresslane_cb,
             expresslane_keys_rotation_interval: self.expresslane_keys_rotation_interval,
             expresslane_metrics: self.expresslane_metrics,
+            #[cfg(all(feature = "debug", wolfssl))]
+            key_logger: self.key_logger,
         }
     }
 }
@@ -371,13 +419,16 @@ const SERVER_CURVE_BASE_GROUPS: &[crate::tls::CurveGroup] = &[
     crate::tls::CurveGroup::EccX25519,
 ];
 
-/// server curves when PQC is enabled, in decreasing order of preference.
 #[cfg(feature = "postquantum")]
 const SERVER_CURVE_PQC_GROUPS: &[crate::tls::CurveGroup] = &[
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P521MLKEM1024,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P521KyberLevel5,
     crate::tls::CurveGroup::X25519MLKEM768,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P256MLKEM512,
+    #[cfg(wolfssl)]
     crate::tls::CurveGroup::P256KyberLevel1,
     crate::tls::CurveGroup::EccSecp256R1,
     crate::tls::CurveGroup::EccX25519,
@@ -396,15 +447,12 @@ impl<AppState> ServerContextBuilder<AppState> {
     ) -> ContextBuilderResult<Self> {
         let protocol = match connection_type {
             ConnectionType::Stream => crate::tls::Method::TlsServerV1_3,
-            // `crate::tls::Method::DtlsServer` supports both DTLS 1.2 and 1.3
-            ConnectionType::Datagram => crate::tls::Method::DtlsServer,
+            ConnectionType::Datagram => crate::tls::Method::DtlsServerV1_3,
         };
 
         let cipher_list = match connection_type {
             ConnectionType::Stream => "TLS13-AES256-GCM-SHA384:TLS13-CHACHA20-POLY1305-SHA256",
-            ConnectionType::Datagram => {
-                "TLS13-CHACHA20-POLY1305-SHA256:ECDHE-RSA-CHACHA20-POLY1305:TLS13-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
-            }
+            ConnectionType::Datagram => "TLS13-CHACHA20-POLY1305-SHA256:TLS13-AES256-GCM-SHA384",
         };
 
         let tls_ctx = crate::tls::ContextBuilder::new(protocol)?
@@ -508,7 +556,7 @@ impl<AppState> ServerContextBuilder<AppState> {
 
     /// Enable Post Quantum Crypto
     #[cfg(feature = "postquantum")]
-    pub fn with_pq_crypto(self) -> ContextBuilderResult<Self> {
+    pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
         Ok(Self {
             tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,
             ..self
