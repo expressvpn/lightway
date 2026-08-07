@@ -104,9 +104,9 @@
 
       # Helper: Build package for a target
       mkPackage =
-        package: toolchain:
+        packages: toolchain:
         toolchain.pkgsCross.callPackage ../. {
-          inherit package;
+          inherit packages;
           rustPlatform = toolchain.rustPlatform;
           isStatic = toolchain.isStatic;
           # Don't pass platformSuffix - rustPlatform adds target triple automatically for cross-compilation
@@ -114,16 +114,21 @@
 
       # Helper: Create both client and server for a target
       mkTargetPackages = targetName: config: toolchain: {
-        "lightway-client-${targetName}" = mkPackage "lightway-client" toolchain;
-        "lightway-server-${targetName}" = mkPackage "lightway-server" toolchain;
+        "lightway-client-${targetName}" = mkPackage [ "lightway-client" ] toolchain;
+        "lightway-server-${targetName}" = mkPackage [ "lightway-server" ] toolchain;
+        # Combined build - compiles the shared dependency graph once
+        "lightway-${targetName}" = mkPackage [
+          "lightway-client"
+          "lightway-server"
+        ] toolchain;
       };
 
       # Helper: Build package with the boringssl backend (mirrors
       # mkBoringSslPackage in native.nix — see the feature notes there).
       mkBoringSslPackage =
-        package: toolchain: features:
+        packages: toolchain: features:
         toolchain.pkgsCross.callPackage ../. {
-          inherit package features;
+          inherit packages features;
           rustPlatform = toolchain.rustPlatform;
           isStatic = toolchain.isStatic;
           noDefaultFeatures = true;
@@ -144,14 +149,14 @@
       # via Earthly (see the root Earthfile), not nix.
       boringSslCrossPackages = lib.optionalAttrs (crossToolchains ? x86_64-darwin) {
         "lightway-client-x86_64-darwin-boringssl-beta" =
-          mkBoringSslPackage "lightway-client" crossToolchains.x86_64-darwin
+          mkBoringSslPackage [ "lightway-client" ] crossToolchains.x86_64-darwin
             [
               "boringssl"
               "postquantum"
             ];
-        "lightway-server-x86_64-darwin-boringssl-beta" =
-          mkBoringSslPackage "lightway-server" crossToolchains.x86_64-darwin
-            [ "boringssl" ];
+        "lightway-server-x86_64-darwin-boringssl-beta" = mkBoringSslPackage [
+          "lightway-server"
+        ] crossToolchains.x86_64-darwin [ "boringssl" ];
       };
 
       # Native musl configuration for devShell (if on native arch)

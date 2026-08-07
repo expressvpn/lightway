@@ -399,11 +399,11 @@ jobs:
 
       - name: Build lightway server and client on MSRV version
         if: matrix.build_msrv
-        run: nix build -j 2 --cores 2 .#lightway-client-${{ matrix.target }}-msrv .#lightway-server-${{ matrix.target }}-msrv --print-build-logs
+        run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }}-msrv --print-build-logs
 
       - name: Build lightway server and client
         if: ${{ !matrix.build_msrv }}
-        run: nix build -j 2 --cores 2 .#lightway-client-${{ matrix.target }} .#lightway-server-${{ matrix.target }} --print-build-logs
+        run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }} --print-build-logs
 
       - name: Upload lightway-client artifact (WolfSSL)
         if: matrix.target == 'aarch64-darwin' || matrix.target == 'x86_64-darwin'
@@ -431,7 +431,7 @@ jobs:
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
-          path: result-1/bin/lightway-server
+          path: result/bin/lightway-server
 
   nix-tests:
     name: Nix tests (${{ matrix.os }})

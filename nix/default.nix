@@ -5,19 +5,23 @@
   autoconf,
   automake,
   libtool,
-  buildPackages,
   cmake,
   git,
   perl,
-  package ? "lightway-client",
+  buildPackages,
+  packages ? [ "lightway-client" ],
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
+  # Per-package feature overrides: { "lightway-client" = ["boringssl" "postquantum"]; }.
+  # A package listed here uses its own feature list instead of `features`.
+  perPackageFeatures ? { },
   noDefaultFeatures ? false,
   isStatic ? false,
   platformSuffix ? null,
 }:
 
 let
-  cargoToml = builtins.fromTOML (builtins.readFile ../${package}/Cargo.toml);
+  singlePackage = builtins.length packages == 1;
+  cargoToml = builtins.fromTOML (builtins.readFile ../${builtins.head packages}/Cargo.toml);
 
   # Package-specific metadata
   packageMeta = {
@@ -32,11 +36,8 @@ let
   };
 
   # Construct package name with optional platform suffix
-  packageName =
-    if platformSuffix != null then
-      "${cargoToml.package.name}-${platformSuffix}"
-    else
-      cargoToml.package.name;
+  baseName = if singlePackage then cargoToml.package.name else "lightway";
+  packageName = if platformSuffix != null then "${baseName}-${platformSuffix}" else baseName;
 in
 rustPlatform.buildRustPackage {
   pname = packageName;
@@ -54,15 +55,21 @@ rustPlatform.buildRustPackage {
     };
   };
 
-  # The boring submodule declares its own workspace including hyper-boring and
-  # tokio-boring crates we don't depend on. cargo-auditable runs `cargo metadata`
-  # eagerly across the whole discovered workspace and fails on those crates'
-  # missing transitive deps. cargo build itself is fine.
-  auditable = false;
-
-  buildFeatures = features;
-  buildNoDefaultFeatures = noDefaultFeatures;
-  cargoBuildFlags = "-p ${package}";
+  # Features use the pkg/feature form: plain --features only applies to the
+  # first -p package when several are selected. perPackageFeatures overrides
+  # the uniform features list for specific packages.
+  cargoBuildFlags = lib.concatStringsSep " " (
+    map (p: "-p ${p}") packages
+    ++ lib.optional noDefaultFeatures "--no-default-features"
+    ++ (
+      let
+        featureFlags = lib.concatMap (
+          p: map (f: "${p}/${f}") (perPackageFeatures.${p} or features)
+        ) packages;
+      in
+      lib.optional (featureFlags != [ ]) ("--features " + lib.concatStringsSep "," featureFlags)
+    )
+  );
 
   nativeBuildInputs = [
     autoconf
@@ -137,8 +144,14 @@ rustPlatform.buildRustPackage {
     with stdenv.hostPlatform;
     lib.optionalString (isAarch && isLinux) "-march=${gcc.arch}+crypto";
 
-  meta = {
-    inherit (packageMeta.${package}) description mainProgram;
-    platforms = lib.platforms.unix;
-  };
+  meta =
+    (
+      if singlePackage then
+        { inherit (packageMeta.${builtins.head packages}) description mainProgram; }
+      else
+        { description = "Lightway VPN client and server"; }
+    )
+    // {
+      platforms = lib.platforms.unix;
+    };
 }
