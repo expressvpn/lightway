@@ -5,6 +5,8 @@ pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
+#[cfg(linux)]
+pub mod policy_routing;
 #[cfg(desktop)]
 pub mod route_manager;
 
@@ -204,9 +206,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
-    /// Firewall mark applied to the outside socket (Linux only).
+    /// Fwmark policy-routing parameters. Only effective under [`RouteMode::Fwmark`].
     #[cfg(linux)]
-    pub fwmark: u32,
+    pub fwmark_config: policy_routing::FWMarkConfig,
 
     /// DNS configuration mode
     #[cfg(desktop)]
@@ -343,7 +345,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(desktop)]
             route_mode: config.route_mode,
             #[cfg(linux)]
-            fwmark: config.fwmark,
+            fwmark_config: config.fwmark_config(),
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -886,6 +888,8 @@ pub struct ClientConnection<T: Send + Sync> {
     encoding_request_signal: mpsc::Sender<bool>,
     #[cfg(desktop)]
     route_manager: Option<RouteManager>,
+    #[cfg(linux)]
+    policy_routing: Option<policy_routing::PolicyRouting>,
     #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
@@ -907,6 +911,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
         network_change_rx: Option<watch::Receiver<()>>,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -919,8 +924,29 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             tun_peer_ip,
             tun_dns_ip
         );
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        // Under Fwmark mode the policy rules must exist *before* any tunnel
+        // route is installed. Installing the tunnel table first would leave a
+        // window where traffic can reach the tunnel table with no fwmark rule to
+        // keep the tunnel's own packets out of it.
+        #[cfg(linux)]
+        if route_mode == RouteMode::Fwmark {
+            let mut pr = policy_routing::PolicyRouting::new(fwmark_config, server_ip)?;
+            if let Err(e) = pr.install().await {
+                pr.cleanup().await;
+                return Err(e);
+            }
+            self.policy_routing = Some(pr);
+        }
+
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_config.table,
+        )?;
         route_manager.start(network_change_rx).await?;
 
         self.route_manager = Some(route_manager);
@@ -993,7 +1019,7 @@ pub async fn connect<
                     server,
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
+                    config.fwmark_config.fwmark,
                 )
                 .await
                 .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
@@ -1013,7 +1039,7 @@ pub async fn connect<
                     server,
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
+                    config.fwmark_config.fwmark,
                 )
                 .await
                 .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
@@ -1243,6 +1269,8 @@ pub async fn connect<
         encoding_request_signal: encoding_request_tx,
         #[cfg(desktop)]
         route_manager: None,
+        #[cfg(linux)]
+        policy_routing: None,
         #[cfg(desktop)]
         dns_manager: None,
     })
@@ -1575,6 +1603,8 @@ pub async fn client<
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
                 Some(rx),
+                #[cfg(linux)]
+                config.fwmark_config,
             )
             .await?;
     }
@@ -1587,6 +1617,12 @@ pub async fn client<
     #[cfg(desktop)]
     if let Some(mut route_manager) = connection.route_manager {
         let _ = route_manager.stop().await;
+    }
+
+    // Rules come down after the routes they steer traffic to.
+    #[cfg(linux)]
+    if let Some(mut pr) = connection.policy_routing {
+        pr.cleanup().await;
     }
 
     // Dropping the monitor aborts its background task.

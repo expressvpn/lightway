@@ -57,6 +57,7 @@ pnet = { version = "0.35.0", default-features = false}
 rand = "0.10.0"
 regex = "1"
 route_manager = { version = "0.2.6", features = ["async"] }
+rtnetlink = "0.20"  # use netlink-packet-route 0.28 which as the same as route_manager using.
 schemars = "1.2.1"
 serde = "1.0.189"
 serde-env = "0.3"
