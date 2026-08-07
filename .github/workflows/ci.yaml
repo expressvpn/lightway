@@ -312,7 +312,7 @@ jobs:
         uses: actions/upload-artifact@v4.6.2
         with:
           name: lightway-server-${{ matrix.target }}
-          path: result/bin/lightway-server
+          path: result-1/bin/lightway-server
 
   nix-tests:
     name: Nix tests (${{ matrix.os }})
