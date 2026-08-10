@@ -1185,7 +1185,7 @@ pub async fn connect<
         None => (None, None, None),
     };
 
-    let conn_builder = ClientContextBuilder::new(
+    let ctx_builder = ClientContextBuilder::new(
         connection_type,
         RootCertificate::PemBuffer(cert_content.as_bytes()),
         None,
@@ -1203,30 +1203,41 @@ pub async fn connect<
     })
     .when(config.expresslane_metrics.is_some(), |b| {
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
-    })
-    .build()
-    .start_connect(
-        outside_io.clone().into_io_send_callback(),
-        config.outside_mtu,
-    )?
-    .with_auth(auth)
-    .with_event_cb(Box::new(event_cb))
-    .with_inside_pkt_codec(inside_io_codec)
-    .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
-    .when_some(server_dn, |b, sdn| {
-        b.with_server_domain_name_validation(&sdn)
-    })
-    .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
-        b.with_pmtud_timer(pmtud_timer)
     });
+
+    // Ensures any per-connection PQ key share is also offered in the context's
+    // supported_groups. The backend difference lives in enable_pq_crypto: it
+    // registers the groups on the SSL_CTX for BoringSSL and is a no-op on
+    // wolfSSL, which configures PQ groups per session.
+    #[cfg(feature = "postquantum")]
+    let ctx_builder = ctx_builder.enable_pq_crypto()?;
+
+    // Register the TLS key logger once on the context; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let ctx_builder = ctx_builder.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
+    let conn_builder = ctx_builder
+        .build()
+        .start_connect(
+            outside_io.clone().into_io_send_callback(),
+            config.outside_mtu,
+        )?
+        .with_auth(auth)
+        .with_event_cb(Box::new(event_cb))
+        .with_inside_pkt_codec(inside_io_codec)
+        .when_some(config.pmtud_base_mtu, |b, mtu| b.with_pmtud_base_mtu(mtu))
+        .when_some(server_dn, |b, sdn| {
+            b.with_server_domain_name_validation(&sdn)
+        })
+        .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
+            b.with_pmtud_timer(pmtud_timer)
+        });
 
     #[cfg(feature = "postquantum")]
     let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
-
-    #[cfg(feature = "debug")]
-    let conn_builder = conn_builder.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
-    });
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 

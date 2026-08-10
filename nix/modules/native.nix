@@ -20,13 +20,29 @@
         rustc = rustMsrv.minimal;
       };
 
-      # Helper: Build package
+      # Helper: Build package with the default (wolfssl) backend
       mkPackage =
         package: pkgs: rustPlatform:
         pkgs.callPackage ../. {
           inherit package rustPlatform;
           isStatic = false;
           platformSuffix = nativeSuffix;
+        };
+
+      # Helper: Build package with the boringssl backend. Drops default
+      # features (which include wolfssl) and lets the caller pass the
+      # exact feature set — lightway-client opts into `postquantum`
+      # explicitly, while lightway-server has no `postquantum` feature
+      # (it pins lightway-core's postquantum on via its own Cargo.toml).
+      # boring-sys handles BoringSSL's CMake build via the cmake/perl
+      # nativeBuildInputs declared in nix/default.nix.
+      mkBoringSslPackage =
+        package: pkgs: rustPlatform: features:
+        pkgs.callPackage ../. {
+          inherit package rustPlatform features;
+          isStatic = false;
+          platformSuffix = "${nativeSuffix}-boringssl-beta";
+          noDefaultFeatures = true;
         };
 
       # Platform-specific package suffix for native builds
@@ -48,9 +64,20 @@
         "lightway-client-${nativeSuffix}" = mkPackage "lightway-client" pkgs rustPlatformStable;
         "lightway-server-${nativeSuffix}" = mkPackage "lightway-server" pkgs rustPlatformStable;
 
-        # MSRV builds
+        # MSRV builds (wolfssl backend)
         "lightway-client-${nativeSuffix}-msrv" = mkPackage "lightway-client" pkgs rustPlatformMsrv;
         "lightway-server-${nativeSuffix}-msrv" = mkPackage "lightway-server" pkgs rustPlatformMsrv;
+
+        # BoringSSL backend builds
+        "lightway-client-${nativeSuffix}-boringssl-beta" =
+          mkBoringSslPackage "lightway-client" pkgs rustPlatformStable
+            [
+              "boringssl"
+              "postquantum"
+            ];
+        "lightway-server-${nativeSuffix}-boringssl-beta" =
+          mkBoringSslPackage "lightway-server" pkgs rustPlatformStable
+            [ "boringssl" ];
       };
     in
     {

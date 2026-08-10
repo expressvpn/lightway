@@ -118,6 +118,17 @@
         "lightway-server-${targetName}" = mkPackage "lightway-server" toolchain;
       };
 
+      # Helper: Build package with the boringssl backend (mirrors
+      # mkBoringSslPackage in native.nix — see the feature notes there).
+      mkBoringSslPackage =
+        package: toolchain: features:
+        toolchain.pkgsCross.callPackage ../. {
+          inherit package features;
+          rustPlatform = toolchain.rustPlatform;
+          isStatic = toolchain.isStatic;
+          noDefaultFeatures = true;
+        };
+
       # All cross-compilation toolchains
       crossToolchains = lib.mapAttrs mkCrossToolchain crossTargets;
 
@@ -127,6 +138,21 @@
           name: toolchain: mkTargetPackages name crossTargets.${name} toolchain
         ) crossToolchains
       );
+
+      # BoringSSL variants for the x86_64-darwin cross target, for parity with
+      # the native boringssl packages in native.nix. Other cross targets ship
+      # via Earthly (see the root Earthfile), not nix.
+      boringSslCrossPackages = lib.optionalAttrs (crossToolchains ? x86_64-darwin) {
+        "lightway-client-x86_64-darwin-boringssl-beta" =
+          mkBoringSslPackage "lightway-client" crossToolchains.x86_64-darwin
+            [
+              "boringssl"
+              "postquantum"
+            ];
+        "lightway-server-x86_64-darwin-boringssl-beta" =
+          mkBoringSslPackage "lightway-server" crossToolchains.x86_64-darwin
+            [ "boringssl" ];
+      };
 
       # Native musl configuration for devShell (if on native arch)
       nativeMuslConfig =
@@ -146,7 +172,7 @@
           null;
     in
     {
-      packages = crossPackages;
+      packages = crossPackages // boringSslCrossPackages;
 
       devShells = lib.optionalAttrs (nativeMuslToolchain != null) {
         musl = nativeMuslToolchain.pkgsCross.callPackage ../shell.nix {

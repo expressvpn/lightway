@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::{Buf, BytesMut};
 use delegate::delegate;
 use more_asserts::*;
+use std::fmt;
 
 use crate::tls::IOCallbackResult;
 
@@ -200,6 +201,13 @@ pub(crate) struct TlsIOAdapter {
 
     /// Plugins to act while egressing outside packet
     pub(crate) outside_plugins: Arc<PluginList>,
+}
+
+/// To satisfy BoringSSL SSL_stream debug trait
+impl fmt::Debug for TlsIOAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsIOAdapter").finish_non_exhaustive()
+    }
 }
 
 impl TlsIOAdapter {

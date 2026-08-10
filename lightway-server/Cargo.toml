@@ -9,7 +9,9 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = []
+default = ["wolfssl"]
+boringssl = ["lightway-app-utils/boringssl"]
+wolfssl = ["lightway-app-utils/wolfssl"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
 
@@ -28,7 +30,7 @@ ipnet.workspace = true
 jsonwebtoken = { version = "10.0.0", features = ["aws_lc_rs"] }
 libc.workspace = true
 lightway-app-utils.workspace = true
-lightway-core = { workspace = true, features = ["postquantum"] }
+lightway-core = { workspace = true, default-features = false, features = ["postquantum"] }
 metrics.workspace = true
 metrics-util = "0.18.0"
 parking_lot = { version = "0.12.3", features = ["deadlock_detection"] }

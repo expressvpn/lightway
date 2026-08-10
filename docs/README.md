@@ -15,6 +15,7 @@
 * [Plugin architecture](plugins.md)
 * [Logging and Metrics](./logs_and_metrics.md)
 * [Supported TLS/DTLS versions](./tls_versions.md)
+* [TLS backends (wolfSSL / BoringSSL)](./tls_backends.md)
 * [Inside Packet Codec](./inside_packet_codec.md)
 * [Expresslane](./expresslane.md)
 * [FAQ](./faq.md)
