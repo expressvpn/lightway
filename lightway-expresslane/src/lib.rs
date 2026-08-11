@@ -14,6 +14,7 @@ mod session;
 mod version;
 
 pub use aead::ExpresslaneAead;
+pub use aead::pool::{PooledAead, PooledCipher};
 #[cfg(feature = "wolfssl-backend")]
 pub use aead::wolfssl::WolfsslAead;
 pub use error::{ExpresslaneError, ExpresslaneResult};

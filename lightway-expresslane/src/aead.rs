@@ -4,6 +4,7 @@ use bytes::BytesMut;
 
 use crate::{ExpresslaneKey, ExpresslaneResult};
 
+pub mod pool;
 #[cfg(feature = "wolfssl-backend")]
 pub mod wolfssl;
 
