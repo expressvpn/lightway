@@ -139,6 +139,7 @@ mod tests {
             ]
         );
 
+        // Note: BoringSSL backend expose no APIs for restricting cipher list in TLS1.3.
         #[cfg(boringssl)]
         assert_eq!(
             suites,
