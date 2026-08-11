@@ -632,7 +632,8 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             .iter_mut()
             .take(count)
             .map(|b| OutsidePacket::Wire(b, connection_type));
-        conn.lock()
+        let frames_decoded = conn
+            .lock()
             .unwrap()
             .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
 
@@ -641,7 +642,9 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             b.reserve(mtu);
         }
 
-        keepalive.outside_activity().await
+        if frames_decoded > 0 {
+            keepalive.outside_activity().await
+        }
     }
 }
 
