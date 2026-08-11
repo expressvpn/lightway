@@ -3,6 +3,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use lightway_app_utils::sockopt;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
+#[cfg(any(ios, tvos, all(test, apple)))]
+use std::sync::OnceLock;
 #[cfg(apple)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +32,15 @@ pub struct Udp {
     /// [`OutsideIO::reconnect`] on the next network-change event.
     #[cfg(apple)]
     connected: AtomicBool,
+    /// Callback registered via [`Udp::on_dead_socket`], fired when the
+    /// connected socket turns out to be permanently dead. iOS/tvOS only
+    /// (compiled into Apple test builds so the unit tests can run on macOS).
+    #[cfg(any(ios, tvos, all(test, apple)))]
+    dead_socket_cb: OnceLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Latch ensuring the dead-socket callback fires at most once per socket
+    /// instance.
+    #[cfg(any(ios, tvos, all(test, apple)))]
+    dead: AtomicBool,
     /// Consecutive swallowed send errors, reset by a successful send; see
     /// [`Udp::note_swallowed_send`].
     swallowed_sends: AtomicU64,
@@ -84,6 +95,10 @@ impl Udp {
             connect_requested: false,
             #[cfg(apple)]
             connected: AtomicBool::new(false),
+            #[cfg(any(ios, tvos, all(test, apple)))]
+            dead_socket_cb: OnceLock::new(),
+            #[cfg(any(ios, tvos, all(test, apple)))]
+            dead: AtomicBool::new(false),
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
@@ -117,6 +132,24 @@ impl Udp {
             local_addr_str(&self.sock)
         );
         Ok(())
+    }
+
+    /// Register a callback fired when the connected socket turns out to be
+    /// permanently dead: on iOS an interface change can defunct the
+    /// `connect()`-ed flow, after which every send on this fd fails with
+    /// `EPIPE` forever. Registering a callback is what opts this socket into
+    /// swallowing those sends — without one they stay on the fatal path,
+    /// which is the enforcement that a recovery handler exists.
+    ///
+    /// The callback runs inside the send callback, under the connection
+    /// lock: it must be non-blocking and must not re-enter the connection.
+    /// It is invoked at most once per socket instance and is expected to
+    /// arrange, elsewhere, for this socket to be replaced.
+    #[cfg(any(ios, tvos, all(test, apple)))]
+    pub fn on_dead_socket(&self, cb: Arc<dyn Fn() + Send + Sync>) -> std::io::Result<()> {
+        self.dead_socket_cb
+            .set(cb)
+            .map_err(|_e| std::io::Error::other("Dead socket callback has been set already"))
     }
 
     /// Drop back to unconnected sends on the same fd.
@@ -416,6 +449,28 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
+            #[cfg(any(ios, tvos, all(test, apple)))]
+            Err(err)
+                if self.connect_requested
+                    && matches!(err.kind(), std::io::ErrorKind::BrokenPipe)
+                    && self.dead_socket_cb.get().is_some() =>
+            {
+                // iOS defuncts the connected flow on an interface change
+                // (e.g. cellular -> WiFi), after which every send on this fd
+                // fails with EPIPE: the fd is unrecoverable, and `send_to`
+                // fails identically so downgrading would not help. Fire the
+                // registered callback (once) to request a replacement socket
+                // and swallow the error — DTLS retransmission covers the
+                // packet and the keepalive timeout remains the liveness
+                // backstop.
+                if !self.dead.swap(true, Ordering::Relaxed)
+                    && let Some(cb) = self.dead_socket_cb.get()
+                {
+                    cb();
+                }
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
             Err(err) => {
                 tracing::warn!("Outside IO Send failed: {err:?}");
                 IOCallbackResult::Err(err)
@@ -558,6 +613,78 @@ mod tests {
         ));
         let (msg, _) = recv_str(&peer).await;
         assert_eq!(msg, "plain");
+    }
+
+    /// `shutdown(SHUT_WR)` on a connected UDP socket makes Darwin fail every
+    /// subsequent `send` with EPIPE — the same permanent failure signature as
+    /// a defunct flow after an interface change.
+    fn shutdown_write(sock: &UdpSocket) {
+        socket2::SockRef::from(sock)
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown(SHUT_WR) failed");
+    }
+
+    #[tokio::test]
+    async fn dead_socket_hook_swallows_epipe_and_fires_once() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+
+        let mut udp = Udp::new(peer_addr, None).await.unwrap();
+        udp.enable_connected_send().unwrap();
+
+        let fired = Arc::new(AtomicU64::new(0));
+        let fired_by_cb = fired.clone();
+        udp.on_dead_socket(Arc::new(move || {
+            fired_by_cb.fetch_add(1, Ordering::Relaxed);
+        }))
+        .expect("first registration must succeed");
+
+        shutdown_write(&udp.sock);
+
+        // Every failing send must be swallowed (fake success, DTLS
+        // retransmission covers the packets), and the callback must fire
+        // exactly once no matter how many sends fail.
+        for _ in 0..3 {
+            assert!(matches!(
+                OutsideIOSendCallback::send(&udp, b"data"),
+                IOCallbackResult::Ok(4)
+            ));
+        }
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn dead_socket_hook_registration_is_once_only() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+
+        let udp = Udp::new(peer_addr, None).await.unwrap();
+        assert!(udp.on_dead_socket(Arc::new(|| {})).is_ok());
+        assert!(udp.on_dead_socket(Arc::new(|| {})).is_err());
+    }
+
+    #[tokio::test]
+    async fn epipe_without_dead_socket_hook_stays_fatal() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+
+        let mut udp = Udp::new(peer_addr, None).await.unwrap();
+        udp.enable_connected_send().unwrap();
+
+        shutdown_write(&udp.sock);
+
+        // Without a registered recovery handler there is nothing to replace
+        // the dead socket: swallowing would turn a hard failure into a silent
+        // black hole, so the error must stay on the fatal path.
+        match OutsideIOSendCallback::send(&udp, b"data") {
+            IOCallbackResult::Err(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe)
+            }
+            IOCallbackResult::Ok(_) => panic!("expected Err(BrokenPipe), got Ok"),
+            IOCallbackResult::WouldBlock => {
+                panic!("expected Err(BrokenPipe), got WouldBlock")
+            }
+        }
     }
 
     #[tokio::test]
