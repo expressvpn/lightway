@@ -259,7 +259,22 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Must not be enabled on a host that forwards tunnel traffic; see
     /// `io::inside::raw_gro` for why a forwarded coalesced packet
     /// blackholes its flow.
+    ///
+    /// Coalescing needs several segments in one decrypt batch to have
+    /// anything to merge, which in practice means pairing this with
+    /// [`Self::enable_udp_gro`]. The two are separate flags so each can
+    /// be measured on its own.
     pub enable_tun_tcp_coalescing: bool,
+
+    /// Enable `UDP_GRO` on the outside socket: the kernel returns a
+    /// train of same-flow datagrams per `recvmsg` instead of one, and
+    /// reports the segment size in a control message.
+    ///
+    /// Worth having on its own (fewer receive syscalls) and it is what
+    /// supplies [`Self::enable_tun_tcp_coalescing`] with multi-segment
+    /// runs. Implied by [`Self::enable_tun_offload`], which cannot work
+    /// without it. Only effective on Linux and Android.
+    pub enable_udp_gro: bool,
 
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
@@ -378,6 +393,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             pmtud_base_mtu: config.pmtud_base_mtu,
             enable_tun_offload: config.enable_tun_offload,
             enable_tun_tcp_coalescing: config.enable_tun_tcp_coalescing,
+            enable_udp_gro: config.enable_udp_gro,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -1313,16 +1329,14 @@ pub async fn connect<
                 // only flip the sockopt when the GRO outside loop
                 // below will consume it.
                 //
-                // Both coalescing paths need it, for the same reason:
                 // `UDP_GRO` is what makes one `recvmsg` return a *train*
                 // of datagrams, which is what puts several same-flow
-                // segments inside one decrypt batch. Without it the
-                // receive loop outruns the wire, every batch holds a
-                // single datagram, and every coalescing run is one
-                // segment long — the window plumbing works but there is
-                // nothing to merge.
+                // segments inside one decrypt batch. It is worth having
+                // on its own (fewer receive syscalls), so it has its own
+                // flag; `enable_tun_offload` implies it because the GSO
+                // path cannot work without it.
                 #[cfg(linux)]
-                if config.enable_tun_offload || config.enable_tun_tcp_coalescing {
+                if config.enable_tun_offload || config.enable_udp_gro {
                     sock.enable_gro();
                 }
 
@@ -1872,6 +1886,17 @@ pub async fn client<
                  coalesced packets that this host *forwards* instead of delivering locally \
                  will be dropped with ICMP frag-needed and those flows will blackhole. \
                  Only enable this on a host that does not forward tunnel traffic."
+            );
+        }
+        // Legal, but it will look like the feature is broken: with one
+        // datagram per decrypt batch every run holds a single segment,
+        // so nothing ever merges. Say so rather than let it be measured
+        // as "coalescing does nothing".
+        if !config.enable_udp_gro {
+            tracing::warn!(
+                "enable_tun_tcp_coalescing is set without enable_udp_gro: each recvmsg \
+                 returns a single datagram, so every coalescing run holds one segment \
+                 and no merging happens. Enable enable_udp_gro as well."
             );
         }
         set_tun_tcp_coalescing_allowed(true);
