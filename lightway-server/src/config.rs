@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
 };
@@ -178,6 +179,18 @@ pub struct Config {
     #[patch(attribute(doc = r#"Disable IP pool randomization
     Should be used for debugging only"#))]
     pub randomize_ippool: bool,
+
+    #[patch(attribute(clap(short, long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = r#"Accept unknown inputs with error message without quiting"#))]
+    pub accept_unknowns: bool,
+
+    /// The unknown options from config file
+    #[patch(attribute(clap(skip)))]
+    #[patch(attribute(serde(flatten)))]
+    #[patch(skip_wrap, apply_by(std::collections::HashMap::extend))]
+    pub unknowns: HashMap<String, serde_json::Value>,
 }
 
 impl Default for Config {
@@ -231,6 +244,8 @@ impl Default for Config {
             tls_debug: false,
             #[cfg(feature = "debug")]
             randomize_ippool: true,
+            accept_unknowns: false,
+            unknowns: HashMap::new(),
         }
     }
 }
@@ -238,6 +253,15 @@ impl Default for Config {
 impl Config {
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.unknowns.is_empty() {
+            let fields: Vec<&str> = self.unknowns.keys().map(String::as_str).collect();
+            if self.accept_unknowns {
+                tracing::warn!(fields = ?fields, "unknown config fields will be ignored");
+            } else {
+                anyhow::bail!("unknown config fields: {:?}", fields);
+            }
+        }
+
         if self.enable_expresslane {
             anyhow::ensure!(self.mode.is_udp(), "Expresslane only work in udp mode")
         }
@@ -301,5 +325,26 @@ mod tests {
         let mut config = Config::default();
         config.enable_batch_send = true;
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_unknown_fields_cause_error() {
+        let yaml = "unknown_field: true\n";
+        let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
+        let mut config = Config::default();
+        config.apply(patch);
+        assert!(config.validate().is_err());
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn config_unknown_fields_with_accept_flag_only_warns() {
+        let yaml = "unknown_field: true\n";
+        let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
+        let mut config = Config::default();
+        config.accept_unknowns = true;
+        config.apply(patch);
+        assert!(config.validate().is_ok());
+        assert!(logs_contain("unknown config fields will be ignored"));
     }
 }
