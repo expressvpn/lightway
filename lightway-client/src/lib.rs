@@ -331,7 +331,25 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Must not be enabled on a host that forwards tunnel traffic; see
     /// `io::inside::raw_gro` for why a forwarded coalesced packet
     /// blackholes its flow.
+    ///
+    /// Coalescing needs several segments in one decrypt batch to have
+    /// anything to merge, which in practice means pairing this with
+    /// [`Self::enable_udp_gro`] (or at least `enable_batch_receive`).
+    /// They are separate flags so each can be measured on its own.
     pub enable_tun_tcp_coalescing: bool,
+
+    /// Enable `UDP_GRO` on the outside socket: the kernel returns a
+    /// train of same-flow datagrams per `recvmsg` instead of one, and
+    /// reports the segment size in a control message.
+    ///
+    /// Worth having on its own (fewer receive syscalls) and it is what
+    /// supplies [`Self::enable_tun_tcp_coalescing`] with multi-segment
+    /// runs. Implied by [`Self::enable_tun_offload`], which cannot work
+    /// without it. Only effective in `client()` on Linux. Android
+    /// embedders wire it themselves (`Udp::enable_gro` on the outside
+    /// socket, then `outside_io_task_gro`); this crate's `mobile`
+    /// module does not do so yet.
+    pub enable_udp_gro: bool,
 
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
@@ -462,6 +480,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             sni_header: config.sni_header.clone(),
             enable_tun_offload: config.enable_tun_offload,
             enable_tun_tcp_coalescing: config.enable_tun_tcp_coalescing,
+            enable_udp_gro: config.enable_udp_gro,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -849,8 +868,10 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
     }
 }
 
-/// Outside traffic handler when TUN offload is enabled on a UDP
-/// connection. Two independent receive optimizations run here:
+/// Outside traffic handler for a UDP connection whose socket was put
+/// on the GRO receive path (`enable_tun_offload` or `enable_udp_gro`).
+/// Receives always use `recvmmsg`, whatever `enable_batch_receive`
+/// says. Two independent receive optimizations run here:
 ///
 /// - **Socket read coalescing** (kernel `UDP_GRO`): the socket sets the
 ///   `UDP_GRO` sockopt, so the kernel returns an equal-size datagram train
@@ -859,8 +880,11 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
 ///   not sufficient. Without coalescing (old kernel, or zero-checksum peer)
 ///   each slot just holds one datagram.
 ///
-/// - **TUN write coalescing** (userspace `TcpGroTable`): in-order TCP
-///   segments are merged into TSO superpackets and written once. This needs
+/// - **TUN write coalescing**: in-order TCP segments are merged and
+///   written once — as TSO superpackets through the vnet-hdr
+///   `TcpGroTable` when the device negotiated `IFF_VNET_HDR`, or as
+///   raw oversized packets through `io::inside::raw_gro` otherwise
+///   (when `enable_tun_tcp_coalescing` is on). This needs
 ///   only several same-flow segments in one window, not socket-level
 ///   coalescing. One window spans one `recvmmsg` batch: it opens before the
 ///   batch is decoded and is flushed before the conn lock is released.
@@ -933,12 +957,12 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                     }
                 }
             }
-            // Flush while the conn lock is still held. `send()` only runs
-            // under this mutex, so closing the window here leaves no gap for
-            // another task to coalesce past the drain and strand a packet
-            // until the next receive. `write_super` only does non-blocking
-            // `try_send`s, so holding the lock a moment longer costs
-            // nothing.
+            // Flush while the conn lock is still held. This connection's
+            // `send()` only runs under this mutex, so closing the window
+            // here leaves it no gap to coalesce past the drain and strand
+            // a packet until the next receive. Both coalescers only do
+            // non-blocking TUN writes, so holding the lock a moment longer
+            // costs nothing.
             inside_io.gro_flush();
             acc
         };
@@ -1886,16 +1910,14 @@ pub async fn connect<
                 // only flip the sockopt when the GRO outside loop
                 // below will consume it.
                 //
-                // Both coalescing paths need it, for the same reason:
                 // `UDP_GRO` is what makes one `recvmsg` return a *train*
                 // of datagrams, which is what puts several same-flow
-                // segments inside one decrypt batch. Without it the
-                // receive loop outruns the wire, every batch holds a
-                // single datagram, and every coalescing run is one
-                // segment long — the window plumbing works but there is
-                // nothing to merge.
+                // segments inside one decrypt batch. It is worth having
+                // on its own (fewer receive syscalls), so it has its own
+                // flag; `enable_tun_offload` implies it because the GSO
+                // path cannot work without it.
                 #[cfg(linux)]
-                if config.enable_tun_offload || config.enable_tun_tcp_coalescing {
+                if config.enable_tun_offload || config.enable_udp_gro {
                     sock.enable_gro();
                 }
 
@@ -2072,9 +2094,9 @@ pub async fn connect<
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
-    // GRO capability is present only when `enable_tun_offload` flipped
-    // the sockopt on a UDP socket above; TCP mode and non-Linux targets
-    // fall back to the per-packet loop.
+    // GRO capability is present only when `enable_tun_offload` or
+    // `enable_udp_gro` put the UDP socket above on the GRO receive
+    // path; TCP mode and non-Linux targets use the per-packet loop.
     let spawn_outside_io_task = || {
         tokio::spawn(outside_io_task(
             conn.clone(),
@@ -2531,6 +2553,17 @@ pub async fn client<
                  coalesced packets that this host *forwards* instead of delivering locally \
                  will be dropped with ICMP frag-needed and those flows will blackhole. \
                  Only enable this on a host that does not forward tunnel traffic."
+            );
+        }
+        // Legal, but it will look like the feature is broken: with one
+        // datagram per decrypt batch every run holds a single segment,
+        // so nothing ever merges. Say so rather than let it be measured
+        // as "coalescing does nothing".
+        if !config.enable_udp_gro {
+            tracing::warn!(
+                "enable_tun_tcp_coalescing is set without enable_udp_gro: each recvmsg \
+                 returns a single datagram, so every coalescing run holds one segment \
+                 and no merging happens. Enable enable_udp_gro as well."
             );
         }
         set_tun_tcp_coalescing_allowed(true);

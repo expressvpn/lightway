@@ -237,8 +237,9 @@ impl Udp {
     /// packet per slot.
     #[cfg(any(linux, android))]
     pub fn enable_gro(&mut self) {
-        // Route receives through `recv_gro_batch` whenever offload is
-        // requested, not only when the sockopt succeeds: socket-read
+        // Route receives through `recv_gro_batch` whenever this is
+        // called (`enable_tun_offload` or `enable_udp_gro`), not only
+        // when the sockopt succeeds: socket-read
         // coalescing (the `UDP_GRO` sockopt) is what makes the kernel
         // coalesce, but the path degrades to single-datagram slots when it
         // does not (old kernel, or a zero-checksum peer the GRO engine
