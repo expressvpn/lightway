@@ -188,7 +188,7 @@ impl ContextBuilder {
     pub fn with_cipher_list(mut self, cipher_list: &str) -> Result<Self> {
         if self.method.is_v1_3() {
             tracing::warn!(
-                "BoringSSL does not support cipher list restriction for (D)TLS 1.3, ignoring \"with_cipher_list\"."
+                "BoringSSL does not support cipher list restriction for (D)TLS 1.3, ignoring \"with_cipher_list\". The default cipher list and behavior in BoringSSL will be used."
             );
             return Ok(self);
         }
