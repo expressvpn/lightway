@@ -64,7 +64,7 @@ tracing-panic = { version = "0.1.2", optional= true }
 more-asserts.workspace = true
 test-case.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-mockall = "0.14.0"
+mockall = "0.15.0"
 regex.workspace = true
 serial_test.workspace = true
 tempfile = "3.24.0"
