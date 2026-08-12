@@ -24,6 +24,7 @@ const DEFAULT_RCVBUF: ByteSize = ByteSize::mib(8);
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
 #[patch(attribute(derive(Clone, Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
@@ -346,7 +347,6 @@ pub struct Config {
     pub enable_dpapi: bool,
 
     /// SNI header for TLS connections
-    #[cfg(feature = "mobile")]
     #[patch(attribute(clap(skip)))]
     #[schemars(extend("x-cfg" = "mobile"))]
     pub sni_header: String,
@@ -578,7 +578,6 @@ impl Default for Config {
             wintun_ring_capacity: ByteSize::mib(8),
             #[cfg(windows)]
             enable_dpapi: false,
-            #[cfg(feature = "mobile")]
             sni_header: String::new(),
             accept_unknowns: false,
             unknowns: HashMap::new(),
@@ -634,7 +633,7 @@ impl ConnectionConfig {
     }
 
     /// Try build CA from ca_crt
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
@@ -651,7 +650,7 @@ impl ConnectionConfig {
     }
 
     /// Try build SocketAddress from server field
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     pub fn skt_addr(&self) -> Result<std::net::SocketAddr, Error> {
         self.server
             .parse()
@@ -660,10 +659,7 @@ impl ConnectionConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
-    derive(uniffi::Error)
-)]
+#[cfg_attr(all(mobile, not(feature = "mobile-test")), derive(uniffi::Error))]
 pub enum Error {
     /// Invalid network protocol
     #[error("Invalid network protocol")]
@@ -674,7 +670,7 @@ pub enum Error {
     #[error("Unable to load certificate")]
     InvalidCertificate,
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     /// Unable to parse the sokcet address
     #[error("Invalid Socket Address")]
     InvalidSocketAddress,
