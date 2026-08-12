@@ -167,6 +167,10 @@ pub enum ConnectionError {
     #[error("Invalid Inside Io")]
     InvalidInsideIo,
 
+    /// Failed to write to the outside socket
+    #[error("Outside IO write error")]
+    OutsideIoWriteError(std::io::Error),
+
     /// Message contained a rejected session id
     #[error("Rejected Session ID")]
     RejectedSessionID,
@@ -290,6 +294,7 @@ impl ConnectionError {
                     InvalidProtocolVersion => false,
                     InvalidState => false, // Can be due to out of order or repeated messages
                     InvalidInsideIo => false, // Can be used for test only test control plane
+                    OutsideIoWriteError(_) => false,
                     UnknownSessionID => false,
                     InvalidInsidePacket(_) => false,
                     RejectedSessionID => false,
@@ -2404,7 +2409,9 @@ impl<AppState: Send> Connection<AppState> {
         // of bytes to `udp_send_gso` at flush time.
         match self.session.io_cb_mut().udp_send(buf.as_ref(), true) {
             IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
-            IOCallbackResult::Err(_e) => ConnectionResult::Err(ConnectionError::AccessDenied),
+            IOCallbackResult::Err(e) => {
+                ConnectionResult::Err(ConnectionError::OutsideIoWriteError(e))
+            }
         }
     }
 
