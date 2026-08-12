@@ -41,7 +41,7 @@ impl Udp {
     pub async fn new(
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
-        #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(all(linux, not(feature = "mobile-test")))] fwmark: u32,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -62,7 +62,7 @@ impl Udp {
         // Apply the firewall mark *before* the socket is used for anything, so
         // that no packet can escape unmarked and be captured by the tunnel's
         // own routes.
-        #[cfg(all(linux, not(feature = "mobile")))]
+        #[cfg(all(linux, not(feature = "mobile-test")))]
         if fwmark != 0 {
             let socket = socket2::SockRef::from(&sock);
             match socket.set_mark(fwmark) {

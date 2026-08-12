@@ -8,10 +8,10 @@ pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
 
-#[cfg(feature = "mobile")]
+#[cfg(any(mobile, feature = "mobile-test"))]
 pub mod mobile;
 
-#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
+#[cfg(all(mobile, not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
@@ -90,21 +90,18 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
-    derive(uniffi::Enum)
-)]
+#[cfg_attr(all(mobile, not(feature = "mobile-test")), derive(uniffi::Enum))]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     ServerGoodbye,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
+    all(mobile, not(feature = "mobile-test")),
     derive(uniffi::Error),
     uniffi(flat_error)
 )]
@@ -120,7 +117,7 @@ pub enum LightwayError {
     #[error("Config Format Error: `{0}`")]
     ConfigFormatError(#[from] serde_saphyr::Error),
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     #[error("Logging bridge initialization error: `{0}`")]
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
 }
@@ -1106,7 +1103,7 @@ pub async fn connect<
                 let mut sock = io::outside::Udp::new(
                     server,
                     maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
+                    #[cfg(all(linux, not(feature = "mobile-test")))]
                     config.fwmark,
                 )
                 .await
@@ -1140,7 +1137,7 @@ pub async fn connect<
                 let sock = io::outside::Tcp::new(
                     server,
                     maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
+                    #[cfg(all(linux, not(feature = "mobile-test")))]
                     config.fwmark,
                 )
                 .await
