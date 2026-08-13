@@ -19,4 +19,4 @@ wolfssl = { version = "7.3.0", optional = true }
 
 [features]
 default = []
-wolfssl-backend = ["dep:wolfssl"]
+wolfssl = ["dep:wolfssl"]

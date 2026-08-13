@@ -515,7 +515,7 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
     }
 }
 
-#[cfg(all(test, feature = "wolfssl-backend"))]
+#[cfg(all(test, feature = "wolfssl"))]
 mod tests {
     use super::*;
     use crate::{EXPRESSLANE_KEY_SIZE, WolfsslAead};
