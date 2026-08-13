@@ -59,7 +59,7 @@ build-wolfssl:
 build-boringssl:
     FROM +source
 
-    DO lib-rust+CARGO --args="build --release --no-default-features --features io-uring,boringssl,postquantum" --output="release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --release --no-default-features --features io-uring,boringssl" --output="release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/release/lightway-client AS LOCAL ./target/release/
     SAVE ARTIFACT ./target/release/lightway-server AS LOCAL ./target/release/
@@ -69,12 +69,8 @@ build-backend:
     FROM +source
     ARG --required BACKEND
     ARG EXTRA_FEATURES=""
-    ARG ENABLE_POSTQUANTUM=false
     LET client_features = "$BACKEND"
     LET server_features = "$BACKEND"
-    IF [ "$ENABLE_POSTQUANTUM" = "true" ]
-        SET client_features = "$client_features,postquantum"
-    END
     IF [ -n "$EXTRA_FEATURES" ]
         SET client_features = "$client_features,$EXTRA_FEATURES"
         SET server_features = "$server_features,$EXTRA_FEATURES"
@@ -110,7 +106,7 @@ build-cross-arm64-boringssl:
     ENV CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"
     ENV AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
 
-    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl,postquantum" --output="$target/release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
@@ -125,7 +121,7 @@ build-cross-riscv64-boringssl:
     ENV CXX_riscv64gc_unknown_linux_gnu="riscv64-linux-gnu-g++"
     ENV AR_riscv64gc_unknown_linux_gnu="riscv64-linux-gnu-ar"
 
-    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl,postquantum" --output="$target/release/lightway-(client|server)$"
+    DO lib-rust+CARGO --args="build --release --target=$target --no-default-features --features boringssl" --output="$target/release/lightway-(client|server)$"
 
     SAVE ARTIFACT ./target/$target/release/lightway-client AS LOCAL ./target/$target/release/
     SAVE ARTIFACT ./target/$target/release/lightway-server AS LOCAL ./target/$target/release/
@@ -160,12 +156,12 @@ test-boringssl:
 
     DO lib-rust+CARGO --args="test -p lightway-boring"
     DO lib-rust+CARGO --args="test -p lightway-app-utils --no-default-features --features tokio,boringssl"
-    DO lib-rust+CARGO --args="test -p lightway-core --no-default-features --features boringssl,postquantum"
-    DO lib-rust+CARGO --args="test -p lightway-client --no-default-features --features boringssl,postquantum"
+    DO lib-rust+CARGO --args="test -p lightway-core --no-default-features --features boringssl"
+    DO lib-rust+CARGO --args="test -p lightway-client --no-default-features --features boringssl"
     DO lib-rust+CARGO --args="test -p lightway-server --no-default-features --features boringssl"
 
     # Run only privileged tests with sudo permissions
-    RUN --privileged cargo test --package lightway-client --no-default-features --features boringssl,postquantum test_privileged -- --ignored
+    RUN --privileged cargo test --package lightway-client --no-default-features --features boringssl test_privileged -- --ignored
 
 # test-miri runs tests for modules which make use of `unsafe` under Miri.
 test-miri:

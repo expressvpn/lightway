@@ -252,7 +252,6 @@ impl<AppState> ClientContextBuilder<AppState> {
     /// On BoringSSL this adds the PQ groups to the context's supported_groups
     /// so a per-connection PQ key share can be offered. On wolfSSL it is a
     /// no-op: PQ groups are configured per session instead.
-    #[cfg(feature = "postquantum")]
     pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
         #[cfg(boringssl)]
         let tls_ctx = self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?;
@@ -419,7 +418,6 @@ const SERVER_CURVE_BASE_GROUPS: &[crate::tls::CurveGroup] = &[
     crate::tls::CurveGroup::EccX25519,
 ];
 
-#[cfg(feature = "postquantum")]
 const SERVER_CURVE_PQC_GROUPS: &[crate::tls::CurveGroup] = &[
     #[cfg(wolfssl)]
     crate::tls::CurveGroup::P521MLKEM1024,
@@ -555,7 +553,6 @@ impl<AppState> ServerContextBuilder<AppState> {
     }
 
     /// Enable Post Quantum Crypto
-    #[cfg(feature = "postquantum")]
     pub fn enable_pq_crypto(self) -> ContextBuilderResult<Self> {
         Ok(Self {
             tls_ctx: self.tls_ctx.with_groups(SERVER_CURVE_PQC_GROUPS)?,

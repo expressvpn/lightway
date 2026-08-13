@@ -1,10 +1,5 @@
 use std::{num::NonZeroU16, sync::Arc};
 
-use bytes::{Bytes, BytesMut};
-use rand::distr::{Distribution, StandardUniform};
-use thiserror::Error;
-
-#[cfg(feature = "postquantum")]
 use crate::KeyShare;
 use crate::{
     AuthMethod, BuilderPredicates, ClientContext, Connection, ConnectionType, MAX_OUTSIDE_MTU,
@@ -16,6 +11,9 @@ use crate::{
     plugin::PluginFactoryError,
     wire::SessionId,
 };
+use bytes::{Bytes, BytesMut};
+use rand::distr::{Distribution, StandardUniform};
+use thiserror::Error;
 
 use super::{ConnectionError, ConnectionMode, NewConnectionArgs, PluginList};
 
@@ -180,7 +178,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     }
 
     /// Enable Post Quantum Crypto
-    #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self, keyshare: KeyShare) -> Self {
         Self {
             session_config: self

@@ -11,7 +11,7 @@
   buildPackages,
   packages ? [ "lightway-client" ],
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
-  # Per-package feature overrides: { "lightway-client" = ["boringssl" "postquantum"]; }.
+  # Per-package feature overrides: { "lightway-client" = ["boringssl"]; }.
   # A package listed here uses its own feature list instead of `features`.
   perPackageFeatures ? { },
   noDefaultFeatures ? false,

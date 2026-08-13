@@ -16,7 +16,6 @@ fuzzing_api = []
 wolfssl = ["dep:wolfssl", "wolfssl/system_ca_certs"]
 boringssl = ["dep:boringssl"]
 debug = ["wolfssl?/debug", "boringssl?/debug"]
-postquantum = ["wolfssl?/postquantum"]
 
 [lints]
 workspace = true

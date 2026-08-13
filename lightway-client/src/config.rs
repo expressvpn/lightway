@@ -4,7 +4,6 @@ use super::dns_manager::DnsConfigMode;
 use super::route_manager::RouteMode;
 use bytesize::ByteSize;
 use clap::Parser;
-#[cfg(feature = "postquantum")]
 use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::args::{
     Cipher, ConfigFormat, ConnectionType, Duration, LogLevel, NonZeroDuration,
@@ -130,7 +129,6 @@ pub struct Config {
     #[patch(attribute(doc = "DNS IP to use in Tun device"))]
     pub tun_dns_ip: Ipv4Addr,
 
-    #[cfg(feature = "postquantum")]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
     #[schemars(extend("x-cfg" = "desktop"))]
@@ -501,7 +499,6 @@ impl Default for Config {
             tun_local_ip: Ipv4Addr::new(100, 64, 0, 6),
             tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
             tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
-            #[cfg(feature = "postquantum")]
             keyshare: KeyShare::default(),
             keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
             keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),

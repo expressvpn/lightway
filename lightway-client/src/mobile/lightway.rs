@@ -634,10 +634,8 @@ async fn lightway_client_connect(
         .with_outside_plugins(outside_plugins)
         .when(connection_type.is_datagram() && enable_expresslane, |b| {
             b.with_expresslane(expresslane_keys_rotation_interval)
-        });
-
-        #[cfg(feature = "postquantum")]
-        let ctx_builder = ctx_builder.enable_pq_crypto()?;
+        })
+        .enable_pq_crypto()?;
 
         ctx_builder
     };
@@ -653,12 +651,8 @@ async fn lightway_client_connect(
         .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
         .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
             b.with_pmtud_timer(pmtud_timer)
-        });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.when(true, |b| {
-        b.with_pq_crypto(lightway_app_utils::args::KeyShare::default().into())
-    });
+        })
+        .with_pq_crypto(lightway_app_utils::args::KeyShare::default().into());
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
