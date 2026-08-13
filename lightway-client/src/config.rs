@@ -12,6 +12,7 @@ use lightway_app_utils::args::{
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, Version};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::{Patch, Substrate};
@@ -345,6 +346,18 @@ pub struct Config {
     #[patch(attribute(clap(skip)))]
     #[schemars(extend("x-cfg" = "mobile"))]
     pub sni_header: String,
+
+    #[patch(attribute(clap(short, long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = r#"Accept unknown inputs with error message without quiting"#))]
+    pub accept_unknowns: bool,
+
+    /// The unknown options from config file
+    #[patch(attribute(clap(skip)))]
+    #[patch(attribute(serde(flatten)))]
+    #[patch(skip_wrap, apply_by(std::collections::HashMap::extend))]
+    pub unknowns: HashMap<String, serde_json::Value>,
 }
 
 impl Config {
@@ -416,6 +429,15 @@ impl Config {
 
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.unknowns.is_empty() {
+            let fields: Vec<&str> = self.unknowns.keys().map(String::as_str).collect();
+            if self.accept_unknowns {
+                tracing::warn!(fields = ?fields, "unknown config fields will be ignored");
+            } else {
+                anyhow::bail!("unknown config fields: {:?}", fields);
+            }
+        }
+
         let mut all_servers: Vec<(&str, ConnectionType)> = self
             .servers
             .iter()
@@ -543,6 +565,8 @@ impl Default for Config {
             enable_dpapi: false,
             #[cfg(feature = "mobile")]
             sni_header: String::new(),
+            accept_unknowns: false,
+            unknowns: HashMap::new(),
         }
     }
 }
@@ -807,6 +831,27 @@ mod tests {
     fn validate_default_config() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_unknown_fields_cause_error() {
+        let yaml = "unknown_field: true\n";
+        let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
+        let mut config = Config::default();
+        config.apply(patch);
+        assert!(config.validate().is_err());
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn config_unknown_fields_with_accept_flag_only_warns() {
+        let yaml = "unknown_field: true\n";
+        let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
+        let mut config = Config::default();
+        config.accept_unknowns = true;
+        config.apply(patch);
+        assert!(config.validate().is_ok());
+        assert!(logs_contain("unknown config fields will be ignored"));
     }
 
     #[cfg(not(macos))]
