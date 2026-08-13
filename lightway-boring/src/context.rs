@@ -300,7 +300,7 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::mock::{ROOT_CERT, SERVER_CERT, SERVER_KEY};
+    use crate::test_utils::mock::{root_cert, server_cert, server_key};
     use crate::{ContextBuilder, Method, RootCertificate, Secret};
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
     fn with_root_certificate_pem_buffer() {
         ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
-            .with_root_certificate(RootCertificate::PemBuffer(ROOT_CERT))
+            .with_root_certificate(RootCertificate::PemBuffer(root_cert()))
             .unwrap()
             .build();
     }
@@ -325,9 +325,9 @@ mod tests {
     fn with_certificate_and_private_key() {
         ContextBuilder::new(Method::TlsServerV1_3)
             .unwrap()
-            .with_certificate(Secret::PemBuffer(SERVER_CERT))
+            .with_certificate(Secret::PemBuffer(server_cert()))
             .unwrap()
-            .with_private_key(Secret::PemBuffer(SERVER_KEY))
+            .with_private_key(Secret::PemBuffer(server_key()))
             .unwrap()
             .build();
     }
@@ -348,7 +348,7 @@ mod tests {
         ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
             .try_when(true, |b| {
-                b.with_root_certificate(RootCertificate::PemBuffer(ROOT_CERT))
+                b.with_root_certificate(RootCertificate::PemBuffer(root_cert()))
             })
             .unwrap()
             .build();
@@ -368,7 +368,7 @@ mod tests {
         // Some: closure is invoked with the contained value.
         ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
-            .try_when_some(Some(ROOT_CERT), |b, cert| {
+            .try_when_some(Some(root_cert()), |b, cert| {
                 b.with_root_certificate(RootCertificate::PemBuffer(cert))
             })
             .unwrap()

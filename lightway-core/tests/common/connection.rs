@@ -18,9 +18,7 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 
-pub const CA_CERT: &[u8] = &include!("data/ca_cert_der_2048");
-pub const SERVER_CERT: &[u8] = &include!("data/server_cert_der_2048");
-pub const SERVER_KEY: &[u8] = &include!("data/server_key_der_2048");
+use crate::common::certgen::gen_shared_testing_pki;
 
 #[derive(Default)]
 pub struct TestAuth {
@@ -235,8 +233,9 @@ pub async fn server<S: TestSock>(
     conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
     metrics: Option<ExpresslaneMetricsType>,
 ) {
-    let server_key = Secret::Asn1Buffer(SERVER_KEY);
-    let server_cert = Secret::Asn1Buffer(SERVER_CERT);
+    let pki = gen_shared_testing_pki();
+    let server_key = Secret::Asn1Buffer(&pki.server.key_der);
+    let server_cert = Secret::Asn1Buffer(&pki.server.cert_der);
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -428,7 +427,7 @@ pub async fn client<S: TestSock>(
     enable_expresslane: bool,
     use_versioned_token: bool,
 ) {
-    let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
     let (tun, mut inside_rx) = ChannelTun::new();
     let client = Arc::new(Client);
 

@@ -14,9 +14,8 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_stream::StreamExt;
-
 pub mod common;
-use crate::common::packet_codec::BlackHolePacketCodecFactory;
+use crate::common::{certgen::gen_shared_testing_pki, packet_codec::BlackHolePacketCodecFactory};
 use crate::common::{connection::*, get_test_timeout};
 
 async fn run_test_tcp<S: TestSock>(
@@ -39,6 +38,10 @@ async fn run_test<S: TestSock>(
     use_versioned_token: bool,
 ) -> Arc<Mutex<Option<AuthMethod>>> {
     let (auth, last_method) = TestAuth::new();
+
+    // Generate the shared test PKI before the timeout window.
+    // RSA keygen is very slow on QEMU. (especially on RISCV).
+    gen_shared_testing_pki();
 
     let test = async move {
         tokio::join!(
@@ -139,7 +142,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
     // Server reflects inside data and ACKs the client's encoding requests.
     let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None));
 
-    let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
     let (tun, _inside_rx) = ChannelTun::new();
     let (event_cb, mut event_stream) = EventStreamCallback::new();
 
@@ -367,7 +370,7 @@ async fn test_stream_connection_versioned_token() {
 }
 
 #[test_case(None; "No server domain name")]
-#[test_case(Some("example.com"); "Valid server domain name")]
+#[test_case(Some(common::certgen::TEST_SERVER_DOMAIN); "Valid server domain name")]
 #[cfg_attr(boringssl, test_case(Some("invalid") => panics "TLS Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
 #[cfg_attr(wolfssl, test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
 #[tokio::test]
@@ -382,6 +385,10 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let _ = client_sock.writable().await;
 
     let auth = Arc::new(TestAuth::default());
+
+    // Generate the shared test PKI *before the timed window* to prevent flaky tests. (see run_test).
+    gen_shared_testing_pki();
+
     let test = async move {
         tokio::join!(
             server(server_sock, auth, pqc, None, None, None),
@@ -405,7 +412,7 @@ async fn mark_offload_activity_bumps_by_rule() {
     let (client_sock, _server_sock) = UnixStream::pair().expect("UnixStream");
     let client_sock = Arc::new(TestStreamSock(client_sock));
 
-    let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
     let (ticker, _ticker_task) = ConnectionTicker::new();
     let state = ConnectionState { ticker };
 
@@ -485,7 +492,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         // cannot deadlock.
         let server_conn = conn_rx.await.expect("server conn handle");
 
-        let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+        let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
         let (tun, _inside_rx) = ChannelTun::new();
         let (ticker, ticker_task) = ConnectionTicker::new();
         let state = ConnectionState { ticker };
@@ -636,7 +643,7 @@ async fn expresslane_health_probe(
     );
 
     let client_task = async move {
-        let ca_cert = RootCertificate::Asn1Buffer(CA_CERT);
+        let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
         let (tun, mut inside_rx) = ChannelTun::new();
         let (ticker, ticker_task) = ConnectionTicker::new();
         let state = ConnectionState { ticker };
