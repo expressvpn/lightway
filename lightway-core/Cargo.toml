@@ -46,7 +46,7 @@ cfg_aliases = "0.2.1"
 [dev-dependencies]
 async-trait.workspace = true
 cfg-if = "1.0.4"
-itertools = "0.14.0"
+itertools = "0.15.0"
 lightway-app-utils.workspace = true
 test-case.workspace = true
 tokio.workspace = true
