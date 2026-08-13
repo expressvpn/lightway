@@ -67,10 +67,11 @@ pub(crate) use data::Data;
 pub(crate) use data_frag::DataFrag;
 pub(crate) use encoding_request::EncodingRequest;
 pub(crate) use encoding_response::EncodingResponse;
-pub(crate) use expresslane_config::ExpresslaneConfig;
-pub use expresslane_config::ExpresslaneVersion;
-pub use expresslane_data::ExpresslaneKey;
-pub(crate) use expresslane_data::{ExpresslaneData, ExpresslaneError};
+pub(crate) use expresslane_config::{ExpresslaneConfig, negotiate_version};
+pub(crate) use expresslane_data::ExpresslaneData;
+pub use expresslane_data::{
+    EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion,
+};
 pub(crate) use ping::Ping;
 pub(crate) use pong::Pong;
 pub(crate) use server_config::ServerConfig;

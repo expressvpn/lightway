@@ -1873,6 +1873,7 @@ dependencies = [
  "itertools 0.15.0",
  "lightway-app-utils",
  "lightway-boring",
+ "lightway-expresslane",
  "lru",
  "metrics",
  "more-asserts",
@@ -1889,6 +1890,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "wolfssl",
+]
+
+[[package]]
+name = "lightway-expresslane"
+version = "0.1.0"
+dependencies = [
+ "bitfield-struct",
+ "bytes",
+ "thiserror 2.0.18",
  "wolfssl",
 ]
 
@@ -2667,7 +2678,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3462,7 +3473,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

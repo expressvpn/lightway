@@ -12,7 +12,10 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_stream::StreamExt;
 
 pub const CA_CERT: &[u8] = &include!("data/ca_cert_der_2048");
@@ -165,7 +168,9 @@ impl OutsideIOSendCallback for TestDatagramSock {
     }
 
     fn peer_addr(&self) -> SocketAddr {
-        todo!()
+        // A UnixDatagram has no IP peer; expresslane key publishes carry
+        // the value opaquely.
+        SocketAddr::from(([127, 0, 0, 1], 0))
     }
 
     fn enable_pmtud_probe(&self) -> std::io::Result<()> {
@@ -226,7 +231,9 @@ pub async fn server<S: TestSock>(
     sock: Arc<S>,
     auth: Arc<TestAuth>,
     pqc: PQCrypto,
-    enable_expresslane: bool,
+    expresslane: Option<std::time::Duration>,
+    conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
+    metrics: Option<ExpresslaneMetricsType>,
 ) {
     let server_key = Secret::Asn1Buffer(SERVER_KEY);
     let server_cert = Secret::Asn1Buffer(SERVER_CERT);
@@ -262,9 +269,8 @@ pub async fn server<S: TestSock>(
     let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.enable_pq_crypto().unwrap());
 
     let server_ctx = server_ctx
-        .when(enable_expresslane, |s| {
-            s.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
-        })
+        .when_some(expresslane, |s, interval| s.with_expresslane(interval))
+        .when_some(metrics, |s, m| s.with_expresslane_metrics(m))
         .build()
         .unwrap();
 
@@ -280,6 +286,10 @@ pub async fn server<S: TestSock>(
             .accept(ticker)
             .unwrap(),
     ));
+
+    if let Some(tx) = conn_out {
+        let _ = tx.send(conn.clone());
+    }
 
     let mut join_set = JoinSet::new();
 

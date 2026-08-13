@@ -38,6 +38,10 @@ pub const DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL: Duration = Duration::from_
 /// the peer's counter snapshot, so one is never enough.
 pub(crate) const EXPRESSLANE_DEGRADE_STRIKES: u8 = 3;
 
+/// Consecutive health windows without a stats reading, in either direction,
+/// before the connection stops flying blind and degrades.
+pub(crate) const EXPRESSLANE_MISSING_STATS_LIMIT: u8 = 3;
+
 /// Packet counters for ExpressLane health monitoring.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExpresslanePacketStats {
@@ -51,14 +55,36 @@ pub struct ExpresslanePacketStats {
     pub received_bytes: u64,
 }
 
+/// Why a stats provider had no reading for a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ExpresslaneStatsError {
+    /// The provider has no entry for this session - e.g. the session id
+    /// just rotated and the mapping has not caught up.
+    #[error("session unknown to the stats provider")]
+    UnknownSession,
+    /// The provider itself could not be reached or failed.
+    #[error("stats provider unavailable")]
+    Unavailable,
+    /// A transient failure the provider expects to recover from by the
+    /// next reading.
+    #[error("temporary stats provider failure")]
+    Temporary,
+}
+
 /// Provider of ExpressLane packet metrics.
 ///
 /// When expresslane encryption/decryption is offloaded, the userspace
 /// packet counters stay at zero. Implementors of this trait supply the
 /// real packet counters from wherever the offload happens.
 pub trait ExpresslaneMetrics {
-    /// Returns cumulative packet counters for the given session.
-    fn get_stats(&self, session_id: SessionId) -> ExpresslanePacketStats;
+    /// Returns cumulative packet counters for the given session, or why
+    /// there is no reading right now. The health check skips that window
+    /// on an error; never substitute zeros for a missing reading - zeros
+    /// are a claim of total loss.
+    fn get_stats(
+        &self,
+        session_id: SessionId,
+    ) -> Result<ExpresslanePacketStats, ExpresslaneStatsError>;
 }
 
 /// Convenience type for [`ExpresslaneMetrics`] trait objects.
@@ -90,6 +116,10 @@ pub(crate) struct Expresslane<AppState: Send> {
     pub(crate) inbound_strikes: u8,
     /// Outbound loss strike bucket; +1 per bad window, -1 per good one
     pub(crate) outbound_strikes: u8,
+    /// Consecutive health windows where the local provider failed to read
+    pub(crate) missing_local_readings: u8,
+    /// Consecutive health windows where the peer's keepalive payload carried no reading
+    pub(crate) missing_peer_reports: u8,
     /// Wire-level crypto engine (encrypt/decrypt/serialize)
     pub(crate) data: ExpresslaneData,
     /// Callback invoked on session key updates so the application can
@@ -119,21 +149,24 @@ impl<AppState: Send> Expresslane<AppState> {
             last_snapshot_recv: 0,
             inbound_strikes: 0,
             outbound_strikes: 0,
-            data: ExpresslaneData::default(),
+            missing_local_readings: 0,
+            missing_peer_reports: 0,
+            data: ExpresslaneData::new(ExpresslaneVersion::Unknown),
             cb,
             metrics,
             keys_rotation_interval,
         }
     }
 
-    /// Get current Expresslane packet stats
-    pub(crate) fn stats(&self, session_id: SessionId) -> (u64, u64) {
+    /// Get current Expresslane packet stats. Fails only when an installed
+    /// provider has no reading; without a provider the in-core counters
+    /// are always available.
+    pub(crate) fn stats(&self, session_id: SessionId) -> Result<(u64, u64), ExpresslaneStatsError> {
         match &self.metrics {
-            Some(provider) => {
-                let stats = provider.get_stats(session_id);
-                (stats.sent_packets, stats.received_packets)
-            }
-            None => (self.data.packets_sent(), self.data.packets_received()),
+            Some(provider) => provider
+                .get_stats(session_id)
+                .map(|stats| (stats.sent_packets, stats.received_packets)),
+            None => Ok((self.data.packets_sent(), self.data.packets_received())),
         }
     }
 
@@ -147,6 +180,70 @@ impl<AppState: Send> Expresslane<AppState> {
             None => true,
             Some(last) => last.elapsed() > self.keys_rotation_interval,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::MAX_RETRANSMISSION_ATTEMPTS;
+
+    const ROTATION_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+    fn expresslane() -> Expresslane<()> {
+        Expresslane::new(ExpresslaneState::Inactive, None, None, ROTATION_INTERVAL)
+    }
+
+    /// A config exchange that burns its whole budget leaves the counter at
+    /// MAX. Without a reset the next exchange schedules one 3s tick that
+    /// immediately re-enters the exhaustion branch, spending no retransmits.
+    #[test]
+    fn exhausted_budget_leaves_a_single_shot_wait() {
+        let mut xp = expresslane();
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_millis(500));
+
+        xp.retransmit_count = MAX_RETRANSMISSION_ATTEMPTS;
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_secs(3));
+
+        xp.retransmit_count = 0;
+        assert_eq!(xp.retransmit_wait_time(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn wait_time_grows_with_each_attempt() {
+        let mut xp = expresslane();
+        let mut prev = Duration::ZERO;
+        for attempt in 0..=MAX_RETRANSMISSION_ATTEMPTS {
+            xp.retransmit_count = attempt;
+            let wait = xp.retransmit_wait_time();
+            assert!(wait > prev, "attempt {attempt} did not back off: {wait:?}");
+            prev = wait;
+        }
+    }
+
+    /// The rotation stamp is taken before the peer has acked. Clearing it on
+    /// the timeout path is what lets the next inside packet re-arm.
+    #[test]
+    fn cleared_stamp_reopens_the_rotation_gate() {
+        let mut xp = expresslane();
+        assert!(xp.time_to_rotate_key(), "first rotation is always allowed");
+
+        xp.last_key_rotation = Some(Instant::now());
+        assert!(
+            !xp.time_to_rotate_key(),
+            "a fresh stamp holds the gate shut for the rotation interval"
+        );
+
+        xp.last_key_rotation = None;
+        assert!(xp.time_to_rotate_key());
+    }
+
+    /// `ExpresslaneCbData.version` is a public field, so its type must be
+    /// nameable by an external crate without casting.
+    #[test]
+    fn callback_version_type_is_publicly_nameable() {
+        let v: crate::ExpresslaneVersion = crate::ExpresslaneVersion::MAX;
+        assert_eq!(v, crate::ExpresslaneVersion::Version2);
     }
 }
 

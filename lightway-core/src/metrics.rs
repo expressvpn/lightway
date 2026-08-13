@@ -1,4 +1,5 @@
-use crate::tls::{Aes256GcmError, ProtocolVersion};
+use crate::tls::ProtocolVersion;
+use crate::wire::ExpresslaneError;
 use metrics::{Counter, counter};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
@@ -109,8 +110,8 @@ pub(crate) fn expresslane_decrypt_no_key() {
 
 /// Server received an expresslane packet, but cannot be decrpyted by
 /// current/prev key
-pub(crate) fn expresslane_decrypt_failed(err: &Aes256GcmError) {
-    warn!("Prev key failed: {err:?}");
+pub(crate) fn expresslane_decrypt_failed(err: &ExpresslaneError) {
+    warn!("Expresslane decrypt failed under every available key: {err:?}");
     METRIC_EXPRESSLANE_DECRYPT_FAILED.increment(1);
 }
 
