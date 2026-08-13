@@ -8,7 +8,7 @@
 //! build known to interoperate and are now fixed. Reordering `build_aad`,
 //! flipping the counter to little-endian or moving a header field changes
 //! them, and each of those breaks a peer that has not been rebuilt.
-#![cfg(feature = "wolfssl-backend")]
+#![cfg(feature = "wolfssl")]
 
 use bytes::BytesMut;
 use lightway_expresslane::{

@@ -15,7 +15,7 @@ mod version;
 
 pub use aead::ExpresslaneAead;
 pub use aead::pool::{PooledAead, PooledCipher};
-#[cfg(feature = "wolfssl-backend")]
+#[cfg(feature = "wolfssl")]
 pub use aead::wolfssl::WolfsslAead;
 pub use error::{ExpresslaneError, ExpresslaneResult};
 pub use key::{EXPRESSLANE_KEY_SIZE, ExpresslaneKey};

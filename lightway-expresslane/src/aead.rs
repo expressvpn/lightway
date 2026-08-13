@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use crate::{ExpresslaneKey, ExpresslaneResult};
 
 pub mod pool;
-#[cfg(feature = "wolfssl-backend")]
+#[cfg(feature = "wolfssl")]
 pub mod wolfssl;
 
 /// AES-256-GCM for ExpressLane data packets.
@@ -76,7 +76,7 @@ pub trait ExpresslaneAead: Send + Sync + Sized {
     }
 }
 
-#[cfg(all(test, feature = "wolfssl-backend"))]
+#[cfg(all(test, feature = "wolfssl"))]
 mod tests {
     use self::wolfssl::WolfsslAead;
     use super::*;
