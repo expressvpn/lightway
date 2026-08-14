@@ -14,6 +14,7 @@
 //! };
 //! ```
 
+mod aead_cipher;
 mod aes256;
 mod cert;
 mod chacha20_poly1305;
@@ -28,6 +29,7 @@ mod test_utils;
 mod types;
 
 // Re-export all public types at crate root (drop-in replacement for wolfssl crate)
+pub use aead_cipher::AeadCipher;
 pub use aes256::{Aes256Gcm, Aes256GcmError};
 pub use boring::version::version as get_version_string;
 pub use cert::{RootCertificate, Secret};

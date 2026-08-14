@@ -108,6 +108,33 @@ impl Aes256Gcm {
     }
 }
 
+impl crate::AeadCipher for Aes256Gcm {
+    const KEY_SIZE: usize = Self::KEY_SIZE;
+    const IV_SIZE: usize = Self::IV_SIZE;
+    const AUTHTAG_SIZE: usize = Self::AUTHTAG_SIZE;
+
+    type Error = Aes256GcmError;
+
+    fn encrypt(
+        &mut self,
+        iv: [u8; 12],
+        plain_text: &[u8],
+        aad: &[u8],
+    ) -> Result<(BytesMut, [u8; 16]), Self::Error> {
+        self.encrypt(iv, plain_text, aad)
+    }
+
+    fn decrypt(
+        &mut self,
+        iv: [u8; 12],
+        cipher_text: &[u8],
+        aad: &[u8],
+        auth_tag: &[u8; 16],
+    ) -> Result<BytesMut, Self::Error> {
+        self.decrypt(iv, cipher_text, aad, auth_tag)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
