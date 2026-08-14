@@ -61,16 +61,80 @@ pub(crate) mod mock {
     }
 
     // -----------------------------------------------------------------------
-    // Embedded test certificates (shared with lightway-core/tests/data/)
-    // server cert CN = example.com — use with_checked_domain_name("example.com")
+    // Generated test certificates (rcgen, once per test process)
+    // server cert CN/SAN = example.com - use with_checked_domain_name("example.com")
     // -----------------------------------------------------------------------
 
-    pub(crate) const ROOT_CERT: &[u8] =
-        &include!("../../lightway-core/tests/common/data/ca_cert_der_2048");
-    pub(crate) const SERVER_CERT: &[u8] =
-        &include!("../../lightway-core/tests/common/data/server_cert_der_2048");
-    pub(crate) const SERVER_KEY: &[u8] =
-        &include!("../../lightway-core/tests/common/data/server_key_der_2048");
+    struct TestPki {
+        root_cert: Vec<u8>,
+        server_cert: Vec<u8>,
+        server_key: Vec<u8>,
+    }
+
+    static TEST_PKI: std::sync::LazyLock<TestPki> = std::sync::LazyLock::new(|| {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
+            IsCa, KeyPair, KeyUsagePurpose, PKCS_RSA_SHA256, RsaKeySize,
+        };
+
+        // Same algorithm and key size as the previously checked-in test
+        // certificates: RSA-2048, signed with SHA-256.
+        let generate_key = || {
+            KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)
+                .expect("generate RSA-2048 key")
+        };
+        use std::time::{Duration, SystemTime};
+
+        // Valid from a day in the past (clock-skew margin) until 30 days out.
+        const DAY: Duration = Duration::from_secs(60 * 60 * 24);
+        let now = SystemTime::now();
+        let set_validity = |params: &mut CertificateParams| {
+            params.not_before = (now - DAY).into();
+            params.not_after = (now + 30 * DAY).into();
+        };
+
+        let mut ca_params = CertificateParams::default();
+        set_validity(&mut ca_params);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "lightway-boring test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_key = generate_key();
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-sign CA cert");
+
+        let mut params =
+            CertificateParams::new(vec!["example.com".to_string()]).expect("valid SAN");
+        set_validity(&mut params);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "example.com");
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let key = generate_key();
+        let cert = params.signed_by(&key, &ca).expect("sign server cert");
+
+        TestPki {
+            root_cert: ca.der().to_vec(),
+            server_cert: cert.der().to_vec(),
+            server_key: key.serialize_der(),
+        }
+    });
+
+    /// Root CA certificate, DER encoded
+    pub(crate) fn root_cert() -> &'static [u8] {
+        &TEST_PKI.root_cert
+    }
+
+    /// Server certificate for "example.com" issued by [`root_cert`], DER encoded
+    pub(crate) fn server_cert() -> &'static [u8] {
+        &TEST_PKI.server_cert
+    }
+
+    /// Private key for [`server_cert`], DER (PKCS#8) encoded
+    pub(crate) fn server_key() -> &'static [u8] {
+        &TEST_PKI.server_key
+    }
 
     // -----------------------------------------------------------------------
     // MessageQueue — datagram-preserving queue (used by UdpIOCallbacks)
@@ -210,15 +274,15 @@ pub(crate) mod mock {
     pub(crate) fn make_connected_tls_pair() -> (Session<TcpIOCallbacks>, Session<TcpIOCallbacks>) {
         let client_ctx = ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
-            .with_root_certificate(RootCertificate::Asn1Buffer(ROOT_CERT))
+            .with_root_certificate(RootCertificate::Asn1Buffer(root_cert()))
             .unwrap()
             .build();
 
         let server_ctx = ContextBuilder::new(Method::TlsServerV1_3)
             .unwrap()
-            .with_certificate(Secret::Asn1Buffer(SERVER_CERT))
+            .with_certificate(Secret::Asn1Buffer(server_cert()))
             .unwrap()
-            .with_private_key(Secret::Asn1Buffer(SERVER_KEY))
+            .with_private_key(Secret::Asn1Buffer(server_key()))
             .unwrap()
             .build();
 
@@ -261,15 +325,15 @@ pub(crate) mod mock {
     pub(crate) fn make_connected_dtls_pair() -> (Session<UdpIOCallbacks>, Session<UdpIOCallbacks>) {
         let client_ctx = ContextBuilder::new(Method::DtlsClientV1_3)
             .unwrap()
-            .with_root_certificate(RootCertificate::Asn1Buffer(ROOT_CERT))
+            .with_root_certificate(RootCertificate::Asn1Buffer(root_cert()))
             .unwrap()
             .build();
 
         let server_ctx = ContextBuilder::new(Method::DtlsServerV1_3)
             .unwrap()
-            .with_certificate(Secret::Asn1Buffer(SERVER_CERT))
+            .with_certificate(Secret::Asn1Buffer(server_cert()))
             .unwrap()
-            .with_private_key(Secret::Asn1Buffer(SERVER_KEY))
+            .with_private_key(Secret::Asn1Buffer(server_key()))
             .unwrap()
             .build();
 

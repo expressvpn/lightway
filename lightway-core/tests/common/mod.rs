@@ -1,3 +1,4 @@
+pub mod certgen;
 pub mod connection;
 pub mod packet_codec;
 

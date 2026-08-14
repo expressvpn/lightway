@@ -19,3 +19,6 @@ libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zeroize = "1.9.0"
+
+[dev-dependencies]
+rcgen = { workspace = true }
