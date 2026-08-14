@@ -5,6 +5,8 @@
   autoconf,
   automake,
   libtool,
+  cmake,
+  perl,
   cargo-deny,
   cargo-make,
   cargo-nextest,
@@ -40,6 +42,8 @@ mkShell (
       autoconf
       automake
       libtool
+      cmake
+      perl
       rustPlatform.bindgenHook
 
       # Development tools
