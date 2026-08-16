@@ -132,6 +132,12 @@ where
             ssl.set_hostname(sni)?;
         }
 
+        // Per-session verify mode overrides the context-level SSL_CTX_set_verify,
+        // matching wolfssl's wolfSSL_set_verify behavior. No verify callback.
+        if let Some(mode) = config.ssl_verify_mode {
+            ssl.set_verify(mode.into());
+        }
+
         // Configure key share group if specified
         if let Some(group) = config.keyshare_group {
             let group_id = group.to_ssl_group()?;
@@ -291,6 +297,11 @@ where
     /// Get mutable reference to the I/O adapter
     pub fn io_cb_mut(&mut self) -> &mut IOCB {
         &mut self.ssl_stream.get_mut().io
+    }
+
+    /// Sets verification method for remote peers via `SSL_set_verify`.
+    pub fn set_verify(&mut self, mode: super::SslVerifyMode) {
+        self.ssl_stream.ssl_mut().set_verify(mode.into());
     }
 
     /// Get current cipher name

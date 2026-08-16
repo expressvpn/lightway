@@ -38,6 +38,7 @@ pub use error::{Error, ErrorKind, NewContextBuilderError, NewSessionError, TlsEr
 pub use session::Session;
 pub use types::{
     CurveGroup, IOCallbackResult, IOCallbacks, Method, Poll, PollResult, ProtocolVersion,
+    SslVerifyMode,
 };
 
 #[cfg(feature = "debug")]

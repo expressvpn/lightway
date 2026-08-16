@@ -14,10 +14,10 @@ use crate::error::Result;
 #[cfg(feature = "debug")]
 use crate::debug::Tls13SecretCallbacksArg;
 
-use super::{CurveGroup, IOCallbacks, Method, RootCertificate, Secret, TlsError};
+use super::{CurveGroup, IOCallbacks, Method, RootCertificate, Secret, SslVerifyMode, TlsError};
 use boring::error::ErrorStack;
 use boring::pkey::PKey;
-use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
+use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslVersion};
 use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
 use zeroize::Zeroizing;
@@ -47,8 +47,11 @@ impl ContextBuilder {
         }
         .map_err(|e| NewContextBuilderError(e.to_string()))?;
 
+        // BoringSSL defaults to SSL_VERIFY_NONE everywhere; wolfSSL clients
+        // verify the server certificate by default. Match wolfSSL here.
+        // Currently this could be overridden by per-session config.
         if method.is_client() {
-            builder.set_verify(SslVerifyMode::PEER);
+            builder.set_verify(SslVerifyMode::SslVerifyPeer.into());
         }
 
         // Pin the context to the requested protocol version

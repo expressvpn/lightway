@@ -91,6 +91,26 @@ impl CurveGroup {
     }
 }
 
+/// SSL verification mode.
+#[derive(Debug, Default, Copy, Clone)]
+pub enum SslVerifyMode {
+    /// No verification done
+    /// Note: Unlike WolfSSL, BoringSSL still verifies the cert under this mode, it just doesn't abort the connection. `verify_result()` still stores the verification result.
+    SslVerifyNone,
+    /// Verify peers certificate
+    #[default]
+    SslVerifyPeer,
+}
+
+impl From<SslVerifyMode> for boring::ssl::SslVerifyMode {
+    fn from(value: SslVerifyMode) -> Self {
+        match value {
+            SslVerifyMode::SslVerifyNone => boring::ssl::SslVerifyMode::NONE,
+            SslVerifyMode::SslVerifyPeer => boring::ssl::SslVerifyMode::PEER,
+        }
+    }
+}
+
 /// Protocol version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolVersion {
