@@ -13,6 +13,17 @@ use std::sync::Arc;
 pub trait InsideIORecv: Sync + Send {
     async fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize>;
 
+    /// Extra capacity a [`Self::recv_buf`] buffer needs beyond the
+    /// interface MTU.
+    ///
+    /// Non-zero only for a TUN opened with offload, where the kernel
+    /// prepends a `virtio_net_hdr` to every read and silently truncates
+    /// if the buffer has no room for it. Callers size their buffer
+    /// `mtu() + vnet_headroom()`.
+    fn vnet_headroom(&self) -> usize {
+        0
+    }
+
     /// Upgrade to the batch-receive interface, when this instance can
     /// pop multiple packets per call. Default: not supported.
     fn as_batch(self: Arc<Self>) -> Option<Arc<dyn InsideIORecvBatch>> {

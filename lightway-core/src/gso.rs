@@ -35,9 +35,15 @@ pub const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
 /// Flag: checksum needs to be computed.
 pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
-/// Maximum number of segments in a single UDP GSO superpacket —
-/// matches the kernel's `UDP_MAX_SEGMENTS` (`1 << 6`); a `sendmsg`
-/// with `UDP_SEGMENT` and more than this is rejected with `EINVAL`.
+/// Maximum number of segments in a single UDP GSO superpacket. A
+/// `sendmsg` with `UDP_SEGMENT` carrying more than the kernel's
+/// `UDP_MAX_SEGMENTS` is rejected with `EINVAL`.
+///
+/// That kernel constant is **not** fixed: it was `1 << 6` (64) before
+/// Linux 6.9 and is `1 << 7` (128) from 6.9 onward (raised in kernel
+/// commit 1382e3b6a350 and backported to stable). We pin the conservative
+/// 64 so a batch built here is accepted on both, which also keeps
+/// [`MAX_GSO_FRAME_BYTES`] bounded.
 pub(crate) const MAX_GSO_SEGS: usize = 64;
 
 /// Upper bound on the bytes a single GSO coalescing buffer can hold:
@@ -79,10 +85,56 @@ impl VirtioNetHdr {
         let base = self.gso_type & !VIRTIO_NET_HDR_GSO_ECN;
         base == VIRTIO_NET_HDR_GSO_TCPV4 || base == VIRTIO_NET_HDR_GSO_TCPV6
     }
+
+    /// True if `gso_type` indicates a non-GSO packet, i.e. a single
+    /// segment rather than an aggregate.
+    ///
+    /// Masks `VIRTIO_NET_HDR_GSO_ECN` for the same reason [`Self::is_tcp`]
+    /// does. Prefer this over comparing `gso_type` to
+    /// [`VIRTIO_NET_HDR_GSO_NONE`] directly: the raw comparison
+    /// misclassifies an ECN-marked packet as an aggregate, and keeping the
+    /// mask here means the ECN constant never has to be mirrored outside
+    /// this module.
+    pub fn is_gso_none(&self) -> bool {
+        self.gso_type & !VIRTIO_NET_HDR_GSO_ECN == VIRTIO_NET_HDR_GSO_NONE
+    }
+}
+
+/// IPv4/IPv6 protocol number for UDP, needed to decide whether the
+/// RFC 768 zero substitution applies.
+const IPPROTO_UDP: u8 = 17;
+
+/// Read the layer-4 protocol number out of the IP header at the start of
+/// `buf`.
+///
+/// `None` when the version nibble is neither 4 nor 6, or the buffer is
+/// too short to hold the field.
+///
+/// For IPv6 this reads the *immediate* Next Header field, so a packet
+/// carrying extension headers yields the first extension header's number
+/// rather than the transport protocol. Deliberately conservative: the
+/// value is then never [`IPPROTO_UDP`], so the substitution is simply
+/// skipped, matching the behaviour before it existed. It can never
+/// mis-identify TCP as UDP, which is the only direction that would
+/// corrupt a packet. Walk the chain here if an IPv6 path with extension
+/// headers ever becomes reachable.
+#[inline]
+fn ip_l4_proto(buf: &[u8]) -> Option<u8> {
+    match buf.first()? >> 4 {
+        4 => buf.get(9).copied(),
+        6 => buf.get(6).copied(),
+        _ => None,
+    }
 }
 
 /// Compute and fill the transport-layer checksum for a non-GSO packet
 /// that has `VIRTIO_NET_HDR_F_NEEDS_CSUM` set.
+///
+/// For UDP the RFC 768 substitution of `0xFFFF` for a computed zero is
+/// applied. `csum_start`/`csum_offset` alone cannot distinguish UDP from
+/// TCP and `0x0000` is a legal TCP checksum, so the protocol is read from
+/// the IP header via `ip_l4_proto` and the substitution is applied only
+/// for protocol 17.
 ///
 /// The kernel deposits the pseudo-header partial sum (src + dst + proto + len)
 /// at `[csum_start + csum_offset]` before delivering the packet.
@@ -102,6 +154,10 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
         return;
     }
 
+    // Protocol must be read before the transport bytes are borrowed
+    // mutably below.
+    let is_udp = ip_l4_proto(buf) == Some(IPPROTO_UDP);
+
     // Read the kernel-deposited pseudo-header partial, then zero the
     // field so it doesn't double-count when we sum the segment.
     let initial = read_u16(&buf[at..at + 2]) as u64;
@@ -109,6 +165,11 @@ pub fn gso_none_checksum(buf: &mut [u8], csum_start: u16, csum_offset: u16) {
     buf[at + 1] = 0;
 
     let csum = !checksum(&buf[start..], initial);
+    // RFC 768: a computed UDP checksum of zero must go on the wire as
+    // 0xFFFF, the same value in one's complement, because 0x0000 is the
+    // IPv4 "no checksum computed" sentinel and is outright invalid over
+    // IPv6 (RFC 8200 s8.1). Never for TCP, where 0x0000 is legal.
+    let csum = if is_udp && csum == 0 { 0xFFFF } else { csum };
     buf[at] = (csum >> 8) as u8;
     buf[at + 1] = csum as u8;
 }
@@ -405,6 +466,98 @@ pub(crate) fn build_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gso_type` is a bitfield: Linux ORs `VIRTIO_NET_HDR_GSO_ECN` into
+    /// it for ECN-marked flows, so a raw comparison against
+    /// `VIRTIO_NET_HDR_GSO_NONE` misclassifies an ECN-marked single packet
+    /// as an aggregate.
+    #[test]
+    fn is_gso_none_masks_the_ecn_bit() {
+        let h = |gso_type| VirtioNetHdr {
+            gso_type,
+            ..Default::default()
+        };
+
+        assert!(h(VIRTIO_NET_HDR_GSO_NONE).is_gso_none());
+        assert!(
+            h(VIRTIO_NET_HDR_GSO_NONE | VIRTIO_NET_HDR_GSO_ECN).is_gso_none(),
+            "an ECN-marked non-GSO packet is still non-GSO"
+        );
+
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV4).is_gso_none());
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV4 | VIRTIO_NET_HDR_GSO_ECN).is_gso_none());
+        assert!(!h(VIRTIO_NET_HDR_GSO_TCPV6).is_gso_none());
+
+        // The raw comparison this replaces gets the ECN case wrong.
+        let ecn = h(VIRTIO_NET_HDR_GSO_NONE | VIRTIO_NET_HDR_GSO_ECN);
+        assert_ne!(ecn.gso_type, VIRTIO_NET_HDR_GSO_NONE);
+        assert!(ecn.is_gso_none());
+    }
+
+    /// RFC 768 / RFC 8200 s8.1: a computed UDP checksum of zero must be
+    /// transmitted as `0xFFFF`, and TCP must be left alone because
+    /// `0x0000` is a legal TCP checksum.
+    ///
+    /// The seed that makes the fold land on zero is *derived* here rather
+    /// than hard-coded, so the test cannot silently stop exercising the
+    /// substitution if the surrounding arithmetic changes.
+    #[test]
+    fn gso_none_checksum_substitutes_zero_for_udp_only() {
+        const START: usize = 20; // IPv4 header length
+        const OFFSET: usize = 6; // UDP checksum field
+
+        // ip_hdr(20) ++ udp_hdr(8) ++ 8 payload bytes.
+        let build = |proto: u8, partial: u16| -> Vec<u8> {
+            let mut p = vec![0u8; START + 8 + 8];
+            p[0] = 0x45;
+            p[9] = proto;
+            p[12..16].copy_from_slice(&[10, 0, 0, 1]);
+            p[16..20].copy_from_slice(&[10, 0, 0, 2]);
+            p[START + 4] = 0;
+            p[START + 5] = 16; // udp length
+            p[START + 8..].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x12, 0x34, 0x56, 0x78]);
+            p[START + OFFSET..START + OFFSET + 2].copy_from_slice(&partial.to_be_bytes());
+            p
+        };
+
+        // Find the kernel-deposited partial for which the completed
+        // checksum folds to zero. Exhaustive over a 16-bit field.
+        let seed = (0u32..=0xFFFF)
+            .map(|c| c as u16)
+            .find(|&c| {
+                let mut p = build(IPPROTO_UDP, c);
+                let at = START + OFFSET;
+                let initial = read_u16(&p[at..at + 2]) as u64;
+                p[at] = 0;
+                p[at + 1] = 0;
+                !checksum(&p[START..], initial) == 0
+            })
+            .expect("some 16-bit seed folds to a zero checksum");
+
+        // UDP: emitted as 0xFFFF.
+        let mut udp = build(IPPROTO_UDP, seed);
+        gso_none_checksum(&mut udp, START as u16, OFFSET as u16);
+        assert_eq!(
+            &udp[START + OFFSET..START + OFFSET + 2],
+            &[0xFF, 0xFF],
+            "UDP zero checksum must be transmitted as 0xFFFF"
+        );
+
+        // Identical bytes and seed, protocol 6: left as 0x0000.
+        let mut tcp = build(6, seed);
+        gso_none_checksum(&mut tcp, START as u16, OFFSET as u16);
+        assert_eq!(
+            &tcp[START + OFFSET..START + OFFSET + 2],
+            &[0x00, 0x00],
+            "0x0000 is a legal TCP checksum and must be left unchanged"
+        );
+
+        // An unrecognised version nibble is not treated as UDP.
+        let mut bogus = build(IPPROTO_UDP, seed);
+        bogus[0] = 0x95;
+        gso_none_checksum(&mut bogus, START as u16, OFFSET as u16);
+        assert_eq!(&bogus[START + OFFSET..START + OFFSET + 2], &[0x00, 0x00]);
+    }
     use bytes::BytesMut;
     use pnet_packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags, TcpPacket};

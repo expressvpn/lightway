@@ -311,6 +311,11 @@ impl Tun {
     /// The [`Tun::Direct`] backend fills `buf` in place. The `IoUring` backend
     /// swaps `buf` for a buffer from its internal pool, so the underlying
     /// allocation may differ between calls.
+    ///
+    /// If the device negotiated `IFF_VNET_HDR`, the [`Tun::Direct`] backend
+    /// strips the `virtio_net_hdr` the kernel prepends, so `buf` always holds
+    /// a bare IP packet regardless of framing. Size the buffer
+    /// [`Tun::mtu`] + [`Tun::vnet_headroom`].
     pub async fn recv_buf(&self, buf: &mut BytesMut) -> IOCallbackResult<usize> {
         match self {
             Tun::Direct(t) => t.recv_buf(buf).await,
@@ -387,6 +392,25 @@ impl Tun {
         }
     }
 
+    /// Extra bytes a [`Tun::recv_buf`] buffer needs on top of [`Tun::mtu`].
+    ///
+    /// When the device negotiated `IFF_VNET_HDR` the kernel prepends a
+    /// `virtio_net_hdr` to every read, so a buffer sized to the MTU alone
+    /// cannot hold a full-size packet. The kernel truncates in that case
+    /// and reports only the bytes it wrote — no flag the caller inspects
+    /// says the tail was lost — so the shortfall is silent. Callers must
+    /// size their buffer `mtu() + vnet_headroom()`.
+    ///
+    /// Zero unless offload is in use, and zero for the `IoUring` backend,
+    /// which reads with its own pooled buffers.
+    pub fn vnet_headroom(&self) -> usize {
+        match self {
+            Tun::Direct(t) => t.vnet_headroom(),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(_) => 0,
+        }
+    }
+
     /// Interface index of 'Tun' interface
     pub fn if_index(&self) -> std::io::Result<u32> {
         match self {
@@ -425,8 +449,9 @@ pub struct TunDirect {
     fd: RawFd,
     #[cfg(unix)]
     close_fd_on_drop: bool,
-    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 12-byte
-    /// `virtio_net_hdr`, reads include it.
+    /// `IFF_VNET_HDR` enabled — sends must be prefixed with a 10-byte
+    /// `virtio_net_hdr` (`size_of::<VirtioNetHdr>()`, the kernel's
+    /// `TUNGETVNETHDRSZ` default), reads include it.
     #[cfg(target_os = "linux")]
     vnet_hdr: bool,
 }
@@ -465,6 +490,10 @@ impl TunDirect {
             Ok(0) => IOCallbackResult::WouldBlock,
             Ok(nr) => {
                 buf.truncate(nr);
+                #[cfg(target_os = "linux")]
+                if self.vnet_hdr {
+                    return Self::strip_vnet_hdr(buf);
+                }
                 IOCallbackResult::Ok(nr)
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
@@ -474,14 +503,62 @@ impl TunDirect {
         }
     }
 
+    /// Strip the leading `virtio_net_hdr` from a packet just read from a
+    /// device opened with offload, leaving `buf` holding the IP payload.
+    ///
+    /// A read no longer than the header carries no packet, so it is
+    /// discarded and reported as [`IOCallbackResult::WouldBlock`] to make
+    /// the caller's recv loop retry rather than treat it as a hard error.
+    ///
+    /// Also checks the IPv4 length field against what was actually read.
+    /// They disagree only if the buffer was not sized
+    /// `mtu + vnet_headroom()` and the kernel truncated the tail — a
+    /// caller bug that is otherwise silent, since the packet still looks
+    /// well-formed. Warn rather than drop: with `TUN_F_TSO*` enabled the
+    /// kernel may also deliver an aggregate here whose length field
+    /// legitimately exceeds one MTU, and dropping those would trade a
+    /// diagnostic for data loss.
+    #[cfg(target_os = "linux")]
+    fn strip_vnet_hdr(buf: &mut BytesMut) -> IOCallbackResult<usize> {
+        use bytes::Buf;
+        use lightway_core::gso::VIRTIO_NET_HDR_LEN;
+
+        if buf.len() <= VIRTIO_NET_HDR_LEN {
+            tracing::warn!(
+                n = buf.len(),
+                "tun recv_buf: read shorter than the virtio header"
+            );
+            buf.clear();
+            return IOCallbackResult::WouldBlock;
+        }
+
+        buf.advance(VIRTIO_NET_HDR_LEN);
+
+        if buf.len() >= 4 && (buf[0] >> 4) == 4 {
+            let total_length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+            if total_length > buf.len() {
+                tracing::warn!(
+                    have = buf.len(),
+                    total_length,
+                    "tun recv_buf: IPv4 length exceeds the bytes read; \
+                     receive buffer is missing Tun::vnet_headroom()"
+                );
+            }
+        }
+
+        IOCallbackResult::Ok(buf.len())
+    }
+
     /// Recv one packet from Tun, appending it to `pkts` as a buffer
     /// sized to the interface MTU. The direct backend has no batched
     /// read, so this is the single-packet counterpart of the io_uring
     /// backend's `recv_buf_many`.
     pub async fn recv_buf_many(&self, pkts: &mut Vec<BytesMut>) -> IOCallbackResult<usize> {
-        let mtu = self.mtu();
-        let mut buf = BytesMut::with_capacity(mtu);
-        buf.resize(mtu, 0);
+        // `mtu + vnet_headroom` so an `IFF_VNET_HDR` read is not
+        // truncated by the length of the prepended header.
+        let cap = self.mtu() + self.vnet_headroom();
+        let mut buf = BytesMut::with_capacity(cap);
+        buf.resize(cap, 0);
         match self.recv_buf(&mut buf).await {
             IOCallbackResult::Ok(_n) => {
                 pkts.push(buf);
@@ -597,6 +674,17 @@ impl TunDirect {
     #[cfg(linux)]
     pub fn supports_gso(&self) -> bool {
         self.vnet_hdr
+    }
+
+    /// See [`Tun::vnet_headroom`].
+    pub fn vnet_headroom(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            if self.vnet_hdr {
+                return lightway_core::gso::VIRTIO_NET_HDR_LEN;
+            }
+        }
+        0
     }
 
     /// Interface index of Tun

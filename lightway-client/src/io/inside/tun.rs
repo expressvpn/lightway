@@ -78,6 +78,10 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         self.tun.mtu()
     }
 
+    fn vnet_headroom(&self) -> usize {
+        self.tun.vnet_headroom()
+    }
+
     fn into_io_send_callback(
         self: Arc<Self>,
     ) -> InsideIOSendCallbackArg<ConnectionState<ExtAppState>> {
