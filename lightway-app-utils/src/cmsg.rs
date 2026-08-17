@@ -1,33 +1,37 @@
 //! Encapsulates the control message apis used with `recvmsg(2)`.
 #![allow(unsafe_code)]
+// Low-level control-message plumbing; the public items are self-describing
+// by name and covered by the module doc, so individual doc comments would
+// add noise without value.
+#![allow(missing_docs)]
 
 use bytes::BytesMut;
 
 #[cfg(target_vendor = "apple")]
-pub(crate) type LibcControlLen = libc::socklen_t;
+pub type LibcControlLen = libc::socklen_t;
 
 #[cfg(all(not(target_vendor = "apple"), target_env = "musl"))]
-pub(crate) type LibcControlLen = libc::socklen_t;
+pub type LibcControlLen = libc::socklen_t;
 
 #[cfg(all(not(target_vendor = "apple"), not(target_env = "musl")))]
-pub(crate) type LibcControlLen = libc::size_t;
+pub type LibcControlLen = libc::size_t;
 
-pub(crate) struct Buffer<const N: usize>(BytesMut);
+pub struct Buffer<const N: usize>(BytesMut);
 
 impl<const N: usize> Buffer<N> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self(BytesMut::with_capacity(N))
     }
 
-    pub(crate) fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+    pub fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
         self.0.spare_capacity_mut()
     }
 
-    pub(crate) fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.0.capacity()
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.0.clear();
         self.0.reserve(N);
     }
@@ -36,7 +40,7 @@ impl<const N: usize> Buffer<N> {
     ///
     /// `control_len` must have been set to the number of bytes of the
     /// buffer which have been initialized.
-    pub(crate) unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_, N> {
+    pub unsafe fn iter(&mut self, control_len: LibcControlLen) -> Iter<'_, N> {
         // SAFETY: The outer function here has enforced this requirement already
         unsafe {
             // `LibcControlLen` is `size_t` on glibc but `socklen_t` on
@@ -75,13 +79,13 @@ pub enum Message<'a> {
 }
 
 impl Message<'_> {
-    pub(crate) const fn space<T>() -> usize {
+    pub const fn space<T>() -> usize {
         // SAFETY: CMSG_SPACE is always safe
         unsafe { libc::CMSG_SPACE(std::mem::size_of::<T>() as libc::c_uint) as usize }
     }
 }
 
-pub(crate) struct Iter<'a, const N: usize> {
+pub struct Iter<'a, const N: usize> {
     msghdr: libc::msghdr,
     cursor: *const libc::cmsghdr,
     // `msghdr` contains a raw pointer into the owning `Buffer` and
@@ -127,10 +131,10 @@ impl<'a, const N: usize> Iterator for Iter<'a, N> {
 }
 
 #[repr(C, align(16))] // Must be suitably aligned for a `libc::cmsghdr`.
-pub(crate) struct BufferMut<const N: usize>([u8; N]);
+pub struct BufferMut<const N: usize>([u8; N]);
 
 impl<const N: usize> BufferMut<N> {
-    pub(crate) fn zeroed() -> Self {
+    pub fn zeroed() -> Self {
         Self([0; N])
     }
 
@@ -145,7 +149,7 @@ impl<const N: usize> BufferMut<N> {
     ///
     /// Note that this is not mentioned in
     /// <https://pubs.opengroup.org/onlinepubs/9699919799.2018edition/basedefs/sys_socket.h.html>.
-    pub(crate) fn builder(&mut self) -> BufferBuilder<'_, N> {
+    pub fn builder(&mut self) -> BufferBuilder<'_, N> {
         // Build a `msghdr` so we can use the `CMSG_*` functionality in
         // libc. We will only use the `CMSG_*` macros which only use
         // the `msg_control*` fields.
@@ -174,7 +178,7 @@ impl<const N: usize> BufferMut<N> {
     /// Mutable view of the raw buffer, for passing to `msg_control` in
     /// syscalls that need a mutable pointer.
     #[cfg(linux)]
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.0
     }
 }
@@ -185,7 +189,7 @@ impl<const N: usize> AsRef<[u8]> for BufferMut<N> {
     }
 }
 
-pub(crate) struct BufferBuilder<'a, const N: usize> {
+pub struct BufferBuilder<'a, const N: usize> {
     msghdr: libc::msghdr,
     cmsghdr: *mut libc::cmsghdr,
     // `msghdr` contains a raw pointer into the owning `Buffer` and
@@ -195,7 +199,7 @@ pub(crate) struct BufferBuilder<'a, const N: usize> {
 }
 
 impl<const N: usize> BufferBuilder<'_, N> {
-    pub(crate) fn fill_next<T>(
+    pub fn fill_next<T>(
         &mut self,
         cmsg_level: libc::c_int,
         cmsg_type: libc::c_int,
@@ -292,7 +296,6 @@ mod tests {
     #![allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 
     use super::*;
-    use more_asserts::*;
 
     #[test]
     fn success_single_pktinfo() {
@@ -327,7 +330,7 @@ mod tests {
     #[test]
     fn not_enough_room_for_first_header() {
         let mut cmsg = BufferMut::<4>::zeroed();
-        assert_lt!(cmsg.0.len(), std::mem::size_of::<libc::cmsghdr>());
+        assert!(cmsg.0.len() < std::mem::size_of::<libc::cmsghdr>());
 
         let mut builder = cmsg.builder();
         let err = builder.fill_next(0, 0, 0).unwrap_err();
@@ -370,8 +373,8 @@ mod tests {
         const SIZE: usize =
             std::mem::size_of::<libc::cmsghdr>() + std::mem::size_of::<libc::in_pktinfo>() - 1;
         let mut cmsg = BufferMut::<SIZE>::zeroed();
-        assert_gt!(cmsg.0.len(), std::mem::size_of::<libc::cmsghdr>());
-        assert_lt!(cmsg.0.len(), Message::space::<libc::in_pktinfo>());
+        assert!(cmsg.0.len() > std::mem::size_of::<libc::cmsghdr>());
+        assert!(cmsg.0.len() < Message::space::<libc::in_pktinfo>());
 
         let mut builder = cmsg.builder();
         let err = builder

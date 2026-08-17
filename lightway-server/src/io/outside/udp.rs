@@ -1,5 +1,5 @@
 mod batch_receive;
-mod cmsg;
+use lightway_app_utils::cmsg;
 pub(crate) mod send_queue;
 
 use anyhow::Result;

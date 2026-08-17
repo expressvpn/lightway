@@ -6,9 +6,9 @@
 //!   `0.0.0.0`). Fills source address and a caller-provided control buffer in
 //!   addition to the data.
 
-use crate::io::outside::udp::cmsg;
-use crate::io::outside::udp::cmsg::LibcControlLen;
 use bytes::BytesMut;
+use lightway_app_utils::cmsg;
+use lightway_app_utils::cmsg::LibcControlLen;
 use lightway_core::MAX_IO_BATCH_SIZE;
 use std::io;
 use std::net::SocketAddr;
@@ -158,7 +158,7 @@ pub(crate) fn recv_multiple_with_metadata<const CONTROL_SIZE: usize>(
 
 #[cfg(macos)]
 mod apple {
-    use crate::io::outside::udp::cmsg::LibcControlLen;
+    use lightway_app_utils::cmsg::LibcControlLen;
     use lightway_app_utils::recvmsg_x::{msghdr_x, recvmsg_x};
     use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::{io, mem};
@@ -249,7 +249,7 @@ mod apple {
 
 #[cfg(linux)]
 mod linux {
-    use crate::io::outside::udp::cmsg::LibcControlLen;
+    use lightway_app_utils::cmsg::LibcControlLen;
     use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
     use std::{io, mem};
 
