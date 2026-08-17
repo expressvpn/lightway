@@ -486,7 +486,7 @@ fn read_single_from_socket(
     let mut msg = MsgHdrMut::new()
         .with_addr(&mut peer_sock_addr)
         .with_buffers(&mut raw_buf)
-        .with_control(control.as_mut());
+        .with_control(control.spare_capacity_mut());
 
     let len = sock.recvmsg(&mut msg, 0)?;
 

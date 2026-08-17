@@ -18,12 +18,18 @@ pub type LibcControlLen = libc::size_t;
 
 pub struct Buffer<const N: usize>(BytesMut);
 
+impl<const N: usize> Default for Buffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> Buffer<N> {
     pub fn new() -> Self {
         Self(BytesMut::with_capacity(N))
     }
 
-    pub fn as_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+    pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
         self.0.spare_capacity_mut()
     }
 

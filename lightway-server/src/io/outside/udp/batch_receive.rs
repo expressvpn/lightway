@@ -201,7 +201,8 @@ mod apple {
                 hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_control =
+                        control.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
                     hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }
@@ -291,7 +292,8 @@ mod linux {
                 hdr.msg_hdr.msg_namelen = slot.peer_addr_len;
 
                 if let Some(control) = &mut slot.control {
-                    hdr.msg_hdr.msg_control = control.as_mut().as_mut_ptr() as *mut libc::c_void;
+                    hdr.msg_hdr.msg_control =
+                        control.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void;
                     hdr.msg_hdr.msg_controllen = control.capacity() as LibcControlLen;
                 }
             }
