@@ -770,9 +770,12 @@ async fn expresslane_health_probe(
         (el_state, degraded_at, reflected)
     };
 
-    let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(15), async move {
-        tokio::join!(server_task, client_task)
-    })
+    // Emulated targets requires much more time to run this,
+    // sometimes >15s. So we use the platform-aware base timeout, scaled up.
+    let (_, result) = tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout() * 8),
+        async move { tokio::join!(server_task, client_task) },
+    )
     .await
     .expect("expresslane health probe timed out");
 
