@@ -15,7 +15,7 @@ workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 bitfield-struct = "0.13.0"
-wolfssl = { version = "7.3.0", optional = true }
+wolfssl = { workspace = true, optional = true }
 
 [features]
 default = []
