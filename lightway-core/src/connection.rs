@@ -292,6 +292,8 @@ impl ConnectionError {
                     Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::PeerClosed)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
+                    #[cfg(wolfssl)]
+                    Tls(crate::tls::Error::Fatal(ErrorKind::PeerFatalAlert)) => true,
 
                     WireError(wire::FromWireError::UnknownFrameType) => false,
                     WireError(wire::FromWireError::InsufficientData) => false,
