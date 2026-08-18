@@ -4,7 +4,7 @@
 //! DTLS MTU, domain name verification, SNI, and post-quantum key share group
 //! preferences.
 
-use super::CurveGroup;
+use super::{CurveGroup, SslVerifyMode};
 
 /// Configuration for creating a session
 pub struct SessionConfig<IOCB> {
@@ -23,6 +23,9 @@ pub struct SessionConfig<IOCB> {
     /// or classical groups, which negotiate normally through the
     /// supported_groups extension.
     pub keyshare_group: Option<CurveGroup>,
+    /// Per-session certificate verification mode. When set, overrides the
+    /// context-level mode for this session via `SSL_set_verify`.
+    pub ssl_verify_mode: Option<SslVerifyMode>,
 }
 
 impl<IOCB> SessionConfig<IOCB> {
@@ -34,6 +37,7 @@ impl<IOCB> SessionConfig<IOCB> {
             checked_domain_name: None,
             server_name_indication: None,
             keyshare_group: None,
+            ssl_verify_mode: None,
         }
     }
 
@@ -82,6 +86,12 @@ impl<IOCB> SessionConfig<IOCB> {
     /// classical groups are a no-op here; they negotiate via `supported_groups`.
     pub fn with_keyshare_group(mut self, group: CurveGroup) -> Self {
         self.keyshare_group = Some(group);
+        self
+    }
+
+    /// Set the certificate verification mode for this session.
+    pub fn with_ssl_verify_mode(mut self, mode: SslVerifyMode) -> Self {
+        self.ssl_verify_mode = Some(mode);
         self
     }
 
@@ -135,6 +145,20 @@ mod tests {
         let config = SessionConfig::new(mock_io).with_keyshare_group(CurveGroup::X25519MLKEM768);
 
         assert_eq!(config.keyshare_group, Some(CurveGroup::X25519MLKEM768));
+    }
+
+    #[test]
+    fn test_session_config_ssl_verify_mode() {
+        let mock_io = MockIOAdapter::new();
+
+        let config = SessionConfig::new(mock_io);
+        assert!(config.ssl_verify_mode.is_none());
+
+        let config = config.with_ssl_verify_mode(SslVerifyMode::SslVerifyNone);
+        assert!(matches!(
+            config.ssl_verify_mode,
+            Some(SslVerifyMode::SslVerifyNone)
+        ));
     }
 
     #[test]
