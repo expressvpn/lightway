@@ -834,7 +834,7 @@ async fn network_event_coordinator(
             }
         }
 
-        match route_updater.check_and_update_server_route().await {
+        match route_updater.update_server_route_with_retry().await {
             // A replaced server route is ground truth that the path to the
             // server moved; probe it so the session floats promptly.
             #[cfg(apple)]

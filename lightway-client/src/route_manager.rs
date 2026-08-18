@@ -192,6 +192,29 @@ impl RouteUpdater {
         }
         self.inner.check_and_update_server_route().await
     }
+
+    /// Re-pin the server route, retrying while the network is still settling.
+    ///
+    /// Sleeps 500ms after the first failure, then 1s per retry (29.5s total).
+    /// The ceiling covers PEAP phase 2 stalls which can hold for up to 25s.
+    pub async fn update_server_route_with_retry(&mut self) -> Result<bool, RoutingTableError> {
+        for n in 0u32..31 {
+            match self.check_and_update_server_route().await {
+                Ok(updated) => return Ok(updated),
+                Err(e) if n == 30 => return Err(e),
+                Err(e) => {
+                    if n < 7 {
+                        tracing::debug!("Server route update failed ({e:?}), retrying");
+                    } else {
+                        tracing::warn!("Server route update failed ({e:?}) more than 6s, retrying");
+                    }
+                    let delay = if n == 0 { 500 } else { 1_000 };
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            }
+        }
+        unreachable!("loop returns on the final attempt")
+    }
 }
 
 impl RouteManagerInner {
@@ -511,14 +534,32 @@ impl RouteManagerInner {
             let server_if_index = server_route.if_index();
 
             // Check if the route to the server has changed
-            if server_gateway != current_gateway || server_if_index != current_if_index {
-                tracing::debug!(
-                    "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
-                    server_gateway,
-                    server_if_index,
-                    current_gateway,
-                    current_if_index
-                );
+            let route_changed =
+                server_gateway != current_gateway || server_if_index != current_if_index;
+
+            // When roaming within the same subnet/gateway/if_index identical,
+            // we need re-pin unconditionally to rebind.
+            let needs_update = cfg_select! {
+                apple => { true }
+                _ =>     { route_changed }
+            };
+
+            if needs_update {
+                if route_changed {
+                    tracing::debug!(
+                        "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
+                        server_gateway,
+                        server_if_index,
+                        current_gateway,
+                        current_if_index
+                    );
+                } else {
+                    tracing::debug!(
+                        "Re-pinning server route with unchanged (interface, gateway): ({:?}, {:?})",
+                        current_if_index,
+                        current_gateway
+                    );
+                }
 
                 // Update server route with new gateway/interface
                 if let Some(old_route) = self.server_route.take() {
@@ -1079,9 +1120,12 @@ mod tests {
         assert!(inner.server_route.is_some());
         let initial_server_route = inner.server_route.as_ref().unwrap().clone();
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
@@ -1202,9 +1246,12 @@ mod tests {
         assert_eq!(initial_server_route.destination(), EXTERNAL_IP_V6);
         assert_eq!(initial_server_route.prefix(), Ipv6Addr::BITS as u8);
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
