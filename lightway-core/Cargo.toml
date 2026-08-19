@@ -38,7 +38,7 @@ rand.workspace = true
 rand_core = "0.10.0"
 thiserror.workspace = true
 tracing.workspace = true
-wolfssl = { version = "7.0.0", optional = true }
+wolfssl = { workspace = true, optional = true }
 boringssl = { path = "../lightway-boring", package = "lightway-boring", optional = true }
 
 [build-dependencies]
