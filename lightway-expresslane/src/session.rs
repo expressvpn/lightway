@@ -283,6 +283,9 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         let (cipher_text, auth_tag) = {
             let keys = self.keys_read();
             let current = keys.current_self.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            if current.key.is_invalid() {
+                return Err(ExpresslaneError::NoKey);
+            }
             current.aead.seal(iv, plaintext, &aad_buf[..aad_len])?
         };
 
@@ -330,6 +333,9 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         let tag = {
             let keys = self.keys_read();
             let current = keys.current_self.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            if current.key.is_invalid() {
+                return Err(ExpresslaneError::NoKey);
+            }
             current.aead.seal_into(
                 iv,
                 plaintext,
@@ -402,11 +408,16 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         let plain_text = {
             let keys = self.keys_read();
             let current = keys.current_peer.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            if current.key.is_invalid() {
+                return Err(ExpresslaneError::NoKey);
+            }
             match current.aead.open(iv, cipher_text, aad, &auth_tag) {
                 Ok(p) => p,
                 Err(e) => match keys.prev_peer.as_ref() {
-                    Some(prev) => prev.aead.open(iv, cipher_text, aad, &auth_tag)?,
-                    None => return Err(e),
+                    Some(prev) if !prev.key.is_invalid() => {
+                        prev.aead.open(iv, cipher_text, aad, &auth_tag)?
+                    }
+                    _ => return Err(e),
                 },
             }
         };
@@ -483,20 +494,23 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
         let plain_len = {
             let keys = self.keys_read();
             let current = keys.current_peer.as_ref().ok_or(ExpresslaneError::NoKey)?;
+            if current.key.is_invalid() {
+                return Err(ExpresslaneError::NoKey);
+            }
             match current
                 .aead
                 .open_into(iv, cipher_text, aad, &auth_tag, &mut out[..data_len])
             {
                 Ok(n) => n,
                 Err(e) => match keys.prev_peer.as_ref() {
-                    Some(prev) => prev.aead.open_into(
+                    Some(prev) if !prev.key.is_invalid() => prev.aead.open_into(
                         iv,
                         cipher_text,
                         aad,
                         &auth_tag,
                         &mut out[..data_len],
                     )?,
-                    None => return Err(e),
+                    _ => return Err(e),
                 },
             }
         };
@@ -604,6 +618,74 @@ mod tests {
         s.update_peer_key(ExpresslaneKey([3u8; EXPRESSLANE_KEY_SIZE]))
             .unwrap();
         assert!(s.has_valid_keys());
+    }
+
+    /// A promoted sentinel must fail the TX path closed - NoKey, not a frame
+    /// sealed under the publicly known all-zero key.
+    #[test]
+    fn promoted_sentinel_key_fails_encrypt_closed() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        s.update_next_self_key(ExpresslaneKey::INVALID).unwrap();
+        s.promote_self_key();
+
+        let mut buf = BytesMut::new();
+        let err = s.append_to_wire(&mut buf, SID, b"x", [3u8; 12], false);
+        assert!(matches!(err, Err(ExpresslaneError::NoKey)), "{err:?}");
+        assert!(buf.is_empty(), "nothing should be written on failure");
+
+        let mut out = [0u8; ExpresslaneSession::<WolfsslAead>::WIRE_OVERHEAD + 1];
+        let err = s.encrypt_into(1, SID, b"x", [3u8; 12], false, &mut out);
+        assert!(matches!(err, Err(ExpresslaneError::NoKey)), "{err:?}");
+    }
+
+    /// An installed sentinel peer key must fail the RX path closed - not open
+    /// under the all-zero key, and not quietly fall back to the retained
+    /// previous key on a path the degrade notice declared dead.
+    #[test]
+    fn sentinel_peer_key_fails_decrypt_closed() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        let mut buf = BytesMut::new();
+        s.append_to_wire(&mut buf, SID, b"payload", [3u8; 12], false)
+            .unwrap();
+
+        s.update_peer_key(ExpresslaneKey::INVALID).unwrap();
+
+        let mut frame = buf.clone();
+        let err = s.try_from_wire(&mut frame, SID);
+        assert!(matches!(err, Err(ExpresslaneError::NoKey)), "{err:?}");
+
+        let mut out = [0u8; 7];
+        let err = s.decrypt_into(SID, &buf, &mut out);
+        assert!(matches!(err, Err(ExpresslaneError::NoKey)), "{err:?}");
+    }
+
+    /// A sentinel bumped into the prev_peer slot by a later real key must not
+    /// serve as the rotation-grace fallback: a frame forged under the
+    /// publicly known all-zero key has to be rejected.
+    #[test]
+    fn sentinel_prev_peer_key_is_not_a_decrypt_fallback() {
+        let s = keyed(ExpresslaneVersion::Version2);
+        s.update_peer_key(ExpresslaneKey::INVALID).unwrap();
+        s.update_peer_key(ExpresslaneKey([2u8; EXPRESSLANE_KEY_SIZE]))
+            .unwrap();
+
+        // Forge a frame under the all-zero key, as any attacker could.
+        let aead = WolfsslAead::new(&ExpresslaneKey::INVALID).unwrap();
+        let iv = [3u8; 12];
+        let counter = 1u64;
+        let flags = Flags::new().with_encoded(false);
+        let (aad_buf, aad_len) = build_aad(ExpresslaneVersion::Version2, &SID, counter, flags);
+        let (cipher_text, auth_tag) = aead.seal(iv, b"forged", &aad_buf[..aad_len]).unwrap();
+        let mut buf = BytesMut::new();
+        buf.put_u64(counter);
+        buf.put(iv.as_ref());
+        buf.put(auth_tag.as_ref());
+        buf.put_u16(cipher_text.len() as u16);
+        buf.put_u16(flags.into());
+        buf.put(&cipher_text[..]);
+
+        let err = s.try_from_wire(&mut buf, SID);
+        assert!(err.is_err(), "forged frame must not decrypt: {err:?}");
     }
 
     #[test]
