@@ -72,8 +72,8 @@ pub enum RouteMode {
 pub enum RoutingTableError {
     #[error("AsyncRoutingManager error {0}")]
     AsyncRoutingManagerError(std::io::Error),
-    #[error("Failed to Add Route {0}")]
-    AddRouteError(std::io::Error),
+    #[error("Failed to Add {0}: {1}")]
+    AddRouteError(Route, std::io::Error),
     #[error("Default interface not found: {0}")]
     DefaultInterfaceNotFound(std::io::Error),
     #[error("Default route not found")]
@@ -362,7 +362,7 @@ impl RouteManagerInner {
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
                     Err(RoutingTableError::InsufficientPermissions)
                 } else {
-                    Err(RoutingTableError::AddRouteError(e))
+                    Err(RoutingTableError::AddRouteError(route.clone(), e))
                 }
             }
         }
