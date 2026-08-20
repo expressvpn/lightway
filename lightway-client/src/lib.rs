@@ -407,6 +407,9 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     #[educe(Debug(method(debug_pkt_codec_fac)))]
     pub inside_pkt_codec: Option<PacketCodecFactoryType>,
 
+    /// SNI header for TLS connections
+    pub sni_header: Option<String>,
+
     /// Allow injection of a custom handler for event callback
     #[educe(Debug(ignore))]
     pub event_handler: Option<EventHandler>,
@@ -442,6 +445,7 @@ impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventH
             inside_plugins: Default::default(),
             outside_plugins: Default::default(),
             inside_pkt_codec: None,
+            sni_header: config.sni_header,
             event_handler,
         })
     }
@@ -1137,6 +1141,7 @@ pub async fn connect<
         inside_pkt_codec,
         inside_plugins,
         outside_plugins,
+        sni_header,
         event_handler,
     } = server_config;
 
@@ -1275,6 +1280,7 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
+        .when_some(sni_header.as_deref(), |b, sni| b.with_sni_header(sni))
         .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })

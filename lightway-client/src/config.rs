@@ -24,7 +24,6 @@ const DEFAULT_RCVBUF: ByteSize = ByteSize::mib(8);
 // values follow the Rust convention in Default trait, such that we are able
 // to serialized out any kind of configure from the Config::default(), such
 // that our library will be nice and easy to further do integrations.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
 #[patch(attribute(derive(Clone, Deserialize, Parser)))]
 #[patch(attribute(command(about = "A lightway client")))]
@@ -346,9 +345,10 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "windows"))]
     pub enable_dpapi: bool,
 
-    /// SNI header for TLS connections
-    #[patch(attribute(clap(skip)))]
-    #[schemars(extend("x-cfg" = "mobile"))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = r#"SNI header for TLS connections
+    Only used if `servers` is empty"#))]
+    /// ex: example.com
     pub sni_header: String,
 
     #[patch(attribute(clap(short, long)))]
@@ -390,6 +390,8 @@ impl Config {
                     .then(|| std::mem::take(&mut self.server_dn)),
                 cipher: self.cipher,
                 outside_mtu: self.outside_mtu,
+                sni_header: (!self.sni_header.is_empty())
+                    .then(|| std::mem::take(&mut self.sni_header)),
                 ..Default::default()
             }];
         }
@@ -624,6 +626,10 @@ pub struct ConnectionConfig {
     /// The CA Cert content or Path
     #[serde(default)]
     pub ca_cert: Option<String>,
+
+    /// SNI header for TLS connections
+    #[serde(default)]
+    pub sni_header: Option<String>,
 }
 
 impl ConnectionConfig {
