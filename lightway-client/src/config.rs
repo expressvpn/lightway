@@ -104,6 +104,13 @@ pub struct Config {
     #[patch(attribute(doc = "Tun device name to use"))]
     pub tun_name: Option<String>,
 
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub tun_txqueuelen: u32,
+
     #[cfg(windows)]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
@@ -516,6 +523,8 @@ impl Default for Config {
             tun_name: None,
             #[cfg(not(macos))]
             tun_name: Some("lightway".to_string()),
+            #[cfg(linux)]
+            tun_txqueuelen: 1000,
             #[cfg(windows)]
             wintun_file: None,
             #[cfg(windows)]
