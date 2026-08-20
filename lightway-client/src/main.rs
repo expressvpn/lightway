@@ -282,11 +282,17 @@ fn spawn_reload_event_handler(
     cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, WAIT_OBJECT_0},
-        System::Threading::{CreateEventW, INFINITE, WaitForSingleObject},
+        Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{CreateEventW, WaitForSingleObject},
     };
 
     const EVENT_NAME: &str = "Global\\LightwayConfigReload";
+
+    // Bound the wait so a shutting-down runtime isn't stuck joining this blocking
+    // thread forever: dropping the Tokio runtime waits for any in-flight
+    // `spawn_blocking` call to return, and `WaitForSingleObject(..., INFINITE)`
+    // never would on its own.
+    const WAIT_TIMEOUT_MS: u32 = 5_000;
 
     let wide_name: Vec<u16> = EVENT_NAME
         .encode_utf16()
@@ -325,12 +331,13 @@ fn spawn_reload_event_handler(
             let h = send_handle;
             let wait_result = tokio::task::spawn_blocking(move || {
                 // SAFETY: handle was created above, is valid
-                unsafe { WaitForSingleObject(h.raw(), INFINITE) }
+                unsafe { WaitForSingleObject(h.raw(), WAIT_TIMEOUT_MS) }
             })
             .await;
 
             match wait_result {
                 Ok(WAIT_OBJECT_0) => {}
+                Ok(WAIT_TIMEOUT) => continue,
                 Ok(code) => {
                     tracing::error!("WaitForSingleObject returned unexpected code: {code}");
                     break;
