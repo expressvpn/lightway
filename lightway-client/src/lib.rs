@@ -813,26 +813,6 @@ async fn network_event_coordinator(
                     rx.mark_unchanged();
                     nudge = true;
                 }
-
-                match route_updater.update_server_route_with_retry().await {
-                    // A replaced server route is ground truth that the path to the
-                    // server moved; probe it so the session floats promptly.
-                    #[cfg(apple)]
-                    Ok(true) if nudge_on_route_update => nudge = true,
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("Updating server route failed: {:?}", e),
-                }
-
-                // The connected outside socket pins the route resolved at connect()
-                // time; re-resolve it now that the routing table is up to date.
-                #[cfg(apple)]
-                if let Some(io) = outside_io.upgrade() {
-                    io.reconnect();
-                }
-
-                if nudge && let Err(e) = network_change_signal.send(()).await {
-                    tracing::error!("Failed to send network_change_signal: {e}");
-                }
             }
             changed = async {
                 match transition_rx.as_mut() {
@@ -851,27 +831,27 @@ async fn network_event_coordinator(
                 if route_rx.has_changed().unwrap_or(false) {
                     route_rx.mark_unchanged();
                 }
-
-                match route_updater.update_server_route_with_retry().await {
-                    // A replaced server route is ground truth that the path to the
-                    // server moved; probe it so the session floats promptly.
-                    #[cfg(apple)]
-                    Ok(true) if nudge_on_route_update => nudge = true,
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("Updating server route failed: {:?}", e),
-                }
-
-                // The connected outside socket pins the route resolved at connect()
-                // time; re-resolve it now that the routing table is up to date.
-                #[cfg(apple)]
-                if let Some(io) = outside_io.upgrade() {
-                    io.reconnect();
-                }
-
-                if nudge && let Err(e) = network_change_signal.send(()).await {
-                    tracing::error!("Failed to send network_change_signal: {e}");
-                }
             }
+        }
+
+        match route_updater.update_server_route_with_retry().await {
+            // A replaced server route is ground truth that the path to the
+            // server moved; probe it so the session floats promptly.
+            #[cfg(apple)]
+            Ok(true) if nudge_on_route_update => nudge = true,
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Updating server route failed: {:?}", e),
+        }
+
+        // The connected outside socket pins the route resolved at connect()
+        // time; re-resolve it now that the routing table is up to date.
+        #[cfg(apple)]
+        if let Some(io) = outside_io.upgrade() {
+            io.reconnect();
+        }
+
+        if nudge && let Err(e) = network_change_signal.send(()).await {
+            tracing::error!("Failed to send network_change_signal: {e}");
         }
     }
 }
