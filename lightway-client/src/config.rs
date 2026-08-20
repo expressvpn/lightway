@@ -104,6 +104,13 @@ pub struct Config {
     #[patch(attribute(doc = "Tun device name to use"))]
     pub tun_name: Option<String>,
 
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub tun_txqueuelen: u32,
+
     #[cfg(windows)]
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
@@ -493,6 +500,16 @@ impl Config {
                 && self.wintun_ring_capacity <= ByteSize::mib(64),
             "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
         );
+        #[cfg(linux)]
+        {
+            anyhow::ensure!(self.tun_txqueuelen != 0, "tun_txqueuelen must not be 0");
+            if self.tun_txqueuelen < 1000 {
+                tracing::warn!(
+                    txqueuelen = self.tun_txqueuelen,
+                    "tun_txqueuelen is below the recommended minimum of 1000"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -516,6 +533,8 @@ impl Default for Config {
             tun_name: None,
             #[cfg(not(macos))]
             tun_name: Some("lightway".to_string()),
+            #[cfg(linux)]
+            tun_txqueuelen: 1000,
             #[cfg(windows)]
             wintun_file: None,
             #[cfg(windows)]
@@ -867,6 +886,26 @@ mod tests {
             "sndbuf is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
+    }
+
+    #[cfg(linux)]
+    #[tracing_test::traced_test]
+    #[test]
+    fn validate_warns_on_low_tun_txqueuelen() {
+        let mut config = Config::default();
+        config.tun_txqueuelen = 500;
+        assert!(config.validate().is_ok());
+        assert!(logs_contain(
+            "tun_txqueuelen is below the recommended minimum of 1000"
+        ));
+    }
+
+    #[cfg(linux)]
+    #[test]
+    fn validate_rejects_zero_tun_txqueuelen() {
+        let mut config = Config::default();
+        config.tun_txqueuelen = 0;
+        assert!(config.validate().is_err());
     }
 
     #[cfg(not(macos))]

@@ -301,6 +301,9 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             tun_config.tun_name(tun_name.clone());
         }
 
+        #[cfg(linux)]
+        tun_config.tx_queue_len(config.tun_txqueuelen);
+
         #[cfg(windows)]
         {
             if let Some(ref wintun_file) = config.wintun_file {
