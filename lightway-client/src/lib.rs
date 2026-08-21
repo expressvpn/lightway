@@ -18,6 +18,8 @@ use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures::{FutureExt, stream::FuturesUnordered};
+#[cfg(linux)]
+pub use io::inside::InsideIORecvGso;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -239,6 +241,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Base MTU for PMTU discovery
     pub pmtud_base_mtu: Option<u16>,
 
+    /// Enable offload for batch packet processing: GSO on the TUN
+    /// read + UDP send path, GRO on the UDP receive path.
+    /// Only effective on Linux; ignored elsewhere.
+    pub enable_tun_offload: bool,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -356,6 +363,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
             pmtud_base_mtu: config.pmtud_base_mtu,
+            enable_tun_offload: config.enable_tun_offload,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -648,6 +656,139 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     }
 }
 
+/// Split a GRO aggregate into per-datagram buffers on `gro_size`
+/// boundaries; the final segment may be shorter. The split-off views
+/// share the aggregate's backing slab — no copies.
+#[cfg(linux)]
+fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
+    debug_assert!(gro_size > 0);
+    while !buf.is_empty() {
+        let take = buf.len().min(gro_size);
+        segments.push(buf.split_to(take));
+    }
+}
+
+/// An async function to handle all the outside traffic when TUN
+/// offload is enabled on a UDP connection.
+///
+/// Two receive optimizations run here. Each is worthwhile on its own and
+/// neither requires the other:
+///
+/// - **Socket read coalescing** (kernel `UDP_GRO`): the receive socket
+///   sets the `UDP_GRO` sockopt (`io::outside::udp`), which is what makes
+///   the kernel return an equal-size train of datagrams as a single
+///   buffer, reporting the segment size in a `UDP_GRO` control message; we
+///   split on that boundary. The sockopt is what does the work — a peer
+///   sending valid UDP checksums is *necessary but not sufficient*, since
+///   without the sockopt the kernel returns one datagram per `recvmsg` no
+///   matter how well-formed the sender is. When coalescing does not happen
+///   — kernel without `UDP_GRO`, or a peer sending zero-checksum UDP,
+///   which the kernel GRO engine skips by design — each `recv_gro_batch`
+///   slot simply holds one datagram and everything below still works
+///   unchanged.
+///
+/// - **TUN write coalescing** (userspace `TcpGroTable`): decrypted
+///   in-order TCP segments are coalesced into TSO superpackets and written
+///   to the TUN once, so the local stack processes the download as
+///   aggregates. This only needs several same-flow segments to be
+///   offered inside one open window — it does **not** depend on the
+///   socket having coalesced, so a zero-checksum peer costs us the first
+///   optimization but not this one. To make it work when the kernel hands us
+///   one wire packet per datagram (i.e. no socket-level coalescing),
+///   we hold the window open across a bounded drain of the
+///   currently-ready datagrams and flush once the socket empties (or
+///   the batch cap is hit), rather than flushing after every datagram.
+#[cfg(linux)]
+pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    connection_type: ConnectionType,
+    outside_io: Arc<dyn io::outside::OutsideIORecvGro>,
+    inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
+    keepalive: Keepalive,
+    mut ready_signal: Option<oneshot::Sender<()>>,
+) -> Result<()> {
+    // A GRO aggregate can be up to the maximum IP datagram size.
+    const RECV_CAP: usize = lightway_core::gro::MAX_IPV4_PACKET_LEN;
+    const BATCH: usize = lightway_core::MAX_IO_BATCH_SIZE;
+
+    let mut bufs: [BytesMut; BATCH] = std::array::from_fn(|_| BytesMut::with_capacity(RECV_CAP));
+    let mut gro_sizes: [Option<u16>; BATCH] = [None; BATCH];
+    let mut segments: Vec<BytesMut> = Vec::new();
+    loop {
+        // Unrecoverable errors: https://github.com/tokio-rs/tokio/discussions/5552
+        outside_io.poll(tokio::io::Interest::READABLE).await?;
+
+        // Send ready signal after first successful poll
+        if let Some(tx) = ready_signal.take() {
+            let _ = tx.send(());
+        }
+
+        // One syscall pulls up to BATCH datagrams. Each may itself be a
+        // kernel-coalesced aggregate (gro_sizes[i] set) or a single
+        // datagram (None) — both feed the userspace TUN coalescer.
+        let count = match outside_io.recv_gro_batch(&mut bufs, &mut gro_sizes) {
+            IOCallbackResult::Ok(n) => n,
+            IOCallbackResult::WouldBlock => continue,
+            IOCallbackResult::Err(err) => return Err(err.into()),
+        };
+
+        // Open one TUN GRO window across the whole batch and flush it
+        // before releasing the conn lock, so decrypted same-flow segments
+        // coalesce into TSO superpackets and packets never wait on future
+        // traffic. `gro_open` is idempotent. The flush must run even on
+        // error, so capture the result and propagate it after the lock is
+        // dropped.
+        inside_io.gro_open();
+        let result = {
+            let mut conn = conn.lock().unwrap();
+            let mut acc = Ok(());
+            for i in 0..count {
+                if bufs[i].is_empty() {
+                    continue;
+                }
+                // A datagram the kernel did not coalesce splits into
+                // exactly one segment (whole-buffer boundary).
+                let seg_size = match gro_sizes[i] {
+                    Some(gro_size) if gro_size > 0 => gro_size as usize,
+                    _ => bufs[i].len(),
+                };
+                segments.clear();
+                split_gro_segments(&mut bufs[i], seg_size, &mut segments);
+                let pkts = segments
+                    .iter_mut()
+                    .map(|b| OutsidePacket::Wire(b, connection_type));
+                let r =
+                    conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
+                if let Err(e) = r {
+                    acc = Err(e);
+                    break;
+                }
+            }
+            // Flush while the conn lock is still held. `send()` can only
+            // run under this mutex, so closing the window here leaves no
+            // window in which another task coalesces into the table after
+            // the drain has run and has its packet sit there until the
+            // next receive. `write_super` only does non-blocking
+            // `try_send`s and the batch's own sends above already ran
+            // under this lock, so holding it a moment longer costs
+            // nothing.
+            inside_io.gro_flush();
+            acc
+        };
+        result?;
+
+        // Reset the buffers consumed this round. Drop the split-off
+        // views first so the last buffer's slab can be reused.
+        segments.clear();
+        for b in &mut bufs[..count] {
+            b.clear();
+            b.reserve(RECV_CAP);
+        }
+
+        keepalive.outside_activity().await
+    }
+}
+
 const DEFAULT_TRACER_TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Tracks the tracer trigger for the inside IO loops: fires
@@ -786,6 +927,78 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
                     }
                 }
                 Ok(())
+            },
+        )?
+        else {
+            continue;
+        };
+
+        tracer.tick(&keepalive, last_outside_data_received).await;
+    }
+}
+
+/// An async function to handle all the inside traffic when TUN offload
+/// (GSO) is enabled.
+///
+/// Mirrors [`inside_io_task`], but reads (potentially oversized) GSO
+/// superpackets from the TUN and forwards each aggregate via
+/// `Connection::inside_data_received_gso`, which segments it in
+/// userspace, encrypts each segment and ships the whole batch as a
+/// single `sendmsg(UDP_SEGMENT)`.
+#[cfg(linux)]
+pub async fn inside_io_task_gso<ExtAppState: Send + Sync>(
+    conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    inside_io: Arc<dyn io::inside::InsideIORecvGso<ExtAppState>>,
+    tun_dns_ip: Ipv4Addr,
+    keepalive: Keepalive,
+    keepalive_config: KeepaliveConfig,
+) -> Result<()> {
+    use lightway_core::gso::{VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_LEN, gso_none_checksum};
+
+    let mut tracer = TracerTrigger::new(&keepalive_config);
+
+    // Receive buffer reused across iterations. `recv_gso` writes
+    // directly into the spare capacity (no zero-init pass); on success
+    // the virtio header has already been parsed and stripped, so `buf`
+    // holds exactly the IP superpacket. `clear()` + `reserve()` at the
+    // top of the loop compacts the window back to the start of the
+    // backing slab without a memcpy (len is 0).
+    let initial_cap = VIRTIO_NET_HDR_LEN + lightway_core::gro::MAX_IPV4_PACKET_LEN;
+    let mut buf = BytesMut::with_capacity(initial_cap);
+    loop {
+        buf.clear();
+        buf.reserve(initial_cap);
+        let (_, hdr) = match inside_io.recv_gso(&mut buf).await {
+            IOCallbackResult::Ok(pair) => pair,
+            IOCallbackResult::WouldBlock => continue, // Spuriously failed to read, keep waiting
+            IOCallbackResult::Err(err) => {
+                // Fatal error
+                return Err(err.into());
+            }
+        };
+
+        // With checksum offload the kernel hands us packets whose
+        // transport checksum is only the pseudo-header partial sum;
+        // finish it before the packet enters the pipeline. Only for
+        // non-GSO packets: the kernel sets NEEDS_CSUM on TSO aggregates
+        // too, but `gso::build_segment` recomputes each segment's
+        // checksum from scratch, so folding the (up to ~64KB)
+        // superpacket here would be immediately discarded work.
+        if hdr.is_gso_none() && hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+            gso_none_checksum(buf.as_mut(), hdr.csum_start, hdr.csum_offset);
+        }
+
+        let Some(last_outside_data_received) = process_inside_packet(
+            &conn,
+            inside_io.as_ref(),
+            tun_dns_ip,
+            &mut buf,
+            |conn, buf| {
+                if hdr.is_gso_none() {
+                    conn.inside_data_received(buf)
+                } else {
+                    conn.inside_data_received_gso(buf, &hdr)
+                }
             },
         )?
         else {
@@ -1161,6 +1374,15 @@ pub async fn connect<
                     sock.enable_batch_receive();
                 }
 
+                // GRO delivery replaces per-packet receive entirely
+                // (a plain recv would merge separate datagrams), so
+                // only flip the sockopt when the GRO outside loop
+                // below will consume it.
+                #[cfg(linux)]
+                if config.enable_tun_offload {
+                    sock.enable_gro();
+                }
+
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
@@ -1315,6 +1537,29 @@ pub async fn connect<
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
+    // GRO capability is present only when `enable_tun_offload` flipped
+    // the sockopt on a UDP socket above; TCP mode and non-Linux targets
+    // fall back to the per-packet loop.
+    #[cfg(linux)]
+    let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = match outside_io.clone().as_gro() {
+        Some(gro_io) => tokio::spawn(outside_io_task_gro(
+            conn.clone(),
+            connection_type,
+            gro_io,
+            inside_io.clone(),
+            keepalive.clone(),
+            None,
+        )),
+        None => tokio::spawn(outside_io_task(
+            conn.clone(),
+            config.outside_mtu,
+            connection_type,
+            outside_io.clone(),
+            keepalive.clone(),
+            None,
+        )),
+    };
+    #[cfg(not(linux))]
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),
         config.outside_mtu,
@@ -1324,6 +1569,29 @@ pub async fn connect<
         None,
     ));
 
+    #[cfg(linux)]
+    let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = if config.enable_tun_offload {
+        let gso_io = inside_io.clone().as_gso().context(
+            "enable_tun_offload is set but the inside IO backend does not support GSO offload",
+        )?;
+        tokio::spawn(inside_io_task_gso(
+            conn.clone(),
+            gso_io,
+            config.tun_dns_ip,
+            keepalive.clone(),
+            keepalive_config,
+        ))
+    } else {
+        tokio::spawn(inside_io_task(
+            conn.clone(),
+            inside_io.clone(),
+            config.tun_dns_ip,
+            keepalive.clone(),
+            keepalive_config,
+            config.inside_pkt_codec_stall_timeout,
+        ))
+    };
+    #[cfg(not(linux))]
     let mut inside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(inside_io_task(
         conn.clone(),
         inside_io.clone(),
@@ -1572,10 +1840,43 @@ fn validate_client_config<
         return Err(anyhow!("At least one server should be specified"));
     }
 
+    // Offload forces the TUN device open with `IFF_VNET_HDR` and drives
+    // the GSO inside-IO path, but the io-uring backend cannot supply a
+    // GSO device (`TunIoUring::supports_gso()` is always false). Left to
+    // run, `as_gso()` would return `None` and `connect()` would hard-fail
+    // for every server. Reject the combination up front with a clear
+    // error instead.
+    #[cfg(all(linux, feature = "io-uring"))]
+    if config.enable_tun_offload && config.enable_tun_iouring {
+        return Err(anyhow!(
+            "enable_tun_offload and enable_tun_iouring cannot be enabled together: \
+             the io-uring inside IO backend does not support GSO offload"
+        ));
+    }
+
     for server_config in servers {
         if server_config.inside_pkt_codec.is_some() && config.inside_pkt_codec_config.is_none() {
             return Err(anyhow!(
                 "Inside packet codec config has to be provided if inside packet codec is used (Server: {})",
+                server_config.server
+            ));
+        }
+
+        // Offload and the inside packet codec are mutually exclusive.
+        // `Connection::inside_data_received_gso` offers the packet to the
+        // encoder *before* segmentation and returns early on
+        // `CodecStatus::PacketAccepted`, so `gso::build_segment` never
+        // runs: the codec would ship a ~64KB superpacket whose IP
+        // `total_length` describes something else entirely to the peer,
+        // which then writes it to its own TUN. `ipv4_is_valid_packet` only
+        // checks the version nibble, so nothing upstream catches the
+        // oversize either. Reject the combination rather than corrupt
+        // traffic.
+        #[cfg(linux)]
+        if config.enable_tun_offload && server_config.inside_pkt_codec.is_some() {
+            return Err(anyhow!(
+                "enable_tun_offload and the inside packet codec cannot be enabled together: \
+                 the codec consumes the packet before GSO segmentation runs (Server: {})",
                 server_config.server
             ));
         }
@@ -1606,6 +1907,11 @@ pub async fn client<
     );
 
     validate_client_config(&config, &conn_confs)?;
+
+    #[cfg(linux)]
+    if config.enable_tun_offload {
+        config.tun_config.offload = true;
+    }
 
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),
@@ -1823,6 +2129,94 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
+
+    struct TestEventHandler;
+
+    impl EventCallback for TestEventHandler {
+        fn event(&mut self, _event: Event) {}
+    }
+
+    struct TestPacketCodecFactory;
+
+    impl lightway_app_utils::PacketCodecFactory for TestPacketCodecFactory {
+        fn build(&self) -> lightway_app_utils::PacketCodec {
+            unimplemented!("config validation never builds the codec")
+        }
+
+        fn get_codec_name(&self) -> String {
+            "test".to_string()
+        }
+    }
+
+    fn test_client_config() -> ClientConfig<()> {
+        ClientConfig::try_from_reload_sig_and_config(None, config::Config::default())
+            .expect("default config should be valid")
+    }
+
+    fn test_codec_config() -> ClientInsidePacketCodecConfig {
+        let (_tx, encoding_request_signal) = mpsc::channel(1);
+        ClientInsidePacketCodecConfig {
+            enable_inside_pkt_encoding: false,
+            encoding_request_signal,
+        }
+    }
+
+    fn test_conn_config(
+        inside_pkt_codec: Option<PacketCodecFactoryType>,
+    ) -> ClientConnectionConfig<TestEventHandler> {
+        ClientConnectionConfig {
+            mode: ClientConnectionMode::Datagram(None),
+            cipher: Cipher::Aes256,
+            server_dn: None,
+            server: "127.0.0.1:27690".parse().unwrap(),
+            auth: AuthMethod::UserPass {
+                user: "user".to_string(),
+                password: "password".to_string(),
+            },
+            cert_content: String::new(),
+            inside_plugins: Default::default(),
+            outside_plugins: Default::default(),
+            inside_pkt_codec,
+            event_handler: None,
+        }
+    }
+
+    #[test]
+    fn validate_default_client_config() {
+        let config = test_client_config();
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
+    #[test]
+    fn validate_inside_pkt_codec_without_tun_offload() {
+        let mut config = test_client_config();
+        config.inside_pkt_codec_config = Some(test_codec_config());
+
+        let servers = [test_conn_config(Some(Box::new(TestPacketCodecFactory)))];
+        assert!(validate_client_config(&config, &servers).is_ok());
+    }
+
+    #[cfg(linux)]
+    #[test]
+    fn validate_tun_offload_with_inside_pkt_codec() {
+        let mut config = test_client_config();
+        config.enable_tun_offload = true;
+        config.inside_pkt_codec_config = Some(test_codec_config());
+
+        let servers = [test_conn_config(Some(Box::new(TestPacketCodecFactory)))];
+        let err = validate_client_config(&config, &servers)
+            .expect_err("offload + inside packet codec must be rejected");
+        assert!(err.to_string().contains("enable_tun_offload"), "{err}");
+    }
+
+    #[cfg(linux)]
+    #[test]
+    fn validate_tun_offload_without_inside_pkt_codec() {
+        let mut config = test_client_config();
+        config.enable_tun_offload = true;
+
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
 
     #[test_case(1, vec![], false => None)]
     #[test_case(1, vec![0], true => Some(0))]
@@ -2143,6 +2537,26 @@ mod tests {
             result.unwrap_err().to_string(),
             "All connections disconnected"
         );
+    }
+
+    /// GRO aggregates split on `gro_size` boundaries: full segments
+    /// plus a shorter trailing one; an exact multiple has no short
+    /// tail; content is preserved byte-for-byte across the views.
+    #[test_case(3300, 1350 => vec![1350, 1350, 600] ; "short trailing segment")]
+    #[test_case(2700, 1350 => vec![1350, 1350]      ; "exact multiple")]
+    #[test_case(600,  1350 => vec![600]             ; "single short packet")]
+    #[cfg(linux)]
+    fn gro_split_segment_sizes(total: usize, gro_size: usize) -> Vec<usize> {
+        let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let mut buf = BytesMut::from(&payload[..]);
+        let mut segments = Vec::new();
+
+        split_gro_segments(&mut buf, gro_size, &mut segments);
+
+        assert!(buf.is_empty());
+        let rejoined: Vec<u8> = segments.iter().flat_map(|s| s.iter().copied()).collect();
+        assert_eq!(rejoined, payload, "content preserved");
+        segments.iter().map(|s| s.len()).collect()
     }
 
     #[test_case(Some(true),  Some(true)  => None       ; "unchanged")]

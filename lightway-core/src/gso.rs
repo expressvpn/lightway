@@ -50,6 +50,27 @@ pub(crate) const MAX_GSO_SEGS: usize = 64;
 /// `MAX_GSO_SEGS` segments, each at most `MAX_OUTSIDE_MTU`.
 pub(crate) const MAX_GSO_FRAME_BYTES: usize = MAX_GSO_SEGS * crate::MAX_OUTSIDE_MTU;
 
+/// Maximum size of an IP datagram: the IP length field is 16 bits.
+#[cfg(target_os = "linux")]
+const IP_MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
+/// Fixed IPv6 header size (RFC 8200 §3). Larger than the IPv4 header, so
+/// used as the worst case when bounding a segment's overhead.
+#[cfg(target_os = "linux")]
+const IPV6_HEADER_SIZE: usize = 40;
+
+/// Upper bound on the UDP payload bytes a single `sendmsg` with
+/// `UDP_SEGMENT` may carry. The kernel assembles the whole batch into
+/// one skb before segmenting, so the total is bounded by the maximum IP
+/// datagram size minus the UDP header and the larger IPv6 header;
+/// exceeding it fails with `EMSGSIZE`. A TUN TSO aggregate can be that
+/// large *before* the per-segment `wire::Header` is added, so flushes
+/// must be chunked to this limit.
+// Only the Linux `UDP_SEGMENT` send path consults this; gating keeps
+// non-Linux builds free of a `dead_code` warning.
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_GSO_SEND_BYTES: usize =
+    IP_MAX_DATAGRAM_SIZE - crate::UDP_HEADER_SIZE - IPV6_HEADER_SIZE;
+
 impl VirtioNetHdr {
     /// Interpret the first [`VIRTIO_NET_HDR_LEN`] bytes of `buf` as a
     /// `&VirtioNetHdr` without copying.
@@ -74,6 +95,21 @@ impl VirtioNetHdr {
         // SAFETY: We verified length and alignment. VirtioNetHdr is repr(C)
         // with no padding, and the returned lifetime is tied to `buf`.
         unsafe { Ok(&*(ptr as *const VirtioNetHdr)) }
+    }
+
+    /// Serialize to the on-wire layout used by the TUN vnet header.
+    ///
+    /// virtio-net fields are guest-endian, which is native endian for
+    /// every target we build for.
+    pub fn to_bytes(&self) -> [u8; VIRTIO_NET_HDR_LEN] {
+        let mut b = [0u8; VIRTIO_NET_HDR_LEN];
+        b[0] = self.flags;
+        b[1] = self.gso_type;
+        b[2..4].copy_from_slice(&self.hdr_len.to_ne_bytes());
+        b[4..6].copy_from_slice(&self.gso_size.to_ne_bytes());
+        b[6..8].copy_from_slice(&self.csum_start.to_ne_bytes());
+        b[8..10].copy_from_slice(&self.csum_offset.to_ne_bytes());
+        b
     }
 
     /// True if `gso_type` indicates a TCP segmentation aggregate (v4 or v6).
@@ -217,7 +253,7 @@ fn transport_checksum(src: &[u8], dst: &[u8], proto: u8, transport: &[u8]) -> u1
 }
 
 /// GSO type: TCP segmentation aggregate over IPv4.
-const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+pub(crate) const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
 /// GSO type: TCP segmentation aggregate over IPv6.
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 /// ECN flag OR'd into `gso_type` for ECN-marked aggregates.
