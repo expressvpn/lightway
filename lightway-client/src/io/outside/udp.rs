@@ -50,6 +50,11 @@ pub struct Udp {
     batch_receive_enabled: bool,
     #[cfg(linux)]
     gro_enabled: bool,
+    /// Latched `true` (for the socket's lifetime) once a `UDP_SEGMENT`
+    /// send is rejected with a capability error; read via
+    /// [`OutsideIOSendCallback::gso_enabled`].
+    #[cfg(linux)]
+    gso_broken: std::sync::atomic::AtomicBool,
 }
 
 impl Udp {
@@ -108,6 +113,8 @@ impl Udp {
             batch_receive_enabled: false,
             #[cfg(linux)]
             gro_enabled: false,
+            #[cfg(linux)]
+            gso_broken: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -315,6 +322,33 @@ impl Udp {
                 tracing::warn!("Outside IO GSO send failed: {err:?}");
                 IOCallbackResult::Err(err)
             }
+        }
+    }
+
+    /// Errno families where the egress path can't do UDP GSO at all, as
+    /// opposed to a transient condition. `EIO` is the kernel refusing a
+    /// `UDP_SEGMENT` send when the device lacks TX checksum offload (the
+    /// dominant cause); `EINVAL`/`EOPNOTSUPP` cover other outright
+    /// rejections. Transient errors (`ENOBUFS`, `ECONNREFUSED`, ...) and
+    /// the sizing error `EMSGSIZE` are handled elsewhere and must not latch.
+    #[cfg(linux)]
+    fn is_gso_unsupported(err: &std::io::Error) -> bool {
+        matches!(
+            err.raw_os_error(),
+            Some(libc::EIO) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+        )
+    }
+
+    /// Latch the GSO-unsupported flag when a send error shows the device
+    /// cannot segment. Logs once, on the false→true transition only.
+    #[cfg(linux)]
+    fn note_gso_send_error(&self, err: &std::io::Error) {
+        if Self::is_gso_unsupported(err) && !self.gso_broken.swap(true, Ordering::Release) {
+            tracing::warn!(
+                "kernel rejected UDP_SEGMENT send ({err}); the egress device likely lacks \
+                 TX checksum offload. Disabling GSO on this socket and falling back to \
+                 per-datagram sends"
+            );
         }
     }
 }
@@ -616,6 +650,12 @@ impl OutsideIOSendCallback for Udp {
             sock.sendmsg(&msghdr, 0)
         });
 
+        // Latch off on a capability error so the connection drops to the
+        // per-segment fallback instead of failing here on every batch.
+        if let Err(ref err) = res {
+            self.note_gso_send_error(err);
+        }
+
         // Note `map_send_result` swallows several transient errors as
         // `Ok(len)` so TLS does not live-lock resending the same record.
         // That contract was written for a single datagram; applied here
@@ -626,6 +666,18 @@ impl OutsideIOSendCallback for Udp {
     #[cfg(not(linux))]
     fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
         IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    fn gso_enabled(&self) -> bool {
+        #[cfg(linux)]
+        {
+            !self.gso_broken.load(Ordering::Acquire)
+        }
+        // Non-Linux has no `UDP_SEGMENT`; `send_gso` is unsupported.
+        #[cfg(not(linux))]
+        {
+            false
+        }
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -645,6 +697,68 @@ impl OutsideIOSendCallback for Udp {
 fn local_addr_str(sock: &tokio::net::UdpSocket) -> String {
     sock.local_addr()
         .map_or_else(|e| e.to_string(), |a| a.to_string())
+}
+
+#[cfg(all(test, linux))]
+mod linux_tests {
+    use super::*;
+    use std::io::Error;
+
+    async fn make_udp() -> Udp {
+        // No server is needed: these tests exercise the latch bookkeeping,
+        // not an actual send. `peer_addr` just has to be a valid address.
+        let peer_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        Udp::new(peer_addr, None, 0).await.unwrap()
+    }
+
+    #[test]
+    fn classifies_capability_errors() {
+        for errno in [libc::EIO, libc::EINVAL, libc::EOPNOTSUPP] {
+            assert!(
+                Udp::is_gso_unsupported(&Error::from_raw_os_error(errno)),
+                "errno {errno} should latch GSO off"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_transient_and_sizing_errors() {
+        for errno in [
+            libc::ENOBUFS,
+            libc::ECONNREFUSED,
+            libc::ENETUNREACH,
+            libc::EPERM,
+            libc::EAGAIN,
+            libc::EMSGSIZE,
+        ] {
+            assert!(
+                !Udp::is_gso_unsupported(&Error::from_raw_os_error(errno)),
+                "errno {errno} must not latch GSO off"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn latches_gso_off_on_capability_error() {
+        let udp = make_udp().await;
+        // Enabled by default.
+        assert!(OutsideIOSendCallback::gso_enabled(&udp));
+
+        // A capability error latches it off for good.
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::EIO));
+        assert!(!OutsideIOSendCallback::gso_enabled(&udp));
+
+        // Idempotent: staying off after a repeat.
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::EIO));
+        assert!(!OutsideIOSendCallback::gso_enabled(&udp));
+    }
+
+    #[tokio::test]
+    async fn transient_error_keeps_gso_enabled() {
+        let udp = make_udp().await;
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::ENOBUFS));
+        assert!(OutsideIOSendCallback::gso_enabled(&udp));
+    }
 }
 
 /// ICMP errors (port/host/net unreachable) are delivered asynchronously to a
