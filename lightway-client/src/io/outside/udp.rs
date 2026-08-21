@@ -208,6 +208,29 @@ impl Udp {
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
+
+    /// Run `f` under `try_io(READABLE)`, mapping the spurious
+    /// `WouldBlock` that `try_io` may report (so the caller waits for
+    /// the next readiness event) and retrying immediately when a
+    /// signal interrupts the syscall.
+    #[cfg(batch_receive)]
+    fn try_readable_io<T>(&self, mut f: impl FnMut() -> std::io::Result<T>) -> IOCallbackResult<T> {
+        loop {
+            match self.sock.try_io(tokio::io::Interest::READABLE, &mut f) {
+                Ok(n) => return IOCallbackResult::Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return IOCallbackResult::WouldBlock;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                #[cfg(apple)]
+                Err(e) if self.connect_requested && is_icmp_derived_err(&e) => {
+                    tracing::debug!("Ignoring ICMP-derived error on connected UDP recv: {e}");
+                    return IOCallbackResult::WouldBlock;
+                }
+                Err(e) => return IOCallbackResult::Err(e),
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -273,27 +296,9 @@ impl OutsideIO for Udp {
 
         let fd = self.sock.as_raw_fd();
 
-        loop {
-            match self.sock.try_io(tokio::io::Interest::READABLE, || {
-                batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
-            }) {
-                Ok(n) => return IOCallbackResult::Ok(n),
-                // try_io may return WouldBlock even if the socket isn't actually
-                // readable. Break with 0 to wait for another readable event emitted.
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return IOCallbackResult::WouldBlock;
-                }
-                // Interrupted means the syscall was interrupted by a signal and can be
-                // retried immediately without waiting for another readable event.
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                #[cfg(apple)]
-                Err(e) if self.connect_requested && is_icmp_derived_err(&e) => {
-                    tracing::debug!("Ignoring ICMP-derived error on connected UDP recv: {e}");
-                    return IOCallbackResult::WouldBlock;
-                }
-                Err(e) => return IOCallbackResult::Err(e),
-            }
-        }
+        self.try_readable_io(|| {
+            batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
+        })
     }
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
