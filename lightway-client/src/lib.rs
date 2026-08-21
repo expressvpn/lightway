@@ -1726,10 +1726,10 @@ pub async fn client<
                 // Network transitions drive the connection-level handler
                 // (keepalive burst); macOS only. Gated on keepalives being
                 // enabled, mirroring the embedder-signal validation.
-                #[cfg(macos)]
+                #[cfg(any(macos, windows))]
                 let transition_rx =
                     (!config.keepalive_interval.is_zero()).then(|| monitor.subscribe_transitions());
-                #[cfg(not(macos))]
+                #[cfg(not(any(macos, windows)))]
                 let transition_rx: Option<watch::Receiver<()>> = None;
 
                 network_change_monitor = Some(monitor);
