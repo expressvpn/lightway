@@ -319,12 +319,12 @@ jobs:
         with:
           use-flakehub: false
 
-      - name: Check with mobile
+      - name: Check with mobile lib
         working-directory: ./lightway-client
-        run: nix develop -c cargo check --features=mobile
-      - name: Clippy with mobile
+        run: nix develop -c cargo check --lib --features=mobile-test
+      - name: Clippy with mobile lib
         working-directory: ./lightway-client
-        run: nix develop -c cargo clippy --features=mobile --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --lib --all-targets -- -D warnings
       - name: Test with mobile features
         working-directory: ./lightway-client
         run: nix develop -c cargo test --features=mobile-test
@@ -342,7 +342,7 @@ jobs:
           path: ${{ steps.build-android-aar.outputs.path }}
           if-no-files-found: error
       - name: Build JsonSchema
-        run: nix develop -c cargo run --features=mobile,wolfssl,postquantum -p lightway-client -- -c client.schema.json -g jsonschema
+        run: nix develop -c cargo run --features=wolfssl,postquantum -p lightway-client -- -c client.schema.json -g jsonschema
       - name: Upload JsonSchema artifact
         uses: actions/upload-artifact@v4.6.2
         with:

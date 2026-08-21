@@ -341,10 +341,10 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "windows"))]
     pub enable_dpapi: bool,
 
-    /// SNI header for TLS connections
-    #[cfg(feature = "mobile")]
-    #[patch(attribute(clap(skip)))]
-    #[schemars(extend("x-cfg" = "mobile"))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = r#"SNI header for TLS connections
+    Only used if `servers` is empty"#))]
+    /// ex: example.com
     pub sni_header: String,
 
     #[patch(attribute(clap(short, long)))]
@@ -386,6 +386,8 @@ impl Config {
                     .then(|| std::mem::take(&mut self.server_dn)),
                 cipher: self.cipher,
                 outside_mtu: self.outside_mtu,
+                sni_header: (!self.sni_header.is_empty())
+                    .then(|| std::mem::take(&mut self.sni_header)),
                 ..Default::default()
             }];
         }
@@ -563,7 +565,6 @@ impl Default for Config {
             wintun_ring_capacity: ByteSize::mib(8),
             #[cfg(windows)]
             enable_dpapi: false,
-            #[cfg(feature = "mobile")]
             sni_header: String::new(),
             accept_unknowns: false,
             unknowns: HashMap::new(),
@@ -610,6 +611,10 @@ pub struct ConnectionConfig {
     /// The CA Cert content or Path
     #[serde(default)]
     pub ca_cert: Option<String>,
+
+    /// SNI header for TLS connections
+    #[serde(default)]
+    pub sni_header: Option<String>,
 }
 
 impl ConnectionConfig {
@@ -619,7 +624,7 @@ impl ConnectionConfig {
     }
 
     /// Try build CA from ca_crt
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
         self.ca_cert
             .as_ref()
@@ -636,7 +641,7 @@ impl ConnectionConfig {
     }
 
     /// Try build SocketAddress from server field
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     pub fn skt_addr(&self) -> Result<std::net::SocketAddr, Error> {
         self.server
             .parse()
@@ -645,10 +650,7 @@ impl ConnectionConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
-    derive(uniffi::Error)
-)]
+#[cfg_attr(all(mobile, not(feature = "mobile-test")), derive(uniffi::Error))]
 pub enum Error {
     /// Invalid network protocol
     #[error("Invalid network protocol")]
@@ -659,7 +661,7 @@ pub enum Error {
     #[error("Unable to load certificate")]
     InvalidCertificate,
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     /// Unable to parse the sokcet address
     #[error("Invalid Socket Address")]
     InvalidSocketAddress,

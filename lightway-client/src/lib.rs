@@ -8,10 +8,10 @@ pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
 
-#[cfg(feature = "mobile")]
+#[cfg(any(mobile, feature = "mobile-test"))]
 pub mod mobile;
 
-#[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
+#[cfg(all(mobile, not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
 
 use anyhow::{Context, Result, anyhow};
@@ -90,21 +90,18 @@ impl std::fmt::Debug for ClientConnectionMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
-    derive(uniffi::Enum)
-)]
+#[cfg_attr(all(mobile, not(feature = "mobile-test")), derive(uniffi::Enum))]
 pub enum ClientResult {
     UserDisconnect,
     NetworkChange,
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     ServerGoodbye,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(
-    all(feature = "mobile", not(feature = "mobile-test")),
+    all(mobile, not(feature = "mobile-test")),
     derive(uniffi::Error),
     uniffi(flat_error)
 )]
@@ -120,7 +117,7 @@ pub enum LightwayError {
     #[error("Config Format Error: `{0}`")]
     ConfigFormatError(#[from] serde_saphyr::Error),
 
-    #[cfg(feature = "mobile")]
+    #[cfg(any(mobile, feature = "mobile-test"))]
     #[error("Logging bridge initialization error: `{0}`")]
     LoggingBridgeError(#[from] crate::mobile::tracing_utils::LoggingBridgeError),
 }
@@ -409,6 +406,9 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     #[educe(Debug(method(debug_pkt_codec_fac)))]
     pub inside_pkt_codec: Option<PacketCodecFactoryType>,
 
+    /// SNI header for TLS connections
+    pub sni_header: Option<String>,
+
     /// Allow injection of a custom handler for event callback
     #[educe(Debug(ignore))]
     pub event_handler: Option<EventHandler>,
@@ -444,6 +444,7 @@ impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventH
             inside_plugins: Default::default(),
             outside_plugins: Default::default(),
             inside_pkt_codec: None,
+            sni_header: config.sni_header,
             event_handler,
         })
     }
@@ -1139,6 +1140,7 @@ pub async fn connect<
         inside_pkt_codec,
         inside_plugins,
         outside_plugins,
+        sni_header,
         event_handler,
     } = server_config;
 
@@ -1149,7 +1151,7 @@ pub async fn connect<
                 let mut sock = io::outside::Udp::new(
                     server,
                     maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
+                    #[cfg(all(linux, not(feature = "mobile-test")))]
                     config.fwmark,
                 )
                 .await
@@ -1183,7 +1185,7 @@ pub async fn connect<
                 let sock = io::outside::Tcp::new(
                     server,
                     maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
+                    #[cfg(all(linux, not(feature = "mobile-test")))]
                     config.fwmark,
                 )
                 .await
@@ -1278,6 +1280,7 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
+        .when_some(sni_header.as_deref(), |b, sni| b.with_sni_header(sni))
         .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         });

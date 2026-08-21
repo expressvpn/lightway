@@ -17,8 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["wolfssl", "postquantum"]
-mobile = ["uniffi", "tracing-core", "tracing-panic"]
-mobile-test = [ "mobile" ]  # Only mock struct, no uniffi structs
+mobile-test = ["dep:uniffi", "dep:tracing-core", "dep:tracing-panic"]  # Only mock struct, no uniffi exports
 boringssl = ["lightway-app-utils/boringssl"]
 wolfssl = ["lightway-app-utils/wolfssl"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
@@ -55,10 +54,9 @@ tokio.workspace = true
 tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-# mobile feature
+tracing-core = { version = "0.1.33", optional = true }
+tracing-panic = { version = "0.1.2", optional = true }
 uniffi = { workspace = true, optional = true }
-tracing-core = { version = "0.1.33", optional =true }
-tracing-panic = { version = "0.1.2", optional= true }
 
 [dev-dependencies]
 more-asserts.workspace = true
@@ -70,6 +68,11 @@ serial_test.workspace = true
 tempfile = "3.24.0"
 tracing-test = "0.2.6"
 tun-rs.workspace = true
+
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "tvos"))'.dependencies]
+tracing-core = "0.1.33"
+tracing-panic = "0.1.2"
+uniffi = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2.0"
