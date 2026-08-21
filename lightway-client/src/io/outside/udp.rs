@@ -7,7 +7,7 @@ use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallba
 use std::sync::OnceLock;
 #[cfg(apple)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -46,6 +46,22 @@ pub struct Udp {
     swallowed_sends: AtomicU64,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    /// Cooperative-budget debt owed to the tokio scheduler, in wire
+    /// datagrams received since the last [`OutsideIO::poll`].
+    ///
+    /// The receive paths here use tokio's manual readiness API
+    /// (`ready()` + `try_io`), which charges no coop budget, so the
+    /// outside loop would only ever yield on `EAGAIN` and could starve
+    /// sibling tasks (notably the TUN reader) on a single-threaded
+    /// runtime. This implements the semantics proposed in
+    /// <https://github.com/tokio-rs/tokio/issues/6237>: IO operations
+    /// consume budget without checking it (the recv paths record debt
+    /// here), while readiness polling enforces it without consuming
+    /// (`poll` drains the debt via `consume_budget`, yielding once the
+    /// task's budget is exhausted). Delete this if tokio ships that.
+    ///
+    /// Atomic because methods take `&self` via `Arc<dyn OutsideIO>`.
+    coop_debt: AtomicUsize,
 }
 
 impl Udp {
@@ -102,6 +118,7 @@ impl Udp {
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            coop_debt: AtomicUsize::new(0),
         })
     }
 
@@ -260,13 +277,25 @@ impl OutsideIO for Udp {
     }
 
     async fn poll(&self, interest: tokio::io::Interest) -> Result<tokio::io::Ready> {
+        // Pay off the coop debt recorded by the recv paths (see
+        // `coop_debt`) before waiting for readiness. `consume_budget`
+        // spends one unit of the task's budget and only yields when it
+        // is exhausted, so a turn is bounded at ~128 datagrams' work at
+        // effectively zero cost otherwise.
+        let debt = self.coop_debt.swap(0, Ordering::Relaxed);
+        for _ in 0..debt {
+            tokio::task::coop::consume_budget().await;
+        }
         let r = self.sock.ready(interest).await?;
         Ok(r)
     }
 
     fn recv_buf(&self, buf: &mut bytes::BytesMut) -> IOCallbackResult<usize> {
         match self.sock.try_recv_buf(buf) {
-            Ok(nr) => IOCallbackResult::Ok(nr),
+            Ok(nr) => {
+                self.coop_debt.fetch_add(1, Ordering::Relaxed);
+                IOCallbackResult::Ok(nr)
+            }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
@@ -296,9 +325,15 @@ impl OutsideIO for Udp {
 
         let fd = self.sock.as_raw_fd();
 
-        self.try_readable_io(|| {
+        match self.try_readable_io(|| {
             batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
-        })
+        }) {
+            IOCallbackResult::Ok(n) => {
+                self.coop_debt.fetch_add(n, Ordering::Relaxed);
+                IOCallbackResult::Ok(n)
+            }
+            others => others,
+        }
     }
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
