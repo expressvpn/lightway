@@ -511,14 +511,32 @@ impl RouteManagerInner {
             let server_if_index = server_route.if_index();
 
             // Check if the route to the server has changed
-            if server_gateway != current_gateway || server_if_index != current_if_index {
-                tracing::debug!(
-                    "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
-                    server_gateway,
-                    server_if_index,
-                    current_gateway,
-                    current_if_index
-                );
+            let route_changed =
+                server_gateway != current_gateway || server_if_index != current_if_index;
+
+            // When roaming within the same subnet/gateway/if_index identical,
+            // we need re-pin unconditionally to rebind.
+            let needs_update = cfg_select! {
+                apple => { true }
+                _ =>     { route_changed }
+            };
+
+            if needs_update {
+                if route_changed {
+                    tracing::debug!(
+                        "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
+                        server_gateway,
+                        server_if_index,
+                        current_gateway,
+                        current_if_index
+                    );
+                } else {
+                    tracing::debug!(
+                        "Re-pinning server route with unchanged (interface, gateway): ({:?}, {:?})",
+                        current_if_index,
+                        current_gateway
+                    );
+                }
 
                 // Update server route with new gateway/interface
                 if let Some(old_route) = self.server_route.take() {
@@ -1079,9 +1097,12 @@ mod tests {
         assert!(inner.server_route.is_some());
         let initial_server_route = inner.server_route.as_ref().unwrap().clone();
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
@@ -1202,9 +1223,12 @@ mod tests {
         assert_eq!(initial_server_route.destination(), EXTERNAL_IP_V6);
         assert_eq!(initial_server_route.prefix(), Ipv6Addr::BITS as u8);
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
