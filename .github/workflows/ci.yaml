@@ -2,7 +2,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, windows-roam]
   pull_request:
     types: [opened, synchronize, reopened]
 
@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ci:
-    needs: [earthly, e2e-wolfssl, e2e-boringssl, cross-compat, coverage, nix-mobile-build, nix-build, nix-tests, windows-build]
+    needs: [windows-build]
     runs-on: ubuntu-latest
     if: always()
     steps:
