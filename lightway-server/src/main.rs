@@ -114,6 +114,13 @@ async fn main() -> Result<()> {
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     config.log_format.init_with_env_filter(fmt);
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_hash = env!("GIT_HASH"),
+        "Lightway server starting"
+    );
+
     let server_config = crate::ServerConfig::try_from_auth_and_config(
         crate::auth::Auth::new(
             config.user_db.as_ref().map(AsRef::as_ref),

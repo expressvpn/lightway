@@ -119,6 +119,12 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_hash = env!("GIT_HASH"),
+        "Lightway client starting"
+    );
+
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
 
     #[cfg(unix)]
