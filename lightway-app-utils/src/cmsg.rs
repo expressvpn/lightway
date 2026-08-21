@@ -1,4 +1,5 @@
-//! Encapsulates the control message apis used with `recvmsg(2)`.
+//! Encapsulates the control message apis used with `recvmsg(2)` and
+//! `sendmsg(2)`.
 #![allow(unsafe_code)]
 // Low-level control-message plumbing; the public items are self-describing
 // by name and covered by the module doc, so individual doc comments would
@@ -35,6 +36,8 @@ impl<const N: usize> Buffer<N> {
 
     pub fn reset(&mut self) {}
 
+    /// Iterate over the control messages the kernel wrote.
+    ///
     /// # Safety
     ///
     /// `control_len` must have been set to the number of bytes of the
@@ -162,6 +165,8 @@ impl<const N: usize> BufferMut<N> {
         Self([0; N])
     }
 
+    /// A builder to fill the buffer with control messages.
+    ///
     /// # Safety
     ///
     /// From <https://man7.org/linux/man-pages/man3/cmsg.3.html>:
