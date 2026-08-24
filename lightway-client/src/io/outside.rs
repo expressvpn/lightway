@@ -82,7 +82,7 @@ pub trait OutsideIO: Sync + Send {
 
     /// Re-pin the socket's egress interface after a network change.
     ///
-    /// On Windows the outside socket is pinned with
+    /// On Linux and Windows the outside socket is pinned with
     /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF` so that egress selection does not
     /// depend on the routing table. A roam normally keeps the same interface
     /// index, but switching adapters (Wi-Fi to Ethernet, docking) does not, so
@@ -91,7 +91,7 @@ pub trait OutsideIO: Sync + Send {
     ///
     /// Default is a no-op for transports that do not pin (TCP pins once,
     /// before `connect`, after which the option has no effect).
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     fn pin_egress_interface(&self, _if_index: u32) {}
 
     /// Returns the underlying socket tagged with its transport type.

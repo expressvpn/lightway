@@ -209,10 +209,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub fwmark: u32,
 
     /// Disable pinning the outside socket to the physical egress interface via
-    /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Windows desktop).
+    /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Linux and Windows desktop).
     /// Pinning is on by default; set this to `true` only when external routing
     /// policy handles egress selection.
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     pub disable_pin_egress_interface: bool,
 
     /// DNS configuration mode
@@ -359,7 +359,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             route_mode: config.route_mode,
             #[cfg(linux)]
             fwmark: config.fwmark,
-            #[cfg(all(windows, not(feature = "mobile")))]
+            #[cfg(all(any(linux, windows), not(feature = "mobile")))]
             disable_pin_egress_interface: config.disable_pin_egress_interface,
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
@@ -845,8 +845,10 @@ async fn network_event_coordinator(
     mut transition_rx: Option<watch::Receiver<()>>,
     nudge_on_route_event: bool,
     #[cfg(apple)] nudge_on_route_update: bool,
-    #[cfg(any(apple, windows))] outside_io: Weak<dyn OutsideIO>,
-    #[cfg(all(windows, not(feature = "mobile")))] pin_egress_interface: bool,
+    #[cfg(any(apple, all(any(linux, windows), not(feature = "mobile"))))] outside_io: Weak<
+        dyn OutsideIO,
+    >,
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))] pin_egress_interface: bool,
     network_change_signal: mpsc::Sender<()>,
 ) {
     tracing::info!("Reacting to network change events...");
@@ -907,7 +909,7 @@ async fn network_event_coordinator(
         // Refresh the egress pin from the server route we just validated. The
         // index usually does not change (a Wi-Fi roam keeps the adapter), but
         // switching adapters entirely does change it.
-        #[cfg(all(windows, not(feature = "mobile")))]
+        #[cfg(all(any(linux, windows), not(feature = "mobile")))]
         if pin_egress_interface
             && let Some(if_index) = route_updater.server_route_if_index()
             && let Some(io) = outside_io.upgrade()
@@ -1072,7 +1074,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         transition_rx: Option<watch::Receiver<()>>,
         nudge_on_route_event: bool,
         #[cfg(apple)] nudge_on_route_update: bool,
-        #[cfg(all(windows, not(feature = "mobile")))] pin_egress_interface: bool,
+        #[cfg(all(any(linux, windows), not(feature = "mobile")))] pin_egress_interface: bool,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -1098,9 +1100,9 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             nudge_on_route_event,
             #[cfg(apple)]
             nudge_on_route_update,
-            #[cfg(any(apple, all(windows, not(feature = "mobile"))))]
+            #[cfg(any(apple, all(any(linux, windows), not(feature = "mobile"))))]
             Arc::downgrade(&self.outside_io),
-            #[cfg(all(windows, not(feature = "mobile")))]
+            #[cfg(all(any(linux, windows), not(feature = "mobile")))]
             pin_egress_interface,
             self.network_change_signal.clone(),
         )));
@@ -1176,7 +1178,7 @@ pub async fn connect<
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
                     config.fwmark,
-                    #[cfg(all(windows, not(feature = "mobile")))]
+                    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
                     !config.disable_pin_egress_interface,
                 )
                 .await
@@ -1212,7 +1214,7 @@ pub async fn connect<
                     maybe_sock,
                     #[cfg(all(linux, not(feature = "mobile")))]
                     config.fwmark,
-                    #[cfg(all(windows, not(feature = "mobile")))]
+                    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
                     !config.disable_pin_egress_interface,
                 )
                 .await
@@ -1826,7 +1828,7 @@ pub async fn client<
                 nudge_on_route_event,
                 #[cfg(apple)]
                 nudge_on_route_update,
-                #[cfg(all(windows, not(feature = "mobile")))]
+                #[cfg(all(any(linux, windows), not(feature = "mobile")))]
                 !config.disable_pin_egress_interface,
             )
             .await?;

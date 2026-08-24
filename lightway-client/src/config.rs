@@ -226,7 +226,7 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "linux"))]
     pub fwmark: u32,
 
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
@@ -237,7 +237,7 @@ pub struct Config {
     capturing outside traffic. Set this flag only when the platform routing policy
     handles egress selection externally."#)
     )]
-    #[schemars(extend("x-cfg" = "windows"))]
+    #[schemars(extend("x-cfg" = "linux,windows"))]
     pub disable_pin_egress_interface: bool,
 
     #[cfg(desktop)]
@@ -554,7 +554,7 @@ impl Default for Config {
             route_mode: RouteMode::default(),
             #[cfg(linux)]
             fwmark: 0,
-            #[cfg(all(windows, not(feature = "mobile")))]
+            #[cfg(all(any(linux, windows), not(feature = "mobile")))]
             disable_pin_egress_interface: false,
             #[cfg(desktop)]
             dns_config_mode: DnsConfigMode::default(),

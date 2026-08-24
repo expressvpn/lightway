@@ -194,7 +194,7 @@ impl RouteUpdater {
     }
 
     /// Interface index of the currently installed server route, if any.
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     pub fn server_route_if_index(&self) -> Option<u32> {
         self.inner.server_route.as_ref().and_then(|r| r.if_index())
     }

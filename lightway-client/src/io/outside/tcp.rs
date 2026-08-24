@@ -13,7 +13,7 @@ impl Tcp {
         remote_addr: SocketAddr,
         maybe_sock: Option<TcpStream>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
-        #[cfg(all(windows, not(feature = "mobile")))] pin_egress_interface: bool,
+        #[cfg(all(any(linux, windows), not(feature = "mobile")))] pin_egress_interface: bool,
     ) -> Result<Self> {
         let sock = match maybe_sock {
             Some(s) => {
@@ -48,13 +48,25 @@ impl Tcp {
                 // The route lookup that binds the local address happens at
                 // connect() and IP_UNICAST_IF has no effect on an already-connected
                 // socket, so pin must be applied before connect.
-                #[cfg(all(windows, not(feature = "mobile")))]
+                #[cfg(all(any(linux, windows), not(feature = "mobile")))]
                 if pin_egress_interface {
-                    use std::os::windows::io::AsRawSocket;
-                    match crate::platform::windows::egress::pin_to_peer_interface(
-                        socket.as_raw_socket(),
-                        remote_addr,
-                    ) {
+                    #[cfg(linux)]
+                    let result = {
+                        use std::os::fd::AsRawFd;
+                        crate::platform::linux::egress::pin_to_peer_interface(
+                            socket.as_raw_fd(),
+                            remote_addr,
+                        )
+                    };
+                    #[cfg(windows)]
+                    let result = {
+                        use std::os::windows::io::AsRawSocket;
+                        crate::platform::windows::egress::pin_to_peer_interface(
+                            socket.as_raw_socket(),
+                            remote_addr,
+                        )
+                    };
+                    match result {
                         Ok(if_index) => tracing::info!(
                             "Pinned outside TCP socket egress to interface {if_index}"
                         ),

@@ -7,7 +7,7 @@ use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallba
 use std::sync::OnceLock;
 #[cfg(apple)]
 use std::sync::atomic::AtomicBool;
-#[cfg(all(windows, not(feature = "mobile")))]
+#[cfg(all(any(linux, windows), not(feature = "mobile")))]
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -45,9 +45,8 @@ pub struct Udp {
     dead: AtomicBool,
     /// Interface index this socket's egress is pinned to via
     /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF`, or `0` when unpinned. Re-applied on
-    /// every network change by [`OutsideIO::pin_egress_interface`]. Windows
-    /// only.
-    #[cfg(all(windows, not(feature = "mobile")))]
+    /// every network change by [`OutsideIO::pin_egress_interface`].
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     pinned_if_index: AtomicU32,
     /// Consecutive swallowed send errors, reset by a successful send; see
     /// [`Udp::note_swallowed_send`].
@@ -61,7 +60,7 @@ impl Udp {
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
-        #[cfg(all(windows, not(feature = "mobile")))] pin_egress_interface: bool,
+        #[cfg(all(any(linux, windows), not(feature = "mobile")))] pin_egress_interface: bool,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -94,20 +93,40 @@ impl Udp {
         // Pin egress to the interface that currently reaches the server so the
         // routing table cannot later divert outside packets into our own tunnel.
         // Applied before the socket is used, for the same reason the firewall mark is.
-        #[cfg(all(windows, not(feature = "mobile")))]
+        #[cfg(all(any(linux, windows), not(feature = "mobile")))]
         let pinned_if_index = if pin_egress_interface {
-            use std::os::windows::io::AsRawSocket;
-            match crate::platform::windows::egress::pin_to_peer_interface(
-                sock.as_raw_socket(),
-                peer_addr,
-            ) {
-                Ok(if_index) => {
-                    tracing::info!("Pinned outside UDP socket egress to interface {if_index}");
-                    if_index
+            #[cfg(linux)]
+            {
+                use std::os::fd::AsRawFd;
+                match crate::platform::linux::egress::pin_to_peer_interface(
+                    sock.as_raw_fd(),
+                    peer_addr,
+                ) {
+                    Ok(if_index) => {
+                        tracing::info!("Pinned outside UDP socket egress to interface {if_index}");
+                        if_index
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to pin outside UDP socket egress: {e}");
+                        0
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to pin outside UDP socket egress: {e}");
-                    0
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawSocket;
+                match crate::platform::windows::egress::pin_to_peer_interface(
+                    sock.as_raw_socket(),
+                    peer_addr,
+                ) {
+                    Ok(if_index) => {
+                        tracing::info!("Pinned outside UDP socket egress to interface {if_index}");
+                        if_index
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to pin outside UDP socket egress: {e}");
+                        0
+                    }
                 }
             }
         } else {
@@ -131,7 +150,7 @@ impl Udp {
             dead_socket_cb: OnceLock::new(),
             #[cfg(any(ios, tvos, all(test, apple)))]
             dead: AtomicBool::new(false),
-            #[cfg(all(windows, not(feature = "mobile")))]
+            #[cfg(all(any(linux, windows), not(feature = "mobile")))]
             pinned_if_index: AtomicU32::new(pinned_if_index),
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
@@ -375,10 +394,8 @@ impl OutsideIO for Udp {
         }
     }
 
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(all(any(linux, windows), not(feature = "mobile")))]
     fn pin_egress_interface(&self, if_index: u32) {
-        use std::os::windows::io::AsRawSocket;
-
         if if_index == 0 {
             return;
         }
@@ -387,11 +404,26 @@ impl OutsideIO for Udp {
             return;
         }
 
-        match crate::platform::windows::egress::set_unicast_if(
-            self.sock.as_raw_socket(),
-            if_index,
-            self.peer_addr.is_ipv6(),
-        ) {
+        #[cfg(linux)]
+        let result = {
+            use std::os::fd::AsRawFd;
+            crate::platform::linux::egress::set_unicast_if(
+                self.sock.as_raw_fd(),
+                if_index,
+                self.peer_addr.is_ipv6(),
+            )
+        };
+        #[cfg(windows)]
+        let result = {
+            use std::os::windows::io::AsRawSocket;
+            crate::platform::windows::egress::set_unicast_if(
+                self.sock.as_raw_socket(),
+                if_index,
+                self.peer_addr.is_ipv6(),
+            )
+        };
+
+        match result {
             Ok(()) => {
                 self.pinned_if_index.store(if_index, Ordering::Relaxed);
                 tracing::info!(
