@@ -352,7 +352,7 @@ impl OutsideIO for Udp {
         }
     }
 
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(windows)]
     fn pin_egress_interface(&self, if_index: u32) {
         use std::os::windows::io::AsRawSocket;
 
