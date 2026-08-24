@@ -61,6 +61,7 @@ impl Udp {
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(all(windows, not(feature = "mobile")))] pin_egress_interface: bool,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -90,11 +91,11 @@ impl Udp {
             }
         }
 
-        // Windows pin egress to the interface that currently reaches the server,
-        // so the routing table cannot later divert outside packets into our own tunnel.
+        // Pin egress to the interface that currently reaches the server so the
+        // routing table cannot later divert outside packets into our own tunnel.
         // Applied before the socket is used, for the same reason the firewall mark is.
         #[cfg(all(windows, not(feature = "mobile")))]
-        let pinned_if_index = {
+        let pinned_if_index = if pin_egress_interface {
             use std::os::windows::io::AsRawSocket;
             match crate::platform::windows::egress::pin_to_peer_interface(
                 sock.as_raw_socket(),
@@ -109,6 +110,8 @@ impl Udp {
                     0
                 }
             }
+        } else {
+            0
         };
 
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
