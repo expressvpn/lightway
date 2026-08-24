@@ -13,6 +13,7 @@ impl Tcp {
         remote_addr: SocketAddr,
         maybe_sock: Option<TcpStream>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<Self> {
         let sock = match maybe_sock {
             Some(s) => {
@@ -44,10 +45,11 @@ impl Tcp {
                     }
                 }
 
-                // the route lookup that binds the local address happens there,
-                // and IP_UNICAST_IF has no effect on an already-connected socket.
-                #[cfg(all(windows, not(feature = "mobile")))]
-                {
+                // The route lookup that binds the local address happens at
+                // connect() and IP_UNICAST_IF has no effect on an already-connected
+                // socket, so pin must be applied before connect.
+                #[cfg(windows)]
+                if pin_egress_interface {
                     use std::os::windows::io::AsRawSocket;
                     match crate::platform::windows::egress::pin_to_peer_interface(
                         socket.as_raw_socket(),

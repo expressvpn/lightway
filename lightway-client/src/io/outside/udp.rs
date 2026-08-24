@@ -7,7 +7,7 @@ use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallba
 use std::sync::OnceLock;
 #[cfg(apple)]
 use std::sync::atomic::AtomicBool;
-#[cfg(all(windows, not(feature = "mobile")))]
+#[cfg(windows)]
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -47,7 +47,7 @@ pub struct Udp {
     /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF`, or `0` when unpinned. Re-applied on
     /// every network change by [`OutsideIO::pin_egress_interface`]. Windows
     /// only.
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(windows)]
     pinned_if_index: AtomicU32,
     /// Consecutive swallowed send errors, reset by a successful send; see
     /// [`Udp::note_swallowed_send`].
@@ -61,6 +61,7 @@ impl Udp {
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -90,11 +91,11 @@ impl Udp {
             }
         }
 
-        // Windows pin egress to the interface that currently reaches the server,
-        // so the routing table cannot later divert outside packets into our own tunnel.
+        // Pin egress to the interface that currently reaches the server so the
+        // routing table cannot later divert outside packets into our own tunnel.
         // Applied before the socket is used, for the same reason the firewall mark is.
-        #[cfg(all(windows, not(feature = "mobile")))]
-        let pinned_if_index = {
+        #[cfg(windows)]
+        let pinned_if_index = if pin_egress_interface {
             use std::os::windows::io::AsRawSocket;
             match crate::platform::windows::egress::pin_to_peer_interface(
                 sock.as_raw_socket(),
@@ -109,6 +110,8 @@ impl Udp {
                     0
                 }
             }
+        } else {
+            0
         };
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
             .context("Failed to get IP MTU Discovery sockopt")?;
@@ -129,7 +132,7 @@ impl Udp {
             dead_socket_cb: OnceLock::new(),
             #[cfg(any(ios, tvos, all(test, apple)))]
             dead: AtomicBool::new(false),
-            #[cfg(all(windows, not(feature = "mobile")))]
+            #[cfg(windows)]
             pinned_if_index: AtomicU32::new(pinned_if_index),
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
@@ -373,7 +376,7 @@ impl OutsideIO for Udp {
         }
     }
 
-    #[cfg(all(windows, not(feature = "mobile")))]
+    #[cfg(windows)]
     fn pin_egress_interface(&self, if_index: u32) {
         use std::os::windows::io::AsRawSocket;
 
