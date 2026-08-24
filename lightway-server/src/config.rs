@@ -51,6 +51,12 @@ pub struct Config {
     #[patch(attribute(doc = "Tun device name to use"))]
     pub tun_name: Option<String>,
 
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
+    pub tun_txqueuelen: u32,
+
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "IP pool to assign clients"))]
     pub ip_pool: Ipv4Net,
@@ -208,6 +214,8 @@ impl Default for Config {
             server_cert: PathBuf::from("./server.crt"),
             server_key: PathBuf::from("./server.key"),
             tun_name: None,
+            #[cfg(linux)]
+            tun_txqueuelen: 1000,
             ip_pool: IP_POOL,
             ip_map: None,
             tun_ip: None,
@@ -280,6 +288,17 @@ impl Config {
             )
         }
 
+        #[cfg(linux)]
+        {
+            anyhow::ensure!(self.tun_txqueuelen != 0, "tun_txqueuelen must not be 0");
+            if self.tun_txqueuelen < 1000 {
+                tracing::warn!(
+                    txqueuelen = self.tun_txqueuelen,
+                    "tun_txqueuelen is below the recommended minimum of 1000"
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -309,6 +328,26 @@ mod tests {
         let mut config = Config::default();
         config.mode = ConnectionType::Udp;
         config.proxy_protocol = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(linux)]
+    #[tracing_test::traced_test]
+    #[test]
+    fn validate_warns_on_low_tun_txqueuelen() {
+        let mut config = Config::default();
+        config.tun_txqueuelen = 500;
+        assert!(config.validate().is_ok());
+        assert!(logs_contain(
+            "tun_txqueuelen is below the recommended minimum of 1000"
+        ));
+    }
+
+    #[cfg(linux)]
+    #[test]
+    fn validate_rejects_zero_tun_txqueuelen() {
+        let mut config = Config::default();
+        config.tun_txqueuelen = 0;
         assert!(config.validate().is_err());
     }
 

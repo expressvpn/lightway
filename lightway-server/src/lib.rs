@@ -280,6 +280,8 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
         if let Some(tun_name) = config.tun_name {
             tun_config.tun_name(tun_name);
         }
+        #[cfg(linux)]
+        tun_config.tx_queue_len(config.tun_txqueuelen);
         tun_config.up();
 
         Ok(crate::ServerConfig {
