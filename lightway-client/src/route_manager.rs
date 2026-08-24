@@ -192,6 +192,12 @@ impl RouteUpdater {
         }
         self.inner.check_and_update_server_route().await
     }
+
+    /// Interface index of the currently installed server route, if any.
+    #[cfg(windows)]
+    pub fn server_route_if_index(&self) -> Option<u32> {
+        self.inner.server_route.as_ref().and_then(|r| r.if_index())
+    }
 }
 
 impl RouteManagerInner {
