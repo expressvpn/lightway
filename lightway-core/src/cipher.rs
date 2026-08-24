@@ -86,9 +86,10 @@ mod tests {
         off += 2;
 
         let cs_bytes = ch.get(off..off + cs_len)?;
+        let (chunks, _remain) = cs_bytes.as_chunks::<2>();
         Some(
-            cs_bytes
-                .chunks_exact(2)
+            chunks
+                .iter()
                 .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
                 .collect(),
         )
@@ -174,9 +175,10 @@ mod tests {
             let data = ch.get(off + 4..off + 4 + ext_len)?;
             if ext_type == 0x000a {
                 // supported_groups: 2-byte list length prefix, then 2-byte ids.
+                let (chunks, _) = data.get(2..)?.as_chunks::<2>();
                 return Some(
-                    data.get(2..)?
-                        .chunks_exact(2)
+                    chunks
+                        .iter()
                         .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
                         .collect(),
                 );
