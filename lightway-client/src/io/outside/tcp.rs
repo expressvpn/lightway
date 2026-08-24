@@ -44,6 +44,24 @@ impl Tcp {
                     }
                 }
 
+                // the route lookup that binds the local address happens there,
+                // and IP_UNICAST_IF has no effect on an already-connected socket.
+                #[cfg(all(windows, not(feature = "mobile")))]
+                {
+                    use std::os::windows::io::AsRawSocket;
+                    match crate::platform::windows::egress::pin_to_peer_interface(
+                        socket.as_raw_socket(),
+                        remote_addr,
+                    ) {
+                        Ok(if_index) => tracing::info!(
+                            "Pinned outside TCP socket egress to interface {if_index}"
+                        ),
+                        Err(e) => {
+                            tracing::warn!("Failed to pin outside TCP socket egress: {e}")
+                        }
+                    }
+                }
+
                 socket.connect(remote_addr).await?
             }
         };
