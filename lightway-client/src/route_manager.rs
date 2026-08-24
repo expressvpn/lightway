@@ -218,6 +218,40 @@ impl RouteUpdater {
     pub fn on_repin_failure(&self, state: &mut RepinState, error: &RoutingTableError) {
         RepinMode::on_failure(state, error);
     }
+
+    /// Interface index to pin the outside socket's egress to for reaching
+    /// the server.
+    ///
+    /// With routes installed (`Default`/`Lan`) this is the tracked server
+    /// route's interface. In `NoExec` no server route is installed, so ask
+    /// the routing table which interface currently serves the server IP.
+    /// Returns `None` when the lookup fails or resolves to the tunnel's own
+    /// interface (an external full-tunnel policy), since pinning egress to
+    /// the tunnel would loop outside traffic back into it.
+    #[cfg(windows)]
+    pub fn server_egress_if_index(&mut self) -> Option<u32> {
+        if self.inner.routing_mode != RouteMode::NoExec {
+            return self.inner.server_route.as_ref().and_then(|r| r.if_index());
+        }
+
+        let server_ip = self.inner.server_ip;
+        let route = self
+            .inner
+            .find_route(&server_ip)
+            .inspect_err(|e| {
+                warn!("Failed to look up the route to the server for the egress pin: {e}");
+            })
+            .ok()?;
+        let Some(if_index) = route.if_index() else {
+            warn!("Route to the server has no interface index; not pinning egress");
+            return None;
+        };
+        if if_index == self.inner.tun_index {
+            warn!("Route to the server resolves to the tunnel interface; not pinning egress");
+            return None;
+        }
+        Some(if_index)
+    }
 }
 
 impl RouteManagerInner {

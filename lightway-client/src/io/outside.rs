@@ -80,6 +80,20 @@ pub trait OutsideIO: Sync + Send {
     #[cfg(apple)]
     fn reconnect(&self) {}
 
+    /// Pin the socket's egress interface at startup and re-pin it after a
+    /// network change.
+    ///
+    /// On Windows the outside socket is pinned with
+    /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF` so that egress selection does not
+    /// depend on the routing table. A roam normally keeps the same interface
+    /// index, but switching adapters (Wi-Fi to Ethernet, docking) does not, so
+    /// the pin is refreshed from the interface of the freshly installed server
+    /// route. `if_index` of `0` means "unknown", and is ignored.
+    ///
+    /// Default is a no-op; only the UDP transport pins its egress.
+    #[cfg(windows)]
+    fn pin_egress_interface(&self, _if_index: u32) {}
+
     /// Returns the underlying socket tagged with its transport type.
     /// `None` when the transport has no single OS socket to name.
     fn socket(&self) -> Option<OutsideSocket>;
