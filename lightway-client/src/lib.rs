@@ -250,6 +250,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(linux)]
     pub fwmark: u32,
 
+    /// Disable pinning the outside UDP socket to the physical egress interface
+    /// via `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Windows).
+    #[cfg(windows)]
+    pub disable_pin_egress_interface: bool,
+
     /// DNS configuration mode
     #[cfg(desktop)]
     pub dns_config_mode: DnsConfigMode,
@@ -398,6 +403,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             route_mode: config.route_mode,
             #[cfg(linux)]
             fwmark: config.fwmark,
+            #[cfg(windows)]
+            disable_pin_egress_interface: config.disable_pin_egress_interface,
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -909,6 +916,7 @@ async fn network_event_coordinator(
     mut transition_rx: Option<watch::Receiver<()>>,
     #[cfg(apple)] nudge_on_route_update: bool,
     #[cfg(any(apple, windows))] outside_io: Weak<dyn OutsideIO>,
+    #[cfg(windows)] pin_egress_interface: bool,
     network_change_signal: mpsc::Sender<()>,
     stop_signal: Option<mpsc::Sender<String>>,
 ) {
@@ -1021,7 +1029,8 @@ async fn network_event_coordinator(
         // index usually does not change (a Wi-Fi roam keeps the adapter), but
         // switching adapters entirely does change it.
         #[cfg(windows)]
-        if let Some(if_index) = route_updater.server_egress_if_index()
+        if pin_egress_interface
+            && let Some(if_index) = route_updater.server_egress_if_index()
             && let Some(io) = outside_io.upgrade()
         {
             io.pin_egress_interface(if_index);
@@ -1180,6 +1189,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         transition_rx: Option<watch::Receiver<()>>,
         #[cfg(apple)] nudge_on_route_update: bool,
         stop_signal: Option<mpsc::Sender<String>>,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -1206,6 +1216,8 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             nudge_on_route_update,
             #[cfg(any(apple, windows))]
             Arc::downgrade(&self.outside_io),
+            #[cfg(windows)]
+            pin_egress_interface,
             self.network_change_signal.clone(),
             stop_signal,
         )));
@@ -1967,6 +1979,8 @@ pub async fn client<
                 #[cfg(apple)]
                 nudge_on_route_update,
                 stop_signal,
+                #[cfg(windows)]
+                !config.disable_pin_egress_interface,
             )
             .await?;
     }
