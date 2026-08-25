@@ -200,7 +200,7 @@ impl RouteUpdater {
     /// Delegate a failed re-pin to the mode handler, which updates the retry
     /// deadline on `state` and logs at the appropriate level.
     pub fn on_repin_failure(&self, state: &mut RepinState, error: &RoutingTableError) {
-        self.inner.repin_mode.on_failure(state, error);
+        RepinMode::on_failure(state, error);
     }
 }
 
