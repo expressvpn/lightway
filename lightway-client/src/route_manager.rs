@@ -13,6 +13,9 @@ use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
 #[cfg(windows)]
 use crate::platform::windows::utils;
 
+pub mod repin;
+pub use repin::{RepinMode, RepinState};
+
 // LAN networks for RouteMode::Lan
 const LAN_NETWORKS: [(IpAddr, u8); 5] = [
     (
@@ -126,6 +129,7 @@ struct RouteManagerInner {
     vpn_routes: Vec<Route>,
     lan_routes: Vec<Route>,
     server_route: Option<Route>,
+    repin_mode: RepinMode,
 }
 
 impl RouteManager {
@@ -192,6 +196,12 @@ impl RouteUpdater {
         }
         self.inner.check_and_update_server_route().await
     }
+
+    /// Delegate a failed re-pin to the mode handler, which updates the retry
+    /// deadline on `state` and logs at the appropriate level.
+    pub fn on_repin_failure(&self, state: &mut RepinState, error: &RoutingTableError) {
+        self.inner.repin_mode.on_failure(state, error);
+    }
 }
 
 impl RouteManagerInner {
@@ -217,6 +227,7 @@ impl RouteManagerInner {
             vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + 1),
             lan_routes: Vec::with_capacity(LAN_NETWORKS.len()),
             server_route: None,
+            repin_mode: RepinMode::OnRouteChange,
         })
     }
 
@@ -511,7 +522,10 @@ impl RouteManagerInner {
             let server_if_index = server_route.if_index();
 
             // Check if the route to the server has changed
-            if server_gateway != current_gateway || server_if_index != current_if_index {
+            let route_changed =
+                server_gateway != current_gateway || server_if_index != current_if_index;
+
+            if self.repin_mode.needs_repin(route_changed) {
                 tracing::debug!(
                     "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
                     server_gateway,
