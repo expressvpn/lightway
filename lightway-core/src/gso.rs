@@ -50,6 +50,15 @@ pub(crate) const MAX_GSO_SEGS: usize = 64;
 /// `MAX_GSO_SEGS` segments, each at most `MAX_OUTSIDE_MTU`.
 pub(crate) const MAX_GSO_FRAME_BYTES: usize = MAX_GSO_SEGS * crate::MAX_OUTSIDE_MTU;
 
+/// Max UDP payload bytes one `sendmsg(UDP_SEGMENT)` may carry: the kernel
+/// builds the whole batch into one skb, bounded by the max IP datagram size
+/// less the UDP and (worst-case) IPv6 headers; beyond it fails `EMSGSIZE`. A
+/// TUN TSO aggregate can exceed this before the wire::Header, so flushes are
+/// chunked to it. Linux-only consumer; gated to avoid a dead_code warning.
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_GSO_SEND_BYTES: usize =
+    crate::IP_MAX_DATAGRAM_SIZE - crate::UDP_HEADER_SIZE - crate::IPV6_HEADER_SIZE;
+
 impl VirtioNetHdr {
     /// Interpret the first [`VIRTIO_NET_HDR_LEN`] bytes of `buf` as a
     /// `&VirtioNetHdr` without copying.

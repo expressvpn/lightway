@@ -87,6 +87,13 @@ const IPV4_HEADER_SIZE: usize = 20;
 const TCP_HEADER_SIZE: usize = 20;
 const UDP_HEADER_SIZE: usize = 8;
 
+/// Fixed IPv6 header size (RFC 8200 §3). Larger than the IPv4 header, so
+/// used as the worst case when bounding a segment's overhead.
+pub const IPV6_HEADER_SIZE: usize = 40;
+
+/// Maximum size of an IP datagram: the IP length field is 16 bits.
+pub const IP_MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
+
 // D/TLS headers + AES crypto fields
 const MAX_DTLS_HEADER_SIZE: usize = 37;
 
