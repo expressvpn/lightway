@@ -23,11 +23,11 @@ use io::outside::OutsideIO;
 use keepalive::Keepalive;
 #[cfg(desktop)]
 use lightway_app_utils::NetworkChangeMonitor;
-#[cfg(feature = "postquantum")]
-use lightway_app_utils::args::KeyShare;
 use lightway_app_utils::{
     ConnectionTicker, ConnectionTickerState, DplpmtudTimer, EventStream, EventStreamCallback,
-    PacketCodecFactoryType, TunConfig, args::Cipher, connection_ticker_cb,
+    PacketCodecFactoryType, TunConfig,
+    args::{Cipher, KeyShare},
+    connection_ticker_cb,
 };
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
@@ -171,7 +171,6 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub tun_dns_ip: Ipv4Addr,
 
     /// Key share group for post-quantum key exchange
-    #[cfg(feature = "postquantum")]
     pub keyshare: KeyShare,
 
     /// Interval between keepalives
@@ -334,7 +333,6 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             tun_local_ip: config.tun_local_ip,
             tun_peer_ip: config.tun_peer_ip,
             tun_dns_ip: config.tun_dns_ip,
-            #[cfg(feature = "postquantum")]
             keyshare: config.keyshare,
             enable_expresslane: config.enable_expresslane,
             #[cfg(apple)]
@@ -1258,7 +1256,6 @@ pub async fn connect<
     // supported_groups. The backend difference lives in enable_pq_crypto: it
     // registers the groups on the SSL_CTX for BoringSSL and is a no-op on
     // wolfSSL, which configures PQ groups per session.
-    #[cfg(feature = "postquantum")]
     let ctx_builder = ctx_builder.enable_pq_crypto()?;
 
     // Register the TLS key logger once on the context; core applies it at the
@@ -1283,10 +1280,8 @@ pub async fn connect<
         })
         .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
-        });
-
-    #[cfg(feature = "postquantum")]
-    let conn_builder = conn_builder.with_pq_crypto(config.keyshare.into());
+        })
+        .with_pq_crypto(config.keyshare.into());
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 

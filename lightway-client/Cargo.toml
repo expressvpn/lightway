@@ -16,14 +16,13 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["wolfssl", "postquantum"]
+default = ["wolfssl"]
 mobile = ["uniffi", "tracing-core", "tracing-panic"]
 mobile-test = [ "mobile" ]  # Only mock struct, no uniffi structs
 boringssl = ["lightway-app-utils/boringssl"]
 wolfssl = ["lightway-app-utils/wolfssl"]
 debug = ["lightway-core/debug","lightway-app-utils/debug"]
 io-uring = ["lightway-app-utils/io-uring"]
-postquantum = ["lightway-core/postquantum", "lightway-app-utils/postquantum"]
 
 [lints]
 workspace = true

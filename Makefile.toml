@@ -3,8 +3,8 @@ default_to_workspace = false
 
 [env]
 # Platform-specific feature sets
-FEATURES_MACOS = "default,debug,postquantum"
-FEATURES_LINUX = "default,debug,postquantum,io-uring"
+FEATURES_MACOS = "default,debug"
+FEATURES_LINUX = "default,debug,io-uring"
 
 # Avoid the long message in CI jobs, the "Compiling XXX ..." messages are swallowed
 CARGO_TERM_QUIET = "true"
@@ -207,12 +207,12 @@ run_task = { name = ["lipo-catalyst-library", "bindgen-catalyst"] }
 [tasks.build-catalyst-arm-library]
 condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
 command = "cargo"
-args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "aarch64-apple-ios-macabi", "--no-default-features", "--features", "postquantum", "--features", "${FEATURES_MOBILE}"]
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "aarch64-apple-ios-macabi", "--no-default-features", "--features", "${FEATURES_MOBILE}"]
 
 [tasks.build-catalyst-x86-library]
 condition = { env_set = [ "IPHONEOS_DEPLOYMENT_TARGET" ] }
 command = "cargo"
-args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "x86_64-apple-ios-macabi", "--no-default-features", "--features", "postquantum", "--features", "${FEATURES_MOBILE}"]
+args = ["rustc", "--crate-type", "staticlib", "--lib", "--release", "-p", "lightway-client", "--target", "x86_64-apple-ios-macabi", "--no-default-features", "--features", "${FEATURES_MOBILE}"]
 
 [tasks.lipo-catalyst-library]
 dependencies = ["build-catalyst-arm-library", "build-catalyst-x86-library"]

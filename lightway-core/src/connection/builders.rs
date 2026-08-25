@@ -4,12 +4,10 @@ use bytes::{Bytes, BytesMut};
 use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
-#[cfg(feature = "postquantum")]
-use crate::KeyShare;
 use crate::{
-    AuthMethod, BuilderPredicates, ClientContext, Connection, ConnectionType, MAX_OUTSIDE_MTU,
-    MIN_OUTSIDE_MTU, OutsideIOSendCallbackArg, PacketDecoderType, PacketEncoderType, ServerContext,
-    ServerIpPoolArg, Version,
+    AuthMethod, BuilderPredicates, ClientContext, Connection, ConnectionType, KeyShare,
+    MAX_OUTSIDE_MTU, MIN_OUTSIDE_MTU, OutsideIOSendCallbackArg, PacketDecoderType,
+    PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
     max_dtls_outside_mtu,
@@ -180,7 +178,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     }
 
     /// Enable Post Quantum Crypto
-    #[cfg(feature = "postquantum")]
     pub fn with_pq_crypto(self, keyshare: KeyShare) -> Self {
         Self {
             session_config: self

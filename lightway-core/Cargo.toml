@@ -13,10 +13,9 @@ readme = "README.md"
 default = ["wolfssl"]
 # Enable additional APIs to support wire protocol fuzzing
 fuzzing_api = []
-wolfssl = ["dep:wolfssl", "wolfssl/system_ca_certs"]
+wolfssl = ["dep:wolfssl", "wolfssl/system_ca_certs", "wolfssl/postquantum"]
 boringssl = ["dep:boringssl"]
 debug = ["wolfssl?/debug", "boringssl?/debug"]
-postquantum = ["wolfssl?/postquantum"]
 
 [lints]
 workspace = true

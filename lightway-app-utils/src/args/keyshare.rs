@@ -16,7 +16,9 @@ pub enum KeyShare {
     #[default]
     P521Mlkem1024,
     /// X25519 + ML-KEM-768
-    #[cfg_attr(boringssl, default)]
+    // Default whenever P521Mlkem1024 is unavailable, including when this crate
+    // is built without any backend feature (as a dev-dependency).
+    #[cfg_attr(not(wolfssl), default)]
     X25519Mlkem768,
 }
 

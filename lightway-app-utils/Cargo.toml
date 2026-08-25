@@ -16,7 +16,6 @@ wolfssl = ["lightway-core/wolfssl"]
 io-uring = [ "dep:io-uring", "dep:tokio", "dep:tokio-eventfd" ]
 tokio = [ "dep:tokio", "dep:tokio-stream" ]
 debug = [ ]
-postquantum = [ "lightway-core/postquantum" ]
 
 [lints]
 workspace = true

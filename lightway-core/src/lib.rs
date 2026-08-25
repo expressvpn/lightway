@@ -12,7 +12,6 @@ mod features;
 #[cfg(any(target_os = "linux", test))]
 pub mod gso;
 mod io;
-#[cfg(feature = "postquantum")]
 mod keyshare;
 mod metrics;
 mod packet;
@@ -47,7 +46,6 @@ pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, OutsideIOSendCallback,
     OutsideIOSendCallbackArg,
 };
-#[cfg(feature = "postquantum")]
 pub use keyshare::KeyShare;
 pub use packet::OutsidePacket;
 pub use packet_codec::{
