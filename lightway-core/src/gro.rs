@@ -105,6 +105,12 @@ fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
     if flags & TCP_NO_COALESCE_FLAGS != 0 {
         return None;
     }
+    // Most expensive check last: a segment with a bad TCP checksum must not
+    // coalesce, or `take` would reseed a valid checksum over corrupt bytes.
+    // See [`tcp_checksum_valid`].
+    if !tcp_checksum_valid(pkt) {
+        return None;
+    }
     let seq = tcp.get_sequence();
     Some(SegInfo {
         tcp_hdr_len,
@@ -112,6 +118,26 @@ fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
         seq,
         psh_fin: flags & TCP_PSH_FIN,
     })
+}
+
+/// Verify a segment's TCP checksum (pseudo-header + TCP header + payload).
+/// Kernel GRO validates before coalescing so a corrupt segment cannot be
+/// laundered: [`TcpGroBatch::take`] reseeds `NEEDS_CSUM`, which makes the
+/// kernel *complete* the checksum rather than check it, so a bad segment
+/// merged here would reach the app with a freshly-valid checksum over
+/// corrupt bytes. A segment that fails is left for the caller to write
+/// directly, where a plain (non-`NEEDS_CSUM`) write lets the kernel
+/// validate and drop it and TCP retransmits. `pkt` is a full IHL==5 IPv4
+/// TCP frame.
+fn tcp_checksum_valid(pkt: &[u8]) -> bool {
+    let tcp_len = (pkt.len() - IPV4_HDR_LEN) as u16;
+    let mut c = internet_checksum::Checksum::new();
+    c.add_bytes(&pkt[12..20]); // src + dst addresses
+    c.add_bytes(&[0, IPPROTO_TCP, (tcp_len >> 8) as u8, tcp_len as u8]);
+    c.add_bytes(&pkt[IPV4_HDR_LEN..]); // TCP header + payload, checksum field included
+    // A valid segment folds to 0xFFFF, whose complement (what `checksum`
+    // returns) is zero.
+    c.checksum() == [0, 0]
 }
 
 /// Folded one's-complement sum of the TCP pseudo header, *not*
@@ -703,6 +729,36 @@ mod tests {
         assert_eq!(vhdr.gso_size, p as u16);
         assert_eq!(vhdr.csum_start, IPV4_HDR_LEN as u16);
         assert_eq!(vhdr.csum_offset, 16);
+    }
+
+    /// A segment whose TCP checksum is wrong (a flipped payload byte)
+    /// must not coalesce: `take` would otherwise reseed a valid checksum
+    /// over corrupt bytes, laundering a packet the kernel would have
+    /// dropped on the non-offload path. As the first segment it fails to
+    /// start a batch; mid-train it flushes the good prefix and is left for
+    /// a direct write.
+    #[test]
+    fn bad_tcp_checksum_not_coalesced() {
+        let p = 400usize;
+        let seq0 = 0x9000_0000u32;
+
+        // As the opening segment: rejected, batch stays empty.
+        let mut corrupt = Seg::new(seq0, 1, p).build();
+        *corrupt.last_mut().unwrap() ^= 0xFF; // flip a payload byte -> bad TCP csum
+        let mut batch = TcpGroBatch::new();
+        assert_eq!(batch.append(&corrupt), GroAppend::Incompatible);
+        assert!(batch.is_empty(), "corrupt opener must not start a batch");
+
+        // Mid-train: a good segment starts the batch, the corrupt follower
+        // flushes it and is not absorbed.
+        let good = Seg::new(seq0, 1, p).build();
+        assert_eq!(batch.append(&good), GroAppend::Coalesced);
+        let mut corrupt2 = Seg::new(seq0 + p as u32, 2, p).build();
+        *corrupt2.last_mut().unwrap() ^= 0xFF;
+        assert_eq!(batch.append(&corrupt2), GroAppend::Incompatible);
+        // Only the one good segment is in the batch.
+        let (sp, _) = batch.take().unwrap();
+        assert_eq!(sp.len(), IPV4_HDR_LEN + TCP_MIN_HDR_LEN + p);
     }
 
     /// Coalesce N in-order segments (sequential IP ids, valid
