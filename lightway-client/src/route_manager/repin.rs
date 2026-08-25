@@ -41,36 +41,28 @@ impl RepinMode {
         }
     }
 
-    pub fn on_failure(&self, state: &mut RepinState, error: &RoutingTableError) {
-        match self {
-            RepinMode::OnRouteChange => {
-                tracing::warn!("Server route update failed: {error:?}");
-                state.next_at = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-            }
-            RepinMode::Always => {
-                const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-                const LONG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    pub fn on_failure(state: &mut RepinState, error: &RoutingTableError) {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        const LONG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
-                let next_interval = if state.retry_count > 4 {
-                    // more than 15.5s
-                    tracing::error!(
-                        "Server route update failed ({error:?}) in {:}, retrying",
-                        state.elapsed_since_start().as_secs()
-                    );
-                    LONG_INTERVAL
-                } else {
-                    let exponential =
-                        MIN_INTERVAL.as_millis() as u64 * 2_u64.saturating_pow(state.retry_count);
-                    tracing::debug!(
-                        "Server route update failed ({error:?}) in {:}, retrying",
-                        state.elapsed_since_start().as_secs()
-                    );
-                    std::time::Duration::from_millis(exponential)
-                };
+        let next_interval = if state.retry_count > 4 {
+            // more than 15.5s
+            tracing::error!(
+                "Server route update failed ({error:?}) in {:}, retrying",
+                state.elapsed_since_start().as_secs()
+            );
+            LONG_INTERVAL
+        } else {
+            let exponential =
+                MIN_INTERVAL.as_millis() as u64 * 2_u64.saturating_pow(state.retry_count);
+            tracing::debug!(
+                "Server route update failed ({error:?}) in {:}, retrying",
+                state.elapsed_since_start().as_secs()
+            );
+            std::time::Duration::from_millis(exponential)
+        };
 
-                state.retry_count = state.retry_count.saturating_add(1);
-                state.next_at = tokio::time::Instant::now() + next_interval;
-            }
-        }
+        state.retry_count = state.retry_count.saturating_add(1);
+        state.next_at = tokio::time::Instant::now() + next_interval;
     }
 }
