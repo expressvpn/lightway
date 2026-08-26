@@ -54,6 +54,9 @@ pub struct TunConfig {
     /// device. Required for the GSO inside-IO path.
     #[cfg(target_os = "linux")]
     pub offload: bool,
+    /// Transmit queue length (txqueuelen) for the TUN interface.
+    #[cfg(target_os = "linux")]
+    pub tx_queue_len: Option<u32>,
     #[cfg(windows)]
     /// Optional wintun file path for Windows TUN interfaces
     pub wintun_file: Option<String>,
@@ -94,6 +97,11 @@ impl Debug for TunConfig {
         }
         #[cfg(unix)]
         s.field("close_fd_on_drop", &self.close_fd_on_drop);
+        #[cfg(linux)]
+        if let Some(txqueuelen) = self.tx_queue_len.as_ref() {
+            s.field("txqueuelen", txqueuelen);
+        }
+
         s.finish()
     }
 }
@@ -131,6 +139,13 @@ impl TunConfig {
     /// Set the MTU.
     pub fn mtu(&mut self, value: u16) -> &mut Self {
         self.mtu = Some(value);
+        self
+    }
+
+    /// Set the transmit queue length (txqueuelen) of the interface (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn tx_queue_len(&mut self, value: u32) -> &mut Self {
+        self.tx_queue_len = Some(value);
         self
     }
 
@@ -232,6 +247,10 @@ impl TunConfig {
             #[cfg(target_os = "linux")]
             if self.offload {
                 builder = builder.offload(true);
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(tx_queue_len) = self.tx_queue_len {
+                builder = builder.tx_queue_len(tx_queue_len);
             }
             let device = builder.build_async()?;
 
