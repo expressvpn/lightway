@@ -16,7 +16,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::windows::io::AsRawSocket;
 
 // All Unix other than apple devices
-#[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
+#[cfg(all(not(apple), unix))]
 mod internal {
     use libc::{IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT};
     #[cfg(target_os = "linux")]
@@ -125,7 +125,7 @@ mod internal {
     }
 }
 
-#[cfg(target_vendor = "apple")]
+#[cfg(apple)]
 mod internal {
     const IP_ALLOW_FRAG: i32 = 0;
     const IP_DONT_FRAG: i32 = 1;
@@ -168,13 +168,13 @@ fn get_level_and_optname() -> (i32, i32) {
     let level: i32;
     let optname: i32;
 
-    #[cfg(target_vendor = "apple")]
+    #[cfg(apple)]
     {
         level = libc::IPPROTO_IP;
         optname = libc::IP_DONTFRAG;
     }
 
-    #[cfg(all(not(target_vendor = "apple"), target_family = "unix"))]
+    #[cfg(all(not(apple), unix))]
     {
         level = libc::SOL_IP;
         optname = libc::IP_MTU_DISCOVER;
