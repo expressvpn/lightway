@@ -259,16 +259,17 @@ pub struct Config {
     #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
     pub enable_expresslane: bool,
 
-    #[cfg(apple)]
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(
-        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
+        doc = r#"Connect the outside UDP socket to the server (Apple and Linux desktop).
     Connecting the single-peer outside socket lets sends skip the per-packet
-    route lookup. The socket is re-connected on network changes."#
+    route lookup. The socket is re-connected on network changes to flush the
+    cached route, enabling roaming between interfaces and same-subnet routers."#
     ))]
-    #[schemars(extend("x-cfg" = "apple"))]
+    #[schemars(extend("x-cfg" = "apple,linux"))]
     pub enable_connected_udp: bool,
 
     #[patch(attribute(clap(long)))]
@@ -560,7 +561,7 @@ impl Default for Config {
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
             enable_expresslane: false,
-            #[cfg(apple)]
+            #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
             enable_connected_udp: false,
             expresslane_keys_rotation_interval: Duration::from_std_duration(
                 lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,

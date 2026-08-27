@@ -51,7 +51,7 @@ impl NetworkChangeMonitor {
         let (transition_tx, transition_rx) = watch::channel(());
 
         let task = tokio::spawn(async move {
-            #[cfg(not(any(windows, macos)))]
+            #[cfg(not(any(windows, macos, linux)))]
             let _ = ignore_ips;
 
             let mut route_listener = match AsyncRouteListener::new() {
@@ -79,9 +79,12 @@ impl NetworkChangeMonitor {
             #[cfg(macos)]
             let mut addr_listener = Some(spawn_macos_addr_listener(ignore_ips));
 
-            #[cfg(not(any(windows, macos)))]
+            #[cfg(linux)]
+            let mut addr_listener = Some(spawn_linux_addr_listener(ignore_ips));
+
+            #[cfg(not(any(windows, macos, linux)))]
             let (_sender, addr_listener) = tokio::sync::mpsc::unbounded_channel::<()>();
-            #[cfg(not(any(windows, macos)))]
+            #[cfg(not(any(windows, macos, linux)))]
             let mut addr_listener = Some(addr_listener);
 
             #[cfg(macos)]
@@ -142,6 +145,17 @@ impl NetworkChangeMonitor {
                                }
                                #[cfg(windows)]
                                {
+                                   let _ = route_tx.send(());
+                                   let _ = transition_tx.send(());
+                               }
+                               // On Linux an address change indicates a network
+                               // transition (e.g., same-subnet roam where the
+                               // default route does not change). Fire both so
+                               // the coordinator re-pins and re-connects the
+                               // socket and triggers a keepalive burst.
+                               #[cfg(linux)]
+                               {
+                                   tracing::info!("Network transition detected (address change)");
                                    let _ = route_tx.send(());
                                    let _ = transition_tx.send(());
                                }
@@ -242,6 +256,48 @@ fn spawn_macos_addr_listener(
     rx
 }
 
+/// Bridge netwatcher's interface updates to a unit-event channel on Linux,
+/// using the same snapshot-diff approach as the macOS listener.
+#[cfg(linux)]
+fn spawn_linux_addr_listener(
+    ignore_ips: Vec<std::net::IpAddr>,
+) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut watcher =
+            match netwatcher::watch_interfaces_async::<netwatcher::async_adapter::Tokio>() {
+                Ok(w) => {
+                    tracing::info!("Started address change monitoring (Linux)...");
+                    w
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start Linux address listener: {e}");
+                    return;
+                }
+            };
+
+        // The first `changed()` yields the initial snapshot; it only seeds.
+        let mut prev: Option<std::collections::BTreeSet<std::net::IpAddr>> = None;
+        loop {
+            let update = watcher.changed().await;
+            let now = relevant_addrs(
+                update
+                    .interfaces
+                    .values()
+                    .flat_map(|iface| iface.ips.iter().map(|record| record.ip)),
+                &ignore_ips,
+            );
+            let is_change = prev.as_ref().is_some_and(|p| *p != now);
+            prev = Some(now);
+            if is_change && tx.send(()).is_err() {
+                // Monitor dropped; returning drops the watcher.
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// Detects a network transition: an address change and an applicable route
 /// arrival (in either order) within `window` of each other, rate-limited by
 /// `cooldown`. An emitted pair is consumed. The caller filters route deletes
@@ -309,7 +365,7 @@ impl TransitionDetector {
 /// other address change — is not mistaken for a path change. Comparing
 /// successive snapshots of this set lets the monitor signal only on genuine
 /// changes.
-#[cfg(any(windows, macos, test))]
+#[cfg(any(windows, macos, linux, test))]
 pub(crate) fn relevant_addrs(
     addrs: impl IntoIterator<Item = std::net::IpAddr>,
     ignore: &[std::net::IpAddr],
@@ -322,7 +378,7 @@ pub(crate) fn relevant_addrs(
         .collect()
 }
 
-#[cfg(any(windows, macos, test))]
+#[cfg(any(windows, macos, linux, test))]
 fn is_link_local(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_link_local(),

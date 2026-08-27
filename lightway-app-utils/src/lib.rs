@@ -7,7 +7,7 @@ pub mod cmsg;
 #[cfg(apple)]
 pub mod recvmsg_x;
 pub mod sockopt;
-#[cfg(apple)]
+#[cfg(any(apple, linux))]
 pub mod udp_disconnect;
 
 #[cfg(feature = "tokio")]

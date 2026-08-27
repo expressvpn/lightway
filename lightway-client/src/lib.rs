@@ -223,9 +223,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub enable_expresslane: bool,
 
     /// Connect the outside UDP socket to the server so sends skip the
-    /// per-packet route lookup (Apple platforms, Datagram only). The socket
-    /// is re-connected when the network changes.
-    #[cfg(apple)]
+    /// per-packet route lookup (Apple and Linux desktop, Datagram only). The
+    /// socket is re-connected when the network changes; on Linux this also
+    /// flushes the route cached by IP_UNICAST_IF.
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     pub enable_connected_udp: bool,
 
     /// Interval between Expresslane key rotations
@@ -341,7 +342,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "postquantum")]
             keyshare: config.keyshare,
             enable_expresslane: config.enable_expresslane,
-            #[cfg(apple)]
+            #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
             enable_connected_udp: config.enable_connected_udp,
             expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
             expresslane_cb: None,
@@ -917,6 +918,15 @@ async fn network_event_coordinator(
             io.pin_egress_interface(if_index);
         }
 
+        // On Linux, re-connect after (re-)pinning the egress interface so the
+        // new IP_UNICAST_IF value takes effect on the cached route. On a
+        // connected socket setsockopt(IP_UNICAST_IF) alone does not flush the
+        // route cache; reconnecting does.
+        #[cfg(all(linux, not(feature = "mobile")))]
+        if let Some(io) = outside_io.upgrade() {
+            io.reconnect();
+        }
+
         if nudge && let Err(e) = network_change_signal.send(()).await {
             tracing::error!("Failed to send network_change_signal: {e}");
         }
@@ -1193,13 +1203,13 @@ pub async fn connect<
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
-                // On Apple platforms a connected UDP socket lets `send` skip
-                // the per-packet route lookup, improving throughput. Safe
-                // because a network change re-connects the socket: via the
-                // network-event coordinator on desktop (see
-                // `initialize_routes`), via the network-change signal
-                // forwarder elsewhere.
-                #[cfg(apple)]
+                // A connected UDP socket lets `send` skip the per-packet
+                // route lookup, improving throughput. On Linux, reconnecting
+                // after a network change also flushes the route cached by
+                // IP_UNICAST_IF at connect() time. Safe because the
+                // network-event coordinator re-connects the socket on every
+                // route/transition event (see `initialize_routes`).
+                #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
                 if config.enable_connected_udp
                     && let Err(e) = sock.enable_connected_send()
                 {
@@ -1795,12 +1805,14 @@ pub async fn client<
                 let route_rx = monitor.subscribe_routes();
 
                 // Network transitions drive the connection-level handler
-                // (keepalive burst); macOS only. Gated on keepalives being
-                // enabled, mirroring the embedder-signal validation.
-                #[cfg(macos)]
+                // (keepalive burst). On macOS transitions require addr+route
+                // pairing; on Linux they fire on address changes (same-subnet
+                // roaming). Gated on keepalives being enabled, mirroring the
+                // embedder-signal validation.
+                #[cfg(any(macos, all(linux, not(feature = "mobile"))))]
                 let transition_rx =
                     (!config.keepalive_interval.is_zero()).then(|| monitor.subscribe_transitions());
-                #[cfg(not(macos))]
+                #[cfg(not(any(macos, all(linux, not(feature = "mobile")))))]
                 let transition_rx: Option<watch::Receiver<()>> = None;
 
                 network_change_monitor = Some(monitor);

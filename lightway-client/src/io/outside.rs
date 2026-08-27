@@ -72,12 +72,14 @@ pub trait OutsideIO: Sync + Send {
 
     /// Re-establish the socket's connected route after a network change.
     ///
-    /// On Apple platforms the outside UDP socket is `connect()`-ed so each send can skip
-    /// the per-packet route lookup. When the network changes the cached route
-    /// and bound source address go stale, so the association has to be
-    /// refreshed. Default is a no-op for transports that don't use a connected
-    /// socket.
-    #[cfg(apple)]
+    /// On Apple and Linux desktop the outside UDP socket may be `connect()`-ed
+    /// so each send can skip the per-packet route lookup. When the network
+    /// changes the cached route and bound source address go stale, so the
+    /// association has to be refreshed by re-`connect()`ing. On Linux this
+    /// also flushes the route cached by `IP_UNICAST_IF` at the original
+    /// `connect()` time, which `setsockopt` alone does not update.
+    /// Default is a no-op for transports that don't use a connected socket.
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     fn reconnect(&self) {}
 
     /// Re-pin the socket's egress interface after a network change.

@@ -49,8 +49,8 @@ tun-rs.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 route_manager.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# Address-change watching (PF_ROUTE doorbell + getifaddrs snapshot diff).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Address-change watching (netlink on Linux, PF_ROUTE on macOS).
 netwatcher = { version = "0.7.1", features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]

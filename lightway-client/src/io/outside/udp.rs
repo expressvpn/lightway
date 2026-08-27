@@ -5,7 +5,7 @@ use lightway_app_utils::sockopt;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
 #[cfg(any(ios, tvos, all(test, apple)))]
 use std::sync::OnceLock;
-#[cfg(apple)]
+#[cfg(any(apple, all(linux, not(feature = "mobile"))))]
 use std::sync::atomic::AtomicBool;
 #[cfg(all(any(linux, windows), not(feature = "mobile")))]
 use std::sync::atomic::AtomicU32;
@@ -25,14 +25,14 @@ pub struct Udp {
     default_ip_pmtudisc: sockopt::IpPmtudisc,
     /// Whether connected-send mode was requested; see
     /// [`Udp::enable_connected_send`]. Set once during setup, before the socket
-    /// is shared. Apple platforms only.
-    #[cfg(apple)]
+    /// is shared. Apple and Linux desktop only.
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     connect_requested: bool,
     /// Whether the socket is currently `connect()`-ed to `peer_addr` so that
     /// `send` can be used in place of `send_to`. Cleared by [`Udp::downgrade`]
     /// when the pinned route/source address dies; restored by
     /// [`OutsideIO::reconnect`] on the next network-change event.
-    #[cfg(apple)]
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     connected: AtomicBool,
     /// Callback registered via [`Udp::on_dead_socket`], fired when the
     /// connected socket turns out to be permanently dead. iOS/tvOS only
@@ -142,9 +142,9 @@ impl Udp {
             sock: Arc::new(sock),
             peer_addr,
             default_ip_pmtudisc,
-            #[cfg(apple)]
+            #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
             connect_requested: false,
-            #[cfg(apple)]
+            #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
             connected: AtomicBool::new(false),
             #[cfg(any(ios, tvos, all(test, apple)))]
             dead_socket_cb: OnceLock::new(),
@@ -162,18 +162,20 @@ impl Udp {
     ///
     /// On a connected UDP socket the kernel resolves the route once, at connect
     /// time, so each subsequent `send` skips the per-packet route lookup that
-    /// `send_to` performs.
-    #[cfg(apple)]
+    /// `send_to` performs. On Linux this also activates the egress interface
+    /// pinned via `IP_UNICAST_IF`; re-`connect()`ing after a `setsockopt`
+    /// update flushes the stale cached route.
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     fn connect_socket(&self) -> std::io::Result<()> {
         socket2::SockRef::from(&self.sock).connect(&self.peer_addr.into())
     }
 
-    /// Switch this socket to connected-send mode for throughput on Apple platforms.
+    /// Switch this socket to connected-send mode for throughput.
     ///
     /// The cached route is bound to the current egress interface, so the caller
     /// MUST invoke [`OutsideIO::reconnect`] on every network change — otherwise
     /// a network change strands the socket on a dead route/source address.
-    #[cfg(apple)]
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     pub fn enable_connected_send(&mut self) -> std::io::Result<()> {
         // Requested before attempted: if this initial connect fails, a later
         // network-change reconnect can still establish the fast path.
@@ -208,12 +210,12 @@ impl Udp {
     /// Drop back to unconnected sends on the same fd.
     ///
     /// `send_to` on a connected UDP socket fails with `EISCONN`, so the
-    /// association has to be dissolved before falling back. `disconnectx` also
-    /// resets the implicitly bound local address, so subsequent sends re-select
-    /// the route and source address per packet — correct on whatever network we
-    /// are now on, just without the connected-send saving. The next
-    /// network-change reconnect restores the fast path.
-    #[cfg(apple)]
+    /// association has to be dissolved before falling back. After dissolving,
+    /// subsequent sends re-select the route and source address per packet —
+    /// correct on whatever network we are now on, just without the
+    /// connected-send saving. The next network-change reconnect restores the
+    /// fast path.
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     fn downgrade(&self) {
         let pinned = local_addr_str(&self.sock);
         // Flip first so concurrent senders switch to `send_to`; a send racing
@@ -222,6 +224,8 @@ impl Udp {
         match lightway_app_utils::udp_disconnect::udp_disconnect(self.sock.as_ref()) {
             Ok(()) => {}
             // NotConnected: already dissolved (e.g. a reconnect failed mid-way).
+            // Apple: disconnectx returns ENOTCONN on an unconnected socket.
+            // Linux: connect(AF_UNSPEC) is idempotent and always succeeds.
             Err(e) if matches!(e.kind(), std::io::ErrorKind::NotConnected) => {}
             Err(e) => {
                 tracing::warn!("Failed to dissolve outside UDP socket association: {e}");
@@ -275,7 +279,7 @@ impl Udp {
                     return IOCallbackResult::WouldBlock;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                #[cfg(apple)]
+                #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
                 Err(e) if self.connect_requested && is_icmp_derived_err(&e) => {
                     tracing::debug!("Ignoring ICMP-derived error on connected UDP recv: {e}");
                     return IOCallbackResult::WouldBlock;
@@ -323,7 +327,7 @@ impl OutsideIO for Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
-            #[cfg(apple)]
+            #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
             Err(err) if self.connect_requested && is_icmp_derived_err(&err) => {
                 tracing::debug!("Ignoring ICMP-derived error on connected UDP recv: {err}");
                 IOCallbackResult::WouldBlock
@@ -362,7 +366,7 @@ impl OutsideIO for Udp {
         self.peer_addr()
     }
 
-    #[cfg(apple)]
+    #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
     fn reconnect(&self) {
         // Only refresh the route if connected-send mode is actually in use.
         // Checked against the request, not the current state, so a downgraded
@@ -370,11 +374,11 @@ impl OutsideIO for Udp {
         if !self.connect_requested {
             return;
         }
-        // `connect()` on a connected datagram socket dissolves the old
-        // association and re-runs route and source-address selection under one
-        // socket lock (see soconnectlock in xnu's uipc_socket.c), so this both
-        // refreshes the pinned route and re-selects the local address — on the
-        // same fd and local port.
+        // `connect()` on an already-connected datagram socket dissolves the
+        // old association and re-runs route and source-address selection. On
+        // Apple this happens under a socket lock (soconnectlock in xnu). On
+        // Linux this additionally flushes the route cached by IP_UNICAST_IF
+        // at the original connect() time, which setsockopt alone cannot do.
         let before = local_addr_str(&self.sock);
         match self.connect_socket() {
             Ok(()) => {
@@ -453,18 +457,18 @@ impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         // On a connected socket the destination is already known, so `send`
         // skips the per-packet route lookup that `send_to` performs - a
-        // measurable throughput win on Apple platforms. Falls back to `send_to` when the
-        // socket isn't connected (mode not enabled, or downgraded after the
-        // pinned route/source address died).
-        #[cfg(apple)]
+        // measurable throughput win. Falls back to `send_to` when the socket
+        // isn't connected (mode not enabled, or downgraded after the pinned
+        // route/source address died).
+        #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
         let connected = self.connected.load(Ordering::Relaxed);
-        #[cfg(apple)]
+        #[cfg(any(apple, all(linux, not(feature = "mobile"))))]
         let result = if connected {
             self.sock.try_send(buf)
         } else {
             self.sock.try_send_to(buf, self.peer_addr)
         };
-        #[cfg(not(apple))]
+        #[cfg(not(any(apple, all(linux, not(feature = "mobile")))))]
         let result = self.sock.try_send_to(buf, self.peer_addr);
 
         match result {
@@ -549,6 +553,38 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
+            #[cfg(all(linux, not(feature = "mobile")))]
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
+                // The source address cached at connect() time is no longer
+                // valid (e.g. the interface lost its address during a roam).
+                // A connected socket will fail this way until re-connected;
+                // downgrade to send_to so packets keep flowing. The next
+                // network-change reconnect restores the fast path.
+                if connected {
+                    self.downgrade();
+                }
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
+            #[cfg(all(linux, not(feature = "mobile")))]
+            Err(err) if connected && matches!(err.kind(), std::io::ErrorKind::HostUnreachable) => {
+                // A connected socket surfaces EHOSTUNREACH when the cached
+                // route is torn down during a network change. Swallow until
+                // the coordinator reconnects on the next route event.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
+            #[cfg(all(linux, not(feature = "mobile")))]
+            Err(err)
+                if self.connect_requested
+                    && (matches!(err.kind(), std::io::ErrorKind::NotConnected)
+                        || matches!(err.raw_os_error(), Some(libc::EISCONN))) =>
+            {
+                // A send raced a reconnect/downgrade transition; the next
+                // send takes the settled path.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
             #[cfg(any(ios, tvos, all(test, apple)))]
             Err(err)
                 if self.connect_requested
@@ -616,7 +652,7 @@ impl OutsideIOSendCallback for Udp {
     }
 }
 
-#[cfg(apple)]
+#[cfg(any(apple, all(linux, not(feature = "mobile"))))]
 fn local_addr_str(sock: &tokio::net::UdpSocket) -> String {
     sock.local_addr()
         .map_or_else(|e| e.to_string(), |a| a.to_string())
@@ -627,7 +663,7 @@ fn local_addr_str(sock: &tokio::net::UdpSocket) -> String {
 /// socket never sees them. They are transient from the tunnel's point of view
 /// (server restart, router mid-transition) and DTLS retransmission recovers
 /// once the peer is reachable again, so they must not tear the connection down.
-#[cfg(apple)]
+#[cfg(any(apple, all(linux, not(feature = "mobile"))))]
 fn is_icmp_derived_err(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
