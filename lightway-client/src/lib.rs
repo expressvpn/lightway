@@ -910,20 +910,22 @@ async fn network_event_coordinator(
         // Refresh the egress pin from the server route we just validated. The
         // index usually does not change (a Wi-Fi roam keeps the adapter), but
         // switching adapters entirely does change it.
+        //
+        // On Linux the reconnect is nested here: reconnecting only when
+        // server_route_if_index() returns Some ensures a valid route exists.
+        // An unconditional reconnect would fire on route-DELETE events where
+        // connect() returns ENETUNREACH, triggering downgrade() and leaving
+        // the socket in slow-path send_to mode for the DELETE→ADD window.
         #[cfg(all(any(linux, windows), not(feature = "mobile")))]
         if pin_egress_interface
             && let Some(if_index) = route_updater.server_route_if_index()
             && let Some(io) = outside_io.upgrade()
         {
             io.pin_egress_interface(if_index);
-        }
-
-        // On Linux, re-connect after (re-)pinning the egress interface so the
-        // new IP_UNICAST_IF value takes effect on the cached route. On a
-        // connected socket setsockopt(IP_UNICAST_IF) alone does not flush the
-        // route cache; reconnecting does.
-        #[cfg(all(linux, not(feature = "mobile")))]
-        if let Some(io) = outside_io.upgrade() {
+            // Re-connect after pinning so the updated IP_UNICAST_IF value
+            // takes effect on the cached route; setsockopt alone does not
+            // flush the route cache on a connected socket.
+            #[cfg(linux)]
             io.reconnect();
         }
 
