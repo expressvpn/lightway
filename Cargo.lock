@@ -2776,7 +2776,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3629,7 +3629,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4707,9 +4707,8 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wolfssl"
-version = "7.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37615b1a3804f015511d20db2d7e93bae8c0b25df20742f911cd4649c045c30a"
+version = "8.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=wolfssl-5.9.2#c72a7f50cdb51b79a6c7040971588b7fca596778"
 dependencies = [
  "bytes",
  "log",
@@ -4719,13 +4718,13 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "4.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11581c6b564afd41fb2ab640f31726fc35a8233088f0677118d9545512428091"
+version = "5.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?branch=wolfssl-5.9.2#c72a7f50cdb51b79a6c7040971588b7fca596778"
 dependencies = [
  "autotools",
  "bindgen",
  "build-target",
+ "cc",
  "msbuild",
 ]
 

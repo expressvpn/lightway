@@ -77,5 +77,5 @@ tracing = "0.1.37"
 tracing-subscriber = "0.3.17"
 tun-rs = { version = "2.8.8", features = ["async"] }
 windows-sys = "0.61.0"
-wolfssl = "7.4.0"
+wolfssl = { git = "https://github.com/expressvpn/wolfssl-rs", branch = "wolfssl-5.9.2" }
 uniffi = "0.26.1"
