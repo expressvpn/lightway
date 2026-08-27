@@ -264,7 +264,6 @@ pub async fn server<S: TestSock>(
     .with_maximum_protocol_version(Version::MAXIMUM)
     .unwrap();
 
-    #[cfg(feature = "postquantum")]
     let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.enable_pq_crypto().unwrap());
 
     let server_ctx = server_ctx
@@ -460,7 +459,6 @@ pub async fn client<S: TestSock>(
         b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
     });
 
-    #[cfg(feature = "postquantum")]
     let client = client.enable_pq_crypto().unwrap();
 
     let client = client
@@ -474,7 +472,6 @@ pub async fn client<S: TestSock>(
         .with_event_cb(Box::new(event_cb))
         .with_inside_pkt_codec(packet_codec);
 
-    #[cfg(feature = "postquantum")]
     let client = client.when_some(pqc.client_keyshare(), |b, ks| b.with_pq_crypto(ks));
 
     let client = client
@@ -677,12 +674,6 @@ pub async fn client<S: TestSock>(
     }
 }
 
-/// Uninhabited stand-in for `lightway_core::KeyShare` when the
-/// postquantum feature is disabled.
-#[cfg(not(feature = "postquantum"))]
-#[derive(Clone, Copy)]
-enum KeyShare {}
-
 #[derive(Clone, Copy)]
 pub struct PQCrypto {
     pub server_pqc: bool,
@@ -700,7 +691,7 @@ impl PQCrypto {
 
     pub fn expected_curve(&self) -> &str {
         cfg_if::cfg_if! {
-            if #[cfg(all(feature = "postquantum", boringssl))] {
+            if #[cfg(boringssl)] {
                 if !self.server_pqc {
                     "P-256"
                 } else {
@@ -708,7 +699,7 @@ impl PQCrypto {
                     // P521 hybrids and other ML-KEM variants are not supported.
                     "X25519MLKEM768"
                 }
-            } else if #[cfg(all(feature = "postquantum", wolfssl))] {
+            } else {
                 if !self.server_pqc {
                     "SECP256R1"
                 } else {
@@ -721,8 +712,6 @@ impl PQCrypto {
                         None => "SecP521r1MLKEM1024",
                     }
                 }
-            } else {
-                "SECP256R1"
             }
         }
     }
@@ -730,15 +719,9 @@ impl PQCrypto {
 
 impl Default for PQCrypto {
     fn default() -> Self {
-        #[cfg(feature = "postquantum")]
-        return Self {
+        Self {
             server_pqc: true,
             keyshare: Some(KeyShare::default()),
-        };
-        #[cfg(not(feature = "postquantum"))]
-        return Self {
-            server_pqc: false,
-            keyshare: None,
-        };
+        }
     }
 }

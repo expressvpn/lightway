@@ -342,7 +342,7 @@ jobs:
           path: ${{ steps.build-android-aar.outputs.path }}
           if-no-files-found: error
       - name: Build JsonSchema
-        run: nix develop -c cargo run --features=mobile,wolfssl,postquantum -p lightway-client -- -c client.schema.json -g jsonschema
+        run: nix develop -c cargo run --features=mobile,wolfssl -p lightway-client -- -c client.schema.json -g jsonschema
       - name: Upload JsonSchema artifact
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -517,7 +517,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.backend }}" = "boringssl" ]; then
-            echo "features=--no-default-features --features boringssl,postquantum" >> "$GITHUB_OUTPUT"
+            echo "features=--no-default-features --features boringssl" >> "$GITHUB_OUTPUT"
           else
             echo "features=" >> "$GITHUB_OUTPUT"
           fi

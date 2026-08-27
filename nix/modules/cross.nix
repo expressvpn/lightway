@@ -148,12 +148,9 @@
       # the native boringssl packages in native.nix. Other cross targets ship
       # via Earthly (see the root Earthfile), not nix.
       boringSslCrossPackages = lib.optionalAttrs (crossToolchains ? x86_64-darwin) {
-        "lightway-client-x86_64-darwin-boringssl-beta" =
-          mkBoringSslPackage [ "lightway-client" ] crossToolchains.x86_64-darwin
-            [
-              "boringssl"
-              "postquantum"
-            ];
+        "lightway-client-x86_64-darwin-boringssl-beta" = mkBoringSslPackage [
+          "lightway-client"
+        ] crossToolchains.x86_64-darwin [ "boringssl" ];
         "lightway-server-x86_64-darwin-boringssl-beta" = mkBoringSslPackage [
           "lightway-server"
         ] crossToolchains.x86_64-darwin [ "boringssl" ];

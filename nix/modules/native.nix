@@ -65,9 +65,7 @@
         ] pkgs rustPlatformMsrv;
 
         # BoringSSL backend builds - combined client+server to compile the
-        # shared dependency graph once. Client needs the `postquantum` feature
-        # explicitly; server has no such feature (it enables postquantum in
-        # lightway-core directly via its Cargo.toml dep spec).
+        # shared dependency graph once.
         "lightway-${nativeSuffix}-boringssl-beta" = pkgs.callPackage ../. {
           packages = [
             "lightway-client"
@@ -78,10 +76,7 @@
           platformSuffix = "${nativeSuffix}-boringssl-beta";
           noDefaultFeatures = true;
           perPackageFeatures = {
-            lightway-client = [
-              "boringssl"
-              "postquantum"
-            ];
+            lightway-client = [ "boringssl" ];
             lightway-server = [ "boringssl" ];
           };
         };

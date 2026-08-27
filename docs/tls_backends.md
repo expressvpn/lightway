@@ -22,10 +22,6 @@ with a `compile_error!` if both or neither are enabled.
 wolfSSL. To switch to BoringSSL, do `no-default-features` and enable
 `boringssl`:
 
-Note that `--no-default-features` also drops the other default features
-(for example `postquantum`), so re-enable any you still want alongside
-`boringssl`.
-
 ## How the switch actually works
 
 The actual switch lives in `lightway-core/src/tls/mod.rs`. This module:
