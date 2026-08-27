@@ -10,8 +10,7 @@ use std::mem::MaybeUninit;
 use libc::socklen_t;
 
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, RawFd};
-
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 #[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
 
@@ -164,30 +163,42 @@ mod internal {
     }
 }
 
-fn get_level_and_optname() -> (i32, i32) {
-    let level: i32;
-    let optname: i32;
+#[cfg(apple)]
+const LEVEL_AND_OPTNAME_V4: (i32, i32) = (libc::IPPROTO_IP, libc::IP_DONTFRAG);
+#[cfg(apple)]
+const LEVEL_AND_OPTNAME_V6: (i32, i32) = (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG);
 
-    #[cfg(apple)]
-    {
-        level = libc::IPPROTO_IP;
-        optname = libc::IP_DONTFRAG;
+#[cfg(all(not(apple), unix))]
+const LEVEL_AND_OPTNAME: (i32, i32) = (libc::SOL_IP, libc::IP_MTU_DISCOVER);
+
+#[cfg(windows)]
+const LEVEL_AND_OPTNAME: (i32, i32) = (
+    windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
+    windows_sys::Win32::Networking::WinSock::IP_MTU_DISCOVER,
+);
+
+/// On Apple platforms the don't-fragment option lives at a different
+/// level/name for IPv4 and IPv6 sockets, so inspect the socket's
+/// address family to pick the right pair.
+#[cfg(apple)]
+fn get_level_and_optname(sock: &impl AsGenericHandle) -> std::io::Result<(i32, i32)> {
+    let addr = socket2::SockRef::from(sock).local_addr()?;
+
+    if addr.is_ipv4() {
+        Ok(LEVEL_AND_OPTNAME_V4)
+    } else if addr.is_ipv6() {
+        Ok(LEVEL_AND_OPTNAME_V6)
+    } else {
+        Err(std::io::Error::other(format!(
+            "unexpected address family: {:?}",
+            addr.family()
+        )))
     }
+}
 
-    #[cfg(all(not(apple), unix))]
-    {
-        level = libc::SOL_IP;
-        optname = libc::IP_MTU_DISCOVER;
-    }
-
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Networking::WinSock::{IP_MTU_DISCOVER, IPPROTO_IP};
-        level = IPPROTO_IP;
-        optname = IP_MTU_DISCOVER;
-    }
-
-    (level, optname)
+#[cfg(not(apple))]
+fn get_level_and_optname(_sock: &impl AsGenericHandle) -> std::io::Result<(i32, i32)> {
+    Ok(LEVEL_AND_OPTNAME)
 }
 
 #[allow(non_camel_case_types)]
@@ -214,14 +225,22 @@ type SetOptValType = libc::c_void;
 type GenericHandle = RawFd;
 
 #[cfg(unix)]
-impl<T: AsRawFd> AsGenericHandle for T {
+impl<T: AsFd> AsGenericHandle for T {
     fn as_generic_handle(&self) -> GenericHandle {
-        self.as_raw_fd()
+        self.as_fd().as_raw_fd()
     }
 }
 
 pub use internal::*;
 
+#[cfg(unix)]
+/// Generic handle to use in sockopt
+pub trait AsGenericHandle: AsFd {
+    /// Generic handle to use in sockopt
+    fn as_generic_handle(&self) -> GenericHandle;
+}
+
+#[cfg(windows)]
 /// Generic handle to use in sockopt
 pub trait AsGenericHandle {
     /// Generic handle to use in sockopt
@@ -233,7 +252,7 @@ pub fn get_ip_mtu_discover(sock: &impl AsGenericHandle) -> std::io::Result<IpPmt
     let mut value: MaybeUninit<libc::c_int> = MaybeUninit::uninit();
     let mut len = std::mem::size_of::<libc::c_int>() as socklen_t;
 
-    let (level, optname) = get_level_and_optname();
+    let (level, optname) = get_level_and_optname(sock)?;
 
     // SAFETY: `getsockopt` requires a socket/fd and a valid buffer of `c_int` size
     let res = unsafe {
@@ -269,7 +288,7 @@ pub fn set_ip_mtu_discover(
     let pmtudisc: libc::c_int = pmtudisc.into();
     let len = std::mem::size_of::<libc::c_int>() as socklen_t;
 
-    let (level, optname) = get_level_and_optname();
+    let (level, optname) = get_level_and_optname(sock)?;
 
     // SAFETY: `setsockopt` requires a socket and a valid buffer of `c_int` size
     let res = unsafe {
@@ -286,5 +305,40 @@ pub fn set_ip_mtu_discover(
         Err(std::io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix, not(miri)))]
+mod tests {
+    use super::*;
+
+    fn roundtrip(sock: &std::net::UdpSocket) {
+        set_ip_mtu_discover(sock, IpPmtudisc::Probe).unwrap();
+        assert!(matches!(
+            get_ip_mtu_discover(sock).unwrap(),
+            IpPmtudisc::Probe
+        ));
+
+        set_ip_mtu_discover(sock, IpPmtudisc::Dont).unwrap();
+        assert!(matches!(
+            get_ip_mtu_discover(sock).unwrap(),
+            IpPmtudisc::Dont
+        ));
+    }
+
+    #[test]
+    fn ipv4_socket() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        roundtrip(&sock);
+    }
+
+    // On non-apple platforms an AF_INET6 socket takes the
+    // don't-fragment option via a different level/optname which we
+    // don't support (yet).
+    #[cfg(apple)]
+    #[test]
+    fn ipv6_socket() {
+        let sock = std::net::UdpSocket::bind("[::1]:0").unwrap();
+        roundtrip(&sock);
     }
 }
