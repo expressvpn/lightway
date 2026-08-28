@@ -95,17 +95,38 @@ async fn main() -> Result<()> {
     // we need keep the PathBuf live outside
     let mut _root_ca_cert_path: Option<PathBuf> = None;
 
+    let mut file_fields = String::new();
+    let mut env_fields = String::new();
+    let mut cli_fields = String::new();
+
     // Load config patch with DPAPI support
     #[cfg(windows)]
-    config.apply(load_patch(&options, &config_file).await?);
+    config.apply_with_log(load_patch(&options, &config_file).await?, |field| {
+        if field != "unknowns" {
+            file_fields.push_str(&format!(", {field}"))
+        }
+    });
     #[cfg(not(windows))]
-    config.apply(serde_saphyr::from_str::<ConfigPatch>(
-        &read_to_string(&config_file).await?,
-    )?);
+    config.apply_with_log(
+        serde_saphyr::from_str::<ConfigPatch>(&read_to_string(&config_file).await?)?,
+        |field| {
+            if field != "unknowns" {
+                file_fields.push_str(&format!(", {field}"))
+            }
+        },
+    );
     let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
-    config.apply(env_patch.clone());
+    config.apply_with_log(env_patch.clone(), |field| {
+        if field != "unknowns" {
+            env_fields.push_str(&format!(", {field}"))
+        }
+    });
     let cli_patch = options.clone();
-    config.apply(options);
+    config.apply_with_log(options, |field| {
+        if field != "unknowns" {
+            cli_fields.push_str(&format!(", {field}"))
+        }
+    });
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
@@ -118,6 +139,16 @@ async fn main() -> Result<()> {
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     LogFormat::Full.init_with_env_filter(fmt);
+
+    if !file_fields.is_empty() {
+        tracing::debug!("config file set: {}", &file_fields[2..]);
+    }
+    if !env_fields.is_empty() {
+        tracing::debug!("environment var: {}", &env_fields[2..]);
+    }
+    if !cli_fields.is_empty() {
+        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    }
 
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
 
@@ -196,9 +227,33 @@ async fn reload_config(
         .ok()?;
 
     let mut config = Config::default();
-    config.apply(file_patch);
-    config.apply(env_patch.clone());
-    config.apply(cli_patch.clone());
+    let mut file_fields = String::new();
+    let mut env_fields = String::new();
+    let mut cli_fields = String::new();
+    config.apply_with_log(file_patch, |field| {
+        if field != "unknowns" {
+            file_fields.push_str(&format!(", {field}"))
+        }
+    });
+    config.apply_with_log(env_patch.clone(), |field| {
+        if field != "unknowns" {
+            env_fields.push_str(&format!(", {field}"))
+        }
+    });
+    config.apply_with_log(cli_patch.clone(), |field| {
+        if field != "unknowns" {
+            cli_fields.push_str(&format!(", {field}"))
+        }
+    });
+    if !file_fields.is_empty() {
+        tracing::debug!("config file set: {}", &file_fields[2..]);
+    }
+    if !env_fields.is_empty() {
+        tracing::debug!("environment var: {}", &env_fields[2..]);
+    }
+    if !cli_fields.is_empty() {
+        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    }
     Some(config)
 }
 

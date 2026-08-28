@@ -3509,23 +3509,23 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "struct-patch"
-version = "0.13.2"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a820f68a123e0ddbcd5215c95bd7d865482d3ad7a9ae463bf2adaf541746ec"
+checksum = "562b5d730abba4c29316f65c76f4939ae63ac998a761fbd99c61ed543d183e23"
 dependencies = [
  "struct-patch-derive",
 ]
 
 [[package]]
 name = "struct-patch-derive"
-version = "0.13.2"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d01189c2d9e14bea08d9dcac1e4e347e91f027d68617096d83a19017e2a7b070"
+checksum = "f4761d4848bf2b974f0a5a93fc69ee63c9f89816c618b3c3c12b8b13690524f1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
- "syn-serde",
+ "syn 3.0.4",
+ "syn-serde3",
 ]
 
 [[package]]
@@ -3589,16 +3589,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "syn-serde"
-version = "0.3.2"
+name = "syn-serde3"
+version = "0.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bac52f98dc6afb9d7d51d325cf6611cab08f283b6b6c20ba57298fd9db509ef"
+checksum = "f83a664220cc243a8f57ead67942c052ce7d618af7f2b6aea3c0f7f8e039e382"
 dependencies = [
  "proc-macro2",
  "serde",
  "serde_derive",
  "serde_json",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]

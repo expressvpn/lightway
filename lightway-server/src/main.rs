@@ -84,9 +84,27 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
 
     let mut config = Config::default();
-    config.apply(serde_saphyr::from_str(&read_to_string(config_file).await?)?);
-    config.apply(serde_env::from_env_with_prefix("LW_SERVER")?);
-    config.apply(options);
+    let mut file_fields = String::new();
+    let mut env_fields = String::new();
+    let mut cli_fields = String::new();
+    config.apply_with_log(
+        serde_saphyr::from_str(&read_to_string(config_file).await?)?,
+        |field| {
+            if field != "unknowns" {
+                file_fields.push_str(&format!(", {field}"))
+            }
+        },
+    );
+    config.apply_with_log(serde_env::from_env_with_prefix("LW_SERVER")?, |field| {
+        if field != "unknowns" {
+            env_fields.push_str(&format!(", {field}"))
+        }
+    });
+    config.apply_with_log(options, |field| {
+        if field != "unknowns" {
+            cli_fields.push_str(&format!(", {field}"))
+        }
+    });
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)
         .with_context(|| format!("Invalid server key file {}", config.server_key.display()))?;
@@ -114,6 +132,17 @@ async fn main() -> Result<()> {
     let fmt = tracing_subscriber::fmt().with_env_filter(filter);
 
     config.log_format.init_with_env_filter(fmt);
+
+    if !file_fields.is_empty() {
+        tracing::debug!("config file set: {}", &file_fields[2..]);
+    }
+    if !env_fields.is_empty() {
+        tracing::debug!("environment var: {}", &env_fields[2..]);
+    }
+    if !cli_fields.is_empty() {
+        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    }
+
     let server_config = crate::ServerConfig::try_from_auth_and_config(
         crate::auth::Auth::new(
             config.user_db.as_ref().map(AsRef::as_ref),
