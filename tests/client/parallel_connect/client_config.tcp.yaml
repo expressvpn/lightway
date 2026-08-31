@@ -58,7 +58,8 @@ tun_name: lightway
 tun_local_ip: 100.64.0.6
 tun_peer_ip: 100.64.0.5
 tun_dns_ip: 100.64.0.1
-log_level: info
+log:
+  level: info
 user: user
 password: password
 outside_mtu: 1500
@@ -71,6 +72,7 @@ keepalive:
 enable_pmtud: false
 # sndbuf: 1.5 MiB
 # rcvbuf: 1.5 MiB
-route_mode: default
-dns_config_mode: noexec
+network:
+  route_mode: default
+  dns_config_mode: noexec
 preferred_connection_wait_interval: 2s

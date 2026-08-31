@@ -190,15 +190,12 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "batch_receive"))]
     pub enable_batch_receive: bool,
 
+    /// Host network side-effects
     #[cfg(desktop)]
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"Setup of route table
-    Modes:
-        default: Sets up routes as specified in server, tun_local_ip, tun_peer_ip, tun_dns_ip
-        noexec : Does not setup any routes
-        lan    : Sets up default + additional lan routes"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub route_mode: RouteMode,
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub network: NetworkConfig,
 
     #[cfg(linux)]
     #[patch(attribute(serde(default)))]
@@ -213,18 +210,11 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "linux"))]
     pub fwmark: u32,
 
-    #[cfg(desktop)]
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"DNS configuration mode
-    Modes:
-        default: Sets up DNS Configuration based on target platform
-        noexec : Skips DNS Configuration setup"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub dns_config_mode: DnsConfigMode,
-
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = "Log level to use"))]
-    pub log_level: LogLevel,
+    /// Logging configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub log: LogConfig,
 
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
@@ -295,19 +285,12 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub enable_inside_pkt_encoding: bool,
 
+    /// Debug helpers
     #[cfg(feature = "debug")]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "File path to save wireshark keylog"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub keylog: Option<PathBuf>,
-
-    #[cfg(feature = "debug")]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable TLS debug logging"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub tls_debug: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub debug: DebugConfig,
 
     #[cfg(windows)]
     #[patch(attribute(clap(long)))]
@@ -319,26 +302,17 @@ pub struct Config {
     #[schemars(schema_with = "byte_size_schema")]
     pub wintun_ring_capacity: ByteSize,
 
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = r#"Enable DPAPI encryption/decryption for config file
-    Only for Windows platform"#))]
-    #[schemars(extend("x-cfg" = "windows"))]
-    pub enable_dpapi: bool,
-
     /// SNI header for TLS connections
     #[cfg(feature = "mobile")]
     #[patch(attribute(clap(skip)))]
     #[schemars(extend("x-cfg" = "mobile"))]
     pub sni_header: String,
 
-    #[patch(attribute(clap(short, long)))]
-    #[patch(empty_value = false)]
+    /// Config-file handling
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = r#"Accept unknown inputs with error message without quiting"#))]
-    pub accept_unknowns: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub config: ConfigMeta,
 
     /// The unknown options from config file
     #[patch(attribute(clap(skip)))]
@@ -418,7 +392,7 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         if !self.unknowns.is_empty() {
             let fields: Vec<&str> = self.unknowns.keys().map(String::as_str).collect();
-            if self.accept_unknowns {
+            if self.config.accept_unknowns {
                 tracing::warn!(fields = ?fields, "unknown config fields will be ignored");
             } else {
                 anyhow::bail!("unknown config fields: {:?}", fields);
@@ -532,12 +506,10 @@ impl Default for Config {
             #[cfg(batch_receive)]
             enable_batch_receive: false,
             #[cfg(desktop)]
-            route_mode: RouteMode::default(),
+            network: NetworkConfig::default(),
             #[cfg(linux)]
             fwmark: 0,
-            #[cfg(desktop)]
-            dns_config_mode: DnsConfigMode::default(),
-            log_level: LogLevel::Info,
+            log: LogConfig::default(),
             enable_expresslane: false,
             #[cfg(apple)]
             enable_connected_udp: false,
@@ -551,16 +523,12 @@ impl Default for Config {
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
             enable_inside_pkt_encoding: false,
             #[cfg(feature = "debug")]
-            keylog: None,
-            #[cfg(feature = "debug")]
-            tls_debug: false,
+            debug: DebugConfig::default(),
             #[cfg(windows)]
             wintun_ring_capacity: ByteSize::mib(8),
-            #[cfg(windows)]
-            enable_dpapi: false,
             #[cfg(feature = "mobile")]
             sni_header: String::new(),
-            accept_unknowns: false,
+            config: ConfigMeta::default(),
             unknowns: HashMap::new(),
         }
     }
@@ -603,6 +571,90 @@ impl Default for KeepaliveConfig {
             tracer_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
         }
     }
+}
+
+/// Logging configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Logging")))]
+pub struct LogConfig {
+    #[patch(attribute(doc = "Log level to use"))]
+    #[patch(attribute(clap(long = "log-level", id = "log_level", value_enum)))]
+    pub level: LogLevel,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Info,
+        }
+    }
+}
+
+/// Config-file handling
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Config handling")))]
+pub struct ConfigMeta {
+    #[cfg(windows)]
+    #[patch(
+        attribute(doc = "Enable DPAPI encryption/decryption for the config file. \
+        Only for Windows platform")
+    )]
+    #[patch(attribute(clap(long = "config-dpapi", id = "config_dpapi")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub dpapi: bool,
+
+    #[patch(attribute(doc = "Accept unknown config keys with a warning instead of erroring out"))]
+    #[patch(attribute(clap(
+        short = 'a',
+        long = "config-accept-unknowns",
+        id = "config_accept_unknowns"
+    )))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub accept_unknowns: bool,
+}
+
+/// Host network side-effects (desktop)
+#[cfg(desktop)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Network")))]
+pub struct NetworkConfig {
+    #[patch(attribute(doc = "Route mode: default = routes per server/tun IPs; \
+        noexec = none; lan = default + LAN routes"))]
+    #[patch(attribute(clap(long = "network-route-mode", id = "network_route_mode", value_enum)))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub route_mode: RouteMode,
+
+    #[patch(attribute(doc = "DNS config mode: platform default, or skip DNS setup"))]
+    #[patch(attribute(clap(
+        long = "network-dns-config-mode",
+        id = "network_dns_config_mode",
+        value_enum
+    )))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub dns_config_mode: DnsConfigMode,
+}
+
+/// Debug helpers (feature: debug)
+#[cfg(feature = "debug")]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Debug")))]
+pub struct DebugConfig {
+    #[patch(attribute(doc = "File path to save wireshark keylog"))]
+    #[patch(attribute(clap(long = "debug-keylog", id = "debug_keylog")))]
+    pub keylog: Option<PathBuf>,
+
+    #[patch(attribute(doc = "Enable TLS debug logging"))]
+    #[patch(attribute(clap(long = "debug-tls", id = "debug_tls")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub tls: bool,
 }
 
 #[serde_inline_default::serde_inline_default]
@@ -756,7 +808,7 @@ impl Config {
             use crate::platform::windows::crypto::decrypt_dpapi_config_file;
             use windows_dpapi::Scope::User;
 
-            let content = if cli_options.enable_dpapi {
+            let content = if cli_options.config.dpapi {
                 tracing::info!("DPAPI decryption enabled for config file");
                 decrypt_dpapi_config_file(path, User).map_err(|e| {
                     anyhow::anyhow!("Failed to decrypt DPAPI-protected config file: {e}")
@@ -860,6 +912,14 @@ mod tests {
             config.keepalive.interval,
             NonZeroDuration::from_std_duration(StdDuration::from_secs(10))
         );
+        // Every fixture sets log_level to info
+        assert_eq!(config.log.level, LogLevel::Info);
+        // Every fixture sets route_mode/dns_config_mode
+        #[cfg(desktop)]
+        {
+            assert_eq!(config.network.route_mode, RouteMode::Default);
+            assert_eq!(config.network.dns_config_mode, DnsConfigMode::NoExec);
+        }
     }
 
     fn get_byte_pattern() -> String {
@@ -970,7 +1030,7 @@ mod tests {
         let yaml = "unknown_field: true\n";
         let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
         let mut config = Config::default();
-        config.accept_unknowns = true;
+        config.config.accept_unknowns = true;
         config.apply(patch);
         assert!(config.validate().is_ok());
         assert!(logs_contain("unknown config fields will be ignored"));
