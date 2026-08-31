@@ -69,9 +69,11 @@ iouring_entry_count: 1024
 keepalive:
   interval: 10s
   timeout: 60s
-enable_pmtud: false
-# sndbuf: 1.5 MiB
-# rcvbuf: 1.5 MiB
+pmtud:
+  enabled: false
+# socket:
+#   sndbuf: 1.5 MiB
+#   rcvbuf: 1.5 MiB
 network:
   route_mode: default
   dns_config_mode: noexec

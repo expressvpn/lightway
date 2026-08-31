@@ -334,10 +334,10 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             tun_peer_ip: config.tun_peer_ip,
             tun_dns_ip: config.tun_dns_ip,
             keyshare: config.keyshare,
-            enable_expresslane: config.enable_expresslane,
+            enable_expresslane: config.expresslane.enabled,
             #[cfg(apple)]
-            enable_connected_udp: config.enable_connected_udp,
-            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            enable_connected_udp: config.socket.connected_udp,
+            expresslane_keys_rotation_interval: config.expresslane.keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
             keepalive_interval: config.keepalive.interval.into(),
@@ -345,18 +345,18 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             continuous_keepalive: config.keepalive.continuous,
             tracer_packet_timeout: config.keepalive.tracer_timeout.into(),
             preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
-            sndbuf: config.sndbuf,
-            rcvbuf: config.rcvbuf,
+            sndbuf: config.socket.sndbuf,
+            rcvbuf: config.socket.rcvbuf,
             #[cfg(batch_receive)]
-            enable_batch_receive: config.enable_batch_receive,
+            enable_batch_receive: config.socket.batch_receive,
             #[cfg(desktop)]
             route_mode: config.network.route_mode,
             #[cfg(linux)]
-            fwmark: config.fwmark,
+            fwmark: config.socket.fwmark,
             #[cfg(desktop)]
             dns_config_mode: config.network.dns_config_mode,
-            enable_pmtud: config.enable_pmtud,
-            pmtud_base_mtu: config.pmtud_base_mtu,
+            enable_pmtud: config.pmtud.enabled,
+            pmtud_base_mtu: config.pmtud.base_mtu,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]

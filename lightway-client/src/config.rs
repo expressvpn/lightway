@@ -160,35 +160,11 @@ pub struct Config {
     /// ex: 2000ms
     pub preferred_connection_wait_interval: Duration,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Socket send buffer size.
-    Always applied for UDP.
-    For TCP, only applied on macOS; skipped on Windows and Linux
-    to preserve kernel buffer autotuning."#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "byte_size_schema")]
-    /// ex: 1.5 MiB
-    pub sndbuf: ByteSize,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Socket receive buffer size.
-    Always applied for UDP.
-    For TCP, only applied on macOS; skipped on Windows and Linux
-    to preserve kernel buffer autotuning."#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "byte_size_schema")]
-    /// ex: 1.5 MiB
-    pub rcvbuf: ByteSize,
-
-    #[cfg(batch_receive)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Outside socket configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(
-        doc = "Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android))"
-    ))]
-    #[schemars(extend("x-cfg" = "batch_receive"))]
-    pub enable_batch_receive: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub socket: SocketConfig,
 
     /// Host network side-effects
     #[cfg(desktop)]
@@ -197,59 +173,23 @@ pub struct Config {
     #[patch(attribute(clap(flatten)))]
     pub network: NetworkConfig,
 
-    #[cfg(linux)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
-        The tunnel's own encrypted packets carry this mark so policy routing
-        rules can keep them out of the tunnel.
-        In Linux networking, a fwmark of 0 represents the default unmarked state
-        and will not apply SO_MARK to the socket."#)
-    )]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub fwmark: u32,
-
     /// Logging configuration
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(flatten)))]
     pub log: LogConfig,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Expresslane configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
-    pub enable_expresslane: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub expresslane: ExpresslaneConfig,
 
-    #[cfg(apple)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// PMTU discovery configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(
-        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
-    Connecting the single-peer outside socket lets sends skip the per-packet
-    route lookup. The socket is re-connected on network changes."#
-    ))]
-    #[schemars(extend("x-cfg" = "apple"))]
-    pub enable_connected_udp: bool,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    pub expresslane_keys_rotation_interval: Duration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub enable_pmtud: bool,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub pmtud_base_mtu: Option<u16>,
+    #[patch(attribute(clap(flatten)))]
+    pub pmtud: PmtudConfig,
 
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
@@ -409,7 +349,7 @@ impl Config {
         }
 
         #[cfg(not(macos))]
-        if self.sndbuf != DEFAULT_SNDBUF {
+        if self.socket.sndbuf != DEFAULT_SNDBUF {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
@@ -420,7 +360,7 @@ impl Config {
             }
         }
         #[cfg(not(macos))]
-        if self.rcvbuf != DEFAULT_RCVBUF {
+        if self.socket.rcvbuf != DEFAULT_RCVBUF {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
@@ -437,7 +377,7 @@ impl Config {
                 "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
             );
         }
-        if self.enable_pmtud {
+        if self.pmtud.enabled {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
@@ -501,23 +441,12 @@ impl Default for Config {
             preferred_connection_wait_interval: Duration::from_std_duration(
                 StdDuration::from_secs(0),
             ),
-            sndbuf: DEFAULT_SNDBUF,
-            rcvbuf: DEFAULT_RCVBUF,
-            #[cfg(batch_receive)]
-            enable_batch_receive: false,
+            socket: SocketConfig::default(),
             #[cfg(desktop)]
             network: NetworkConfig::default(),
-            #[cfg(linux)]
-            fwmark: 0,
             log: LogConfig::default(),
-            enable_expresslane: false,
-            #[cfg(apple)]
-            enable_connected_udp: false,
-            expresslane_keys_rotation_interval: Duration::from_std_duration(
-                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
-            ),
-            enable_pmtud: false,
-            pmtud_base_mtu: None,
+            expresslane: ExpresslaneConfig::default(),
+            pmtud: PmtudConfig::default(),
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
@@ -569,6 +498,80 @@ impl Default for KeepaliveConfig {
             timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
             continuous: true,
             tracer_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+        }
+    }
+}
+
+/// Outside socket configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Socket")))]
+pub struct SocketConfig {
+    #[patch(attribute(clap(long = "socket-sndbuf", id = "socket_sndbuf")))]
+    #[patch(attribute(doc = r#"Socket send buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
+    #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
+    pub sndbuf: ByteSize,
+
+    #[patch(attribute(clap(long = "socket-rcvbuf", id = "socket_rcvbuf")))]
+    #[patch(attribute(doc = r#"Socket receive buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
+    #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
+    pub rcvbuf: ByteSize,
+
+    #[cfg(batch_receive)]
+    #[patch(attribute(clap(long = "socket-batch-receive", id = "socket_batch_receive")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android))"
+    ))]
+    #[schemars(extend("x-cfg" = "batch_receive"))]
+    pub batch_receive: bool,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long = "socket-fwmark", id = "socket_fwmark")))]
+    #[patch(
+        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
+        The tunnel's own encrypted packets carry this mark so policy routing
+        rules can keep them out of the tunnel.
+        In Linux networking, a fwmark of 0 represents the default unmarked state
+        and will not apply SO_MARK to the socket."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub fwmark: u32,
+
+    #[cfg(apple)]
+    #[patch(attribute(clap(long = "socket-connected-udp", id = "socket_connected_udp")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
+    Connecting the single-peer outside socket lets sends skip the per-packet
+    route lookup. The socket is re-connected on network changes."#
+    ))]
+    #[schemars(extend("x-cfg" = "apple"))]
+    pub connected_udp: bool,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            sndbuf: DEFAULT_SNDBUF,
+            rcvbuf: DEFAULT_RCVBUF,
+            #[cfg(batch_receive)]
+            batch_receive: false,
+            #[cfg(linux)]
+            fwmark: 0,
+            #[cfg(apple)]
+            connected_udp: false,
         }
     }
 }
@@ -655,6 +658,53 @@ pub struct DebugConfig {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     pub tls: bool,
+}
+
+/// Expresslane configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Expresslane")))]
+pub struct ExpresslaneConfig {
+    #[patch(attribute(clap(long = "expresslane-enabled", id = "expresslane_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
+    pub enabled: bool,
+
+    #[patch(attribute(clap(
+        long = "expresslane-keys-rotation-interval",
+        id = "expresslane_keys_rotation_interval"
+    )))]
+    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    pub keys_rotation_interval: Duration,
+}
+
+impl Default for ExpresslaneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keys_rotation_interval: Duration::from_std_duration(
+                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
+        }
+    }
+}
+
+/// PMTU discovery configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "PMTUD")))]
+pub struct PmtudConfig {
+    #[patch(attribute(clap(long = "pmtud-enabled", id = "pmtud_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
+    pub enabled: bool,
+
+    #[patch(attribute(clap(long = "pmtud-base-mtu", id = "pmtud_base_mtu")))]
+    #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
+    pub base_mtu: Option<u16>,
 }
 
 #[serde_inline_default::serde_inline_default]
@@ -920,6 +970,8 @@ mod tests {
             assert_eq!(config.network.route_mode, RouteMode::Default);
             assert_eq!(config.network.dns_config_mode, DnsConfigMode::NoExec);
         }
+        // Every fixture sets pmtud.enabled to false
+        assert!(!config.pmtud.enabled);
     }
 
     fn get_byte_pattern() -> String {
@@ -1043,7 +1095,7 @@ mod tests {
         let mut config = Config::default();
         config.server = "127.0.0.1:27690".to_string();
         config.mode = ConnectionType::Tcp;
-        config.sndbuf = ByteSize::mib(16);
+        config.socket.sndbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
             "sndbuf is set but cannot be applied to this TCP connections"
@@ -1078,7 +1130,7 @@ mod tests {
         let mut config = Config::default();
         config.server = "127.0.0.1:27690".to_string();
         config.mode = ConnectionType::Tcp;
-        config.rcvbuf = ByteSize::mib(16);
+        config.socket.rcvbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
             "rcvbuf is set but cannot be applied to this TCP connections"
@@ -1101,7 +1153,7 @@ mod tests {
     fn validate_pmtud_on_tcp_server() {
         let mut config = Config::default();
         config.server = "127.0.0.1:27690".to_string();
-        config.enable_pmtud = true;
+        config.pmtud.enabled = true;
         config.mode = ConnectionType::Tcp;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
