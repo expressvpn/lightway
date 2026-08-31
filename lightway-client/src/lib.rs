@@ -639,6 +639,22 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             .unwrap()
             .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
 
+        // The receives above go through tokio's manual readiness API
+        // (`ready()` + `try_io`-style receives), which charges no
+        // cooperative budget, so without this the loop's only yield is
+        // an empty socket: under sustained load it never parks and
+        // starves sibling tasks (notably the TUN reader) for the length
+        // of the backlog. Charge one unit per datagram received, as
+        // tokio's own charged IO paths would — the semantics proposed
+        // in <https://github.com/tokio-rs/tokio/issues/6237> —
+        // `consume_budget` yields only when the task's ~128-unit budget
+        // is exhausted, bounding a turn at ~128 datagrams' work for
+        // every transport that drives this loop. Runs after the conn
+        // lock is dropped. Delete if tokio ships #6237.
+        for _ in 0..count {
+            tokio::task::coop::consume_budget().await;
+        }
+
         for b in &mut bufs[..count] {
             b.clear();
             b.reserve(mtu);
