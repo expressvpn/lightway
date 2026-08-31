@@ -7,6 +7,8 @@ use crate::{
     ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
     keepalive::Config as KeepaliveConfig, outside_io_task,
 };
+use anyhow::{Context, anyhow, bail};
+use bytes::BytesMut;
 use futures::StreamExt;
 use futures::future::{FutureExt, OptionFuture, select_all};
 use futures::stream::{FusedStream, FuturesUnordered};
@@ -31,8 +33,6 @@ use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info, info_span, warn};
-use uniffi::deps::anyhow::{Context, anyhow, bail};
-use uniffi::deps::bytes::BytesMut;
 
 const INTERNAL_MTU: u16 = 1350;
 #[cfg(apple)]
