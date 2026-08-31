@@ -55,18 +55,20 @@ ca_cert: >
   MIIDjzCCAnegAwIBAgIUHB34aYMvdw7cfOu6wXW1WlxQtrswDQYJKoZIhvcNAQELBQAwVzELMAkGA1UEBhMCVVMxDzANBgNVBAgMBkRlbmlhbDEUMBIGA1UEBwwLU3ByaW5nZmllbGQxDDAKBgNVBAoMA0RpczETMBEGA1UEAwwKZ29hd2F5LmNvbTAeFw0yMTA1MjAwODE1MTNaFw0zMTA1MTgwODE1MTNaMFcxCzAJBgNVBAYTAlVTMQ8wDQYDVQQIDAZEZW5pYWwxFDASBgNVBAcMC1NwcmluZ2ZpZWxkMQwwCgYDVQQKDANEaXMxEzARBgNVBAMMCmdvYXdheS5jb20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrWN/eREd5swtS9M69hfCvWc0qSp1jQ9eXPFFXyy66nSBYFP2Ajsr50hJd1WzWfyeVF3DZj2gepHq3vsvJVHP8xFj0+pNHtGUZFeFfT8du758MTJ67Cd3pvkUcgkxfflWHVSvGvdk+1a8hhumiyW0yV3ZIhbx99DZshiFxlIUs+MmsbQ3mBctBSrChFrqMIjKIRdt0CsTyPhtvehzZJLvzmqW0qzE28+y0U7sT2ZOiP5zCvoKdFrx3t6UlTFKttBgpYZ/43Zsvw09sQCwZxDuAyf+M0YPFcnzTDNvY1WLd0phB4D8GRsCZtRxHNdFvWtrRVncgBXBcu1IpA2nnMJx1AgMBAAGjUzBRMB0GA1UdDgQWBBTpiK7hbR6OU8raZ/SQe4Ii18f86TAfBgNVHSMEGDAWgBTpiK7hbR6OU8raZ/SQe4Ii18f86TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBRXYWTTJ8M+gEMMS2+JEDunBMCrmaBQIRNq7fU0vHrWA4j4u+2Zr4siMtueCxsJoJG3mPEdeal/N2T/JG9ygqw3YMnZyPnAHXujk3tjQT+2zMVUJx+rwy6h1tq+YjpsfmZtga4atvemZ+gZZAPuT+rmKbSpnRNjUs8QwhqPqoZ5wJwCjxO2gyyMy437J1NY6Ss21bwA9cGuX0qDP9eQkegMrRH16yWVL3exro58slg7S0PyyDHaUWEcWBB0dmhLRBkYDb9XXl/gxmdBP8OLsaIhNGjiK5Lt8cTRkZOLYuXvi1/CgW34d1YazAGpUSG2dE6YL2TruV8kRa7AMzVqTMy
   -----END CERTIFICATE-----
 
-tun_name: lightway
-tun_local_ip: 100.64.0.6
-tun_peer_ip: 100.64.0.5
-tun_dns_ip: 100.64.0.1
+tun:
+  name: lightway
+  local_ip: 100.64.0.6
+  peer_ip: 100.64.0.5
+  dns_ip: 100.64.0.1
+  iouring:
+    enabled: false
+    entry_count: 1024
+    # sqpoll_idle_time: 100ms
 log:
   level: info
 user: user
 password: password
 outside_mtu: 1500
-enable_tun_iouring: false
-# iouring_sqpoll_idle_time: 100ms
-iouring_entry_count: 1024
 keepalive:
   interval: 10s
   timeout: 60s
