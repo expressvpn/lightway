@@ -214,16 +214,11 @@ pub struct Config {
     /// ex: 100ms
     pub iouring_sqpoll_idle_time: Duration,
 
-    #[patch(attribute(clap(short, long)))]
-    #[patch(empty_value = false)]
+    /// Inside packet codec
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(
-        attribute(doc = r#"Enable inside packet encoding once lightway connects
-    Only used if a codec is set"#)
-    )]
-    #[serde(alias = "enable_inside_pkt_encoding_at_connect")]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub enable_inside_pkt_encoding: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub codec: CodecConfig,
 
     /// Debug helpers
     #[cfg(feature = "debug")]
@@ -450,7 +445,7 @@ impl Default for Config {
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
-            enable_inside_pkt_encoding: false,
+            codec: CodecConfig::default(),
             #[cfg(feature = "debug")]
             debug: DebugConfig::default(),
             #[cfg(windows)]
@@ -705,6 +700,21 @@ pub struct PmtudConfig {
     #[patch(attribute(clap(long = "pmtud-base-mtu", id = "pmtud_base_mtu")))]
     #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
     pub base_mtu: Option<u16>,
+}
+
+/// Inside packet codec
+#[derive(
+    Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate, Default,
+)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Codec")))]
+pub struct CodecConfig {
+    #[patch(attribute(doc = "Enable inside packet encoding once connected \
+        (only if a codec is set)"))]
+    #[patch(attribute(clap(short = 'e', long = "codec-enabled", id = "codec_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub enabled: bool,
 }
 
 #[serde_inline_default::serde_inline_default]

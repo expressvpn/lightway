@@ -471,7 +471,7 @@ pub struct ReloadableClientConfig {
 impl From<&config::Config> for ReloadableClientConfig {
     fn from(config: &config::Config) -> Self {
         Self {
-            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
+            enable_inside_pkt_encoding: Some(config.codec.enabled),
         }
     }
 }
