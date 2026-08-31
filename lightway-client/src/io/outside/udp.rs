@@ -1,5 +1,5 @@
 use super::{OutsideIO, OutsideSocket};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use lightway_app_utils::sockopt;
 use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallbackArg};
@@ -82,7 +82,8 @@ impl Udp {
             }
         }
 
-        let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)?;
+        let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
+            .context("Failed to get IP MTU Discovery sockopt")?;
         // Check for the socket's writable ready status, so that it can be used
         // successfuly in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
