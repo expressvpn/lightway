@@ -21,10 +21,13 @@ keepalive:
   interval: 10s
   timeout: 30s
   continuous: true
-enable_expresslane: false
-enable_pmtud: false
-# sndbuf: 1.5 MiB
-# rcvbuf: 1.5 MiB
+expresslane:
+  enabled: false
+pmtud:
+  enabled: false
+# socket:
+#   sndbuf: 1.5 MiB
+#   rcvbuf: 1.5 MiB
 network:
   route_mode: default
   dns_config_mode: noexec

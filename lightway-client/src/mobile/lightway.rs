@@ -215,9 +215,10 @@ pub(crate) async fn async_lightway_start(
                     sni_header: config.sni_header.clone(),
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive.continuous,
-                    enable_expresslane: config.enable_expresslane,
+                    enable_expresslane: config.expresslane.enabled,
                     expresslane_keys_rotation_interval: config
-                        .expresslane_keys_rotation_interval
+                        .expresslane
+                        .keys_rotation_interval
                         .into(),
                     online_signal_sender: online_signal_sender.clone(),
                     event_stream_handler: event_handler.clone(),
