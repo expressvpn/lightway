@@ -1036,4 +1036,10 @@ mod tests {
         config.wintun_ring_capacity = ByteSize::mib(3);
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn clap_command_has_no_arg_collisions() {
+        use clap::CommandFactory;
+        ConfigPatch::command().debug_assert();
+    }
 }
