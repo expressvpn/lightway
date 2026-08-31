@@ -296,7 +296,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
 
         let mut tun_config = TunConfig::default();
 
-        if let Some(ref tun_name) = config.tun_name {
+        if let Some(ref tun_name) = config.tun.name {
             tun_config.tun_name(tun_name.clone());
         }
 
@@ -305,14 +305,14 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
 
         #[cfg(windows)]
         {
-            if let Some(ref wintun_file) = config.wintun_file {
+            if let Some(ref wintun_file) = config.tun.wintun.file {
                 tun_config.wintun_file(wintun_file);
             }
-            tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
+            tun_config.ring_capacity(config.tun.wintun.ring_capacity.as_u64().try_into()?)?;
         }
 
         #[cfg(windows)]
-        if let Some(ref device_guid) = config.device_guid {
+        if let Some(ref device_guid) = config.tun.wintun.device_guid {
             let parsed = uuid::Uuid::parse_str(device_guid)
                 .with_context(|| format!("invalid device GUID: {device_guid}"))?;
             tracing::info!(device_guid = %parsed, "Setting device GUID");
@@ -322,17 +322,17 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
         // TODO: Fix in future PR
         tun_config
             .mtu(1350)
-            .address(config.tun_local_ip.into())
-            .destination(config.tun_peer_ip)
+            .address(config.tun.local_ip.into())
+            .destination(config.tun.peer_ip)
             .up();
 
         Ok(ClientConfig {
             outside_mtu: config.outside_mtu,
             inside_io: None,
             tun_config,
-            tun_local_ip: config.tun_local_ip,
-            tun_peer_ip: config.tun_peer_ip,
-            tun_dns_ip: config.tun_dns_ip,
+            tun_local_ip: config.tun.local_ip,
+            tun_peer_ip: config.tun.peer_ip,
+            tun_dns_ip: config.tun.dns_ip,
             keyshare: config.keyshare,
             enable_expresslane: config.expresslane.enabled,
             #[cfg(apple)]
@@ -358,11 +358,11 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_pmtud: config.pmtud.enabled,
             pmtud_base_mtu: config.pmtud.base_mtu,
             #[cfg(feature = "io-uring")]
-            enable_tun_iouring: config.enable_tun_iouring,
+            enable_tun_iouring: config.tun.iouring.enabled,
             #[cfg(feature = "io-uring")]
-            iouring_entry_count: config.iouring_entry_count,
+            iouring_entry_count: config.tun.iouring.entry_count,
             #[cfg(feature = "io-uring")]
-            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            iouring_sqpoll_idle_time: config.tun.iouring.sqpoll_idle_time.into(),
             inside_pkt_codec_config: None,
             inside_pkt_codec_stall_timeout: Duration::ZERO,
             config_reload_signal,

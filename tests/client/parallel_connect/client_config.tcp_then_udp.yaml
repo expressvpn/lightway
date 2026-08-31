@@ -9,18 +9,20 @@ servers:
     server_dn: goaway.com
     cipher: aes256
 ca_cert: "tests/certs/ca.crt"
-tun_name: lightway
-tun_local_ip: 100.64.0.6
-tun_peer_ip: 100.64.0.5
-tun_dns_ip: 100.64.0.1
+tun:
+  name: lightway
+  local_ip: 100.64.0.6
+  peer_ip: 100.64.0.5
+  dns_ip: 100.64.0.1
+  iouring:
+    enabled: false
+    entry_count: 1024
+    # sqpoll_idle_time: 100ms
 log:
   level: info
 user: user
 password: password
 outside_mtu: 1500
-enable_tun_iouring: false
-# iouring_sqpoll_idle_time: 100ms
-iouring_entry_count: 1024
 keepalive:
   interval: 10s
   timeout: 60s

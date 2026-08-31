@@ -188,7 +188,7 @@ pub(crate) async fn async_lightway_start(
     let server_len = servers.len();
     let tcp_connections_only = servers.iter().all(|s| s.mode.is_tcp());
 
-    let inside_io = setup_tunnel_interface(tun_fd, config.tun_local_ip, config.tun_dns_ip).await?;
+    let inside_io = setup_tunnel_interface(tun_fd, config.tun.local_ip, config.tun.dns_ip).await?;
 
     let (_network_change_sender, mut network_change_receiver) = tokio::sync::mpsc::channel(1);
 
@@ -392,7 +392,7 @@ pub(crate) async fn async_lightway_start(
     let inside_io_loop: JoinHandle<uniffi::Result<()>> = tokio::spawn(inside_io_task(
         conn.clone(),
         inside_io,
-        config.tun_dns_ip,
+        config.tun.dns_ip,
         keepalive,
         keepalive_config,
         Duration::ZERO,

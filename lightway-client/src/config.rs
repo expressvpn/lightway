@@ -101,9 +101,11 @@ pub struct Config {
     #[patch(attribute(doc = "Outside (wire) MTU"))]
     pub outside_mtu: usize,
 
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = "Tun device name to use"))]
-    pub tun_name: Option<String>,
+    /// Tun device configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub tun: TunConfig,
 
     #[cfg(linux)]
     #[patch(attribute(serde(default)))]
@@ -111,33 +113,6 @@ pub struct Config {
     #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
     #[schemars(extend("x-cfg" = "linux"))]
     pub tun_txqueuelen: u32,
-
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
-    #[schemars(extend("x-cfg" = "windows"))]
-    pub wintun_file: Option<String>,
-
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"
-    Fixed GUID for the Wintun adapter (Windows only).
-    Ensures adapter creation retries reuse the same device node.
-    Accepts a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000")."#))]
-    pub device_guid: Option<String>,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Local IP to use in Tun device"))]
-    pub tun_local_ip: Ipv4Addr,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Peer IP to use in Tun device"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub tun_peer_ip: Ipv4Addr,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "DNS IP to use in Tun device"))]
-    pub tun_dns_ip: Ipv4Addr,
 
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
@@ -191,29 +166,6 @@ pub struct Config {
     #[patch(attribute(clap(flatten)))]
     pub pmtud: PmtudConfig,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub enable_tun_iouring: bool,
-
-    // Any value more than 1024 negatively impact the throughput
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"IO-uring submission queue count.
-    Only applicable when `enable_tun_iouring` is `true`"#))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub iouring_entry_count: usize,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
-    If non-zero use a kernel thread to perform submission queue polling.
-    After the given idle time the thread will go to sleep."#))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    /// ex: 100ms
-    pub iouring_sqpoll_idle_time: Duration,
-
     /// Inside packet codec
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
@@ -226,16 +178,6 @@ pub struct Config {
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(flatten)))]
     pub debug: DebugConfig,
-
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"Wintun ring buffer capacity in bytes (Windows only).
-    Must be a power of two between 128KiB and 64MiB.
-    Larger values improve throughput."#)
-    )]
-    #[schemars(schema_with = "byte_size_schema")]
-    pub wintun_ring_capacity: ByteSize,
 
     /// SNI header for TLS connections
     #[cfg(feature = "mobile")]
@@ -366,7 +308,7 @@ impl Config {
             }
         }
         #[cfg(windows)]
-        if let Some(guid) = &self.device_guid {
+        if let Some(guid) = &self.tun.wintun.device_guid {
             anyhow::ensure!(
                 uuid::Uuid::parse_str(guid).is_ok(),
                 "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
@@ -384,9 +326,9 @@ impl Config {
         }
         #[cfg(windows)]
         anyhow::ensure!(
-            self.wintun_ring_capacity.0.is_power_of_two()
-                && self.wintun_ring_capacity >= ByteSize::kib(128)
-                && self.wintun_ring_capacity <= ByteSize::mib(64),
+            self.tun.wintun.ring_capacity.0.is_power_of_two()
+                && self.tun.wintun.ring_capacity >= ByteSize::kib(128)
+                && self.tun.wintun.ring_capacity <= ByteSize::mib(64),
             "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
         );
         #[cfg(linux)]
@@ -418,19 +360,9 @@ impl Default for Config {
             password: None,
             ca_cert: "./ca_cert.crt".to_string(),
             outside_mtu: MAX_OUTSIDE_MTU,
-            #[cfg(macos)]
-            tun_name: None,
-            #[cfg(not(macos))]
-            tun_name: Some("lightway".to_string()),
+            tun: TunConfig::default(),
             #[cfg(linux)]
             tun_txqueuelen: 1000,
-            #[cfg(windows)]
-            wintun_file: None,
-            #[cfg(windows)]
-            device_guid: None,
-            tun_local_ip: Ipv4Addr::new(100, 64, 0, 6),
-            tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
-            tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
             keyshare: KeyShare::default(),
             keepalive: KeepaliveConfig::default(),
             preferred_connection_wait_interval: Duration::from_std_duration(
@@ -442,14 +374,9 @@ impl Default for Config {
             log: LogConfig::default(),
             expresslane: ExpresslaneConfig::default(),
             pmtud: PmtudConfig::default(),
-            enable_tun_iouring: false,
-            iouring_entry_count: 1024,
-            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
             codec: CodecConfig::default(),
             #[cfg(feature = "debug")]
             debug: DebugConfig::default(),
-            #[cfg(windows)]
-            wintun_ring_capacity: ByteSize::mib(8),
             #[cfg(feature = "mobile")]
             sni_header: String::new(),
             config: ConfigMeta::default(),
@@ -717,6 +644,139 @@ pub struct CodecConfig {
     pub enabled: bool,
 }
 
+/// Tun device configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Tun")))]
+pub struct TunConfig {
+    #[patch(attribute(clap(short = 't', long = "tun-name", id = "tun_name")))]
+    #[patch(attribute(doc = "Tun device name to use"))]
+    pub name: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-local-ip", id = "tun_local_ip")))]
+    #[patch(attribute(doc = "Local IP to use in Tun device"))]
+    pub local_ip: Ipv4Addr,
+
+    #[patch(attribute(clap(long = "tun-peer-ip", id = "tun_peer_ip")))]
+    #[patch(attribute(doc = "Peer IP to use in Tun device"))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub peer_ip: Ipv4Addr,
+
+    #[patch(attribute(clap(long = "tun-dns-ip", id = "tun_dns_ip")))]
+    #[patch(attribute(doc = "DNS IP to use in Tun device"))]
+    pub dns_ip: Ipv4Addr,
+
+    /// IO-uring configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub iouring: IouringConfig,
+
+    /// Wintun configuration
+    #[cfg(windows)]
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub wintun: WintunConfig,
+}
+
+impl Default for TunConfig {
+    fn default() -> Self {
+        Self {
+            #[cfg(macos)]
+            name: None,
+            #[cfg(not(macos))]
+            name: Some("lightway".to_string()),
+            local_ip: Ipv4Addr::new(100, 64, 0, 6),
+            peer_ip: Ipv4Addr::new(100, 64, 0, 5),
+            dns_ip: Ipv4Addr::new(100, 64, 0, 1),
+            iouring: IouringConfig::default(),
+            #[cfg(windows)]
+            wintun: WintunConfig::default(),
+        }
+    }
+}
+
+/// IO-uring configuration for the Tun device
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "IO-uring")))]
+pub struct IouringConfig {
+    #[patch(attribute(clap(long = "tun-iouring-enabled", id = "tun_iouring_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
+    pub enabled: bool,
+
+    // Any value more than 1024 negatively impact the throughput
+    #[patch(attribute(clap(long = "tun-iouring-entry-count", id = "tun_iouring_entry_count")))]
+    #[patch(attribute(doc = r#"IO-uring submission queue count.
+    Only applicable when `enabled` is `true`"#))]
+    pub entry_count: usize,
+
+    #[patch(attribute(clap(
+        long = "tun-iouring-sqpoll-idle-time",
+        id = "tun_iouring_sqpoll_idle_time"
+    )))]
+    #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
+    If non-zero use a kernel thread to perform submission queue polling.
+    After the given idle time the thread will go to sleep."#))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 100ms
+    pub sqpoll_idle_time: Duration,
+}
+
+impl Default for IouringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            entry_count: 1024,
+            sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+        }
+    }
+}
+
+/// Wintun configuration (Windows only)
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Wintun")))]
+pub struct WintunConfig {
+    #[patch(attribute(clap(long = "tun-wintun-file", id = "tun_wintun_file")))]
+    #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub file: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-wintun-device-guid", id = "tun_wintun_device_guid")))]
+    #[patch(attribute(doc = r#"
+    Fixed GUID for the Wintun adapter (Windows only).
+    Ensures adapter creation retries reuse the same device node.
+    Accepts a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000")."#))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub device_guid: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-wintun-ring-capacity", id = "tun_wintun_ring_capacity")))]
+    #[patch(
+        attribute(doc = r#"Wintun ring buffer capacity in bytes (Windows only).
+    Must be a power of two between 128KiB and 64MiB.
+    Larger values improve throughput."#)
+    )]
+    #[schemars(extend("x-cfg" = "windows"))]
+    #[schemars(schema_with = "byte_size_schema")]
+    pub ring_capacity: ByteSize,
+}
+
+#[cfg(windows)]
+impl Default for WintunConfig {
+    fn default() -> Self {
+        Self {
+            file: None,
+            device_guid: None,
+            ring_capacity: ByteSize::mib(8),
+        }
+    }
+}
+
 #[serde_inline_default::serde_inline_default]
 #[derive(
     Clone, Default, Parser, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Substrate,
@@ -982,6 +1042,14 @@ mod tests {
         }
         // Every fixture sets pmtud.enabled to false
         assert!(!config.pmtud.enabled);
+        // Every fixture sets tun.name/local_ip/peer_ip/dns_ip
+        assert_eq!(config.tun.name, Some("lightway".to_string()));
+        assert_eq!(config.tun.local_ip, Ipv4Addr::new(100, 64, 0, 6));
+        assert_eq!(config.tun.peer_ip, Ipv4Addr::new(100, 64, 0, 5));
+        assert_eq!(config.tun.dns_ip, Ipv4Addr::new(100, 64, 0, 1));
+        // Every fixture sets tun.iouring.enabled/entry_count
+        assert!(!config.tun.iouring.enabled);
+        assert_eq!(config.tun.iouring.entry_count, 1024);
     }
 
     fn get_byte_pattern() -> String {
@@ -1152,9 +1220,9 @@ mod tests {
     #[test]
     fn validate_device_guid() {
         let mut config = Config::default();
-        config.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
+        config.tun.wintun.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
         assert!(config.validate().is_ok());
-        config.device_guid = Some("not-a-valid-uuid".to_string());
+        config.tun.wintun.device_guid = Some("not-a-valid-uuid".to_string());
         assert!(config.validate().is_err());
     }
 
@@ -1176,7 +1244,7 @@ mod tests {
     #[test]
     fn validate_wintun_ring_capacity() {
         let mut config = Config::default();
-        config.wintun_ring_capacity = ByteSize::mib(3);
+        config.tun.wintun.ring_capacity = ByteSize::mib(3);
         assert!(config.validate().is_err());
     }
 
