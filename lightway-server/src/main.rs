@@ -1,18 +1,15 @@
 mod auth;
 
-use anyhow::{Context, Result, anyhow};
-use clap::Parser;
-use struct_patch::Patch;
+use anyhow::{Context, Result};
 
 use metrics_util::debugging::DebuggingRecorder;
-use tokio::fs::read_to_string;
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 
 use lightway_app_utils::{Validate, validate_configuration_file_path};
 #[cfg(feature = "debug")]
 use lightway_core::set_logging_callback;
-use lightway_server::config::{Config, ConfigPatch};
+use lightway_server::config::Config;
 use lightway_server::*;
 
 async fn metrics_debug() {
@@ -73,38 +70,7 @@ async fn metrics_debug() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let mut options = ConfigPatch::parse();
-
-    // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = options.config_file.take() else {
-        return Err(anyhow!("Config file not present"));
-    };
-
-    validate_configuration_file_path(&config_file, Validate::AllowWorldRead)
-        .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
-
-    let mut config = Config::default();
-    let mut file_fields = String::new();
-    let mut env_fields = String::new();
-    let mut cli_fields = String::new();
-    config.apply_with_log(
-        serde_saphyr::from_str(&read_to_string(config_file).await?)?,
-        |field| {
-            if field != "unknowns" {
-                file_fields.push_str(&format!(", {field}"))
-            }
-        },
-    );
-    config.apply_with_log(serde_env::from_env_with_prefix("LW_SERVER")?, |field| {
-        if field != "unknowns" {
-            env_fields.push_str(&format!(", {field}"))
-        }
-    });
-    config.apply_with_log(options, |field| {
-        if field != "unknowns" {
-            cli_fields.push_str(&format!(", {field}"))
-        }
-    });
+    let (config, startup_logs) = Config::load().await?;
 
     validate_configuration_file_path(&config.server_key, Validate::OwnerOnly)
         .with_context(|| format!("Invalid server key file {}", config.server_key.display()))?;
@@ -133,14 +99,8 @@ async fn main() -> Result<()> {
 
     config.log_format.init_with_env_filter(fmt);
 
-    if !file_fields.is_empty() {
-        tracing::debug!("config file set: {}", &file_fields[2..]);
-    }
-    if !env_fields.is_empty() {
-        tracing::debug!("environment var: {}", &env_fields[2..]);
-    }
-    if !cli_fields.is_empty() {
-        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    for log in startup_logs {
+        tracing::debug!("{log}");
     }
 
     let server_config = crate::ServerConfig::try_from_auth_and_config(
