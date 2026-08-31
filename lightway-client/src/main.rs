@@ -1,11 +1,8 @@
-use clap::Parser;
 use std::path::PathBuf;
-use struct_patch::Patch;
 
 use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
 use lightway_core::{Event, EventCallback};
-use tokio::fs::read_to_string;
 use tokio::sync::mpsc;
 
 use lightway_app_utils::{
@@ -15,7 +12,7 @@ use lightway_app_utils::{
 };
 use lightway_client::*;
 
-use lightway_client::config::{Config, ConfigPatch};
+use lightway_client::config::Config;
 
 struct EventHandler;
 
@@ -31,25 +28,6 @@ impl EventCallback for EventHandler {
             _ => {}
         }
     }
-}
-
-#[cfg(windows)]
-async fn load_patch(options: &ConfigPatch, config_file: &PathBuf) -> Result<ConfigPatch> {
-    use crate::platform::windows::crypto::decrypt_dpapi_config_file;
-    use windows_dpapi::Scope::User;
-
-    // Fetch whether DPAPI is enabled from CLI args
-    let enable_dpapi = options.enable_dpapi;
-
-    let content = if enable_dpapi {
-        tracing::info!("DPAPI decryption enabled for config file");
-        decrypt_dpapi_config_file(config_file, User)
-            .context("Failed to decrypt DPAPI-protected config file")?
-    } else {
-        tracing::debug!("Loading config file directly (no DPAPI)");
-        read_to_string(config_file).await?
-    };
-    Ok(serde_saphyr::from_str::<ConfigPatch>(&content)?)
 }
 
 fn generate_config(format: ConfigFormat, config_file: &PathBuf) -> Result<()> {
@@ -75,58 +53,28 @@ fn generate_config(format: ConfigFormat, config_file: &PathBuf) -> Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let mut options = ConfigPatch::parse();
-
-    // Fetch the config filepath from CLI and load it as config
-    let Some(config_file) = options.config_file.take() else {
-        return Err(anyhow!("Config file not present"));
-    };
-
-    if let Some(config_format) = options.generate.take() {
-        return generate_config(config_format, &config_file);
+    if let Some(config_format) = Config::cli_options().generate {
+        return match Config::cli_options().config_file {
+            Some(ref path) => generate_config(config_format, path),
+            None => Err(anyhow!("Please provide path via --config-file to write")),
+        };
     }
 
-    validate_configuration_file_path(&config_file, Validate::OwnerOnly)
-        .with_context(|| format!("Invalid configuration file {}", config_file.display()))?;
+    let (mut config, startup_logs) = Config::load(None).await?;
 
-    let mut config = Config::default();
+    validate_configuration_file_path(&config.config_file, Validate::OwnerOnly).with_context(
+        || {
+            format!(
+                "Invalid configuration file {}",
+                config.config_file.display()
+            )
+        },
+    )?;
+
     // NOTE:
     // RootCertificate of TLS library is not a self handled Struct
     // we need keep the PathBuf live outside
     let mut _root_ca_cert_path: Option<PathBuf> = None;
-
-    let mut file_fields = String::new();
-    let mut env_fields = String::new();
-    let mut cli_fields = String::new();
-
-    // Load config patch with DPAPI support
-    #[cfg(windows)]
-    config.apply_with_log(load_patch(&options, &config_file).await?, |field| {
-        if field != "unknowns" {
-            file_fields.push_str(&format!(", {field}"))
-        }
-    });
-    #[cfg(not(windows))]
-    config.apply_with_log(
-        serde_saphyr::from_str::<ConfigPatch>(&read_to_string(&config_file).await?)?,
-        |field| {
-            if field != "unknowns" {
-                file_fields.push_str(&format!(", {field}"))
-            }
-        },
-    );
-    let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
-    config.apply_with_log(env_patch.clone(), |field| {
-        if field != "unknowns" {
-            env_fields.push_str(&format!(", {field}"))
-        }
-    });
-    let cli_patch = options.clone();
-    config.apply_with_log(options, |field| {
-        if field != "unknowns" {
-            cli_fields.push_str(&format!(", {field}"))
-        }
-    });
 
     let level: tracing::level_filters::LevelFilter = config.log_level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
@@ -140,14 +88,8 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
-    if !file_fields.is_empty() {
-        tracing::debug!("config file set: {}", &file_fields[2..]);
-    }
-    if !env_fields.is_empty() {
-        tracing::debug!("environment var: {}", &env_fields[2..]);
-    }
-    if !cli_fields.is_empty() {
-        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    for log in startup_logs {
+        tracing::debug!("{log}");
     }
 
     let (ctrlc_tx, mut ctrlc_rx) = tokio::sync::oneshot::channel();
@@ -179,8 +121,7 @@ async fn main() -> Result<()> {
         })?;
     }
 
-    let config_reload_signal =
-        spawn_reload_event_handler(&config, config_file.clone(), env_patch, cli_patch);
+    let config_reload_signal = spawn_reload_event_handler(&config, config.config_file.clone());
 
     let servers = config.take_servers()?;
 
@@ -213,46 +154,13 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(any(unix, windows))]
-async fn reload_config(
-    path: &PathBuf,
-    env_patch: &ConfigPatch,
-    cli_patch: &ConfigPatch,
-) -> Option<Config> {
-    let content = tokio::fs::read_to_string(path)
+async fn reload_config(path: &PathBuf) -> Option<Config> {
+    let (config, logs) = Config::load(Some(path))
         .await
-        .map_err(|e| tracing::error!("Failed to read config: {e}"))
+        .map_err(|e| tracing::error!("Failed to reload config: {e}"))
         .ok()?;
-    let file_patch = serde_saphyr::from_str::<ConfigPatch>(&content)
-        .map_err(|e| tracing::error!("Failed to parse config on reload: {e}"))
-        .ok()?;
-
-    let mut config = Config::default();
-    let mut file_fields = String::new();
-    let mut env_fields = String::new();
-    let mut cli_fields = String::new();
-    config.apply_with_log(file_patch, |field| {
-        if field != "unknowns" {
-            file_fields.push_str(&format!(", {field}"))
-        }
-    });
-    config.apply_with_log(env_patch.clone(), |field| {
-        if field != "unknowns" {
-            env_fields.push_str(&format!(", {field}"))
-        }
-    });
-    config.apply_with_log(cli_patch.clone(), |field| {
-        if field != "unknowns" {
-            cli_fields.push_str(&format!(", {field}"))
-        }
-    });
-    if !file_fields.is_empty() {
-        tracing::debug!("config file set: {}", &file_fields[2..]);
-    }
-    if !env_fields.is_empty() {
-        tracing::debug!("environment var: {}", &env_fields[2..]);
-    }
-    if !cli_fields.is_empty() {
-        tracing::debug!("commandline arg: {}", &cli_fields[2..]);
+    for log in logs {
+        tracing::debug!("{log}");
     }
     Some(config)
 }
@@ -287,8 +195,6 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 fn spawn_reload_event_handler(
     config: &Config,
     config_file: PathBuf,
-    env_patch: ConfigPatch,
-    cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("Failed to register SIGHUP handler");
@@ -303,7 +209,7 @@ fn spawn_reload_event_handler(
         while sighup.recv().await.is_some() {
             tracing::info!("SIGHUP received, reloading config");
 
-            let Some(new_config) = reload_config(&config_file, &env_patch, &cli_patch).await else {
+            let Some(new_config) = reload_config(&config_file).await else {
                 continue;
             };
 
@@ -333,8 +239,6 @@ fn spawn_reload_event_handler(
 fn spawn_reload_event_handler(
     config: &Config,
     config_file: PathBuf,
-    env_patch: ConfigPatch,
-    cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
@@ -405,7 +309,7 @@ fn spawn_reload_event_handler(
 
             tracing::info!("Reload event signaled, reloading config");
 
-            let Some(new_config) = reload_config(&config_file, &env_patch, &cli_patch).await else {
+            let Some(new_config) = reload_config(&config_file).await else {
                 continue;
             };
 
@@ -438,8 +342,6 @@ fn spawn_reload_event_handler(
 fn spawn_reload_event_handler(
     _config: &Config,
     _config_file: PathBuf,
-    _env_patch: ConfigPatch,
-    _cli_patch: ConfigPatch,
 ) -> Option<mpsc::Receiver<ReloadableClientConfig>> {
     None
 }
