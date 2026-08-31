@@ -212,6 +212,7 @@ pub(crate) async fn async_lightway_start(
                 lightway_client_connect(LightwayClientConnectArgs {
                     instance_id,
                     connect_conf,
+                    sni_header: config.sni_header.clone(),
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
@@ -552,6 +553,7 @@ struct LightwayConnection {
 struct LightwayClientConnectArgs {
     instance_id: usize,
     connect_conf: ConnectionConfig,
+    sni_header: String,
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
@@ -566,6 +568,7 @@ async fn lightway_client_connect(
     LightwayClientConnectArgs {
         instance_id,
         mut connect_conf,
+        sni_header,
         socket,
         enable_keepalive,
         enable_expresslane,
@@ -587,7 +590,6 @@ async fn lightway_client_connect(
     let auth = connect_conf.take_auth()?;
     let server_sockaddr = connect_conf.skt_addr()?;
     let server_dn = connect_conf.server_dn.take();
-    let sni_header = connect_conf.sni_header.take();
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn OutsideIO>) = {
         let builder = OutsideIOBuilder::new(socket, server_sockaddr);
@@ -642,9 +644,7 @@ async fn lightway_client_connect(
         .when(server_dn.is_some(), |b| {
             b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
         })
-        .when(sni_header.is_some(), |b| {
-            b.with_sni_header(&sni_header.expect("checked in builder pattern"))
-        })
+        .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
         .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
