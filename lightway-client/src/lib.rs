@@ -410,13 +410,13 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(batch_receive)]
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
-            route_mode: config.route_mode,
+            route_mode: config.network.route_mode,
             #[cfg(linux)]
             fwmark: config.fwmark,
             #[cfg(windows)]
             disable_pin_egress_interface: config.disable_pin_egress_interface,
             #[cfg(desktop)]
-            dns_config_mode: config.dns_config_mode,
+            dns_config_mode: config.network.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
             pmtud_base_mtu: config.pmtud_base_mtu,
             sni_header: config.sni_header.clone(),
@@ -433,9 +433,9 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             network_signals: None,
             best_connection_selected_signal: None,
             #[cfg(feature = "debug")]
-            tls_debug: config.tls_debug,
+            tls_debug: config.debug.tls,
             #[cfg(feature = "debug")]
-            keylog: config.keylog.clone(),
+            keylog: config.debug.keylog.clone(),
         })
     }
 }
