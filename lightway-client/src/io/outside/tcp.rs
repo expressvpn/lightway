@@ -12,11 +12,11 @@ impl Tcp {
     pub async fn new(
         remote_addr: SocketAddr,
         maybe_sock: Option<TcpStream>,
-        #[cfg(all(linux, not(feature = "mobile-test")))] fwmark: u32,
+        #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
     ) -> Result<Self> {
         let sock = match maybe_sock {
             Some(s) => {
-                #[cfg(all(linux, not(feature = "mobile-test")))]
+                #[cfg(all(linux, not(feature = "mobile")))]
                 if fwmark != 0 {
                     let socket = socket2::SockRef::from(&s);
                     match socket.set_mark(fwmark) {
@@ -36,7 +36,7 @@ impl Tcp {
                 // SO_MARK must be set before connect() so that the SYN packet is also
                 // marked, ensuring all traffic (including connection setup) is subject
                 // to policy routing rules based on the mark.
-                #[cfg(all(linux, not(feature = "mobile-test")))]
+                #[cfg(all(linux, not(feature = "mobile")))]
                 if fwmark != 0 {
                     match socket2::SockRef::from(&socket).set_mark(fwmark) {
                         Ok(_) => tracing::info!("Applied firewall mark to outside TCP socket"),

@@ -276,7 +276,7 @@ run_task = { name = [ "build-android-uniffi-library", "bindgen-android", "bundle
 description = "Build native libraries for all Android architectures (x86_64, x86, armeabi-v7a, arm64-v8a)"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
 command = "cargo"
-args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}", "build", "--release", "-p", "lightway-client", "--lib" ]
+args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}", "build", "--features", "mobile", "--release", "-p", "lightway-client", "--lib" ]
 
 [tasks.bindgen-android]
 description = "Generate bindgen kotlin classes"
