@@ -184,7 +184,7 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 
     // List ONLY the fields that CAN be reloaded at runtime.
     // Everything else is automatically caught by the PartialEq check.
-    let masked = mask_reloadable!(old, new, log.level, enable_inside_pkt_encoding);
+    let masked = mask_reloadable!(old, new, log.level, codec.enabled);
 
     if masked != *new {
         tracing::warn!("Non-reloadable config fields changed (requires restart to take effect)");
