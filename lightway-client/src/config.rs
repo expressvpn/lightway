@@ -144,31 +144,11 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub keyshare: KeyShare,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Interval between keepalives"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 10s
-    pub keepalive_interval: NonZeroDuration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Keepalive timeout"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 60s
-    pub keepalive_timeout: NonZeroDuration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Keepalive configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable continuous Keepalive"))]
-    pub keepalive_continuous: bool,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
-    when we haven't received an outside packet"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 10s
-    pub tracer_packet_timeout: NonZeroDuration,
+    #[patch(attribute(clap(flatten)))]
+    pub keepalive: KeepaliveConfig,
 
     // NOTE: also "Defer timeout" in mobile device
     #[patch(attribute(clap(long)))]
@@ -543,10 +523,7 @@ impl Default for Config {
             tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
             tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
             keyshare: KeyShare::default(),
-            keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
-            keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
-            keepalive_continuous: true,
-            tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            keepalive: KeepaliveConfig::default(),
             preferred_connection_wait_interval: Duration::from_std_duration(
                 StdDuration::from_secs(0),
             ),
@@ -585,6 +562,45 @@ impl Default for Config {
             sni_header: String::new(),
             accept_unknowns: false,
             unknowns: HashMap::new(),
+        }
+    }
+}
+
+/// Keepalive configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Keepalive")))]
+pub struct KeepaliveConfig {
+    #[patch(attribute(doc = "Interval between keepalives"))]
+    #[patch(attribute(clap(long = "keepalive-interval", id = "keepalive_interval")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub interval: NonZeroDuration,
+
+    #[patch(attribute(doc = "Keepalive timeout"))]
+    #[patch(attribute(clap(long = "keepalive-timeout", id = "keepalive_timeout")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub timeout: NonZeroDuration,
+
+    #[patch(attribute(doc = "Enable continuous Keepalive"))]
+    #[patch(attribute(clap(long = "keepalive-continuous", id = "keepalive_continuous")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub continuous: bool,
+
+    #[patch(attribute(doc = "Time before triggering a tracer packet when no \
+        outside packet received"))]
+    #[patch(attribute(clap(long = "keepalive-tracer-timeout", id = "keepalive_tracer_timeout")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub tracer_timeout: NonZeroDuration,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
+            continuous: true,
+            tracer_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
         }
     }
 }
@@ -839,6 +855,11 @@ mod tests {
 
         assert_eq!(config.server.is_empty(), !has_top_level_server);
         assert_eq!(config.servers.len(), servers_len);
+        // Every fixture sets keepalive.interval to 10s
+        assert_eq!(
+            config.keepalive.interval,
+            NonZeroDuration::from_std_duration(StdDuration::from_secs(10))
+        );
     }
 
     fn get_byte_pattern() -> String {
