@@ -945,7 +945,8 @@ impl Config {
             serde_saphyr::from_str::<ConfigPatch>(&content)?
         };
 
-        let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
+        let env_patch: ConfigPatch =
+            lightway_app_utils::env_tree::from_env_with_prefix("LW_CLIENT")?;
         let mut cli_patch = cli_options.clone();
         cli_patch.config_file = None;
         cli_patch.generate = None;
@@ -1023,14 +1024,25 @@ mod tests {
         let yaml_patch =
             serde_saphyr::from_str::<ConfigPatch>(&read_to_string(config_file).unwrap()).unwrap();
         config.apply(yaml_patch);
+
+        let env_patch: ConfigPatch = lightway_app_utils::env_tree::from_iter_with_prefix(
+            vec![(
+                "LW_CLIENT_KEEPALIVE__INTERVAL".to_string(),
+                "33s".to_string(),
+            )],
+            "LW_CLIENT",
+        )
+        .unwrap();
+        config.apply(env_patch);
+
         config.apply(matches.unwrap());
 
         assert_eq!(config.server.is_empty(), !has_top_level_server);
         assert_eq!(config.servers.len(), servers_len);
-        // Every fixture sets keepalive.interval to 10s
+        // env layer overrides the fixture's keepalive.interval (10s) with 33s
         assert_eq!(
             config.keepalive.interval,
-            NonZeroDuration::from_std_duration(StdDuration::from_secs(10))
+            NonZeroDuration::from_std_duration(StdDuration::from_secs(33))
         );
         // Every fixture sets log_level to info
         assert_eq!(config.log.level, LogLevel::Info);
