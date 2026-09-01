@@ -555,6 +555,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     let ip_manager = Arc::new(ip_manager);
 
     let connection_type = config.mode;
+
     let auth = Arc::new(AuthAdapter(config.auth));
 
     let inside_io: Arc<dyn InsideIO> = match config.inside_io.take() {
@@ -648,8 +649,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => {
-            let udp_server = io::outside::UdpServer::new(
-                conn_manager.clone(),
+            let udp_io = io::outside::UdpIo::new(
                 config.bind_address,
                 config.udp_buffer_size,
                 config.enable_batch_receive,
@@ -657,8 +657,11 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 may_be_sock,
             )
             .await?;
-            send_queue = udp_server.send_queue();
-            Box::new(udp_server)
+            send_queue = udp_io.send_queue();
+            Box::new(io::outside::DatagramServer::new(
+                Box::new(udp_io),
+                conn_manager.clone(),
+            ))
         }
         ServerConnectionMode::Stream(may_be_sock) => Box::new(
             io::outside::TcpServer::new(

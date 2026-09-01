@@ -13,9 +13,7 @@ use lightway_core::{MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU};
 use std::io;
 use std::net::SocketAddr;
 
-/// Control-buffer size for one `IP_PKTINFO` control message, which is the
-/// only cmsg this server reads.
-pub(crate) const CONTROL_SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
+const CONTROL_SIZE: usize = super::PKTINFO_CONTROL_SIZE;
 
 /// Per-packet metadata for a batched UDP receive: the source address and
 /// any control messages (cmsg) the kernel returns.
