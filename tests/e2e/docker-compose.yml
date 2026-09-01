@@ -45,6 +45,8 @@ services:
   client:
     image: lightway-test-client:latest
     command: ${CLIENT_ARGS}
+    environment:
+      - LW_CLIENT_CONNECT__SERVERS__0__SERVER=${CLIENT_SERVER_ADDR}
     stop_signal: SIGTERM
     stop_grace_period: 10s
     sysctls:

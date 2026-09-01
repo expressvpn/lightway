@@ -26,14 +26,30 @@ TEST:
     ARG TEST_SCRIPT=./run-simple-test.sh
 
     ARG SERVER_ARGS="--config-file server_config.yaml --log-level trace ${SERVER_EXTRA_ARGS} --bind-address 0.0.0.0:${SERVER_PORT}"
-    ARG CLIENT_ARGS="--config-file ${CLIENT_CONFIG_FILE} --log-level trace ${CLIENT_EXTRA_ARGS} --server server:${SERVER_PORT}"
+    ARG CLIENT_ARGS="--config-file ${CLIENT_CONFIG_FILE} --log-level trace ${CLIENT_EXTRA_ARGS}"
 
     LET SERVER_ARGS=$SERVER_ARGS
     LET CLIENT_ARGS=$CLIENT_ARGS
     IF [ -n "$MODE" ]
         SET SERVER_ARGS="$SERVER_ARGS --mode=$MODE"
-        SET CLIENT_ARGS="$CLIENT_ARGS --mode=$MODE"
+        SET CLIENT_ARGS="$CLIENT_ARGS --connect-mode=$MODE"
     END
+
+    # Only the default fixture (client_config.yaml) hardcodes a placeholder
+    # server address that needs correcting to this run's SERVER_PORT. The
+    # parallel_connect fixtures already list their own correct addresses
+    # (Task 9) - overriding index 0 there would wholesale-replace their
+    # multi-entry servers list (struct_patch/env_tree treat connect.servers
+    # as one non-mergeable field), collapsing the parallel-connect fallback
+    # coverage down to a single candidate. Leave CLIENT_SERVER_ADDR empty in
+    # that case: an empty env value is treated as unset (see
+    # lightway-app-utils/src/env_tree.rs), so the compose env entry becomes
+    # a no-op.
+    LET CLIENT_SERVER_ADDR=""
+    IF [ "$CLIENT_CONFIG_FILE" = "client_config.yaml" ]
+        SET CLIENT_SERVER_ADDR="server:${SERVER_PORT}"
+    END
+    ENV CLIENT_SERVER_ADDR=$CLIENT_SERVER_ADDR
 
     ARG CLIENT_IMAGE="(./client+build-container --BACKEND=$BACKEND --EXTRA_FEATURES=$EXTRA_FEATURES --TOKIO_WORKER_THREADS=$CLIENT_TOKIO_WORKER_THREADS --debian=$debian)"
     ARG SERVER_IMAGE="(./server+build-container --BACKEND=$BACKEND --EXTRA_FEATURES=$EXTRA_FEATURES --TOKIO_WORKER_THREADS=$SERVER_TOKIO_WORKER_THREADS --debian=$debian)"
@@ -50,11 +66,11 @@ TEST:
 
 # run-tcp-aes256-test runs e2e test using TCP and AES256 cipher
 run-tcp-aes256-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--cipher aes256"
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--connect-cipher aes256"
 
 # run-tcp-chacha20-test runs e2e test using TCP and chacha20 cipher
 run-tcp-chacha20-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--cipher chacha20"
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--connect-cipher chacha20"
 
 # run-tcp-pqc-test runs e2e test using TCP and default cipher with PQC enabled
 run-tcp-pqc-test:
@@ -62,7 +78,7 @@ run-tcp-pqc-test:
 
 # run-tcp-pqc-x25519mlkem768-test runs e2e test using TCP with X25519MLKEM768 keyshare
 run-tcp-pqc-x25519mlkem768-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768"
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--connect-keyshare x25519mlkem768"
 
 # run-udp-aes256-test runs e2e test using UDP and AES256 cipher
 run-udp-aes256-test:
@@ -70,7 +86,7 @@ run-udp-aes256-test:
 
 # run-udp-chacha20-test runs e2e test using UDP and chacha20 cipher
 run-udp-chacha20-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--cipher chacha20"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--connect-cipher chacha20"
 
 # run-udp-pqc-test runs e2e test using UDP and default cipher with PQC enabled
 run-udp-pqc-test:
@@ -78,7 +94,7 @@ run-udp-pqc-test:
 
 # run-udp-pqc-x25519mlkem768-test runs e2e test using UDP with X25519MLKEM768 keyshare
 run-udp-pqc-x25519mlkem768-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--connect-keyshare x25519mlkem768"
 
 # run-udp-floating-ip-test runs e2e test of UDP floating IP support
 run-udp-floating-ip-test:
@@ -86,11 +102,11 @@ run-udp-floating-ip-test:
 
 # run-udp-pmtud-test runs e2e test of UDP with PMTUD enabled
 run-udp-pmtud-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-pmtud"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--pmtud-enabled"
 
 # run-udp-iouring-test runs e2e test using UDP and default cipher with io-uring enabled
 run-udp-iouring-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--tun-iouring-enabled"
 
 # run-udp-tun-offload-test runs e2e test using UDP with server TUN offload (GSO/GRO) enabled
 run-udp-tun-offload-test:
@@ -98,7 +114,7 @@ run-udp-tun-offload-test:
 
 # run-udp-client-batch-receive-test runs e2e test using UDP with batch receive enabled
 run-udp-client-batch-receive-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--socket-batch-receive"
 
 # run-udp-server-batch-receive-test runs e2e test using UDP with batch receive enabled
 run-udp-server-batch-receive-test:
@@ -106,7 +122,7 @@ run-udp-server-batch-receive-test:
 
 # run-udp-server-batch-receive-test runs e2e test using UDP with batch receive enabled
 run-udp-both-batch-receive-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive" --SERVER_EXTRA_ARGS="--enable-batch-receive"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--socket-batch-receive" --SERVER_EXTRA_ARGS="--enable-batch-receive"
 
 # run-udp-server-batch-send-test runs e2e test using UDP with batch send enabled on the server
 run-udp-server-batch-send-test:
@@ -118,16 +134,16 @@ run-udp-server-all-batching-test:
 
 # run-udp-expresslane-test runs e2e test using UDP with expresslane enabled
 run-udp-expresslane-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--expresslane-enabled"
 
 # run-udp-expresslane-compat-test runs e2e test using UDP with expresslane enabled in either peer
 run-udp-expresslane-compat-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-expresslane"
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-expresslane"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--expresslane-enabled"
 
 # run-tcp-iouring-test runs e2e test using TCP and default cipher with io-uring enabled
 run-tcp-iouring-test:
-    DO +TEST --MODE=tcp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring"
+    DO +TEST --MODE=tcp --SERVER_PORT=27690 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--tun-iouring-enabled"
 
 # run-udp-keepalive-test runs e2e test of UDP with client using keepalive
 run-udp-keepalive-test:
@@ -143,7 +159,7 @@ run-tcp-server-batch-send-test:
 
 # run-udp-single-threaded-test runs e2e test of UDP with server and client using a single Tokio worker thread
 run-udp-single-threaded-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TOKIO_WORKER_THREADS=1 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --enable-tun-iouring --enable-pmtud"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TOKIO_WORKER_THREADS=1 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_TOKIO_WORKER_THREADS=1 --CLIENT_EXTRA_ARGS="--keepalive-interval=2s --keepalive-timeout=6s --tun-iouring-enabled --pmtud-enabled"
 
 # run-tcp-single-threaded-test runs e2e test of TCP with server and client using a single Tokio worker thread
 run-tcp-single-threaded-test:
@@ -167,18 +183,18 @@ run-udp-then-tcp-parallel-connect-test:
 
 # run-token-auth-test runs a test of the token auth
 run-token-auth-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQ4ODMxMTM0MTZ9.gb0U7xTwxl7GDeKftKSZvnkkIDnoz8NmzJ4etukCjtZWzA4kSNbt84iTKOE14paRZdfE67tLGfcLsqA9uh-zuA_-ecZbiC4znz2CVVjhD2CIrW_0LQbHRbzYlOozjc108pct-VivtiPr7SqcIgRTjH59HTCDXtgp0kELhhr3NNfYP0-6DtadXQ_Twn2tcC3A-rTpfjwo7HDqnc43niCALXFhqR0F4DkEC3amKuOiP9afQ6dFmWVAzWXWEpQ_kK-EsCeBZ6K89GaF5quIErrV3U_FSwbX8biFB7S8VhkLqCoyabRKKprwp_mi24e91URgGqNvbCrXs2zrJMat-1zUvw" --SERVER_EXTRA_ARGS="--token-rsa-pub-key-pem /token.pub"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--auth-token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQ4ODMxMTM0MTZ9.gb0U7xTwxl7GDeKftKSZvnkkIDnoz8NmzJ4etukCjtZWzA4kSNbt84iTKOE14paRZdfE67tLGfcLsqA9uh-zuA_-ecZbiC4znz2CVVjhD2CIrW_0LQbHRbzYlOozjc108pct-VivtiPr7SqcIgRTjH59HTCDXtgp0kELhhr3NNfYP0-6DtadXQ_Twn2tcC3A-rTpfjwo7HDqnc43niCALXFhqR0F4DkEC3amKuOiP9afQ6dFmWVAzWXWEpQ_kK-EsCeBZ6K89GaF5quIErrV3U_FSwbX8biFB7S8VhkLqCoyabRKKprwp_mi24e91URgGqNvbCrXs2zrJMat-1zUvw" --SERVER_EXTRA_ARGS="--token-rsa-pub-key-pem /token.pub"
 
 # run-udp-fwmark-test runs e2e test using UDP with fwmark set on the outside socket
 run-udp-fwmark-test:
-    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--fwmark=1698916352"
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--socket-fwmark=1698916352"
 
 # CROSS_COMPAT_TEST runs the full cross-compat matrix for a given backend pair:
 # classical TCP/UDP/UDP+expresslane, plus TCP+PQC and UDP+PQC handshakes.
 #
 # PQC uses X25519MLKEM768. It's the only PQ key share group BoringSSL
 # supports, and the only one selectable through the BoringSSL client's
-# --keyshare CLI (the wolfSSL-only variants are cfg-gated out of the type
+# --connect-keyshare CLI (the wolfSSL-only variants are cfg-gated out of the type
 # at build time). wolfSSL supports it too, so this value is the safe
 # cross-backend choice.
 CROSS_COMPAT_TEST:
@@ -198,19 +214,19 @@ CROSS_COMPAT_TEST:
 
     # Classical UDP + Expresslane
     DO +TEST --MODE=udp --SERVER_PORT=27690 \
-        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane" \
+        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--expresslane-enabled" \
         --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
         --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
 
     # PQC TCP (X25519MLKEM768)
     DO +TEST --MODE=tcp --SERVER_PORT=443 \
-        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--connect-keyshare x25519mlkem768" \
         --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
         --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
 
     # PQC UDP (X25519MLKEM768)
     DO +TEST --MODE=udp --SERVER_PORT=27690 \
-        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--connect-keyshare x25519mlkem768" \
         --SERVER_IMAGE="(./server+build-container --BACKEND=$SERVER_BACKEND --debian=$debian)" \
         --CLIENT_IMAGE="(./client+build-container --BACKEND=$CLIENT_BACKEND --debian=$debian)"
 
@@ -222,7 +238,7 @@ run-cross-compat-wolfssl-boringssl:
 
     # PQC TCP (X25519MLKEM768) — the only PQ group both backends speak.
     DO +TEST --MODE=tcp --SERVER_PORT=443 \
-        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--keyshare x25519mlkem768" \
+        --SERVER_EXTRA_ARGS="--enable-pqc" --CLIENT_EXTRA_ARGS="--connect-keyshare x25519mlkem768" \
         --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --debian=$debian)" \
         --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --debian=$debian)"
 
@@ -231,7 +247,7 @@ run-cross-compat-wolfssl-boringssl:
         --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --debian=$debian)"
     
     DO +TEST --MODE=udp --SERVER_PORT=27690 \
-        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--enable-expresslane" \
+        --SERVER_EXTRA_ARGS="--enable-expresslane" --CLIENT_EXTRA_ARGS="--expresslane-enabled" \
         --SERVER_IMAGE="(./server+build-container --BACKEND=wolfssl --debian=$debian)" \
         --CLIENT_IMAGE="(./client+build-container --BACKEND=boringssl --debian=$debian)"
 
