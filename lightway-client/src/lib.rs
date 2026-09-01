@@ -298,7 +298,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
         }
 
         #[cfg(linux)]
-        tun_config.tx_queue_len(config.tun_txqueuelen);
+        tun_config.tx_queue_len(config.tun.txqueuelen);
 
         #[cfg(windows)]
         {

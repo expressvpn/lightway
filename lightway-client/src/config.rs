@@ -63,13 +63,6 @@ pub struct Config {
     #[patch(attribute(clap(flatten)))]
     pub tun: TunConfig,
 
-    #[cfg(linux)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub tun_txqueuelen: u32,
-
     /// Keepalive configuration
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
@@ -262,10 +255,10 @@ impl Config {
         );
         #[cfg(linux)]
         {
-            anyhow::ensure!(self.tun_txqueuelen != 0, "tun_txqueuelen must not be 0");
-            if self.tun_txqueuelen < 1000 {
+            anyhow::ensure!(self.tun.txqueuelen != 0, "tun_txqueuelen must not be 0");
+            if self.tun.txqueuelen < 1000 {
                 tracing::warn!(
-                    txqueuelen = self.tun_txqueuelen,
+                    txqueuelen = self.tun.txqueuelen,
                     "tun_txqueuelen is below the recommended minimum of 1000"
                 );
             }
@@ -282,8 +275,6 @@ impl Default for Config {
             connect: ConnectConfig::default(),
             auth: AuthConfig::default(),
             tun: TunConfig::default(),
-            #[cfg(linux)]
-            tun_txqueuelen: 1000,
             keepalive: KeepaliveConfig::default(),
             socket: SocketConfig::default(),
             #[cfg(desktop)]
@@ -694,6 +685,13 @@ pub struct TunConfig {
     #[patch(attribute(doc = "DNS IP to use in Tun device"))]
     pub dns_ip: Ipv4Addr,
 
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long = "tun-txqueuelen", id = "tun_txqueuelen")))]
+    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub txqueuelen: u32,
+
     /// IO-uring configuration
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
@@ -718,6 +716,8 @@ impl Default for TunConfig {
             local_ip: Ipv4Addr::new(100, 64, 0, 6),
             peer_ip: Ipv4Addr::new(100, 64, 0, 5),
             dns_ip: Ipv4Addr::new(100, 64, 0, 1),
+            #[cfg(linux)]
+            txqueuelen: 1000,
             iouring: IouringConfig::default(),
             #[cfg(windows)]
             wintun: WintunConfig::default(),
@@ -1323,7 +1323,7 @@ mod tests {
     #[test]
     fn validate_warns_on_low_tun_txqueuelen() {
         let mut config = Config::default();
-        config.tun_txqueuelen = 500;
+        config.tun.txqueuelen = 500;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
             "tun_txqueuelen is below the recommended minimum of 1000"
@@ -1334,7 +1334,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_tun_txqueuelen() {
         let mut config = Config::default();
-        config.tun_txqueuelen = 0;
+        config.tun.txqueuelen = 0;
         assert!(config.validate().is_err());
     }
 
