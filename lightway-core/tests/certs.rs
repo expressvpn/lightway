@@ -1,4 +1,7 @@
 //! Certificate-chain validation tests for backend.
+//!
+//! On-the-fly generation of certs is too slow on RISCV, skip this suite.
+#![cfg(not(target_arch = "riscv64"))]
 
 use std::sync::Arc;
 use std::time::Duration;
