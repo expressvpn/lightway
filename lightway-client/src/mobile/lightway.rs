@@ -1,4 +1,4 @@
-use crate::config::{Config, ConnectionConfig};
+use crate::config::{Config, ResolvedConnection};
 use crate::io::outside::OutsideIO;
 use crate::keepalive::{Keepalive, KeepaliveResult};
 use crate::mobile::EventHandlers;
@@ -175,10 +175,10 @@ async fn setup_tunnel_interface(
 pub(crate) async fn async_lightway_start(
     tun_fd: RawFd,
     external_event_handler: Arc<dyn EventHandlers>,
-    mut config: Config,
+    config: Config,
     connected_index: Arc<OnceLock<usize>>,
 ) -> uniffi::Result<ClientResult> {
-    let servers = config.take_servers()?;
+    let servers = config.resolve_connections()?;
     let mut outside_sockets = servers
         .iter()
         .map(|s| OutsideSocket::new(s.mode.is_tcp(), Some(external_event_handler.clone())).ok())
@@ -212,7 +212,6 @@ pub(crate) async fn async_lightway_start(
                 lightway_client_connect(LightwayClientConnectArgs {
                     instance_id,
                     connect_conf,
-                    sni_header: config.sni_header.clone(),
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive.continuous,
                     enable_expresslane: config.expresslane.enabled,
@@ -231,7 +230,7 @@ pub(crate) async fn async_lightway_start(
         .unzip();
 
     let mut wait_timer_task = tokio::spawn(tokio::time::sleep(
-        config.preferred_connection_wait_interval.into(),
+        config.connect.preferred_wait_interval.into(),
     ));
 
     debug!(
@@ -553,8 +552,7 @@ struct LightwayConnection {
 
 struct LightwayClientConnectArgs {
     instance_id: usize,
-    connect_conf: ConnectionConfig,
-    sni_header: String,
+    connect_conf: ResolvedConnection,
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
@@ -569,7 +567,6 @@ async fn lightway_client_connect(
     LightwayClientConnectArgs {
         instance_id,
         mut connect_conf,
-        sni_header,
         socket,
         enable_keepalive,
         enable_expresslane,
@@ -590,7 +587,8 @@ async fn lightway_client_connect(
 
     let auth = connect_conf.take_auth()?;
     let server_sockaddr = connect_conf.skt_addr()?;
-    let server_dn = connect_conf.server_dn.take();
+    let server_dn = (!connect_conf.server_dn.is_empty()).then(|| connect_conf.server_dn.clone());
+    let sni_header = std::mem::take(&mut connect_conf.sni_header);
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn OutsideIO>) = {
         let builder = OutsideIOBuilder::new(socket, server_sockaddr);
@@ -615,10 +613,12 @@ async fn lightway_client_connect(
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 
-    let ConnectionConfig {
+    // Only Copy fields: `root_ca_cert` still borrows `connect_conf`
+    let ResolvedConnection {
         cipher,
         outside_mtu,
         mode,
+        keyshare,
         ..
     } = connect_conf;
 
@@ -649,7 +649,7 @@ async fn lightway_client_connect(
         .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
-        .with_pq_crypto(lightway_app_utils::args::KeyShare::default().into());
+        .with_pq_crypto(keyshare.into());
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
