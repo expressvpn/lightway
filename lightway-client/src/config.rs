@@ -213,7 +213,7 @@ impl Config {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "sndbuf is set but cannot be applied to this TCP connections"
+                        "socket.sndbuf is set but cannot be applied to this TCP connections"
                     );
                 }
             }
@@ -224,7 +224,7 @@ impl Config {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "rcvbuf is set but cannot be applied to this TCP connections"
+                        "socket.rcvbuf is set but cannot be applied to this TCP connections"
                     );
                 }
             }
@@ -233,7 +233,7 @@ impl Config {
         if let Some(guid) = &self.tun.wintun.device_guid {
             anyhow::ensure!(
                 uuid::Uuid::parse_str(guid).is_ok(),
-                "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
+                "tun.wintun.device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
             );
         }
         if self.pmtud.enabled {
@@ -241,7 +241,7 @@ impl Config {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "enable_pmtud is set but cannot be applied to this TCP connections"
+                        "pmtud.enabled is set but cannot be applied to this TCP connections"
                     );
                 }
             }
@@ -251,15 +251,15 @@ impl Config {
             self.tun.wintun.ring_capacity.0.is_power_of_two()
                 && self.tun.wintun.ring_capacity >= ByteSize::kib(128)
                 && self.tun.wintun.ring_capacity <= ByteSize::mib(64),
-            "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
+            "tun.wintun.ring_capacity must be a power of two between 128KiB and 64MiB"
         );
         #[cfg(linux)]
         {
-            anyhow::ensure!(self.tun.txqueuelen != 0, "tun_txqueuelen must not be 0");
+            anyhow::ensure!(self.tun.txqueuelen != 0, "tun.txqueuelen must not be 0");
             if self.tun.txqueuelen < 1000 {
                 tracing::warn!(
                     txqueuelen = self.tun.txqueuelen,
-                    "tun_txqueuelen is below the recommended minimum of 1000"
+                    "tun.txqueuelen is below the recommended minimum of 1000"
                 );
             }
         }
@@ -588,12 +588,14 @@ pub struct NetworkConfig {
 pub struct DebugConfig {
     #[patch(attribute(doc = "File path to save wireshark keylog"))]
     #[patch(attribute(clap(long = "debug-keylog", id = "debug_keylog")))]
+    #[schemars(extend("x-cfg" = "debug"))]
     pub keylog: Option<PathBuf>,
 
     #[patch(attribute(doc = "Enable TLS debug logging"))]
     #[patch(attribute(clap(long = "debug-tls", id = "debug_tls")))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
+    #[schemars(extend("x-cfg" = "debug"))]
     pub tls: bool,
 }
 
@@ -678,7 +680,6 @@ pub struct TunConfig {
 
     #[patch(attribute(clap(long = "tun-peer-ip", id = "tun_peer_ip")))]
     #[patch(attribute(doc = "Peer IP to use in Tun device"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
     pub peer_ip: Ipv4Addr,
 
     #[patch(attribute(clap(long = "tun-dns-ip", id = "tun_dns_ip")))]
@@ -837,7 +838,7 @@ pub struct ConnectionConfig {
     #[serde(default)]
     pub user: Option<String>,
 
-    /// Passwordfor User/Pass Auth
+    /// Password for User/Pass Auth
     #[serde(default)]
     pub password: Option<String>,
 
@@ -1313,7 +1314,7 @@ mod tests {
         config.socket.sndbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "sndbuf is set but cannot be applied to this TCP connections"
+            "socket.sndbuf is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }
@@ -1326,7 +1327,7 @@ mod tests {
         config.tun.txqueuelen = 500;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "tun_txqueuelen is below the recommended minimum of 1000"
+            "tun.txqueuelen is below the recommended minimum of 1000"
         ));
     }
 
@@ -1347,7 +1348,7 @@ mod tests {
         config.socket.rcvbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "rcvbuf is set but cannot be applied to this TCP connections"
+            "socket.rcvbuf is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }
@@ -1370,7 +1371,7 @@ mod tests {
         config.pmtud.enabled = true;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "enable_pmtud is set but cannot be applied to this TCP connections"
+            "pmtud.enabled is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }

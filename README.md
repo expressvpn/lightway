@@ -156,8 +156,9 @@ or `-5` to pick a different algorithm.
 > username / password authentication mechanisms and their own choice of password
 > hashing algorithms to suit their security needs.
 
-Please note that when providing env variables it should be in upper case and using "_" as a word separator,
-while using as cli config, it should be in lower case with "-" as the word separator.
+Please note that when providing env variables it should be in upper case, with nested config groups
+joined by a double underscore "__" (see below), while using as cli config, it should be in lower case
+with "-" as the word separator.
 
 > [!CAUTION]
 > Passing the `--auth-password` option on the CLI will expose your password
