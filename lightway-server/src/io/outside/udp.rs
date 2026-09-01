@@ -9,10 +9,7 @@ use lightway_app_utils::cmsg;
 #[cfg(target_os = "linux")]
 use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
-use lightway_core::{
-    ConnectionType, Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU,
-    OutsideIOSendCallback, OutsidePacket, SessionId, Version,
-};
+use lightway_core::{IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsideIOSendCallback};
 use socket2::{MaybeUninitSlice, MsgHdr, MsgHdrMut, SockAddr, SockRef};
 use std::os::fd::AsRawFd;
 use std::{
@@ -21,9 +18,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::io::Interest;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::Server;
+use crate::io::outside::datagram;
 use crate::io::outside::udp::batch_receive::{BatchRecvSlot, recv_multiple_with_metadata};
 use crate::io::outside::udp::send_queue::SendQueue;
 use crate::{connection_manager::ConnectionManager, metrics};
@@ -215,7 +213,7 @@ impl UdpServer {
             if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
                 true
             } else {
-                warn!(
+                tracing::warn!(
                     "batch receive (recvmsg_x) not available on this system, batch receive disabled"
                 );
                 false
@@ -240,116 +238,35 @@ impl UdpServer {
     }
 
     fn data_received(
-        &mut self,
+        &self,
         peer_addr: SocketAddr,
         local_addr: SocketAddr,
         reply_pktinfo: Option<libc::in_pktinfo>,
         buf: &mut BytesMut,
     ) {
-        let pkt = OutsidePacket::Wire(buf, ConnectionType::Datagram);
-        let pkt = match self.conn_manager.parse_raw_outside_packet(pkt) {
-            Ok(hdr) => hdr,
-            Err(e) => {
-                metrics::udp_parse_wire_failed();
-                warn!("Extracting header from packet failed: {e}");
-                return;
-            }
-        };
-
-        let Some(hdr) = pkt.header() else {
-            metrics::udp_no_header();
-            warn!("Packet parsing error: Not a UDP frame");
-            return;
-        };
-        if !self.conn_manager.is_supported_version(hdr.version) {
-            // If the protocol version is not supported then drop
-            // the packet.
-            metrics::udp_bad_packet_version(hdr.version);
-            return;
-        }
-
-        let may_be_conn = self.conn_manager.find_datagram_connection_with(peer_addr);
-        let (conn, update_peer_address) = match may_be_conn {
-            Some(conn) => (conn, false),
-            None => {
-                let conn_result = self.conn_manager.find_or_create_datagram_connection_with(
-                    peer_addr,
-                    hdr.version,
-                    hdr.session,
-                    local_addr,
-                    || {
-                        Arc::new(UdpSocket {
-                            sock: self.sock.clone(),
-                            peer_addr: RwLock::new((peer_addr, peer_addr.into())),
-                            reply_pktinfo,
-                            send_queue: self.send_queue.clone(),
-                        })
-                    },
+        datagram::data_received(
+            &self.conn_manager,
+            buf,
+            peer_addr,
+            local_addr,
+            || {
+                Arc::new(UdpSocket {
+                    sock: self.sock.clone(),
+                    peer_addr: RwLock::new((peer_addr, peer_addr.into())),
+                    reply_pktinfo,
+                    send_queue: self.send_queue.clone(),
+                })
+            },
+            |frame| {
+                // Ignore failure to send.
+                let _ = send_to_socket(
+                    &self.sock,
+                    &[IoSlice::new(frame)],
+                    &peer_addr.into(),
+                    reply_pktinfo,
+                    None,
                 );
-
-                match conn_result {
-                    Ok(conn) => conn,
-                    Err(_e) => {
-                        self.send_reject(peer_addr.into(), reply_pktinfo);
-                        return;
-                    }
-                }
-            }
-        };
-
-        let session = hdr.session;
-
-        match conn.outside_data_received(pkt) {
-            Ok(0) => {
-                // We will hit this case when there is UDP packet duplication.
-                // TLS library skips duplicate packets and thus no frames read.
-                // It is also possible that adversary can capture the packet
-                // and replay it. In any case, skip processing further
-                if update_peer_address {
-                    metrics::udp_session_rotation_attempted_via_replay();
-                }
-            }
-            Ok(_) => {
-                // NOTE: We wait until the first successful TLS
-                // decrypt to protect against the case where a crafted
-                // packet with a session ID causes us to change the
-                // connection IP without verifying the SSL connection
-                // first
-                if update_peer_address {
-                    metrics::udp_conn_recovered_via_session(session);
-                    // Address first: the rotation announce must go to the
-                    // address the client roamed to.
-                    self.conn_manager.set_peer_addr(&conn, peer_addr);
-                    conn.begin_session_id_rotation();
-                }
-            }
-            Err(err) => {
-                warn!("Failed to process outside data: {err}");
-                let _ = conn.handle_outside_data_error(&err);
-                // Fatal or not, we are done with this packet.
-            }
-        }
-    }
-
-    fn send_reject(&self, peer_addr: SockAddr, reply_pktinfo: Option<libc::in_pktinfo>) {
-        metrics::udp_rejected_session();
-        let msg = Header {
-            version: Version::MINIMUM,
-            aggressive_mode: false,
-            session: SessionId::REJECTED,
-            expresslane_data: false,
-        };
-
-        let mut buf = BytesMut::with_capacity(Header::WIRE_SIZE);
-        msg.append_to_wire(&mut buf);
-
-        // Ignore failure to send.
-        let _ = send_to_socket(
-            &self.sock,
-            &[IoSlice::new(&buf)],
-            &peer_addr,
-            reply_pktinfo,
-            None,
+            },
         );
     }
 }
