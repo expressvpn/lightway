@@ -304,6 +304,7 @@ impl Default for Config {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Connect")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct ConnectConfig {
     #[patch(attribute(clap(short = 'm', long = "connect-mode", id = "connect_mode")))]
     #[patch(attribute(doc = "Connection mode"))]
@@ -378,6 +379,7 @@ impl Default for ConnectConfig {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Auth")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct AuthConfig {
     #[patch(attribute(clap(long = "auth-token", id = "auth_token", hide = true)))]
     #[patch(attribute(doc = r#"Auth token
@@ -405,6 +407,7 @@ pub struct AuthConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Keepalive")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct KeepaliveConfig {
     #[patch(attribute(doc = "Interval between keepalives"))]
     #[patch(attribute(clap(long = "keepalive-interval", id = "keepalive_interval")))]
@@ -444,6 +447,7 @@ impl Default for KeepaliveConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Socket")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct SocketConfig {
     #[patch(attribute(clap(long = "socket-sndbuf", id = "socket_sndbuf")))]
     #[patch(attribute(doc = r#"Socket send buffer size.
@@ -518,6 +522,7 @@ impl Default for SocketConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Logging")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct LogConfig {
     #[patch(attribute(doc = "Log level to use"))]
     #[patch(attribute(clap(long = "log-level", id = "log_level", value_enum)))]
@@ -536,6 +541,7 @@ impl Default for LogConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Config handling")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct ConfigMeta {
     #[cfg(windows)]
     #[patch(
@@ -564,6 +570,7 @@ pub struct ConfigMeta {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Network")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct NetworkConfig {
     #[patch(attribute(doc = "Route mode: default = routes per server/tun IPs; \
         noexec = none; lan = default + LAN routes"))]
@@ -586,6 +593,7 @@ pub struct NetworkConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Debug")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct DebugConfig {
     #[patch(attribute(doc = "File path to save wireshark keylog"))]
     #[patch(attribute(clap(long = "debug-keylog", id = "debug_keylog")))]
@@ -602,6 +610,7 @@ pub struct DebugConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Expresslane")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct ExpresslaneConfig {
     #[patch(attribute(clap(long = "expresslane-enabled", id = "expresslane_enabled")))]
     #[patch(empty_value = false)]
@@ -633,6 +642,7 @@ impl Default for ExpresslaneConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "PMTUD")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct PmtudConfig {
     #[patch(attribute(clap(long = "pmtud-enabled", id = "pmtud_enabled")))]
     #[patch(empty_value = false)]
@@ -651,6 +661,7 @@ pub struct PmtudConfig {
 )]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Codec")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct CodecConfig {
     #[patch(attribute(doc = "Enable inside packet encoding once connected \
         (only if a codec is set)"))]
@@ -664,6 +675,7 @@ pub struct CodecConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Tun")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct TunConfig {
     #[patch(attribute(clap(short = 't', long = "tun-name", id = "tun_name")))]
     #[patch(attribute(doc = "Tun device name to use"))]
@@ -717,6 +729,7 @@ impl Default for TunConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "IO-uring")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct IouringConfig {
     #[patch(attribute(clap(long = "tun-iouring-enabled", id = "tun_iouring_enabled")))]
     #[patch(empty_value = false)]
@@ -757,6 +770,7 @@ impl Default for IouringConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
 #[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
 #[patch(attribute(command(next_help_heading = "Wintun")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct WintunConfig {
     #[patch(attribute(clap(long = "tun-wintun-file", id = "tun_wintun_file")))]
     #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
@@ -798,6 +812,7 @@ impl Default for WintunConfig {
 #[derive(
     Clone, Default, Parser, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Substrate,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
     /// Server to connect to in `<hostname>:<port>` format
     pub server: String,
@@ -1601,6 +1616,20 @@ mod tests {
             assert_eq!(group_actual, group_expected, "{field}: group default lost");
             assert_eq!(entry_actual, entry_expected, "{field}: entry override lost");
         }
+    }
+
+    #[test]
+    fn unknown_key_inside_group_is_hard_error() {
+        let yaml = "keepalive:\n  interval: 10s\n  typo_key: 1\n";
+        let result = serde_saphyr::from_str::<ConfigPatch>(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_key_inside_connect_entry_errors() {
+        let yaml = "connect:\n  servers:\n    - server: 127.0.0.1:27690\n      typo_key: 1\n";
+        let result = serde_saphyr::from_str::<ConfigPatch>(yaml);
+        assert!(result.is_err());
     }
 
     #[test]
