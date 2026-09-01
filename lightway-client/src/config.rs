@@ -33,7 +33,7 @@ const DEFAULT_RCVBUF: ByteSize = ByteSize::mib(8);
 pub struct Config {
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(
-        doc = "Generate configure for single server in the format to path from `-c, --config-file`"
+        doc = "Generate config in the given format to the `-c, --config-file` path"
     ))]
     #[serde(skip_serializing)]
     #[schemars(skip)]
@@ -45,61 +45,17 @@ pub struct Config {
     #[schemars(skip)]
     pub config_file: PathBuf,
 
-    /// Servers to attempt to connect to. Configuration is only supported in
-    /// config file, not command line or environment variable
-    #[patch(attribute(clap(skip)))]
-    #[serde(default)]
-    #[serde(skip_serializing)]
-    #[schemars(skip)]
-    servers: Vec<ConnectionConfig>,
+    /// Connection defaults, inherited by every `servers` entry
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub connect: ConnectConfig,
 
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
-    Only used if `servers` is empty"#))]
-    /// socket address, ex: 127.0.0.1:27690
-    pub server: String,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = r#"Connection mode
-    Only used if `servers` is empty"#))]
-    pub mode: ConnectionType,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Server domain name
-    Only used if `servers` is empty"#))]
-    pub server_dn: String,
-
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"Cipher to use for encryption
-    Only used if `servers` is empty"#))]
-    pub cipher: Cipher,
-
-    #[patch(attribute(clap(long, hide = true)))]
-    #[patch(attribute(doc = r#"Auth token
-    If both token and user/pass are provided, token auth will
-    be used. user/pass will be ignored in this case"#))]
-    #[schemars(extend("format" = "password"))]
-    pub token: Option<String>,
-
-    #[patch(attribute(clap(short, long, hide = true)))]
-    #[patch(attribute(doc = "Username for auth"))]
-    pub user: Option<String>,
-
-    #[patch(attribute(clap(short, long, hide = true)))]
-    #[patch(attribute(doc = "Password for auth"))]
-    #[schemars(extend("format" = "password"))]
-    pub password: Option<String>,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"CA certificate
-    This can either be a path to the file, or a string starting with
-    "-----BEGIN CERTIFICATE-----""#))]
-    #[schemars(extend("format" = "textarea"))]
-    pub ca_cert: String,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Outside (wire) MTU"))]
-    pub outside_mtu: usize,
+    /// Credential defaults, inherited by every `servers` entry
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub auth: AuthConfig,
 
     /// Tun device configuration
     #[patch(nesting)]
@@ -114,26 +70,11 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "linux"))]
     pub tun_txqueuelen: u32,
 
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub keyshare: KeyShare,
-
     /// Keepalive configuration
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(flatten)))]
     pub keepalive: KeepaliveConfig,
-
-    // NOTE: also "Defer timeout" in mobile device
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"How long to wait before selecting the best connection.
-    If the preferred connection connects before the timeout, it will be used immediately."#)
-    )]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    /// ex: 2000ms
-    pub preferred_connection_wait_interval: Duration,
 
     /// Outside socket configuration
     #[patch(nesting)]
@@ -179,12 +120,6 @@ pub struct Config {
     #[patch(attribute(clap(flatten)))]
     pub debug: DebugConfig,
 
-    /// SNI header for TLS connections
-    #[cfg(feature = "mobile")]
-    #[patch(attribute(clap(skip)))]
-    #[schemars(extend("x-cfg" = "mobile"))]
-    pub sni_header: String,
-
     /// Config-file handling
     #[patch(nesting)]
     #[patch(attribute(serde(default)))]
@@ -201,68 +136,64 @@ pub struct Config {
 impl Config {
     /// The number of servers
     pub fn len(&self) -> usize {
-        if self.server.is_empty() {
-            self.servers.len()
-        } else {
-            self.servers.len() + 1
-        }
+        self.connect.servers.len()
     }
 
     /// Check if there is any server setting
     pub fn is_empty(&self) -> bool {
-        self.servers.is_empty() && self.server.is_empty()
+        self.connect.servers.is_empty()
     }
 
-    /// Take out configures for servers
-    /// and normalize the auth and ca of ConnectionConfig of servers
-    pub fn take_servers(&mut self) -> Result<Vec<ConnectionConfig>, Error> {
-        if self.servers.is_empty() {
-            self.servers = vec![ConnectionConfig {
-                server: self.server.clone(),
-                mode: self.mode,
-                server_dn: (!self.server_dn.is_empty())
-                    .then(|| std::mem::take(&mut self.server_dn)),
-                cipher: self.cipher,
-                outside_mtu: self.outside_mtu,
-                ..Default::default()
-            }];
+    /// Resolve every `connect.servers` entry into a fully populated
+    /// [`ResolvedConnection`]. Each field takes the entry's own value, else the
+    /// `connect` default, else the type default.
+    ///
+    /// Credentials are inherited group-wise, not per field: an entry that
+    /// supplies any of token/user/password uses only its own credentials, so a
+    /// global `auth.token` can never override an entry's explicit user/pass.
+    pub fn resolve_connections(&self) -> anyhow::Result<Vec<ResolvedConnection>> {
+        if self.connect.servers.is_empty() {
+            anyhow::bail!("connect.servers must contain at least one entry");
         }
-        let ca_content = if check_cert_header(&self.ca_cert) {
-            Some(self.ca_cert.clone())
-        } else {
-            // NOTE: we support a path input on desktop, we keep None if global cert is not set, and
-            // it is okay to use certs for each server, thees will be checked in following loop.
-            if cfg!(desktop) {
-                std::fs::read_to_string(&self.ca_cert).ok()
-            } else {
-                None
-            }
-        };
-        for server in self.servers.iter_mut() {
-            if server.user.is_none() && server.password.is_none() && server.token.is_none() {
-                server.user = self.user.clone();
-                server.password = self.password.clone();
-                server.token = self.token.clone();
-            }
-
-            if let Some(ref mut ca_cert) = server.ca_cert {
-                if !check_cert_header(&ca_cert) {
-                    // NOTE: we support a path input on desktop, but raise error if not found
-                    if cfg!(desktop) {
-                        *ca_cert = std::fs::read_to_string(&mut *ca_cert)
-                            .map_err(|_| Error::CaFileNotFound)?;
+        Ok(self
+            .connect
+            .servers
+            .iter()
+            .map(|e| {
+                let (token, user, password) =
+                    if e.token.is_some() || e.user.is_some() || e.password.is_some() {
+                        (e.token.clone(), e.user.clone(), e.password.clone())
                     } else {
-                        return Err(Error::InvalidCertificate);
-                    }
+                        (
+                            self.auth.token.clone(),
+                            self.auth.user.clone(),
+                            self.auth.password.clone(),
+                        )
+                    };
+                ResolvedConnection {
+                    server: e.server.clone(),
+                    mode: e.mode.unwrap_or(self.connect.mode),
+                    server_dn: e
+                        .server_dn
+                        .clone()
+                        .unwrap_or_else(|| self.connect.server_dn.clone()),
+                    cipher: e.cipher.unwrap_or(self.connect.cipher),
+                    keyshare: e.keyshare.unwrap_or(self.connect.keyshare),
+                    outside_mtu: e.outside_mtu.unwrap_or(self.connect.outside_mtu),
+                    ca_cert: e
+                        .ca_cert
+                        .clone()
+                        .unwrap_or_else(|| self.connect.ca_cert.clone()),
+                    sni_header: e
+                        .sni_header
+                        .clone()
+                        .unwrap_or_else(|| self.connect.sni_header.clone()),
+                    token,
+                    user,
+                    password,
                 }
-            } else {
-                if ca_content.is_none() {
-                    return Err(Error::CaFileNotFound);
-                }
-                server.ca_cert = ca_content.clone();
-            }
-        }
-        Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
+            })
+            .collect())
     }
 
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
@@ -276,14 +207,12 @@ impl Config {
             }
         }
 
-        let mut all_servers: Vec<(&str, ConnectionType)> = self
+        let all_servers: Vec<(&str, ConnectionType)> = self
+            .connect
             .servers
             .iter()
-            .map(|s| (s.server.as_str(), s.mode))
+            .map(|s| (s.server.as_str(), s.mode.unwrap_or(self.connect.mode)))
             .collect();
-        if !self.server.is_empty() {
-            all_servers.push((self.server.as_str(), self.mode));
-        }
 
         #[cfg(not(macos))]
         if self.socket.sndbuf != DEFAULT_SNDBUF {
@@ -350,24 +279,12 @@ impl Default for Config {
         Config {
             config_file: PathBuf::default(),
             generate: ConfigFormat::Yaml,
-            servers: Vec::default(),
-            server: String::default(),
-            mode: ConnectionType::Tcp,
-            server_dn: String::new(),
-            cipher: Cipher::Aes256,
-            token: None,
-            user: None,
-            password: None,
-            ca_cert: "./ca_cert.crt".to_string(),
-            outside_mtu: MAX_OUTSIDE_MTU,
+            connect: ConnectConfig::default(),
+            auth: AuthConfig::default(),
             tun: TunConfig::default(),
             #[cfg(linux)]
             tun_txqueuelen: 1000,
-            keyshare: KeyShare::default(),
             keepalive: KeepaliveConfig::default(),
-            preferred_connection_wait_interval: Duration::from_std_duration(
-                StdDuration::from_secs(0),
-            ),
             socket: SocketConfig::default(),
             #[cfg(desktop)]
             network: NetworkConfig::default(),
@@ -377,12 +294,111 @@ impl Default for Config {
             codec: CodecConfig::default(),
             #[cfg(feature = "debug")]
             debug: DebugConfig::default(),
-            #[cfg(feature = "mobile")]
-            sni_header: String::new(),
             config: ConfigMeta::default(),
             unknowns: HashMap::new(),
         }
     }
+}
+
+/// Connection defaults, inherited by every `servers` entry
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Connect")))]
+pub struct ConnectConfig {
+    #[patch(attribute(clap(short = 'm', long = "connect-mode", id = "connect_mode")))]
+    #[patch(attribute(doc = "Connection mode"))]
+    pub mode: ConnectionType,
+
+    #[patch(attribute(clap(long = "connect-server-dn", id = "connect_server_dn")))]
+    #[patch(attribute(doc = "Server domain name"))]
+    pub server_dn: String,
+
+    #[patch(attribute(clap(long = "connect-cipher", id = "connect_cipher", value_enum)))]
+    #[patch(attribute(doc = "Cipher to use for encryption"))]
+    pub cipher: Cipher,
+
+    #[patch(attribute(clap(long = "connect-keyshare", id = "connect_keyshare", value_enum)))]
+    #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
+    pub keyshare: KeyShare,
+
+    #[patch(attribute(clap(long = "connect-outside-mtu", id = "connect_outside_mtu")))]
+    #[patch(attribute(doc = "Outside (wire) MTU"))]
+    pub outside_mtu: usize,
+
+    #[patch(attribute(clap(long = "connect-ca-cert", id = "connect_ca_cert")))]
+    #[patch(attribute(doc = r#"CA certificate
+    This can either be a path to the file, or a string starting with
+    "-----BEGIN CERTIFICATE-----""#))]
+    #[schemars(extend("format" = "textarea"))]
+    pub ca_cert: String,
+
+    /// SNI header for TLS connections
+    #[patch(attribute(clap(skip)))]
+    pub sni_header: String,
+
+    // NOTE: also "Defer timeout" in mobile device
+    #[patch(attribute(clap(
+        long = "connect-preferred-wait-interval",
+        id = "connect_preferred_wait_interval"
+    )))]
+    #[patch(
+        attribute(doc = r#"How long to wait before selecting the best connection.
+    If the preferred connection connects before the timeout, it will be used immediately."#)
+    )]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 2000ms
+    pub preferred_wait_interval: Duration,
+
+    /// Servers to attempt to connect to, at least one entry is required.
+    /// Configuration is only supported in config file and environment
+    /// variable, not command line
+    #[patch(attribute(clap(skip)))]
+    #[patch(attribute(serde(default)))]
+    #[serde(default)]
+    pub servers: Vec<ConnectionConfig>,
+}
+
+impl Default for ConnectConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConnectionType::Tcp,
+            server_dn: String::new(),
+            cipher: Cipher::Aes256,
+            keyshare: KeyShare::default(),
+            outside_mtu: MAX_OUTSIDE_MTU,
+            ca_cert: "./ca_cert.crt".to_string(),
+            sni_header: String::new(),
+            preferred_wait_interval: Duration::from_std_duration(StdDuration::from_secs(0)),
+            servers: Vec::new(),
+        }
+    }
+}
+
+/// Credential defaults, inherited by every `servers` entry
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Auth")))]
+pub struct AuthConfig {
+    #[patch(attribute(clap(long = "auth-token", id = "auth_token", hide = true)))]
+    #[patch(attribute(doc = r#"Auth token
+    If both token and user/pass are provided, token auth will
+    be used. user/pass will be ignored in this case"#))]
+    #[schemars(extend("format" = "password"))]
+    pub token: Option<String>,
+
+    #[patch(attribute(clap(short = 'u', long = "auth-user", id = "auth_user", hide = true)))]
+    #[patch(attribute(doc = "Username for auth"))]
+    pub user: Option<String>,
+
+    #[patch(attribute(clap(
+        short = 'p',
+        long = "auth-password",
+        id = "auth_password",
+        hide = true
+    )))]
+    #[patch(attribute(doc = "Password for auth"))]
+    #[schemars(extend("format" = "password"))]
+    pub password: Option<String>,
 }
 
 /// Keepalive configuration
@@ -777,7 +793,8 @@ impl Default for WintunConfig {
     }
 }
 
-#[serde_inline_default::serde_inline_default]
+/// A single server entry. Every field but `server` falls back to the
+/// matching `connect`/`auth` default, see [`Config::resolve_connections`].
 #[derive(
     Clone, Default, Parser, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Substrate,
 )]
@@ -787,7 +804,7 @@ pub struct ConnectionConfig {
 
     /// Connection mode
     #[serde(default)]
-    pub mode: ConnectionType,
+    pub mode: Option<ConnectionType>,
 
     /// Server domain name
     #[serde(default)]
@@ -795,7 +812,11 @@ pub struct ConnectionConfig {
 
     /// Cipher to use for encryption
     #[serde(default)]
-    pub cipher: Cipher,
+    pub cipher: Option<Cipher>,
+
+    /// Key share group for post-quantum key exchange
+    #[serde(default)]
+    pub keyshare: Option<KeyShare>,
 
     /// Username for User/Pass Auth
     #[serde(default)]
@@ -810,35 +831,88 @@ pub struct ConnectionConfig {
     pub token: Option<String>,
 
     /// Outside mtu
-    #[serde_inline_default(MAX_OUTSIDE_MTU)]
-    pub outside_mtu: usize,
+    #[serde(default)]
+    pub outside_mtu: Option<usize>,
 
     /// The CA Cert content or Path
     #[serde(default)]
     pub ca_cert: Option<String>,
+
+    /// SNI header for TLS connections
+    #[serde(default)]
+    pub sni_header: Option<String>,
 }
 
-impl ConnectionConfig {
+/// A [`ConnectionConfig`] entry with every field resolved against the
+/// `connect`/`auth` defaults.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedConnection {
+    /// Server to connect to in `<hostname>:<port>` format
+    pub server: String,
+
+    /// Connection mode
+    pub mode: ConnectionType,
+
+    /// Server domain name
+    pub server_dn: String,
+
+    /// Cipher to use for encryption
+    pub cipher: Cipher,
+
+    /// Key share group for post-quantum key exchange
+    pub keyshare: KeyShare,
+
+    /// Outside mtu
+    pub outside_mtu: usize,
+
+    /// The CA Cert content or Path
+    pub ca_cert: String,
+
+    /// SNI header for TLS connections
+    pub sni_header: String,
+
+    /// Auth token
+    pub token: Option<String>,
+
+    /// Username for User/Pass Auth
+    pub user: Option<String>,
+
+    /// Password for User/Pass Auth
+    pub password: Option<String>,
+}
+
+impl ResolvedConnection {
     /// Try build auth from config
     pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
         take_auth(self.token.take(), self.user.take(), self.password.take())
     }
 
-    /// Try build CA from ca_crt
+    /// Certificate content of `ca_cert`, read from disk on desktop when it
+    /// holds a path rather than an inline PEM
+    pub fn load_ca_content(&self) -> Result<String, Error> {
+        if check_cert_header(&self.ca_cert) {
+            return Ok(self.ca_cert.clone());
+        }
+        // NOTE: we support a path input on desktop only
+        if cfg!(desktop) {
+            std::fs::read_to_string(&self.ca_cert).map_err(|_| Error::CaFileNotFound {
+                path: self.ca_cert.clone(),
+            })
+        } else {
+            Err(Error::InvalidCertificate)
+        }
+    }
+
+    /// Try build CA from ca_cert
     #[cfg(feature = "mobile")]
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-        self.ca_cert
-            .as_ref()
-            .map(|ca| {
-                if check_cert_header(ca) {
-                    Ok(lightway_core::tls::RootCertificate::PemBuffer(
-                        ca.as_bytes(),
-                    ))
-                } else {
-                    Err(Error::InvalidCertificate)
-                }
-            })
-            .ok_or(Error::InvalidCertificate)?
+        if check_cert_header(&self.ca_cert) {
+            Ok(lightway_core::tls::RootCertificate::PemBuffer(
+                self.ca_cert.as_bytes(),
+            ))
+        } else {
+            Err(Error::InvalidCertificate)
+        }
     }
 
     /// Try build SocketAddress from server field
@@ -875,8 +949,11 @@ pub enum Error {
     InsufficientAuth,
 
     /// No such Ca file from user's input
-    #[error("Ca file is absent")]
-    CaFileNotFound,
+    #[error("Ca file is absent: {path}")]
+    CaFileNotFound {
+        /// The `ca_cert` value that could not be read
+        path: String,
+    },
 }
 
 fn take_auth(
@@ -1003,20 +1080,40 @@ mod tests {
     use schemars::SchemaGenerator;
     use test_case::test_case;
 
-    #[test_case("../tests/client/client_config.yaml", true, 0)]
+    /// One resolved field checked in both directions:
+    /// `(field, (group-default actual, expected), (entry-override actual, expected))`
+    type FieldCheck = (&'static str, (String, String), (String, String));
+
+    fn tcp_entry(server: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            server: server.to_string(),
+            mode: Some(ConnectionType::Tcp),
+            ..Default::default()
+        }
+    }
+
+    #[test_case("../tests/client/client_config.yaml", 1, "server:27690")]
     #[test_case(
         "../tests/client/parallel_connect/client_config.tcp_then_udp.yaml",
-        false,
-        2
+        2,
+        "server_tcp:27690"
     )]
-    #[test_case("../tests/client/parallel_connect/client_config.tcp.yaml", false, 10)]
+    #[test_case(
+        "../tests/client/parallel_connect/client_config.tcp.yaml",
+        10,
+        "server:27691"
+    )]
     #[test_case(
         "../tests/client/parallel_connect/client_config.udp_then_tcp.yaml",
-        false,
-        2
+        2,
+        "server_udp:27690"
     )]
-    #[test_case("../tests/client/parallel_connect/client_config.udp.yaml", false, 10)]
-    fn test_parse_config(config_file: &str, has_top_level_server: bool, servers_len: usize) {
+    #[test_case(
+        "../tests/client/parallel_connect/client_config.udp.yaml",
+        10,
+        "server:27691"
+    )]
+    fn test_parse_config(config_file: &str, servers_len: usize, first_server: &str) {
         let matches =
             ConfigPatch::try_parse_from(["lightway-client", "--config-file", config_file]);
         let mut config = Config::default();
@@ -1037,8 +1134,22 @@ mod tests {
 
         config.apply(matches.unwrap());
 
-        assert_eq!(config.server.is_empty(), !has_top_level_server);
-        assert_eq!(config.servers.len(), servers_len);
+        // Every fixture lists its servers under connect
+        assert_eq!(config.connect.servers.len(), servers_len);
+        assert_eq!(config.connect.servers[0].server, first_server);
+        // Every fixture sets connect.outside_mtu and the auth credentials
+        assert_eq!(config.connect.outside_mtu, 1500);
+        assert_eq!(config.auth.user.as_deref(), Some("user"));
+        assert_eq!(config.auth.password.as_deref(), Some("password"));
+        // Resolution fills every entry from the entry itself or the group defaults
+        let resolved = config.resolve_connections().unwrap();
+        assert_eq!(resolved.len(), servers_len);
+        assert_eq!(resolved[0].server, first_server);
+        assert_eq!(resolved[0].server_dn, "goaway.com");
+        assert_eq!(resolved[0].cipher, Cipher::Aes256);
+        assert_eq!(resolved[0].outside_mtu, 1500);
+        assert_eq!(resolved[0].user.as_deref(), Some("user"));
+        assert!(!resolved[0].ca_cert.is_empty());
         // env layer overrides the fixture's keepalive.interval (10s) with 33s
         assert_eq!(
             config.keepalive.interval,
@@ -1183,8 +1294,7 @@ mod tests {
     #[test]
     fn validate_sndbuf_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
-        config.mode = ConnectionType::Tcp;
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
         config.socket.sndbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
@@ -1218,8 +1328,7 @@ mod tests {
     #[test]
     fn validate_rcvbuf_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
-        config.mode = ConnectionType::Tcp;
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
         config.socket.rcvbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
@@ -1242,9 +1351,8 @@ mod tests {
     #[test]
     fn validate_pmtud_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
         config.pmtud.enabled = true;
-        config.mode = ConnectionType::Tcp;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
             "enable_pmtud is set but cannot be applied to this TCP connections"
@@ -1258,6 +1366,241 @@ mod tests {
         let mut config = Config::default();
         config.tun.wintun.ring_capacity = ByteSize::mib(3);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resolve_precedence_entry_over_connect_over_default() {
+        let mut config = Config::default();
+        config.connect.cipher = Cipher::Chacha20;
+        config.auth.user = Some("global".into());
+        config.connect.servers = vec![
+            ConnectionConfig {
+                server: "a:1".into(),
+                ..Default::default()
+            },
+            ConnectionConfig {
+                server: "b:2".into(),
+                cipher: Some(Cipher::Aes256),
+                user: Some("per-entry".into()),
+                ..Default::default()
+            },
+        ];
+        let resolved = config.resolve_connections().unwrap();
+        assert_eq!(resolved[0].cipher, Cipher::Chacha20); // connect default
+        assert_eq!(resolved[0].user.as_deref(), Some("global")); // auth fallback
+        assert_eq!(resolved[1].cipher, Cipher::Aes256); // entry wins
+        assert_eq!(resolved[1].user.as_deref(), Some("per-entry"));
+    }
+
+    #[test]
+    fn resolve_requires_at_least_one_server() {
+        let config = Config::default();
+        assert!(config.resolve_connections().is_err());
+    }
+
+    #[test]
+    fn resolve_credentials_are_group_wise() {
+        let mut config = Config::default();
+        config.auth.token = Some("global-token".into());
+        config.auth.user = Some("global-user".into());
+        config.auth.password = Some("global-pass".into());
+        config.connect.servers = vec![
+            // Supplies user+password: the global token must not leak in and
+            // downgrade the connection to token auth
+            ConnectionConfig {
+                server: "a:1".into(),
+                user: Some("entry-user".into()),
+                password: Some("entry-pass".into()),
+                ..Default::default()
+            },
+            // Supplies user only: stays incomplete so auth fails loudly
+            ConnectionConfig {
+                server: "b:2".into(),
+                user: Some("lonely-user".into()),
+                ..Default::default()
+            },
+            // Supplies a token only: the global user/pass must not leak in
+            ConnectionConfig {
+                server: "c:3".into(),
+                token: Some("entry-token".into()),
+                ..Default::default()
+            },
+            // Supplies nothing: inherits the whole auth group
+            ConnectionConfig {
+                server: "d:4".into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut resolved = config.resolve_connections().unwrap();
+
+        assert_eq!(resolved[0].token, None);
+        assert_eq!(resolved[0].user.as_deref(), Some("entry-user"));
+        assert_eq!(resolved[0].password.as_deref(), Some("entry-pass"));
+        assert!(matches!(
+            resolved[0].take_auth().unwrap(),
+            AuthMethod::UserPass { .. }
+        ));
+
+        assert_eq!(resolved[1].token, None);
+        assert_eq!(resolved[1].user.as_deref(), Some("lonely-user"));
+        assert_eq!(resolved[1].password, None);
+        assert!(matches!(
+            resolved[1].take_auth(),
+            Err(Error::InsufficientAuth)
+        ));
+
+        assert_eq!(resolved[2].token.as_deref(), Some("entry-token"));
+        assert_eq!(resolved[2].user, None);
+        assert_eq!(resolved[2].password, None);
+
+        assert_eq!(resolved[3].token.as_deref(), Some("global-token"));
+        assert_eq!(resolved[3].user.as_deref(), Some("global-user"));
+        assert_eq!(resolved[3].password.as_deref(), Some("global-pass"));
+    }
+
+    #[test]
+    fn resolve_covers_every_field_in_both_directions() {
+        // Every connect.*/auth.* default moved off its type default
+        let mut config = Config::default();
+        config.connect.mode = ConnectionType::Udp;
+        config.connect.server_dn = "group.example".into();
+        config.connect.cipher = Cipher::Chacha20;
+        {
+            config.connect.keyshare = KeyShare::X25519Mlkem768;
+        }
+        config.connect.outside_mtu = 1400;
+        config.connect.ca_cert = "group-ca.crt".into();
+        config.connect.sni_header = "group.sni".into();
+        config.auth.token = Some("group-token".into());
+        config.auth.user = Some("group-user".into());
+        config.auth.password = Some("group-pass".into());
+
+        config.connect.servers = vec![
+            // Sets nothing: every field falls back to the group default
+            ConnectionConfig {
+                server: "group:1".into(),
+                ..Default::default()
+            },
+            // Sets everything: every field comes from the entry
+            ConnectionConfig {
+                server: "entry:2".into(),
+                mode: Some(ConnectionType::Tcp),
+                server_dn: Some("entry.example".into()),
+                cipher: Some(Cipher::Aes256),
+                keyshare: Some(KeyShare::default()),
+                outside_mtu: Some(1300),
+                ca_cert: Some("entry-ca.crt".into()),
+                sni_header: Some("entry.sni".into()),
+                token: Some("entry-token".into()),
+                user: Some("entry-user".into()),
+                password: Some("entry-pass".into()),
+            },
+        ];
+
+        let resolved = config.resolve_connections().unwrap();
+        let (group, entry) = (&resolved[0], &resolved[1]);
+
+        let mut checks: Vec<FieldCheck> = vec![
+            (
+                "mode",
+                (
+                    format!("{:?}", group.mode),
+                    format!("{:?}", ConnectionType::Udp),
+                ),
+                (
+                    format!("{:?}", entry.mode),
+                    format!("{:?}", ConnectionType::Tcp),
+                ),
+            ),
+            (
+                "server_dn",
+                (group.server_dn.clone(), "group.example".into()),
+                (entry.server_dn.clone(), "entry.example".into()),
+            ),
+            (
+                "cipher",
+                (
+                    format!("{:?}", group.cipher),
+                    format!("{:?}", Cipher::Chacha20),
+                ),
+                (
+                    format!("{:?}", entry.cipher),
+                    format!("{:?}", Cipher::Aes256),
+                ),
+            ),
+            (
+                "outside_mtu",
+                (group.outside_mtu.to_string(), "1400".into()),
+                (entry.outside_mtu.to_string(), "1300".into()),
+            ),
+            (
+                "ca_cert",
+                (group.ca_cert.clone(), "group-ca.crt".into()),
+                (entry.ca_cert.clone(), "entry-ca.crt".into()),
+            ),
+            (
+                "sni_header",
+                (group.sni_header.clone(), "group.sni".into()),
+                (entry.sni_header.clone(), "entry.sni".into()),
+            ),
+            (
+                "token",
+                (
+                    format!("{:?}", group.token),
+                    format!("{:?}", Some("group-token")),
+                ),
+                (
+                    format!("{:?}", entry.token),
+                    format!("{:?}", Some("entry-token")),
+                ),
+            ),
+            (
+                "user",
+                (
+                    format!("{:?}", group.user),
+                    format!("{:?}", Some("group-user")),
+                ),
+                (
+                    format!("{:?}", entry.user),
+                    format!("{:?}", Some("entry-user")),
+                ),
+            ),
+            (
+                "password",
+                (
+                    format!("{:?}", group.password),
+                    format!("{:?}", Some("group-pass")),
+                ),
+                (
+                    format!("{:?}", entry.password),
+                    format!("{:?}", Some("entry-pass")),
+                ),
+            ),
+            (
+                "server",
+                (group.server.clone(), "group:1".into()),
+                (entry.server.clone(), "entry:2".into()),
+            ),
+        ];
+        // On boringssl `KeyShare` has a single variant, so the entry branch
+        // cannot differ from the group one there; on wolfSSL it does.
+        checks.push((
+            "keyshare",
+            (
+                format!("{:?}", group.keyshare),
+                format!("{:?}", KeyShare::X25519Mlkem768),
+            ),
+            (
+                format!("{:?}", entry.keyshare),
+                format!("{:?}", KeyShare::default()),
+            ),
+        ));
+
+        for (field, (group_actual, group_expected), (entry_actual, entry_expected)) in checks {
+            assert_eq!(group_actual, group_expected, "{field}: group default lost");
+            assert_eq!(entry_actual, entry_expected, "{field}: entry override lost");
+        }
     }
 
     #[test]

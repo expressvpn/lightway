@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         };
     }
 
-    let (mut config, startup_logs) = Config::load(None).await?;
+    let (config, startup_logs) = Config::load(None).await?;
 
     validate_configuration_file_path(&config.config_file, Validate::OwnerOnly).with_context(
         || {
@@ -123,7 +123,15 @@ async fn main() -> Result<()> {
 
     let config_reload_signal = spawn_reload_event_handler(&config, config.config_file.clone());
 
-    let servers = config.take_servers()?;
+    let servers = config.resolve_connections()?;
+
+    // Fail fast: a bad CA here would otherwise only surface as every connection
+    // failing to build, reported as "At least one server should be specified".
+    for server in servers.iter() {
+        server
+            .load_ca_content()
+            .with_context(|| format!("Invalid CA certificate for server {}", server.server))?;
+    }
 
     let client_config = lightway_client::ClientConfig::<()>::try_from_reload_sig_and_config(
         config_reload_signal,

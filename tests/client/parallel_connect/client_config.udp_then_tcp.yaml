@@ -1,14 +1,20 @@
 ---
-servers:
-  - server: server_udp:27690
-    mode: udp
-    server_dn: goaway.com
-    cipher: aes256
-  - server: server_tcp:27690
-    mode: tcp
-    server_dn: goaway.com
-    cipher: aes256
-ca_cert: "tests/certs/ca.crt"
+connect:
+  ca_cert: "tests/certs/ca.crt"
+  outside_mtu: 1500
+  preferred_wait_interval: 2s
+  servers:
+    - server: server_udp:27690
+      mode: udp
+      server_dn: goaway.com
+      cipher: aes256
+    - server: server_tcp:27690
+      mode: tcp
+      server_dn: goaway.com
+      cipher: aes256
+auth:
+  user: user
+  password: password
 tun:
   name: lightway
   local_ip: 100.64.0.6
@@ -20,9 +26,6 @@ tun:
     # sqpoll_idle_time: 100ms
 log:
   level: info
-user: user
-password: password
-outside_mtu: 1500
 keepalive:
   interval: 10s
   timeout: 60s
@@ -34,4 +37,3 @@ pmtud:
 network:
   route_mode: default
   dns_config_mode: noexec
-preferred_connection_wait_interval: 2s
