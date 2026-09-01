@@ -1943,7 +1943,6 @@ dependencies = [
  "route_manager",
  "schemars 1.2.2",
  "serde",
- "serde-env",
  "serde-inline-default",
  "serde-saphyr",
  "serde_json",
