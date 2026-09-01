@@ -3,6 +3,7 @@ use lightway_app_utils::{
     ConnectionTicker, EventStreamCallback, PacketCodecFactory, connection_ticker_cb,
 };
 use lightway_core::*;
+use rcgen::RsaKeySize;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -15,7 +16,7 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 pub mod common;
-use crate::common::{certgen::gen_shared_testing_pki, packet_codec::BlackHolePacketCodecFactory};
+use crate::common::{certgen::TestPki, packet_codec::BlackHolePacketCodecFactory};
 use crate::common::{connection::*, get_test_timeout};
 
 async fn run_test_tcp<S: TestSock>(
@@ -39,11 +40,12 @@ async fn run_test<S: TestSock>(
 ) -> Arc<Mutex<Option<AuthMethod>>> {
     let (auth, last_method) = TestAuth::new();
 
-    // Generate the shared test PKI before the timeout window.
-    // RSA keygen is very slow on QEMU. (especially on RISCV).
-    gen_shared_testing_pki();
+    // Take the shared test PKI before the timeout window: RSA keygen is very
+    // slow on QEMU (especially on RISCV) and only happens on first use.
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
 
     let test = async move {
+        let (server_cert, server_key) = pki.server_secrets();
         tokio::join!(
             server(
                 server_sock,
@@ -52,6 +54,8 @@ async fn run_test<S: TestSock>(
                 enable_expresslane.then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
                 None,
                 None,
+                server_cert,
+                server_key,
             ),
             client(
                 client_sock,
@@ -61,6 +65,7 @@ async fn run_test<S: TestSock>(
                 enable_codec,
                 enable_expresslane,
                 use_versioned_token,
+                pki.root_ca(),
             )
         )
     };
@@ -138,9 +143,20 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
     };
 
     // Server reflects inside data and ACKs the client's encoding requests.
-    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None));
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (server_cert, server_key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        auth,
+        pqc,
+        None,
+        None,
+        None,
+        server_cert,
+        server_key,
+    ));
 
-    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+    let ca_cert = pki.root_ca();
     let (tun, _inside_rx) = ChannelTun::new();
     let (event_cb, mut event_stream) = EventStreamCallback::new();
 
@@ -366,7 +382,7 @@ async fn test_stream_connection_versioned_token() {
 }
 
 #[test_case(None; "No server domain name")]
-#[test_case(Some(common::certgen::TEST_SERVER_DOMAIN); "Valid server domain name")]
+#[test_case(Some(TestPki::SERVER_DOMAIN); "Valid server domain name")]
 #[cfg_attr(boringssl, test_case(Some("invalid") => panics "TLS Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
 #[cfg_attr(wolfssl, test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
 #[tokio::test]
@@ -382,13 +398,34 @@ async fn test_server_dn(server_dn: Option<&str>) {
 
     let auth = Arc::new(TestAuth::default());
 
-    // Generate the shared test PKI *before the timed window* to prevent flaky tests. (see run_test).
-    gen_shared_testing_pki();
+    // Take the shared test PKI *before the timed window* to prevent flaky tests. (see run_test).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
 
     let test = async move {
         tokio::join!(
-            server(server_sock, auth, pqc, None, None, None),
-            client(client_sock, None, pqc, server_dn, false, false, false)
+            {
+                let (server_cert, server_key) = pki.server_secrets();
+                server(
+                    server_sock,
+                    auth,
+                    pqc,
+                    None,
+                    None,
+                    None,
+                    server_cert,
+                    server_key,
+                )
+            },
+            client(
+                client_sock,
+                None,
+                pqc,
+                server_dn,
+                false,
+                false,
+                false,
+                pki.root_ca()
+            )
         )
     };
 
@@ -408,7 +445,7 @@ async fn mark_offload_activity_bumps_by_rule() {
     let (client_sock, _server_sock) = UnixStream::pair().expect("UnixStream");
     let client_sock = Arc::new(TestStreamSock(client_sock));
 
-    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+    let ca_cert = TestPki::get_valid(2, RsaKeySize::_2048).root_ca();
     let (ticker, _ticker_task) = ConnectionTicker::new();
     let state = ConnectionState { ticker };
 
@@ -471,6 +508,8 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
     let (conn_tx, conn_rx) = oneshot::channel();
 
     let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (server_cert, server_key) = pki.server_secrets();
     let server_task = server(
         server_sock,
         auth,
@@ -481,6 +520,8 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         Some(INTERVAL),
         Some(conn_tx),
         None,
+        server_cert,
+        server_key,
     );
 
     let client_task = async move {
@@ -488,7 +529,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         // cannot deadlock.
         let server_conn = conn_rx.await.expect("server conn handle");
 
-        let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+        let ca_cert = pki.root_ca();
         let (tun, _inside_rx) = ChannelTun::new();
         let (ticker, ticker_task) = ConnectionTicker::new();
         let state = ConnectionState { ticker };
@@ -629,6 +670,8 @@ async fn expresslane_health_probe(
     let auth = Arc::new(TestAuth::default());
     // A long rotation interval on purpose: rotation must not interfere with
     // the health-check windows this probe measures.
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (server_cert, server_key) = pki.server_secrets();
     let server_task = server(
         server_sock,
         auth,
@@ -636,10 +679,12 @@ async fn expresslane_health_probe(
         Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
         None,
         server_metrics,
+        server_cert,
+        server_key,
     );
 
     let client_task = async move {
-        let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+        let ca_cert = pki.root_ca();
         let (tun, mut inside_rx) = ChannelTun::new();
         let (ticker, ticker_task) = ConnectionTicker::new();
         let state = ConnectionState { ticker };
@@ -929,9 +974,9 @@ async fn pmtud_reports_status_changes() {
         }
     }
 
-    // Generate the shared test PKI before the timeout window (RSA keygen is
-    // very slow on QEMU).
-    gen_shared_testing_pki();
+    // Take the shared test PKI before the timeout window (RSA keygen is very
+    // slow on QEMU, and only happens on first use).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
 
     let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
     let server_sock = Arc::new(TestDatagramSock(server_sock));
@@ -944,10 +989,11 @@ async fn pmtud_reports_status_changes() {
     };
 
     // The server answers every probe Ping with a Pong.
-    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None));
+    let (cert, key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None, cert, key));
 
     let log: Log = Default::default();
-    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+    let ca_cert = pki.root_ca();
     let (tun, _inside_rx) = ChannelTun::new();
     let (event_cb, mut event_stream) = EventStreamCallback::new();
     let (ticker, ticker_task) = ConnectionTicker::new();

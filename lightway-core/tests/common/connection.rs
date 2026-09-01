@@ -18,8 +18,6 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 
-use crate::common::certgen::gen_shared_testing_pki;
-
 #[derive(Default)]
 pub struct TestAuth {
     /// Captures the last [`AuthMethod`] seen by [`ServerAuth::authorize`]
@@ -225,6 +223,7 @@ impl OutsideIOSendCallback for TestStreamSock {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn server<S: TestSock>(
     sock: Arc<S>,
     auth: Arc<TestAuth>,
@@ -232,10 +231,9 @@ pub async fn server<S: TestSock>(
     expresslane: Option<std::time::Duration>,
     conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
     metrics: Option<ExpresslaneMetricsType>,
+    server_cert: Secret<'_>,
+    server_key: Secret<'_>,
 ) {
-    let pki = gen_shared_testing_pki();
-    let server_key = Secret::Asn1Buffer(&pki.server.key_der);
-    let server_cert = Secret::Asn1Buffer(&pki.server.cert_der);
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -417,6 +415,7 @@ pub enum ClientTestState {
     MessageSent,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn client<S: TestSock>(
     sock: Arc<S>,
     cipher: Option<Cipher>,
@@ -425,8 +424,9 @@ pub async fn client<S: TestSock>(
     enable_codec: bool,
     enable_expresslane: bool,
     use_versioned_token: bool,
+    root_ca: RootCertificate<'_>,
 ) {
-    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+    let ca_cert = root_ca;
     let (tun, mut inside_rx) = ChannelTun::new();
     let client = Arc::new(Client);
 
