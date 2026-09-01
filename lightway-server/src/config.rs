@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use anyhow::Context;
 use bytesize::ByteSize;
 use clap::Parser;
 use ipnet::Ipv4Net;
@@ -11,8 +12,10 @@ use serde::Deserialize;
 use std::time::Duration as StdDuration;
 use struct_patch::{Patch, Substrate};
 
-use lightway_app_utils::args::{
-    ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration,
+use lightway_app_utils::{
+    Validate,
+    args::{ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration},
+    validate_configuration_file_path,
 };
 
 // NOTE
@@ -300,6 +303,59 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+impl Config {
+    pub async fn load() -> anyhow::Result<(Self, Vec<String>)> {
+        let mut cli_patch = ConfigPatch::parse();
+
+        let path = cli_patch
+            .config_file
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Config file not specified"))?;
+
+        validate_configuration_file_path(&path, Validate::AllowWorldRead)
+            .with_context(|| format!("Invalid configuration file {}", path.display()))?;
+
+        let content = tokio::fs::read_to_string(&path).await?;
+        let file_patch = serde_saphyr::from_str::<ConfigPatch>(&content)?;
+
+        let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_SERVER")?;
+
+        let mut config = Config::default();
+        let mut file_fields = String::new();
+        let mut env_fields = String::new();
+        let mut cli_fields = String::new();
+
+        config.apply_with_log(file_patch, |field| {
+            if field != "unknowns" {
+                file_fields.push_str(&format!(", {field}"))
+            }
+        });
+        config.apply_with_log(env_patch, |field| {
+            if field != "unknowns" {
+                env_fields.push_str(&format!(", {field}"))
+            }
+        });
+        config.apply_with_log(cli_patch, |field| {
+            if field != "unknowns" {
+                cli_fields.push_str(&format!(", {field}"))
+            }
+        });
+
+        let mut logs = Vec::new();
+        if !file_fields.is_empty() {
+            logs.push(format!("config file set: {}", &file_fields[2..]));
+        }
+        if !env_fields.is_empty() {
+            logs.push(format!("environment var: {}", &env_fields[2..]));
+        }
+        if !cli_fields.is_empty() {
+            logs.push(format!("commandline arg: {}", &cli_fields[2..]));
+        }
+
+        Ok((config, logs))
     }
 }
 

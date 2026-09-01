@@ -11,9 +11,12 @@ use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, Version};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::{Patch, Substrate};
+
+static CLI_OPTIONS: OnceLock<ConfigPatch> = OnceLock::new();
 
 const DEFAULT_SNDBUF: ByteSize = ByteSize::mib(8);
 const DEFAULT_RCVBUF: ByteSize = ByteSize::mib(8);
@@ -714,6 +717,89 @@ fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Sche
         "^[0-9]+(\\.[0-9]+)?\\s*(EB|EIB|GB|GIB|KB|KIB|MB|MIB|PB|PIB|TB|TIB|eb|eib|gb|gib|kb|kib|mb|mib|pb|pib|tb|tib)$".into(),
     );
     schema
+}
+
+impl Config {
+    pub fn cli_options() -> &'static ConfigPatch {
+        CLI_OPTIONS.get_or_init(ConfigPatch::parse)
+    }
+
+    pub async fn load(config_file: Option<&PathBuf>) -> anyhow::Result<(Self, Vec<String>)> {
+        let cli_options = Self::cli_options();
+
+        let path = match config_file {
+            Some(p) => p,
+            None => cli_options
+                .config_file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Config file not specified"))?,
+        };
+
+        #[cfg(windows)]
+        let file_patch = {
+            use crate::platform::windows::crypto::decrypt_dpapi_config_file;
+            use windows_dpapi::Scope::User;
+
+            let content = if cli_options.enable_dpapi {
+                tracing::info!("DPAPI decryption enabled for config file");
+                decrypt_dpapi_config_file(path, User).map_err(|e| {
+                    anyhow::anyhow!("Failed to decrypt DPAPI-protected config file: {e}")
+                })?
+            } else {
+                tracing::debug!("Loading config file directly (no DPAPI)");
+                tokio::fs::read_to_string(path).await?
+            };
+            serde_saphyr::from_str::<ConfigPatch>(&content)?
+        };
+        #[cfg(not(windows))]
+        let file_patch = {
+            let content = tokio::fs::read_to_string(path).await?;
+            serde_saphyr::from_str::<ConfigPatch>(&content)?
+        };
+
+        let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
+        let mut cli_patch = cli_options.clone();
+        cli_patch.config_file = None;
+        cli_patch.generate = None;
+
+        let mut config = Config {
+            config_file: path.to_path_buf(),
+            ..Default::default()
+        };
+
+        let mut file_fields = String::new();
+        let mut env_fields = String::new();
+        let mut cli_fields = String::new();
+
+        config.apply_with_log(file_patch, |field| {
+            if field != "unknowns" {
+                file_fields.push_str(&format!(", {field}"))
+            }
+        });
+        config.apply_with_log(env_patch, |field| {
+            if field != "unknowns" {
+                env_fields.push_str(&format!(", {field}"))
+            }
+        });
+        config.apply_with_log(cli_patch, |field| {
+            if field != "unknowns" {
+                cli_fields.push_str(&format!(", {field}"))
+            }
+        });
+
+        let mut logs = Vec::new();
+        if !file_fields.is_empty() {
+            logs.push(format!("config file set: {}", &file_fields[2..]));
+        }
+        if !env_fields.is_empty() {
+            logs.push(format!("environment var: {}", &env_fields[2..]));
+        }
+        if !cli_fields.is_empty() {
+            logs.push(format!("commandline arg: {}", &cli_fields[2..]));
+        }
+
+        Ok((config, logs))
+    }
 }
 
 // Note: it easier to see what is different from default in each validate testcase
