@@ -11,7 +11,10 @@ use tokio::net::UnixStream;
 
 pub mod common;
 use crate::common::certgen::{Defect, Link, TestPki};
-use crate::common::connection::{PQCrypto, TestAuth, TestSock, TestStreamSock, client, server};
+use crate::common::connection::{
+    PQCrypto, TestAuth, TestClientConfig, TestServerConfig, TestSock, TestStreamSock, client,
+    server,
+};
 use crate::common::get_test_timeout;
 use rcgen::RsaKeySize;
 
@@ -26,16 +29,29 @@ async fn handshake(pki: &'static TestPki) -> Result<(), String> {
         let pqc = PQCrypto::default();
         let (cert, key) = pki.server_secrets();
         tokio::join!(
-            server(server_sock, auth, pqc, None, None, None, cert, key,),
+            server(
+                server_sock,
+                TestServerConfig {
+                    auth,
+                    pqc,
+                    expresslane: None,
+                    conn_out: None,
+                    metrics: None,
+                    cert,
+                    key,
+                },
+            ),
             client(
                 client_sock,
-                None,
-                pqc,
-                None,
-                false,
-                false,
-                false,
-                pki.root_ca(),
+                TestClientConfig {
+                    cipher: None,
+                    pqc,
+                    server_dn: None,
+                    enable_codec: false,
+                    enable_expresslane: false,
+                    use_versioned_token: false,
+                    root_ca: pki.root_ca(),
+                },
             )
         )
     });

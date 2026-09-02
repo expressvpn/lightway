@@ -223,17 +223,27 @@ impl OutsideIOSendCallback for TestStreamSock {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn server<S: TestSock>(
-    sock: Arc<S>,
-    auth: Arc<TestAuth>,
-    pqc: PQCrypto,
-    expresslane: Option<std::time::Duration>,
-    conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
-    metrics: Option<ExpresslaneMetricsType>,
-    server_cert: Secret<'_>,
-    server_key: Secret<'_>,
-) {
+pub struct TestServerConfig<'a> {
+    pub auth: Arc<TestAuth>,
+    pub pqc: PQCrypto,
+    pub expresslane: Option<std::time::Duration>,
+    pub conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
+    pub metrics: Option<ExpresslaneMetricsType>,
+    pub cert: Secret<'a>,
+    pub key: Secret<'a>,
+}
+
+pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
+    let TestServerConfig {
+        auth,
+        pqc,
+        expresslane,
+        conn_out,
+        metrics,
+        cert: server_cert,
+        key: server_key,
+    } = config;
+
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -415,18 +425,27 @@ pub enum ClientTestState {
     MessageSent,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn client<S: TestSock>(
-    sock: Arc<S>,
-    cipher: Option<Cipher>,
-    pqc: PQCrypto,
-    server_dn: Option<&str>,
-    enable_codec: bool,
-    enable_expresslane: bool,
-    use_versioned_token: bool,
-    root_ca: RootCertificate<'_>,
-) {
-    let ca_cert = root_ca;
+pub struct TestClientConfig<'a> {
+    pub cipher: Option<Cipher>,
+    pub pqc: PQCrypto,
+    pub server_dn: Option<&'a str>,
+    pub enable_codec: bool,
+    pub enable_expresslane: bool,
+    pub use_versioned_token: bool,
+    pub root_ca: RootCertificate<'a>,
+}
+
+pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
+    let TestClientConfig {
+        cipher,
+        pqc,
+        server_dn,
+        enable_codec,
+        enable_expresslane,
+        use_versioned_token,
+        root_ca: ca_cert,
+    } = config;
+
     let (tun, mut inside_rx) = ChannelTun::new();
     let client = Arc::new(Client);
 

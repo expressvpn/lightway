@@ -45,27 +45,32 @@ async fn run_test<S: TestSock>(
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
 
     let test = async move {
-        let (server_cert, server_key) = pki.server_secrets();
+        let (cert, key) = pki.server_secrets();
         tokio::join!(
             server(
                 server_sock,
-                auth,
-                pqc,
-                enable_expresslane.then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
-                None,
-                None,
-                server_cert,
-                server_key,
+                TestServerConfig {
+                    auth,
+                    pqc,
+                    expresslane: enable_expresslane
+                        .then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+                    conn_out: None,
+                    metrics: None,
+                    cert,
+                    key,
+                },
             ),
             client(
                 client_sock,
-                cipher,
-                pqc,
-                None,
-                enable_codec,
-                enable_expresslane,
-                use_versioned_token,
-                pki.root_ca(),
+                TestClientConfig {
+                    cipher,
+                    pqc,
+                    server_dn: None,
+                    enable_codec,
+                    enable_expresslane,
+                    use_versioned_token,
+                    root_ca: pki.root_ca(),
+                },
             )
         )
     };
@@ -144,16 +149,18 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
 
     // Server reflects inside data and ACKs the client's encoding requests.
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
-    let (server_cert, server_key) = pki.server_secrets();
+    let (cert, key) = pki.server_secrets();
     let mut server_task = tokio::spawn(server(
         server_sock,
-        auth,
-        pqc,
-        None,
-        None,
-        None,
-        server_cert,
-        server_key,
+        TestServerConfig {
+            auth,
+            pqc,
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            cert,
+            key,
+        },
     ));
 
     let ca_cert = pki.root_ca();
@@ -404,27 +411,31 @@ async fn test_server_dn(server_dn: Option<&str>) {
     let test = async move {
         tokio::join!(
             {
-                let (server_cert, server_key) = pki.server_secrets();
+                let (cert, key) = pki.server_secrets();
                 server(
                     server_sock,
-                    auth,
-                    pqc,
-                    None,
-                    None,
-                    None,
-                    server_cert,
-                    server_key,
+                    TestServerConfig {
+                        auth,
+                        pqc,
+                        expresslane: None,
+                        conn_out: None,
+                        metrics: None,
+                        cert,
+                        key,
+                    },
                 )
             },
             client(
                 client_sock,
-                None,
-                pqc,
-                server_dn,
-                false,
-                false,
-                false,
-                pki.root_ca()
+                TestClientConfig {
+                    cipher: None,
+                    pqc,
+                    server_dn,
+                    enable_codec: false,
+                    enable_expresslane: false,
+                    use_versioned_token: false,
+                    root_ca: pki.root_ca(),
+                },
             )
         )
     };
@@ -509,19 +520,21 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
 
     let auth = Arc::new(TestAuth::default());
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
-    let (server_cert, server_key) = pki.server_secrets();
+    let (cert, key) = pki.server_secrets();
     let server_task = server(
         server_sock,
-        auth,
-        PQCrypto {
-            server_pqc: false,
-            keyshare: None,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: Some(INTERVAL),
+            conn_out: Some(conn_tx),
+            metrics: None,
+            cert,
+            key,
         },
-        Some(INTERVAL),
-        Some(conn_tx),
-        None,
-        server_cert,
-        server_key,
     );
 
     let client_task = async move {
@@ -671,16 +684,18 @@ async fn expresslane_health_probe(
     // A long rotation interval on purpose: rotation must not interfere with
     // the health-check windows this probe measures.
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
-    let (server_cert, server_key) = pki.server_secrets();
+    let (cert, key) = pki.server_secrets();
     let server_task = server(
         server_sock,
-        auth,
-        pqc,
-        Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
-        None,
-        server_metrics,
-        server_cert,
-        server_key,
+        TestServerConfig {
+            auth,
+            pqc,
+            expresslane: Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+            conn_out: None,
+            metrics: server_metrics,
+            cert,
+            key,
+        },
     );
 
     let client_task = async move {
@@ -990,7 +1005,18 @@ async fn pmtud_reports_status_changes() {
 
     // The server answers every probe Ping with a Pong.
     let (cert, key) = pki.server_secrets();
-    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None, cert, key));
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc,
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            cert,
+            key,
+        },
+    ));
 
     let log: Log = Default::default();
     let ca_cert = pki.root_ca();
