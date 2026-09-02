@@ -1000,6 +1000,19 @@ fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Sche
     schema
 }
 
+/// `LW_CLIENT_RUST_LOG` is the tracing `EnvFilter` var read directly by
+/// `main.rs`, not a config key - drop it before the env_tree parse so
+/// setting it doesn't trip the "unknown config fields" check.
+fn env_config_patch_from_vars(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Result<ConfigPatch, lightway_app_utils::env_tree::Error> {
+    lightway_app_utils::env_tree::from_iter_with_prefix(
+        vars.into_iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("LW_CLIENT_RUST_LOG")),
+        "LW_CLIENT",
+    )
+}
+
 impl Config {
     pub fn cli_options() -> &'static ConfigPatch {
         CLI_OPTIONS.get_or_init(ConfigPatch::parse)
@@ -1038,8 +1051,7 @@ impl Config {
             serde_saphyr::from_str::<ConfigPatch>(&content)?
         };
 
-        let env_patch: ConfigPatch =
-            lightway_app_utils::env_tree::from_env_with_prefix("LW_CLIENT")?;
+        let env_patch: ConfigPatch = env_config_patch_from_vars(std::env::vars())?;
         let mut cli_patch = cli_options.clone();
         cli_patch.config_file = None;
         cli_patch.generate = None;
@@ -1291,6 +1303,30 @@ mod tests {
         let mut config = Config::default();
         config.apply(patch);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn env_rust_log_is_not_an_unknown_config_field() {
+        // LW_CLIENT_RUST_LOG is the tracing EnvFilter var (main.rs), not a
+        // config key: it must not land in `unknowns` and must not shadow
+        // other env-set fields going through the same load() path.
+        let vars = vec![
+            ("LW_CLIENT_RUST_LOG".to_string(), "debug".to_string()),
+            (
+                "LW_CLIENT_KEEPALIVE__INTERVAL".to_string(),
+                "33s".to_string(),
+            ),
+        ];
+        let patch = env_config_patch_from_vars(vars).expect("should parse");
+        assert!(patch.unknowns.is_empty());
+
+        let mut config = Config::default();
+        config.apply(patch);
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.keepalive.interval,
+            NonZeroDuration::from_std_duration(StdDuration::from_secs(33))
+        );
     }
 
     #[tracing_test::traced_test]
