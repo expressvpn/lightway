@@ -78,6 +78,12 @@ use tracing::info;
 pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
+    /// A datagram transport supplied by the application, in place of the
+    /// socket the client otherwise creates. Every socket option in the
+    /// client config goes unused.
+    DatagramIo(Arc<dyn io::outside::OutsideIO>),
+    /// A stream transport supplied by the application; see `DatagramIo`.
+    StreamIo(Arc<dyn io::outside::OutsideIO>),
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -85,6 +91,8 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
+            Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
+            Self::StreamIo(_) => f.debug_tuple("StreamIo").finish(),
         }
     }
 }
@@ -1162,6 +1170,8 @@ pub async fn connect<
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match mode {
+            ClientConnectionMode::DatagramIo(io) => (ConnectionType::Datagram, io),
+            ClientConnectionMode::StreamIo(io) => (ConnectionType::Stream, io),
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
                 let mut sock = io::outside::Udp::new(
