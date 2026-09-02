@@ -170,6 +170,7 @@ pub enum State {
 /// [`crate::Event::PmtudStateChanged`] and returned by
 /// [`crate::Connection::pmtud_status`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Status {
     /// Current state.
     pub state: State,
@@ -179,8 +180,9 @@ pub struct Status {
     /// estimate ([`State::Disabled`], [`State::Base`], [`State::Error`]).
     pub plpmtu: Option<u16>,
     /// Largest inside (application) packet that fits a single `Data`
-    /// frame at `plpmtu` — the size the connection uses to clamp TCP MSS
-    /// and above which it fragments. `None` whenever `plpmtu` is.
+    /// frame at `plpmtu`: the connection fragments inside packets above
+    /// it and clamps TCP MSS to `max_packet_size - 40` (the IPv4 and TCP
+    /// headers). `None` whenever `plpmtu` is.
     pub max_packet_size: Option<usize>,
 }
 

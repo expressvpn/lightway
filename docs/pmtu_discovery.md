@@ -28,7 +28,9 @@ estimate changes, and `Connection::pmtud_status()` returns the current `PmtudSta
 when PMTUD is not enabled). `PmtudStatus::max_packet_size` is the largest inside packet the
 connection sends in a single `Data` frame at the discovered PLPMTU; it is `None` while there is
 no estimate (`Disabled`, `Base`, `Error`). An application that sends packets outside the
-`Connection` (an offloaded data plane) can use it to clamp TCP MSS and size its own packets.
+`Connection` (an offloaded data plane) can use it to size its own packets and to clamp TCP MSS,
+which is `max_packet_size - 40` for IPv4 (the IP and TCP headers), exactly as the connection
+does for the packets it sends itself.
 
 At present, PMTU discovery is only enabled on client side. In future, we may enable
 it in Server.
