@@ -44,7 +44,6 @@ static METRIC_UDP_REJECTED_SESSION: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_rejected_session"));
 static METRIC_UDP_PARSE_WIRE_FAILED: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_parse_wire_failed"));
-static METRIC_UDP_NO_HEADER: LazyLock<Counter> = LazyLock::new(|| counter!("udp_no_header"));
 static METRIC_UDP_SESSION_ROTATION_BEGIN: LazyLock<Counter> =
     LazyLock::new(|| counter!("udp_session_rotation_begin"));
 static METRIC_UDP_SESSION_ROTATION_FINALIZED: LazyLock<Counter> =
@@ -287,10 +286,6 @@ pub(crate) fn udp_rejected_session() {
 
 pub(crate) fn udp_parse_wire_failed() {
     METRIC_UDP_PARSE_WIRE_FAILED.increment(1);
-}
-
-pub(crate) fn udp_no_header() {
-    METRIC_UDP_NO_HEADER.increment(1);
 }
 
 pub(crate) fn udp_recv_truncated() {

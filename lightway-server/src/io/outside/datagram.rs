@@ -31,12 +31,7 @@ pub(crate) fn data_received(
             return;
         }
     };
-    let Some(hdr) = pkt.header() else {
-        metrics::udp_no_header();
-        warn!("Packet parsing error: Not a UDP frame");
-        return;
-    };
-    let hdr = *hdr;
+    let hdr = *pkt.header().expect("a parsed datagram carries a header");
 
     if !conn_manager.is_supported_version(hdr.version) {
         // If the protocol version is not supported then drop
