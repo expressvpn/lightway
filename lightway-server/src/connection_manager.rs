@@ -198,7 +198,7 @@ async fn handle_events(
             Event::ExpresslaneStateChanged(s) => {
                 info!("Setting expresslane state to {:?}", s);
             }
-            Event::FirstPacketReceived => {
+            Event::FirstPacketReceived | Event::PmtudStateChanged(_) => {
                 unreachable!("client only event received");
             }
             Event::EncodingStateChanged { enabled } => handle_encoding_state_changed(enabled),

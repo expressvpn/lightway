@@ -574,6 +574,9 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
             Event::EncodingStateChanged { enabled } => {
                 info!("Encoding state changed to {enabled}");
             }
+            Event::PmtudStateChanged(status) => {
+                info!(?status, "Path MTU discovery status changed");
+            }
 
             // Server only events
             Event::SessionIdRotationStarted { .. }

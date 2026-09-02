@@ -31,7 +31,9 @@ pub use cipher::Cipher;
 pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
     ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg, ExpresslaneState,
-    ServerConnectionBuilder, State, dplpmtud::Timer as DplpmtudTimer, expresslane::*,
+    ServerConnectionBuilder, State,
+    dplpmtud::{State as PmtudState, Status as PmtudStatus, Timer as DplpmtudTimer},
+    expresslane::*,
 };
 pub use context::{
     ClientContext, ClientContextBuilder, ConnectionType, ContextError, ExpresslaneTickData,

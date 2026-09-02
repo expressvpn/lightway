@@ -1,5 +1,5 @@
 use crate::connection::ExpresslaneState;
-use crate::{SessionId, State};
+use crate::{PmtudStatus, SessionId, State};
 
 /// A lightway event
 #[derive(Debug)]
@@ -52,4 +52,15 @@ pub enum Event {
     },
     /// Expresslane state changed
     ExpresslaneStateChanged(ExpresslaneState),
+    /// Path MTU discovery state or estimate changed.
+    ///
+    /// Fired on every DPLPMTUD state transition and whenever the PLPMTU
+    /// estimate changes within a state (each confirmed search probe).
+    /// [`PmtudStatus::max_packet_size`] is the largest inside packet the
+    /// connection now sends unfragmented; `None` means no estimate is
+    /// available and the connection sizes packets by its configured
+    /// outside MTU instead.
+    ///
+    /// Client datagram connections built with a PMTUD timer only
+    PmtudStateChanged(PmtudStatus),
 }

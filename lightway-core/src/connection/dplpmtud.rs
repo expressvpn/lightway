@@ -148,12 +148,40 @@ pub(crate) enum Action {
 }
 
 /// DPLPMTUD states as defined in the RFC.
-enum State {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum State {
+    /// PMTUD is not running (the connection is not online yet).
     Disabled,
+    /// Probing the base PLPMTU to confirm basic connectivity. No
+    /// estimate is available.
     Base,
+    /// The base PLPMTU could not be confirmed; it is re-probed until
+    /// connectivity returns. No estimate is available.
     Error,
+    /// Searching upward for a larger PLPMTU. The current estimate has
+    /// been confirmed and is in use.
     Searching,
+    /// The search has converged. The estimate is periodically
+    /// re-confirmed and a raise is attempted.
     SearchComplete,
+}
+
+/// A snapshot of DPLPMTUD, delivered with
+/// [`crate::Event::PmtudStateChanged`] and returned by
+/// [`crate::Connection::pmtud_status`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// Current state.
+    pub state: State,
+    /// Current PLPMTU estimate: the largest lightway datagram (frame
+    /// header plus payload, before D/TLS and IP/UDP encapsulation) the
+    /// path is believed to carry. `None` while there is no usable
+    /// estimate ([`State::Disabled`], [`State::Base`], [`State::Error`]).
+    pub plpmtu: Option<u16>,
+    /// Largest inside (application) packet that fits a single `Data`
+    /// frame at `plpmtu` — the size the connection uses to clamp TCP MSS
+    /// and above which it fragments. `None` whenever `plpmtu` is.
+    pub max_packet_size: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -227,6 +255,15 @@ impl<AppState> Dplpmtud<AppState> {
         match self.state {
             State::Searching | State::SearchComplete => Some(self.plpmtu as usize),
             _ => None,
+        }
+    }
+
+    /// Snapshot of the current state and estimate.
+    pub(crate) fn status(&self) -> Status {
+        Status {
+            state: self.state,
+            plpmtu: self.current_plpmtu().map(|plpmtu| plpmtu as u16),
+            max_packet_size: self.maximum_packet_sizes().map(|(mps, _)| mps),
         }
     }
 
@@ -557,6 +594,167 @@ mod tests {
         for id in (0..3 * u16::MAX as usize).map(|_| pmtud.next_probe_id()) {
             assert!(!id.is_zero());
         }
+    }
+
+    #[test]
+    fn status_tracks_state_and_estimate() {
+        let timer = FakeTimer::new();
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
+        let none = |state| Status {
+            state,
+            plpmtu: None,
+            max_packet_size: None,
+        };
+        assert_eq!(pmtud.status(), none(State::Disabled));
+
+        // Base probing: no usable estimate yet.
+        let _ = pmtud.online(&mut ());
+        assert_eq!(pmtud.status(), none(State::Base));
+
+        // Every confirmed probe raises the estimate while Searching ...
+        let mut expected = BASE_PLPMTU;
+        loop {
+            let id = pmtud.pending_probe.as_ref().unwrap().id;
+            let _ = pmtud.pong_received(
+                &wire::Pong {
+                    id: id.as_u16(),
+                    payload: Default::default(),
+                },
+                &mut (),
+            );
+            let status = pmtud.status();
+            assert_eq!(status.plpmtu, Some(expected));
+            assert_eq!(
+                status.max_packet_size,
+                Some(wire::Data::maximum_packet_size_for_plpmtu(
+                    expected as usize
+                ))
+            );
+            if expected == TEST_MAX_PLPMTU {
+                break;
+            }
+            assert_eq!(status.state, State::Searching);
+            expected = std::cmp::min(expected + PROBE_BIG_STEP, TEST_MAX_PLPMTU);
+        }
+        // ... until the search converges on the maximum.
+        assert_eq!(pmtud.status().state, State::SearchComplete);
+
+        // Losing the base probe MAX_PROBES times enters Error with no
+        // estimate; the next confirmed base probe restores one.
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
+        let _ = pmtud.online(&mut ());
+        for _ in 0..MAX_PROBES {
+            let _ = pmtud.tick(&mut ());
+        }
+        assert_eq!(pmtud.status(), none(State::Error));
+        let id = pmtud.pending_probe.as_ref().unwrap().id;
+        let _ = pmtud.pong_received(
+            &wire::Pong {
+                id: id.as_u16(),
+                payload: Default::default(),
+            },
+            &mut (),
+        );
+        assert_eq!(
+            pmtud.status(),
+            Status {
+                state: State::Searching,
+                plpmtu: Some(BASE_PLPMTU),
+                max_packet_size: Some(wire::Data::maximum_packet_size_for_plpmtu(
+                    BASE_PLPMTU as usize
+                )),
+            }
+        );
+    }
+
+    /// The status snapshot (and therefore `Event::PmtudStateChanged`, which
+    /// fires only when it changes) must stay put across probe retries and the
+    /// big-to-small step switch, and must move on every genuine transition
+    /// including the ones that leave `SearchComplete`.
+    #[test]
+    fn status_changes_only_on_state_or_estimate_transitions() {
+        let timer = FakeTimer::new();
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
+        fn pong_pending(pmtud: &mut Dplpmtud<()>) {
+            let id = pmtud.pending_probe.as_ref().unwrap().id;
+            let _ = pmtud.pong_received(
+                &wire::Pong {
+                    id: id.as_u16(),
+                    payload: Default::default(),
+                },
+                &mut (),
+            );
+        }
+
+        // Base probe retries are silent.
+        let _ = pmtud.online(&mut ());
+        let base = pmtud.status();
+        for _ in 1..MAX_PROBES {
+            let _ = pmtud.tick(&mut ());
+            assert_eq!(pmtud.status(), base);
+        }
+
+        // Confirming the base yields the first estimate ...
+        pong_pending(&mut pmtud);
+        let searching = pmtud.status();
+        assert_eq!(searching.state, State::Searching);
+        assert_eq!(searching.plpmtu, Some(BASE_PLPMTU));
+
+        // ... which losing the first search probe MAX_PROBES times (the switch
+        // from big to small steps) does not disturb ...
+        for _ in 0..MAX_PROBES {
+            let _ = pmtud.tick(&mut ());
+            assert_eq!(pmtud.status(), searching);
+        }
+        assert!(matches!(pmtud.step_size, StepSize::Small));
+
+        // ... until the small-step probe is lost as well and the search
+        // converges on the confirmed estimate.
+        for _ in 0..MAX_PROBES {
+            let _ = pmtud.tick(&mut ());
+        }
+        let complete = Status {
+            state: State::SearchComplete,
+            ..searching
+        };
+        assert_eq!(pmtud.status(), complete);
+        timer.expect_pending(PMTU_RAISE_TIMER_TIMEOUT);
+
+        // The raise timer sends a CONFIRM probe at the current estimate: silent.
+        let _ = pmtud.tick(&mut ());
+        assert_eq!(pmtud.status(), complete);
+        assert_eq!(pmtud.pending_probe.as_ref().unwrap().size, BASE_PLPMTU);
+
+        // Its success restarts the search: the state changes, the estimate
+        // does not.
+        pong_pending(&mut pmtud);
+        assert_eq!(
+            pmtud.status(),
+            Status {
+                state: State::Searching,
+                ..complete
+            }
+        );
+
+        // Converge again, then black-hole the CONFIRM probe: back to Base with
+        // the estimate withdrawn.
+        for _ in 0..2 * MAX_PROBES {
+            let _ = pmtud.tick(&mut ());
+        }
+        assert_eq!(pmtud.status(), complete);
+        let _ = pmtud.tick(&mut ()); // raise timer -> CONFIRM probe
+        for _ in 0..MAX_PROBES {
+            let _ = pmtud.tick(&mut ()); // lost, lost, given up
+        }
+        assert_eq!(
+            pmtud.status(),
+            Status {
+                state: State::Base,
+                plpmtu: None,
+                max_packet_size: None,
+            }
+        );
+        timer.expect_pending(PROBE_TIME_TIMEOUT);
     }
 
     #[test_case(State::Base, 1250 => None)]
