@@ -33,7 +33,7 @@ const DEFAULT_RCVBUF: ByteSize = ByteSize::mib(8);
 pub struct Config {
     #[patch(attribute(clap(short, long)))]
     #[patch(attribute(
-        doc = "Generate configure for single server in the format to path from `-c, --config-file`"
+        doc = "Generate config in the given format to the `-c, --config-file` path"
     ))]
     #[serde(skip_serializing)]
     #[schemars(skip)]
@@ -45,320 +45,79 @@ pub struct Config {
     #[schemars(skip)]
     pub config_file: PathBuf,
 
-    /// Servers to attempt to connect to. Configuration is only supported in
-    /// config file, not command line or environment variable
-    #[patch(attribute(clap(skip)))]
-    #[serde(default)]
-    #[serde(skip_serializing)]
-    #[schemars(skip)]
-    servers: Vec<ConnectionConfig>,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = r#"Server to connect to in `<hostname>:<port>` format
-    Only used if `servers` is empty"#))]
-    /// socket address, ex: 127.0.0.1:27690
-    pub server: String,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = r#"Connection mode
-    Only used if `servers` is empty"#))]
-    pub mode: ConnectionType,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Server domain name
-    Only used if `servers` is empty"#))]
-    pub server_dn: String,
-
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"Cipher to use for encryption
-    Only used if `servers` is empty"#))]
-    pub cipher: Cipher,
-
-    #[patch(attribute(clap(long, hide = true)))]
-    #[patch(attribute(doc = r#"Auth token
-    If both token and user/pass are provided, token auth will
-    be used. user/pass will be ignored in this case"#))]
-    #[schemars(extend("format" = "password"))]
-    pub token: Option<String>,
-
-    #[patch(attribute(clap(short, long, hide = true)))]
-    #[patch(attribute(doc = "Username for auth"))]
-    pub user: Option<String>,
-
-    #[patch(attribute(clap(short, long, hide = true)))]
-    #[patch(attribute(doc = "Password for auth"))]
-    #[schemars(extend("format" = "password"))]
-    pub password: Option<String>,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"CA certificate
-    This can either be a path to the file, or a string starting with
-    "-----BEGIN CERTIFICATE-----""#))]
-    #[schemars(extend("format" = "textarea"))]
-    pub ca_cert: String,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Outside (wire) MTU"))]
-    pub outside_mtu: usize,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(attribute(doc = "Tun device name to use"))]
-    pub tun_name: Option<String>,
-
-    #[cfg(linux)]
+    /// Connection defaults, inherited by every `servers` entry
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub tun_txqueuelen: u32,
+    #[patch(attribute(clap(flatten)))]
+    pub connect: ConnectConfig,
 
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
-    #[schemars(extend("x-cfg" = "windows"))]
-    pub wintun_file: Option<String>,
-
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"
-    Fixed GUID for the Wintun adapter (Windows only).
-    Ensures adapter creation retries reuse the same device node.
-    Accepts a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000")."#))]
-    pub device_guid: Option<String>,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Local IP to use in Tun device"))]
-    pub tun_local_ip: Ipv4Addr,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Peer IP to use in Tun device"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub tun_peer_ip: Ipv4Addr,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "DNS IP to use in Tun device"))]
-    pub tun_dns_ip: Ipv4Addr,
-
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub keyshare: KeyShare,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Interval between keepalives"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 10s
-    pub keepalive_interval: NonZeroDuration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Keepalive timeout"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 60s
-    pub keepalive_timeout: NonZeroDuration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Credential defaults, inherited by every `servers` entry
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable continuous Keepalive"))]
-    pub keepalive_continuous: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub auth: AuthConfig,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
-    when we haven't received an outside packet"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
-    /// ex: 10s
-    pub tracer_packet_timeout: NonZeroDuration,
-
-    // NOTE: also "Defer timeout" in mobile device
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"How long to wait before selecting the best connection.
-    If the preferred connection connects before the timeout, it will be used immediately."#)
-    )]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    /// ex: 2000ms
-    pub preferred_connection_wait_interval: Duration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Socket send buffer size.
-    Always applied for UDP.
-    For TCP, only applied on macOS; skipped on Windows and Linux
-    to preserve kernel buffer autotuning."#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "byte_size_schema")]
-    /// ex: 1.5 MiB
-    pub sndbuf: ByteSize,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"Socket receive buffer size.
-    Always applied for UDP.
-    For TCP, only applied on macOS; skipped on Windows and Linux
-    to preserve kernel buffer autotuning."#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "byte_size_schema")]
-    /// ex: 1.5 MiB
-    pub rcvbuf: ByteSize,
-
-    #[cfg(batch_receive)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Tun device configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(
-        doc = "Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android))"
-    ))]
-    #[schemars(extend("x-cfg" = "batch_receive"))]
-    pub enable_batch_receive: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub tun: TunConfig,
 
+    /// Keepalive configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub keepalive: KeepaliveConfig,
+
+    /// Outside socket configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub socket: SocketConfig,
+
+    /// Host network side-effects
     #[cfg(desktop)]
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"Setup of route table
-    Modes:
-        default: Sets up routes as specified in server, tun_local_ip, tun_peer_ip, tun_dns_ip
-        noexec : Does not setup any routes
-        lan    : Sets up default + additional lan routes"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub route_mode: RouteMode,
-
-    #[cfg(linux)]
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
-        The tunnel's own encrypted packets carry this mark so policy routing
-        rules can keep them out of the tunnel.
-        In Linux networking, a fwmark of 0 represents the default unmarked state
-        and will not apply SO_MARK to the socket."#)
-    )]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub fwmark: u32,
+    #[patch(attribute(clap(flatten)))]
+    pub network: NetworkConfig,
 
-    #[cfg(desktop)]
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = r#"DNS configuration mode
-    Modes:
-        default: Sets up DNS Configuration based on target platform
-        noexec : Skips DNS Configuration setup"#))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub dns_config_mode: DnsConfigMode,
-
-    #[patch(attribute(clap(long, value_enum)))]
-    #[patch(attribute(doc = "Log level to use"))]
-    pub log_level: LogLevel,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Logging configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
-    pub enable_expresslane: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub log: LogConfig,
 
-    #[cfg(apple)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Expresslane configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(
-        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
-    Connecting the single-peer outside socket lets sends skip the per-packet
-    route lookup. The socket is re-connected on network changes."#
-    ))]
-    #[schemars(extend("x-cfg" = "apple"))]
-    pub enable_connected_udp: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub expresslane: ExpresslaneConfig,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    pub expresslane_keys_rotation_interval: Duration,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// PMTU discovery configuration
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub enable_pmtud: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub pmtud: PmtudConfig,
 
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub pmtud_base_mtu: Option<u16>,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Inside packet codec
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub enable_tun_iouring: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub codec: CodecConfig,
 
-    // Any value more than 1024 negatively impact the throughput
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"IO-uring submission queue count.
-    Only applicable when `enable_tun_iouring` is `true`"#))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    pub iouring_entry_count: usize,
-
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
-    If non-zero use a kernel thread to perform submission queue polling.
-    After the given idle time the thread will go to sleep."#))]
-    #[schemars(extend("x-cfg" = "linux"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
-    /// ex: 100ms
-    pub iouring_sqpoll_idle_time: Duration,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(empty_value = false)]
-    #[patch(attribute(serde(default)))]
-    #[patch(
-        attribute(doc = r#"Enable inside packet encoding once lightway connects
-    Only used if a codec is set"#)
-    )]
-    #[serde(alias = "enable_inside_pkt_encoding_at_connect")]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub enable_inside_pkt_encoding: bool,
-
+    /// Debug helpers
     #[cfg(feature = "debug")]
-    #[patch(attribute(clap(long)))]
-    #[patch(attribute(doc = "File path to save wireshark keylog"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub keylog: Option<PathBuf>,
-
-    #[cfg(feature = "debug")]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = "Enable TLS debug logging"))]
-    #[schemars(extend("x-cfg" = "desktop"))]
-    pub tls_debug: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub debug: DebugConfig,
 
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(
-        attribute(doc = r#"Wintun ring buffer capacity in bytes (Windows only).
-    Must be a power of two between 128KiB and 64MiB.
-    Larger values improve throughput."#)
-    )]
-    #[schemars(schema_with = "byte_size_schema")]
-    pub wintun_ring_capacity: ByteSize,
-
-    #[cfg(windows)]
-    #[patch(attribute(clap(long)))]
-    #[patch(empty_value = false)]
+    /// Config-file handling
+    #[patch(nesting)]
     #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = r#"Enable DPAPI encryption/decryption for config file
-    Only for Windows platform"#))]
-    #[schemars(extend("x-cfg" = "windows"))]
-    pub enable_dpapi: bool,
-
-    /// SNI header for TLS connections
-    #[cfg(feature = "mobile")]
-    #[patch(attribute(clap(skip)))]
-    #[schemars(extend("x-cfg" = "mobile"))]
-    pub sni_header: String,
-
-    #[patch(attribute(clap(short, long)))]
-    #[patch(empty_value = false)]
-    #[patch(attribute(serde(default)))]
-    #[patch(attribute(doc = r#"Accept unknown inputs with error message without quiting"#))]
-    pub accept_unknowns: bool,
+    #[patch(attribute(clap(flatten)))]
+    pub config: ConfigMeta,
 
     /// The unknown options from config file
     #[patch(attribute(clap(skip)))]
@@ -370,143 +129,137 @@ pub struct Config {
 impl Config {
     /// The number of servers
     pub fn len(&self) -> usize {
-        if self.server.is_empty() {
-            self.servers.len()
-        } else {
-            self.servers.len() + 1
-        }
+        self.connect.servers.len()
     }
 
     /// Check if there is any server setting
     pub fn is_empty(&self) -> bool {
-        self.servers.is_empty() && self.server.is_empty()
+        self.connect.servers.is_empty()
     }
 
-    /// Take out configures for servers
-    /// and normalize the auth and ca of ConnectionConfig of servers
-    pub fn take_servers(&mut self) -> Result<Vec<ConnectionConfig>, Error> {
-        if self.servers.is_empty() {
-            self.servers = vec![ConnectionConfig {
-                server: self.server.clone(),
-                mode: self.mode,
-                server_dn: (!self.server_dn.is_empty())
-                    .then(|| std::mem::take(&mut self.server_dn)),
-                cipher: self.cipher,
-                outside_mtu: self.outside_mtu,
-                ..Default::default()
-            }];
+    /// Resolve every `connect.servers` entry into a fully populated
+    /// [`ResolvedConnection`]. Each field takes the entry's own value, else the
+    /// `connect` default, else the type default.
+    ///
+    /// Credentials are inherited group-wise, not per field: an entry that
+    /// supplies any of token/user/password uses only its own credentials, so a
+    /// global `auth.token` can never override an entry's explicit user/pass.
+    pub fn resolve_connections(&self) -> anyhow::Result<Vec<ResolvedConnection>> {
+        if self.connect.servers.is_empty() {
+            anyhow::bail!("connect.servers must contain at least one entry");
         }
-        let ca_content = if check_cert_header(&self.ca_cert) {
-            Some(self.ca_cert.clone())
-        } else {
-            // NOTE: we support a path input on desktop, we keep None if global cert is not set, and
-            // it is okay to use certs for each server, thees will be checked in following loop.
-            if cfg!(desktop) {
-                std::fs::read_to_string(&self.ca_cert).ok()
-            } else {
-                None
-            }
-        };
-        for server in self.servers.iter_mut() {
-            if server.user.is_none() && server.password.is_none() && server.token.is_none() {
-                server.user = self.user.clone();
-                server.password = self.password.clone();
-                server.token = self.token.clone();
-            }
-
-            if let Some(ref mut ca_cert) = server.ca_cert {
-                if !check_cert_header(&ca_cert) {
-                    // NOTE: we support a path input on desktop, but raise error if not found
-                    if cfg!(desktop) {
-                        *ca_cert = std::fs::read_to_string(&mut *ca_cert)
-                            .map_err(|_| Error::CaFileNotFound)?;
+        Ok(self
+            .connect
+            .servers
+            .iter()
+            .map(|e| {
+                let (token, user, password) =
+                    if e.token.is_some() || e.user.is_some() || e.password.is_some() {
+                        (e.token.clone(), e.user.clone(), e.password.clone())
                     } else {
-                        return Err(Error::InvalidCertificate);
-                    }
+                        (
+                            self.auth.token.clone(),
+                            self.auth.user.clone(),
+                            self.auth.password.clone(),
+                        )
+                    };
+                ResolvedConnection {
+                    server: e.server.clone(),
+                    mode: e.mode.unwrap_or(self.connect.mode),
+                    server_dn: e
+                        .server_dn
+                        .clone()
+                        .unwrap_or_else(|| self.connect.server_dn.clone()),
+                    cipher: e.cipher.unwrap_or(self.connect.cipher),
+                    keyshare: e.keyshare.unwrap_or(self.connect.keyshare),
+                    outside_mtu: e.outside_mtu.unwrap_or(self.connect.outside_mtu),
+                    ca_cert: e
+                        .ca_cert
+                        .clone()
+                        .unwrap_or_else(|| self.connect.ca_cert.clone()),
+                    sni_header: e
+                        .sni_header
+                        .clone()
+                        .unwrap_or_else(|| self.connect.sni_header.clone()),
+                    token,
+                    user,
+                    password,
                 }
-            } else {
-                if ca_content.is_none() {
-                    return Err(Error::CaFileNotFound);
-                }
-                server.ca_cert = ca_content.clone();
-            }
-        }
-        Ok(std::mem::take::<Vec<ConnectionConfig>>(&mut self.servers))
+            })
+            .collect())
     }
 
     /// Ensure the config is validated, and alerted when there's a conflict in the settings.
     pub fn validate(&self) -> anyhow::Result<()> {
         if !self.unknowns.is_empty() {
             let fields: Vec<&str> = self.unknowns.keys().map(String::as_str).collect();
-            if self.accept_unknowns {
+            if self.config.accept_unknowns {
                 tracing::warn!(fields = ?fields, "unknown config fields will be ignored");
             } else {
                 anyhow::bail!("unknown config fields: {:?}", fields);
             }
         }
 
-        let mut all_servers: Vec<(&str, ConnectionType)> = self
+        let all_servers: Vec<(&str, ConnectionType)> = self
+            .connect
             .servers
             .iter()
-            .map(|s| (s.server.as_str(), s.mode))
+            .map(|s| (s.server.as_str(), s.mode.unwrap_or(self.connect.mode)))
             .collect();
-        if !self.server.is_empty() {
-            all_servers.push((self.server.as_str(), self.mode));
-        }
 
         #[cfg(not(macos))]
-        if self.sndbuf != DEFAULT_SNDBUF {
+        if self.socket.sndbuf != DEFAULT_SNDBUF {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "sndbuf is set but cannot be applied to this TCP connections"
+                        "socket.sndbuf is set but cannot be applied to this TCP connections"
                     );
                 }
             }
         }
         #[cfg(not(macos))]
-        if self.rcvbuf != DEFAULT_RCVBUF {
+        if self.socket.rcvbuf != DEFAULT_RCVBUF {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "rcvbuf is set but cannot be applied to this TCP connections"
+                        "socket.rcvbuf is set but cannot be applied to this TCP connections"
                     );
                 }
             }
         }
         #[cfg(windows)]
-        if let Some(guid) = &self.device_guid {
+        if let Some(guid) = &self.tun.wintun.device_guid {
             anyhow::ensure!(
                 uuid::Uuid::parse_str(guid).is_ok(),
-                "device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
+                "tun.wintun.device_guid must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000)"
             );
         }
-        if self.enable_pmtud {
+        if self.pmtud.enabled {
             for (server, mode) in &all_servers {
                 if mode.is_tcp() {
                     tracing::warn!(
                         server,
-                        "enable_pmtud is set but cannot be applied to this TCP connections"
+                        "pmtud.enabled is set but cannot be applied to this TCP connections"
                     );
                 }
             }
         }
         #[cfg(windows)]
         anyhow::ensure!(
-            self.wintun_ring_capacity.0.is_power_of_two()
-                && self.wintun_ring_capacity >= ByteSize::kib(128)
-                && self.wintun_ring_capacity <= ByteSize::mib(64),
-            "wintun_ring_capacity must be a power of two between 128KiB and 64MiB"
+            self.tun.wintun.ring_capacity.0.is_power_of_two()
+                && self.tun.wintun.ring_capacity >= ByteSize::kib(128)
+                && self.tun.wintun.ring_capacity <= ByteSize::mib(64),
+            "tun.wintun.ring_capacity must be a power of two between 128KiB and 64MiB"
         );
         #[cfg(linux)]
         {
-            anyhow::ensure!(self.tun_txqueuelen != 0, "tun_txqueuelen must not be 0");
-            if self.tun_txqueuelen < 1000 {
+            anyhow::ensure!(self.tun.txqueuelen != 0, "tun.txqueuelen must not be 0");
+            if self.tun.txqueuelen < 1000 {
                 tracing::warn!(
-                    txqueuelen = self.tun_txqueuelen,
-                    "tun_txqueuelen is below the recommended minimum of 1000"
+                    txqueuelen = self.tun.txqueuelen,
+                    "tun.txqueuelen is below the recommended minimum of 1000"
                 );
             }
         }
@@ -519,87 +272,555 @@ impl Default for Config {
         Config {
             config_file: PathBuf::default(),
             generate: ConfigFormat::Yaml,
-            servers: Vec::default(),
-            server: String::default(),
-            mode: ConnectionType::Tcp,
-            server_dn: String::new(),
-            cipher: Cipher::Aes256,
-            token: None,
-            user: None,
-            password: None,
-            ca_cert: "./ca_cert.crt".to_string(),
-            outside_mtu: MAX_OUTSIDE_MTU,
-            #[cfg(macos)]
-            tun_name: None,
-            #[cfg(not(macos))]
-            tun_name: Some("lightway".to_string()),
-            #[cfg(linux)]
-            tun_txqueuelen: 1000,
-            #[cfg(windows)]
-            wintun_file: None,
-            #[cfg(windows)]
-            device_guid: None,
-            tun_local_ip: Ipv4Addr::new(100, 64, 0, 6),
-            tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
-            tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
-            keyshare: KeyShare::default(),
-            keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
-            keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
-            keepalive_continuous: true,
-            tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
-            preferred_connection_wait_interval: Duration::from_std_duration(
-                StdDuration::from_secs(0),
-            ),
-            sndbuf: DEFAULT_SNDBUF,
-            rcvbuf: DEFAULT_RCVBUF,
-            #[cfg(batch_receive)]
-            enable_batch_receive: false,
+            connect: ConnectConfig::default(),
+            auth: AuthConfig::default(),
+            tun: TunConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            socket: SocketConfig::default(),
             #[cfg(desktop)]
-            route_mode: RouteMode::default(),
-            #[cfg(linux)]
-            fwmark: 0,
-            #[cfg(desktop)]
-            dns_config_mode: DnsConfigMode::default(),
-            log_level: LogLevel::Info,
-            enable_expresslane: false,
-            #[cfg(apple)]
-            enable_connected_udp: false,
-            expresslane_keys_rotation_interval: Duration::from_std_duration(
-                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
-            ),
-            enable_pmtud: false,
-            pmtud_base_mtu: None,
-            enable_tun_iouring: false,
-            iouring_entry_count: 1024,
-            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
-            enable_inside_pkt_encoding: false,
+            network: NetworkConfig::default(),
+            log: LogConfig::default(),
+            expresslane: ExpresslaneConfig::default(),
+            pmtud: PmtudConfig::default(),
+            codec: CodecConfig::default(),
             #[cfg(feature = "debug")]
-            keylog: None,
-            #[cfg(feature = "debug")]
-            tls_debug: false,
-            #[cfg(windows)]
-            wintun_ring_capacity: ByteSize::mib(8),
-            #[cfg(windows)]
-            enable_dpapi: false,
-            #[cfg(feature = "mobile")]
-            sni_header: String::new(),
-            accept_unknowns: false,
+            debug: DebugConfig::default(),
+            config: ConfigMeta::default(),
             unknowns: HashMap::new(),
         }
     }
 }
 
-#[serde_inline_default::serde_inline_default]
+/// Connection defaults, inherited by every `servers` entry
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Connect")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct ConnectConfig {
+    #[patch(attribute(clap(short = 'm', long = "connect-mode", id = "connect_mode")))]
+    #[patch(attribute(doc = "Connection mode"))]
+    pub mode: ConnectionType,
+
+    #[patch(attribute(clap(long = "connect-server-dn", id = "connect_server_dn")))]
+    #[patch(attribute(doc = "Server domain name"))]
+    pub server_dn: String,
+
+    #[patch(attribute(clap(long = "connect-cipher", id = "connect_cipher", value_enum)))]
+    #[patch(attribute(doc = "Cipher to use for encryption"))]
+    pub cipher: Cipher,
+
+    #[patch(attribute(clap(long = "connect-keyshare", id = "connect_keyshare", value_enum)))]
+    #[patch(attribute(doc = "Enable Post Quantum Crypto"))]
+    pub keyshare: KeyShare,
+
+    #[patch(attribute(clap(long = "connect-outside-mtu", id = "connect_outside_mtu")))]
+    #[patch(attribute(doc = "Outside (wire) MTU"))]
+    pub outside_mtu: usize,
+
+    #[patch(attribute(clap(long = "connect-ca-cert", id = "connect_ca_cert")))]
+    #[patch(attribute(doc = r#"CA certificate
+    This can either be a path to the file, or a string starting with
+    "-----BEGIN CERTIFICATE-----""#))]
+    #[schemars(extend("format" = "textarea"))]
+    pub ca_cert: String,
+
+    /// SNI header for TLS connections
+    #[patch(attribute(clap(skip)))]
+    pub sni_header: String,
+
+    // NOTE: also "Defer timeout" in mobile device
+    #[patch(attribute(clap(
+        long = "connect-preferred-wait-interval",
+        id = "connect_preferred_wait_interval"
+    )))]
+    #[patch(
+        attribute(doc = r#"How long to wait before selecting the best connection.
+    If the preferred connection connects before the timeout, it will be used immediately."#)
+    )]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 2000ms
+    pub preferred_wait_interval: Duration,
+
+    /// Servers to attempt to connect to, at least one entry is required.
+    /// Configuration is only supported in config file and environment
+    /// variable, not command line
+    #[patch(attribute(clap(skip)))]
+    #[patch(attribute(serde(default)))]
+    #[serde(default)]
+    pub servers: Vec<ConnectionConfig>,
+}
+
+impl Default for ConnectConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConnectionType::Tcp,
+            server_dn: String::new(),
+            cipher: Cipher::Aes256,
+            keyshare: KeyShare::default(),
+            outside_mtu: MAX_OUTSIDE_MTU,
+            ca_cert: "./ca_cert.crt".to_string(),
+            sni_header: String::new(),
+            preferred_wait_interval: Duration::from_std_duration(StdDuration::from_secs(0)),
+            servers: Vec::new(),
+        }
+    }
+}
+
+/// Credential defaults, inherited by every `servers` entry
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Auth")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct AuthConfig {
+    #[patch(attribute(clap(long = "auth-token", id = "auth_token", hide = true)))]
+    #[patch(attribute(doc = r#"Auth token
+    If both token and user/pass are provided, token auth will
+    be used. user/pass will be ignored in this case"#))]
+    #[schemars(extend("format" = "password"))]
+    pub token: Option<String>,
+
+    #[patch(attribute(clap(short = 'u', long = "auth-user", id = "auth_user", hide = true)))]
+    #[patch(attribute(doc = "Username for auth"))]
+    pub user: Option<String>,
+
+    #[patch(attribute(clap(
+        short = 'p',
+        long = "auth-password",
+        id = "auth_password",
+        hide = true
+    )))]
+    #[patch(attribute(doc = "Password for auth"))]
+    #[schemars(extend("format" = "password"))]
+    pub password: Option<String>,
+}
+
+/// Keepalive configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Keepalive")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct KeepaliveConfig {
+    #[patch(attribute(doc = "Interval between keepalives"))]
+    #[patch(attribute(clap(long = "keepalive-interval", id = "keepalive_interval")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub interval: NonZeroDuration,
+
+    #[patch(attribute(doc = "Keepalive timeout"))]
+    #[patch(attribute(clap(long = "keepalive-timeout", id = "keepalive_timeout")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub timeout: NonZeroDuration,
+
+    #[patch(attribute(doc = "Enable continuous Keepalive"))]
+    #[patch(attribute(clap(long = "keepalive-continuous", id = "keepalive_continuous")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub continuous: bool,
+
+    #[patch(attribute(doc = "Time before triggering a tracer packet when no \
+        outside packet received"))]
+    #[patch(attribute(clap(long = "keepalive-tracer-timeout", id = "keepalive_tracer_timeout")))]
+    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    pub tracer_timeout: NonZeroDuration,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
+            continuous: true,
+            tracer_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+        }
+    }
+}
+
+/// Outside socket configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Socket")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct SocketConfig {
+    #[patch(attribute(clap(long = "socket-sndbuf", id = "socket_sndbuf")))]
+    #[patch(attribute(doc = r#"Socket send buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
+    #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
+    pub sndbuf: ByteSize,
+
+    #[patch(attribute(clap(long = "socket-rcvbuf", id = "socket_rcvbuf")))]
+    #[patch(attribute(doc = r#"Socket receive buffer size.
+    Always applied for UDP.
+    For TCP, only applied on macOS; skipped on Windows and Linux
+    to preserve kernel buffer autotuning."#))]
+    #[schemars(schema_with = "byte_size_schema")]
+    /// ex: 1.5 MiB
+    pub rcvbuf: ByteSize,
+
+    #[cfg(batch_receive)]
+    #[patch(attribute(clap(long = "socket-batch-receive", id = "socket_batch_receive")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable batch receive (`recvmsg_x` on macOS, `recvmmsg` on Linux/Android))"
+    ))]
+    #[schemars(extend("x-cfg" = "batch_receive"))]
+    pub batch_receive: bool,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long = "socket-fwmark", id = "socket_fwmark")))]
+    #[patch(
+        attribute(doc = r#"Firewall mark (SO_MARK) applied to the outside socket.
+        The tunnel's own encrypted packets carry this mark so policy routing
+        rules can keep them out of the tunnel.
+        In Linux networking, a fwmark of 0 represents the default unmarked state
+        and will not apply SO_MARK to the socket."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub fwmark: u32,
+
+    #[cfg(apple)]
+    #[patch(attribute(clap(long = "socket-connected-udp", id = "socket_connected_udp")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = r#"Connect the outside UDP socket to the server (Apple platforms only).
+    Connecting the single-peer outside socket lets sends skip the per-packet
+    route lookup. The socket is re-connected on network changes."#
+    ))]
+    #[schemars(extend("x-cfg" = "apple"))]
+    pub connected_udp: bool,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            sndbuf: DEFAULT_SNDBUF,
+            rcvbuf: DEFAULT_RCVBUF,
+            #[cfg(batch_receive)]
+            batch_receive: false,
+            #[cfg(linux)]
+            fwmark: 0,
+            #[cfg(apple)]
+            connected_udp: false,
+        }
+    }
+}
+
+/// Logging configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Logging")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct LogConfig {
+    #[patch(attribute(doc = "Log level to use"))]
+    #[patch(attribute(clap(long = "log-level", id = "log_level", value_enum)))]
+    pub level: LogLevel,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Info,
+        }
+    }
+}
+
+/// Config-file handling
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Config handling")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct ConfigMeta {
+    #[cfg(windows)]
+    #[patch(
+        attribute(doc = "Enable DPAPI encryption/decryption for the config file. \
+        Only for Windows platform")
+    )]
+    #[patch(attribute(clap(long = "config-dpapi", id = "config_dpapi")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub dpapi: bool,
+
+    #[patch(attribute(doc = "Accept unknown config keys with a warning instead of erroring out"))]
+    #[patch(attribute(clap(
+        short = 'a',
+        long = "config-accept-unknowns",
+        id = "config_accept_unknowns"
+    )))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub accept_unknowns: bool,
+}
+
+/// Host network side-effects (desktop)
+#[cfg(desktop)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Network")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct NetworkConfig {
+    #[patch(attribute(doc = "Route mode: default = routes per server/tun IPs; \
+        noexec = none; lan = default + LAN routes"))]
+    #[patch(attribute(clap(long = "network-route-mode", id = "network_route_mode", value_enum)))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub route_mode: RouteMode,
+
+    #[patch(attribute(doc = "DNS config mode: platform default, or skip DNS setup"))]
+    #[patch(attribute(clap(
+        long = "network-dns-config-mode",
+        id = "network_dns_config_mode",
+        value_enum
+    )))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub dns_config_mode: DnsConfigMode,
+}
+
+/// Debug helpers (feature: debug)
+#[cfg(feature = "debug")]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Debug")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct DebugConfig {
+    #[patch(attribute(doc = "File path to save wireshark keylog"))]
+    #[patch(attribute(clap(long = "debug-keylog", id = "debug_keylog")))]
+    #[schemars(extend("x-cfg" = "debug"))]
+    pub keylog: Option<PathBuf>,
+
+    #[patch(attribute(doc = "Enable TLS debug logging"))]
+    #[patch(attribute(clap(long = "debug-tls", id = "debug_tls")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[schemars(extend("x-cfg" = "debug"))]
+    pub tls: bool,
+}
+
+/// Expresslane configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Expresslane")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct ExpresslaneConfig {
+    #[patch(attribute(clap(long = "expresslane-enabled", id = "expresslane_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
+    pub enabled: bool,
+
+    #[patch(attribute(clap(
+        long = "expresslane-keys-rotation-interval",
+        id = "expresslane_keys_rotation_interval"
+    )))]
+    #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    pub keys_rotation_interval: Duration,
+}
+
+impl Default for ExpresslaneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keys_rotation_interval: Duration::from_std_duration(
+                lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            ),
+        }
+    }
+}
+
+/// PMTU discovery configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Default)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "PMTUD")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct PmtudConfig {
+    #[patch(attribute(clap(long = "pmtud-enabled", id = "pmtud_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable PMTU discovery for [`ConnectionType::Udp`] connections"))]
+    pub enabled: bool,
+
+    #[patch(attribute(clap(long = "pmtud-base-mtu", id = "pmtud_base_mtu")))]
+    #[patch(attribute(doc = "Base MTU to use for PMTU discovery"))]
+    pub base_mtu: Option<u16>,
+}
+
+/// Inside packet codec
+#[derive(
+    Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate, Default,
+)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Codec")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct CodecConfig {
+    #[patch(attribute(doc = "Enable inside packet encoding once connected \
+        (only if a codec is set)"))]
+    #[patch(attribute(clap(short = 'e', long = "codec-enabled", id = "codec_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    pub enabled: bool,
+}
+
+/// Tun device configuration
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch, Substrate)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Tun")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct TunConfig {
+    #[patch(attribute(clap(short = 't', long = "tun-name", id = "tun_name")))]
+    #[patch(attribute(doc = "Tun device name to use"))]
+    pub name: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-local-ip", id = "tun_local_ip")))]
+    #[patch(attribute(doc = "Local IP to use in Tun device"))]
+    pub local_ip: Ipv4Addr,
+
+    #[patch(attribute(clap(long = "tun-peer-ip", id = "tun_peer_ip")))]
+    #[patch(attribute(doc = "Peer IP to use in Tun device"))]
+    pub peer_ip: Ipv4Addr,
+
+    #[patch(attribute(clap(long = "tun-dns-ip", id = "tun_dns_ip")))]
+    #[patch(attribute(doc = "DNS IP to use in Tun device"))]
+    pub dns_ip: Ipv4Addr,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long = "tun-txqueuelen", id = "tun_txqueuelen")))]
+    #[patch(attribute(doc = "Transmit queue length (txqueuelen) of the Tun device"))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub txqueuelen: u32,
+
+    /// IO-uring configuration
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub iouring: IouringConfig,
+
+    /// Wintun configuration
+    #[cfg(windows)]
+    #[patch(nesting)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(flatten)))]
+    pub wintun: WintunConfig,
+}
+
+impl Default for TunConfig {
+    fn default() -> Self {
+        Self {
+            #[cfg(macos)]
+            name: None,
+            #[cfg(not(macos))]
+            name: Some("lightway".to_string()),
+            local_ip: Ipv4Addr::new(100, 64, 0, 6),
+            peer_ip: Ipv4Addr::new(100, 64, 0, 5),
+            dns_ip: Ipv4Addr::new(100, 64, 0, 1),
+            #[cfg(linux)]
+            txqueuelen: 1000,
+            iouring: IouringConfig::default(),
+            #[cfg(windows)]
+            wintun: WintunConfig::default(),
+        }
+    }
+}
+
+/// IO-uring configuration for the Tun device
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "IO-uring")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct IouringConfig {
+    #[patch(attribute(clap(long = "tun-iouring-enabled", id = "tun_iouring_enabled")))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
+    pub enabled: bool,
+
+    // Any value more than 1024 negatively impact the throughput
+    #[patch(attribute(clap(long = "tun-iouring-entry-count", id = "tun_iouring_entry_count")))]
+    #[patch(attribute(doc = r#"IO-uring submission queue count.
+    Only applicable when `enabled` is `true`"#))]
+    pub entry_count: usize,
+
+    #[patch(attribute(clap(
+        long = "tun-iouring-sqpoll-idle-time",
+        id = "tun_iouring_sqpoll_idle_time"
+    )))]
+    #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
+    If non-zero use a kernel thread to perform submission queue polling.
+    After the given idle time the thread will go to sleep."#))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 100ms
+    pub sqpoll_idle_time: Duration,
+}
+
+impl Default for IouringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            entry_count: 1024,
+            sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+        }
+    }
+}
+
+/// Wintun configuration (Windows only)
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Serialize, Patch)]
+#[patch(attribute(derive(Clone, Debug, Default, Deserialize, clap::Args)))]
+#[patch(attribute(command(next_help_heading = "Wintun")))]
+#[patch(attribute(serde(deny_unknown_fields)))]
+pub struct WintunConfig {
+    #[patch(attribute(clap(long = "tun-wintun-file", id = "tun_wintun_file")))]
+    #[patch(attribute(doc = "Path to wintun.dll file (Windows only)"))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub file: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-wintun-device-guid", id = "tun_wintun_device_guid")))]
+    #[patch(attribute(doc = r#"
+    Fixed GUID for the Wintun adapter (Windows only).
+    Ensures adapter creation retries reuse the same device node.
+    Accepts a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000")."#))]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub device_guid: Option<String>,
+
+    #[patch(attribute(clap(long = "tun-wintun-ring-capacity", id = "tun_wintun_ring_capacity")))]
+    #[patch(
+        attribute(doc = r#"Wintun ring buffer capacity in bytes (Windows only).
+    Must be a power of two between 128KiB and 64MiB.
+    Larger values improve throughput."#)
+    )]
+    #[schemars(extend("x-cfg" = "windows"))]
+    #[schemars(schema_with = "byte_size_schema")]
+    pub ring_capacity: ByteSize,
+}
+
+#[cfg(windows)]
+impl Default for WintunConfig {
+    fn default() -> Self {
+        Self {
+            file: None,
+            device_guid: None,
+            ring_capacity: ByteSize::mib(8),
+        }
+    }
+}
+
+/// A single server entry. Every field but `server` falls back to the
+/// matching `connect`/`auth` default, see [`Config::resolve_connections`].
 #[derive(
     Clone, Default, Parser, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Substrate,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
     /// Server to connect to in `<hostname>:<port>` format
     pub server: String,
 
     /// Connection mode
     #[serde(default)]
-    pub mode: ConnectionType,
+    pub mode: Option<ConnectionType>,
 
     /// Server domain name
     #[serde(default)]
@@ -607,13 +828,17 @@ pub struct ConnectionConfig {
 
     /// Cipher to use for encryption
     #[serde(default)]
-    pub cipher: Cipher,
+    pub cipher: Option<Cipher>,
+
+    /// Key share group for post-quantum key exchange
+    #[serde(default)]
+    pub keyshare: Option<KeyShare>,
 
     /// Username for User/Pass Auth
     #[serde(default)]
     pub user: Option<String>,
 
-    /// Passwordfor User/Pass Auth
+    /// Password for User/Pass Auth
     #[serde(default)]
     pub password: Option<String>,
 
@@ -622,35 +847,88 @@ pub struct ConnectionConfig {
     pub token: Option<String>,
 
     /// Outside mtu
-    #[serde_inline_default(MAX_OUTSIDE_MTU)]
-    pub outside_mtu: usize,
+    #[serde(default)]
+    pub outside_mtu: Option<usize>,
 
     /// The CA Cert content or Path
     #[serde(default)]
     pub ca_cert: Option<String>,
+
+    /// SNI header for TLS connections
+    #[serde(default)]
+    pub sni_header: Option<String>,
 }
 
-impl ConnectionConfig {
+/// A [`ConnectionConfig`] entry with every field resolved against the
+/// `connect`/`auth` defaults.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedConnection {
+    /// Server to connect to in `<hostname>:<port>` format
+    pub server: String,
+
+    /// Connection mode
+    pub mode: ConnectionType,
+
+    /// Server domain name
+    pub server_dn: String,
+
+    /// Cipher to use for encryption
+    pub cipher: Cipher,
+
+    /// Key share group for post-quantum key exchange
+    pub keyshare: KeyShare,
+
+    /// Outside mtu
+    pub outside_mtu: usize,
+
+    /// The CA Cert content or Path
+    pub ca_cert: String,
+
+    /// SNI header for TLS connections
+    pub sni_header: String,
+
+    /// Auth token
+    pub token: Option<String>,
+
+    /// Username for User/Pass Auth
+    pub user: Option<String>,
+
+    /// Password for User/Pass Auth
+    pub password: Option<String>,
+}
+
+impl ResolvedConnection {
     /// Try build auth from config
     pub fn take_auth(&mut self) -> Result<AuthMethod, Error> {
         take_auth(self.token.take(), self.user.take(), self.password.take())
     }
 
-    /// Try build CA from ca_crt
+    /// Certificate content of `ca_cert`, read from disk on desktop when it
+    /// holds a path rather than an inline PEM
+    pub fn load_ca_content(&self) -> Result<String, Error> {
+        if check_cert_header(&self.ca_cert) {
+            return Ok(self.ca_cert.clone());
+        }
+        // NOTE: we support a path input on desktop only
+        if cfg!(desktop) {
+            std::fs::read_to_string(&self.ca_cert).map_err(|_| Error::CaFileNotFound {
+                path: self.ca_cert.clone(),
+            })
+        } else {
+            Err(Error::InvalidCertificate)
+        }
+    }
+
+    /// Try build CA from ca_cert
     #[cfg(feature = "mobile")]
     pub fn load_ca(&self) -> Result<lightway_core::tls::RootCertificate<'_>, Error> {
-        self.ca_cert
-            .as_ref()
-            .map(|ca| {
-                if check_cert_header(ca) {
-                    Ok(lightway_core::tls::RootCertificate::PemBuffer(
-                        ca.as_bytes(),
-                    ))
-                } else {
-                    Err(Error::InvalidCertificate)
-                }
-            })
-            .ok_or(Error::InvalidCertificate)?
+        if check_cert_header(&self.ca_cert) {
+            Ok(lightway_core::tls::RootCertificate::PemBuffer(
+                self.ca_cert.as_bytes(),
+            ))
+        } else {
+            Err(Error::InvalidCertificate)
+        }
     }
 
     /// Try build SocketAddress from server field
@@ -687,8 +965,11 @@ pub enum Error {
     InsufficientAuth,
 
     /// No such Ca file from user's input
-    #[error("Ca file is absent")]
-    CaFileNotFound,
+    #[error("Ca file is absent: {path}")]
+    CaFileNotFound {
+        /// The `ca_cert` value that could not be read
+        path: String,
+    },
 }
 
 fn take_auth(
@@ -719,6 +1000,19 @@ fn byte_size_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Sche
     schema
 }
 
+/// `LW_CLIENT_RUST_LOG` is the tracing `EnvFilter` var read directly by
+/// `main.rs`, not a config key - drop it before the env_tree parse so
+/// setting it doesn't trip the "unknown config fields" check.
+fn env_config_patch_from_vars(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Result<ConfigPatch, lightway_app_utils::env_tree::Error> {
+    lightway_app_utils::env_tree::from_iter_with_prefix(
+        vars.into_iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("LW_CLIENT_RUST_LOG")),
+        "LW_CLIENT",
+    )
+}
+
 impl Config {
     pub fn cli_options() -> &'static ConfigPatch {
         CLI_OPTIONS.get_or_init(ConfigPatch::parse)
@@ -740,7 +1034,7 @@ impl Config {
             use crate::platform::windows::crypto::decrypt_dpapi_config_file;
             use windows_dpapi::Scope::User;
 
-            let content = if cli_options.enable_dpapi {
+            let content = if cli_options.config.dpapi {
                 tracing::info!("DPAPI decryption enabled for config file");
                 decrypt_dpapi_config_file(path, User).map_err(|e| {
                     anyhow::anyhow!("Failed to decrypt DPAPI-protected config file: {e}")
@@ -757,7 +1051,7 @@ impl Config {
             serde_saphyr::from_str::<ConfigPatch>(&content)?
         };
 
-        let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
+        let env_patch: ConfigPatch = env_config_patch_from_vars(std::env::vars())?;
         let mut cli_patch = cli_options.clone();
         cli_patch.config_file = None;
         cli_patch.generate = None;
@@ -814,20 +1108,40 @@ mod tests {
     use schemars::SchemaGenerator;
     use test_case::test_case;
 
-    #[test_case("../tests/client/client_config.yaml", true, 0)]
+    /// One resolved field checked in both directions:
+    /// `(field, (group-default actual, expected), (entry-override actual, expected))`
+    type FieldCheck = (&'static str, (String, String), (String, String));
+
+    fn tcp_entry(server: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            server: server.to_string(),
+            mode: Some(ConnectionType::Tcp),
+            ..Default::default()
+        }
+    }
+
+    #[test_case("../tests/client/client_config.yaml", 1, "server:27690")]
     #[test_case(
         "../tests/client/parallel_connect/client_config.tcp_then_udp.yaml",
-        false,
-        2
+        2,
+        "server_tcp:27690"
     )]
-    #[test_case("../tests/client/parallel_connect/client_config.tcp.yaml", false, 10)]
+    #[test_case(
+        "../tests/client/parallel_connect/client_config.tcp.yaml",
+        10,
+        "server:27691"
+    )]
     #[test_case(
         "../tests/client/parallel_connect/client_config.udp_then_tcp.yaml",
-        false,
-        2
+        2,
+        "server_udp:27690"
     )]
-    #[test_case("../tests/client/parallel_connect/client_config.udp.yaml", false, 10)]
-    fn test_parse_config(config_file: &str, has_top_level_server: bool, servers_len: usize) {
+    #[test_case(
+        "../tests/client/parallel_connect/client_config.udp.yaml",
+        10,
+        "server:27691"
+    )]
+    fn test_parse_config(config_file: &str, servers_len: usize, first_server: &str) {
         let matches =
             ConfigPatch::try_parse_from(["lightway-client", "--config-file", config_file]);
         let mut config = Config::default();
@@ -835,10 +1149,58 @@ mod tests {
         let yaml_patch =
             serde_saphyr::from_str::<ConfigPatch>(&read_to_string(config_file).unwrap()).unwrap();
         config.apply(yaml_patch);
+
+        let env_patch: ConfigPatch = lightway_app_utils::env_tree::from_iter_with_prefix(
+            vec![(
+                "LW_CLIENT_KEEPALIVE__INTERVAL".to_string(),
+                "33s".to_string(),
+            )],
+            "LW_CLIENT",
+        )
+        .unwrap();
+        config.apply(env_patch);
+
         config.apply(matches.unwrap());
 
-        assert_eq!(config.server.is_empty(), !has_top_level_server);
-        assert_eq!(config.servers.len(), servers_len);
+        // Every fixture lists its servers under connect
+        assert_eq!(config.connect.servers.len(), servers_len);
+        assert_eq!(config.connect.servers[0].server, first_server);
+        // Every fixture sets connect.outside_mtu and the auth credentials
+        assert_eq!(config.connect.outside_mtu, 1500);
+        assert_eq!(config.auth.user.as_deref(), Some("user"));
+        assert_eq!(config.auth.password.as_deref(), Some("password"));
+        // Resolution fills every entry from the entry itself or the group defaults
+        let resolved = config.resolve_connections().unwrap();
+        assert_eq!(resolved.len(), servers_len);
+        assert_eq!(resolved[0].server, first_server);
+        assert_eq!(resolved[0].server_dn, "goaway.com");
+        assert_eq!(resolved[0].cipher, Cipher::Aes256);
+        assert_eq!(resolved[0].outside_mtu, 1500);
+        assert_eq!(resolved[0].user.as_deref(), Some("user"));
+        assert!(!resolved[0].ca_cert.is_empty());
+        // env layer overrides the fixture's keepalive.interval (10s) with 33s
+        assert_eq!(
+            config.keepalive.interval,
+            NonZeroDuration::from_std_duration(StdDuration::from_secs(33))
+        );
+        // Every fixture sets log_level to info
+        assert_eq!(config.log.level, LogLevel::Info);
+        // Every fixture sets route_mode/dns_config_mode
+        #[cfg(desktop)]
+        {
+            assert_eq!(config.network.route_mode, RouteMode::Default);
+            assert_eq!(config.network.dns_config_mode, DnsConfigMode::NoExec);
+        }
+        // Every fixture sets pmtud.enabled to false
+        assert!(!config.pmtud.enabled);
+        // Every fixture sets tun.name/local_ip/peer_ip/dns_ip
+        assert_eq!(config.tun.name, Some("lightway".to_string()));
+        assert_eq!(config.tun.local_ip, Ipv4Addr::new(100, 64, 0, 6));
+        assert_eq!(config.tun.peer_ip, Ipv4Addr::new(100, 64, 0, 5));
+        assert_eq!(config.tun.dns_ip, Ipv4Addr::new(100, 64, 0, 1));
+        // Every fixture sets tun.iouring.enabled/entry_count
+        assert!(!config.tun.iouring.enabled);
+        assert_eq!(config.tun.iouring.entry_count, 1024);
     }
 
     fn get_byte_pattern() -> String {
@@ -943,13 +1305,37 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn env_rust_log_is_not_an_unknown_config_field() {
+        // LW_CLIENT_RUST_LOG is the tracing EnvFilter var (main.rs), not a
+        // config key: it must not land in `unknowns` and must not shadow
+        // other env-set fields going through the same load() path.
+        let vars = vec![
+            ("LW_CLIENT_RUST_LOG".to_string(), "debug".to_string()),
+            (
+                "LW_CLIENT_KEEPALIVE__INTERVAL".to_string(),
+                "33s".to_string(),
+            ),
+        ];
+        let patch = env_config_patch_from_vars(vars).expect("should parse");
+        assert!(patch.unknowns.is_empty());
+
+        let mut config = Config::default();
+        config.apply(patch);
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.keepalive.interval,
+            NonZeroDuration::from_std_duration(StdDuration::from_secs(33))
+        );
+    }
+
     #[tracing_test::traced_test]
     #[test]
     fn config_unknown_fields_with_accept_flag_only_warns() {
         let yaml = "unknown_field: true\n";
         let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");
         let mut config = Config::default();
-        config.accept_unknowns = true;
+        config.config.accept_unknowns = true;
         config.apply(patch);
         assert!(config.validate().is_ok());
         assert!(logs_contain("unknown config fields will be ignored"));
@@ -960,12 +1346,11 @@ mod tests {
     #[test]
     fn validate_sndbuf_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
-        config.mode = ConnectionType::Tcp;
-        config.sndbuf = ByteSize::mib(16);
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
+        config.socket.sndbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "sndbuf is set but cannot be applied to this TCP connections"
+            "socket.sndbuf is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }
@@ -975,10 +1360,10 @@ mod tests {
     #[test]
     fn validate_warns_on_low_tun_txqueuelen() {
         let mut config = Config::default();
-        config.tun_txqueuelen = 500;
+        config.tun.txqueuelen = 500;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "tun_txqueuelen is below the recommended minimum of 1000"
+            "tun.txqueuelen is below the recommended minimum of 1000"
         ));
     }
 
@@ -986,7 +1371,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_tun_txqueuelen() {
         let mut config = Config::default();
-        config.tun_txqueuelen = 0;
+        config.tun.txqueuelen = 0;
         assert!(config.validate().is_err());
     }
 
@@ -995,12 +1380,11 @@ mod tests {
     #[test]
     fn validate_rcvbuf_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
-        config.mode = ConnectionType::Tcp;
-        config.rcvbuf = ByteSize::mib(16);
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
+        config.socket.rcvbuf = ByteSize::mib(16);
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "rcvbuf is set but cannot be applied to this TCP connections"
+            "socket.rcvbuf is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }
@@ -1009,9 +1393,9 @@ mod tests {
     #[test]
     fn validate_device_guid() {
         let mut config = Config::default();
-        config.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
+        config.tun.wintun.device_guid = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
         assert!(config.validate().is_ok());
-        config.device_guid = Some("not-a-valid-uuid".to_string());
+        config.tun.wintun.device_guid = Some("not-a-valid-uuid".to_string());
         assert!(config.validate().is_err());
     }
 
@@ -1019,12 +1403,11 @@ mod tests {
     #[test]
     fn validate_pmtud_on_tcp_server() {
         let mut config = Config::default();
-        config.server = "127.0.0.1:27690".to_string();
-        config.enable_pmtud = true;
-        config.mode = ConnectionType::Tcp;
+        config.connect.servers = vec![tcp_entry("127.0.0.1:27690")];
+        config.pmtud.enabled = true;
         assert!(config.validate().is_ok());
         assert!(logs_contain(
-            "enable_pmtud is set but cannot be applied to this TCP connections"
+            "pmtud.enabled is set but cannot be applied to this TCP connections"
         ));
         assert!(logs_contain("127.0.0.1:27690"));
     }
@@ -1033,7 +1416,262 @@ mod tests {
     #[test]
     fn validate_wintun_ring_capacity() {
         let mut config = Config::default();
-        config.wintun_ring_capacity = ByteSize::mib(3);
+        config.tun.wintun.ring_capacity = ByteSize::mib(3);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resolve_precedence_entry_over_connect_over_default() {
+        let mut config = Config::default();
+        config.connect.cipher = Cipher::Chacha20;
+        config.auth.user = Some("global".into());
+        config.connect.servers = vec![
+            ConnectionConfig {
+                server: "a:1".into(),
+                ..Default::default()
+            },
+            ConnectionConfig {
+                server: "b:2".into(),
+                cipher: Some(Cipher::Aes256),
+                user: Some("per-entry".into()),
+                ..Default::default()
+            },
+        ];
+        let resolved = config.resolve_connections().unwrap();
+        assert_eq!(resolved[0].cipher, Cipher::Chacha20); // connect default
+        assert_eq!(resolved[0].user.as_deref(), Some("global")); // auth fallback
+        assert_eq!(resolved[1].cipher, Cipher::Aes256); // entry wins
+        assert_eq!(resolved[1].user.as_deref(), Some("per-entry"));
+    }
+
+    #[test]
+    fn resolve_requires_at_least_one_server() {
+        let config = Config::default();
+        assert!(config.resolve_connections().is_err());
+    }
+
+    #[test]
+    fn resolve_credentials_are_group_wise() {
+        let mut config = Config::default();
+        config.auth.token = Some("global-token".into());
+        config.auth.user = Some("global-user".into());
+        config.auth.password = Some("global-pass".into());
+        config.connect.servers = vec![
+            // Supplies user+password: the global token must not leak in and
+            // downgrade the connection to token auth
+            ConnectionConfig {
+                server: "a:1".into(),
+                user: Some("entry-user".into()),
+                password: Some("entry-pass".into()),
+                ..Default::default()
+            },
+            // Supplies user only: stays incomplete so auth fails loudly
+            ConnectionConfig {
+                server: "b:2".into(),
+                user: Some("lonely-user".into()),
+                ..Default::default()
+            },
+            // Supplies a token only: the global user/pass must not leak in
+            ConnectionConfig {
+                server: "c:3".into(),
+                token: Some("entry-token".into()),
+                ..Default::default()
+            },
+            // Supplies nothing: inherits the whole auth group
+            ConnectionConfig {
+                server: "d:4".into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut resolved = config.resolve_connections().unwrap();
+
+        assert_eq!(resolved[0].token, None);
+        assert_eq!(resolved[0].user.as_deref(), Some("entry-user"));
+        assert_eq!(resolved[0].password.as_deref(), Some("entry-pass"));
+        assert!(matches!(
+            resolved[0].take_auth().unwrap(),
+            AuthMethod::UserPass { .. }
+        ));
+
+        assert_eq!(resolved[1].token, None);
+        assert_eq!(resolved[1].user.as_deref(), Some("lonely-user"));
+        assert_eq!(resolved[1].password, None);
+        assert!(matches!(
+            resolved[1].take_auth(),
+            Err(Error::InsufficientAuth)
+        ));
+
+        assert_eq!(resolved[2].token.as_deref(), Some("entry-token"));
+        assert_eq!(resolved[2].user, None);
+        assert_eq!(resolved[2].password, None);
+
+        assert_eq!(resolved[3].token.as_deref(), Some("global-token"));
+        assert_eq!(resolved[3].user.as_deref(), Some("global-user"));
+        assert_eq!(resolved[3].password.as_deref(), Some("global-pass"));
+    }
+
+    #[test]
+    fn resolve_covers_every_field_in_both_directions() {
+        // Every connect.*/auth.* default moved off its type default
+        let mut config = Config::default();
+        config.connect.mode = ConnectionType::Udp;
+        config.connect.server_dn = "group.example".into();
+        config.connect.cipher = Cipher::Chacha20;
+        {
+            config.connect.keyshare = KeyShare::X25519Mlkem768;
+        }
+        config.connect.outside_mtu = 1400;
+        config.connect.ca_cert = "group-ca.crt".into();
+        config.connect.sni_header = "group.sni".into();
+        config.auth.token = Some("group-token".into());
+        config.auth.user = Some("group-user".into());
+        config.auth.password = Some("group-pass".into());
+
+        config.connect.servers = vec![
+            // Sets nothing: every field falls back to the group default
+            ConnectionConfig {
+                server: "group:1".into(),
+                ..Default::default()
+            },
+            // Sets everything: every field comes from the entry
+            ConnectionConfig {
+                server: "entry:2".into(),
+                mode: Some(ConnectionType::Tcp),
+                server_dn: Some("entry.example".into()),
+                cipher: Some(Cipher::Aes256),
+                keyshare: Some(KeyShare::default()),
+                outside_mtu: Some(1300),
+                ca_cert: Some("entry-ca.crt".into()),
+                sni_header: Some("entry.sni".into()),
+                token: Some("entry-token".into()),
+                user: Some("entry-user".into()),
+                password: Some("entry-pass".into()),
+            },
+        ];
+
+        let resolved = config.resolve_connections().unwrap();
+        let (group, entry) = (&resolved[0], &resolved[1]);
+
+        let mut checks: Vec<FieldCheck> = vec![
+            (
+                "mode",
+                (
+                    format!("{:?}", group.mode),
+                    format!("{:?}", ConnectionType::Udp),
+                ),
+                (
+                    format!("{:?}", entry.mode),
+                    format!("{:?}", ConnectionType::Tcp),
+                ),
+            ),
+            (
+                "server_dn",
+                (group.server_dn.clone(), "group.example".into()),
+                (entry.server_dn.clone(), "entry.example".into()),
+            ),
+            (
+                "cipher",
+                (
+                    format!("{:?}", group.cipher),
+                    format!("{:?}", Cipher::Chacha20),
+                ),
+                (
+                    format!("{:?}", entry.cipher),
+                    format!("{:?}", Cipher::Aes256),
+                ),
+            ),
+            (
+                "outside_mtu",
+                (group.outside_mtu.to_string(), "1400".into()),
+                (entry.outside_mtu.to_string(), "1300".into()),
+            ),
+            (
+                "ca_cert",
+                (group.ca_cert.clone(), "group-ca.crt".into()),
+                (entry.ca_cert.clone(), "entry-ca.crt".into()),
+            ),
+            (
+                "sni_header",
+                (group.sni_header.clone(), "group.sni".into()),
+                (entry.sni_header.clone(), "entry.sni".into()),
+            ),
+            (
+                "token",
+                (
+                    format!("{:?}", group.token),
+                    format!("{:?}", Some("group-token")),
+                ),
+                (
+                    format!("{:?}", entry.token),
+                    format!("{:?}", Some("entry-token")),
+                ),
+            ),
+            (
+                "user",
+                (
+                    format!("{:?}", group.user),
+                    format!("{:?}", Some("group-user")),
+                ),
+                (
+                    format!("{:?}", entry.user),
+                    format!("{:?}", Some("entry-user")),
+                ),
+            ),
+            (
+                "password",
+                (
+                    format!("{:?}", group.password),
+                    format!("{:?}", Some("group-pass")),
+                ),
+                (
+                    format!("{:?}", entry.password),
+                    format!("{:?}", Some("entry-pass")),
+                ),
+            ),
+            (
+                "server",
+                (group.server.clone(), "group:1".into()),
+                (entry.server.clone(), "entry:2".into()),
+            ),
+        ];
+        // On boringssl `KeyShare` has a single variant, so the entry branch
+        // cannot differ from the group one there; on wolfSSL it does.
+        checks.push((
+            "keyshare",
+            (
+                format!("{:?}", group.keyshare),
+                format!("{:?}", KeyShare::X25519Mlkem768),
+            ),
+            (
+                format!("{:?}", entry.keyshare),
+                format!("{:?}", KeyShare::default()),
+            ),
+        ));
+
+        for (field, (group_actual, group_expected), (entry_actual, entry_expected)) in checks {
+            assert_eq!(group_actual, group_expected, "{field}: group default lost");
+            assert_eq!(entry_actual, entry_expected, "{field}: entry override lost");
+        }
+    }
+
+    #[test]
+    fn unknown_key_inside_group_is_hard_error() {
+        let yaml = "keepalive:\n  interval: 10s\n  typo_key: 1\n";
+        let result = serde_saphyr::from_str::<ConfigPatch>(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_key_inside_connect_entry_errors() {
+        let yaml = "connect:\n  servers:\n    - server: 127.0.0.1:27690\n      typo_key: 1\n";
+        let result = serde_saphyr::from_str::<ConfigPatch>(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clap_command_has_no_arg_collisions() {
+        use clap::CommandFactory;
+        ConfigPatch::command().debug_assert();
     }
 }

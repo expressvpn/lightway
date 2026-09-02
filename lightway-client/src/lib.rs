@@ -170,9 +170,6 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// DNS IP to use in Tun device
     pub tun_dns_ip: Ipv4Addr,
 
-    /// Key share group for post-quantum key exchange
-    pub keyshare: KeyShare,
-
     /// Interval between keepalives
     pub keepalive_interval: Duration,
 
@@ -296,23 +293,23 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
 
         let mut tun_config = TunConfig::default();
 
-        if let Some(ref tun_name) = config.tun_name {
+        if let Some(ref tun_name) = config.tun.name {
             tun_config.tun_name(tun_name.clone());
         }
 
         #[cfg(linux)]
-        tun_config.tx_queue_len(config.tun_txqueuelen);
+        tun_config.tx_queue_len(config.tun.txqueuelen);
 
         #[cfg(windows)]
         {
-            if let Some(ref wintun_file) = config.wintun_file {
+            if let Some(ref wintun_file) = config.tun.wintun.file {
                 tun_config.wintun_file(wintun_file);
             }
-            tun_config.ring_capacity(config.wintun_ring_capacity.as_u64().try_into()?)?;
+            tun_config.ring_capacity(config.tun.wintun.ring_capacity.as_u64().try_into()?)?;
         }
 
         #[cfg(windows)]
-        if let Some(ref device_guid) = config.device_guid {
+        if let Some(ref device_guid) = config.tun.wintun.device_guid {
             let parsed = uuid::Uuid::parse_str(device_guid)
                 .with_context(|| format!("invalid device GUID: {device_guid}"))?;
             tracing::info!(device_guid = %parsed, "Setting device GUID");
@@ -322,56 +319,55 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
         // TODO: Fix in future PR
         tun_config
             .mtu(1350)
-            .address(config.tun_local_ip.into())
-            .destination(config.tun_peer_ip)
+            .address(config.tun.local_ip.into())
+            .destination(config.tun.peer_ip)
             .up();
 
         Ok(ClientConfig {
-            outside_mtu: config.outside_mtu,
+            outside_mtu: config.connect.outside_mtu,
             inside_io: None,
             tun_config,
-            tun_local_ip: config.tun_local_ip,
-            tun_peer_ip: config.tun_peer_ip,
-            tun_dns_ip: config.tun_dns_ip,
-            keyshare: config.keyshare,
-            enable_expresslane: config.enable_expresslane,
+            tun_local_ip: config.tun.local_ip,
+            tun_peer_ip: config.tun.peer_ip,
+            tun_dns_ip: config.tun.dns_ip,
+            enable_expresslane: config.expresslane.enabled,
             #[cfg(apple)]
-            enable_connected_udp: config.enable_connected_udp,
-            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            enable_connected_udp: config.socket.connected_udp,
+            expresslane_keys_rotation_interval: config.expresslane.keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
-            keepalive_interval: config.keepalive_interval.into(),
-            keepalive_timeout: config.keepalive_timeout.into(),
-            continuous_keepalive: config.keepalive_continuous,
-            tracer_packet_timeout: config.tracer_packet_timeout.into(),
-            preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
-            sndbuf: config.sndbuf,
-            rcvbuf: config.rcvbuf,
+            keepalive_interval: config.keepalive.interval.into(),
+            keepalive_timeout: config.keepalive.timeout.into(),
+            continuous_keepalive: config.keepalive.continuous,
+            tracer_packet_timeout: config.keepalive.tracer_timeout.into(),
+            preferred_connection_wait_interval: config.connect.preferred_wait_interval.into(),
+            sndbuf: config.socket.sndbuf,
+            rcvbuf: config.socket.rcvbuf,
             #[cfg(batch_receive)]
-            enable_batch_receive: config.enable_batch_receive,
+            enable_batch_receive: config.socket.batch_receive,
             #[cfg(desktop)]
-            route_mode: config.route_mode,
+            route_mode: config.network.route_mode,
             #[cfg(linux)]
-            fwmark: config.fwmark,
+            fwmark: config.socket.fwmark,
             #[cfg(desktop)]
-            dns_config_mode: config.dns_config_mode,
-            enable_pmtud: config.enable_pmtud,
-            pmtud_base_mtu: config.pmtud_base_mtu,
+            dns_config_mode: config.network.dns_config_mode,
+            enable_pmtud: config.pmtud.enabled,
+            pmtud_base_mtu: config.pmtud.base_mtu,
             #[cfg(feature = "io-uring")]
-            enable_tun_iouring: config.enable_tun_iouring,
+            enable_tun_iouring: config.tun.iouring.enabled,
             #[cfg(feature = "io-uring")]
-            iouring_entry_count: config.iouring_entry_count,
+            iouring_entry_count: config.tun.iouring.entry_count,
             #[cfg(feature = "io-uring")]
-            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            iouring_sqpoll_idle_time: config.tun.iouring.sqpoll_idle_time.into(),
             inside_pkt_codec_config: None,
             inside_pkt_codec_stall_timeout: Duration::ZERO,
             config_reload_signal,
             network_change_signal: None,
             best_connection_selected_signal: None,
             #[cfg(feature = "debug")]
-            tls_debug: config.tls_debug,
+            tls_debug: config.debug.tls,
             #[cfg(feature = "debug")]
-            keylog: config.keylog.clone(),
+            keylog: config.debug.keylog.clone(),
         })
     }
 }
@@ -385,8 +381,14 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
     /// Cipher to use for encryption
     pub cipher: Cipher,
 
+    /// Key share group for post-quantum key exchange
+    pub keyshare: KeyShare,
+
     /// Server domain name to validate
     pub server_dn: Option<String>,
+
+    /// SNI header to send, empty to not send one
+    pub sni_header: String,
 
     /// Server IP address and port
     pub server: SocketAddr,
@@ -418,9 +420,10 @@ pub struct ClientConnectionConfig<EventHandler: 'static + Send + EventCallback> 
 impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventHandler> {
     pub async fn try_from_event_handler_and_connection_config(
         event_handler: Option<EventHandler>,
-        mut config: config::ConnectionConfig,
+        mut config: config::ResolvedConnection,
     ) -> Result<ClientConnectionConfig<EventHandler>> {
         let auth = config.take_auth()?;
+        let cert_content = config.load_ca_content()?;
         tracing::info!("Resolving server address: {}", &config.server);
 
         let server_addr: SocketAddr = tokio::net::lookup_host(config.server)
@@ -436,12 +439,12 @@ impl<EventHandler: 'static + Send + EventCallback> ClientConnectionConfig<EventH
         Ok(ClientConnectionConfig {
             mode,
             cipher: config.cipher,
-            server_dn: config.server_dn,
+            keyshare: config.keyshare,
+            server_dn: (!config.server_dn.is_empty()).then_some(config.server_dn),
+            sni_header: config.sni_header,
             server: server_addr,
             auth,
-            cert_content: config.ca_cert.ok_or(anyhow!(
-                "ca_cert missing; ensure Config::take_servers() was called first"
-            ))?,
+            cert_content,
             inside_plugins: Default::default(),
             outside_plugins: Default::default(),
             inside_pkt_codec: None,
@@ -471,7 +474,7 @@ pub struct ReloadableClientConfig {
 impl From<&config::Config> for ReloadableClientConfig {
     fn from(config: &config::Config) -> Self {
         Self {
-            enable_inside_pkt_encoding: Some(config.enable_inside_pkt_encoding),
+            enable_inside_pkt_encoding: Some(config.codec.enabled),
         }
     }
 }
@@ -1149,8 +1152,10 @@ pub async fn connect<
     let ClientConnectionConfig {
         mode,
         cipher,
+        keyshare,
         server,
         server_dn,
+        sni_header,
         auth,
         cert_content,
         inside_pkt_codec,
@@ -1294,10 +1299,11 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
+        .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
         .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
-        .with_pq_crypto(config.keyshare.into());
+        .with_pq_crypto(keyshare.into());
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 
