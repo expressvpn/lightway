@@ -21,7 +21,7 @@ pub(crate) trait Server {
 
 /// Where one received wire packet came from.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RecvMeta {
+pub struct RecvMeta {
     /// Address the packet was received from.
     ///
     /// The server routes by this address before it consults the session
@@ -43,10 +43,12 @@ pub(crate) struct RecvMeta {
 /// wire header, routing to a connection, and delivering. An implementation
 /// supplies only the transport.
 ///
+/// Pass it as `ServerConnectionMode::DatagramIo`. Datagram transports
+/// only: `TcpServer` is accept-based and does not fit the shared loop.
 #[async_trait]
-pub(crate) trait OutsideIO: Send {
-    /// Receive one wire packet into `buf`, which the implementation
-    /// clears and reserves [`lightway_core::MAX_OUTSIDE_MTU`] on first.
+pub trait OutsideIO: Send {
+    /// Receive one wire packet into `buf`. The implementation clears `buf`
+    /// and reserves [`lightway_core::MAX_OUTSIDE_MTU`] before it receives.
     ///
     /// Return `WouldBlock` only after awaiting readiness. The server loop
     /// retries immediately, so a `WouldBlock` that awaited nothing burns a
