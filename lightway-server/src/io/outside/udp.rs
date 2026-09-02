@@ -377,27 +377,26 @@ impl UdpServer {
     /// Receive and process packets in batches using the platform batch-receive
     /// syscall (`recvmmsg` on Linux, `recvmsg_x` on macOS).
     async fn run_batch(&mut self) -> Result<()> {
-        const SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
-        let mut buf_slots: [BatchRecvSlot<SIZE>; MAX_IO_BATCH_SIZE] =
+        let mut buf_slots: [BatchRecvSlot; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BatchRecvSlot::new());
+        let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
+            std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
         loop {
             let pkt_metadata = self
                 .sock
                 .async_io(Interest::READABLE, || {
                     read_multiple_from_socket(
                         &self.sock,
+                        &mut bufs,
                         &mut buf_slots,
-                        MAX_IO_BATCH_SIZE,
                         &self.bind_mode,
                     )
                 })
                 .await?;
             // `zip` stops at the shorter iterator, so this processes exactly the
             // slots that batch receive filled (one metadata entry per slot).
-            for (slot, meta) in buf_slots.iter_mut().zip(pkt_metadata) {
-                self.data_received(meta.peer, meta.local, meta.reply_pktinfo, &mut slot.buf);
-                // Recover full capacity
-                slot.reset();
+            for (buf, meta) in bufs.iter_mut().zip(pkt_metadata) {
+                self.data_received(meta.peer, meta.local, meta.reply_pktinfo, buf);
             }
         }
     }
@@ -534,24 +533,22 @@ fn read_single_from_socket(
 
 /// Per-packet metadata produced by batched receive.
 struct BatchRecvMetadata {
-    /// The peer (remote) address the packet was received from.
     peer: SocketAddr,
-    /// The resolved local address the packet was received on.
     local: SocketAddr,
     /// The `in_pktinfo` to echo back on replies, when the bind mode needs it.
     reply_pktinfo: Option<libc::in_pktinfo>,
 }
 
-fn read_multiple_from_socket<const N: usize>(
+fn read_multiple_from_socket(
     sock: &Arc<tokio::net::UdpSocket>,
-    buf_slots: &mut [BatchRecvSlot<N>; MAX_IO_BATCH_SIZE],
-    max_batch_size: usize,
+    bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
+    buf_slots: &mut [BatchRecvSlot; MAX_IO_BATCH_SIZE],
     bind_mode: &BindMode,
 ) -> std::io::Result<Vec<BatchRecvMetadata>> {
     let sock = SockRef::from(sock.as_ref());
 
     let fd = sock.as_raw_fd();
-    let n = recv_multiple_with_metadata(fd, buf_slots, max_batch_size)?;
+    let n = recv_multiple_with_metadata(fd, bufs, buf_slots)?;
 
     let mut metadata = Vec::with_capacity(n);
 
@@ -571,28 +568,16 @@ fn read_multiple_from_socket<const N: usize>(
 
         let (local_addr, reply_pktinfo) = match *bind_mode {
             BindMode::UnspecifiedAddress { local_port } => {
-                if let Some(ref mut control) = slot.control
-                    && let Some(control_len) = slot.control_length
-                {
-                    #[allow(unsafe_code)]
-                    let Some((local_addr, reply_pktinfo)) =
-                        // SAFETY: The call to `recvmmsg` above updated
-                        // the control buffer length field.
-                        find_pktinfo_from_iter(unsafe { control.iter(control_len) }, local_port) else {
-                        // Since we have a bound socket
-                        // and we have set IP_PKTINFO
-                        // sockopt this shouldn't happen.
-                        metrics::udp_recv_missing_pktinfo();
-                        return Err(std::io::Error::other("recvmmsg did not return IP_PKTINFO"));
-                    };
-                    (local_addr, Some(reply_pktinfo))
-                } else {
-                    // No cmsg found, returning error
+                let Some((local_addr, reply_pktinfo)) = slot
+                    .control_messages()
+                    .and_then(|iter| find_pktinfo_from_iter(iter, local_port))
+                else {
+                    // We bind the socket and set the IP_PKTINFO sockopt, so
+                    // this should not happen.
                     metrics::udp_recv_missing_pktinfo();
-                    return Err(std::io::Error::other(
-                        "recvmmsg did not return cmsg and IP_PKTINFO",
-                    ));
-                }
+                    return Err(std::io::Error::other("recvmmsg did not return IP_PKTINFO"));
+                };
+                (local_addr, Some(reply_pktinfo))
             }
             BindMode::SpecificAddress { local_addr } => (local_addr, None),
         };
