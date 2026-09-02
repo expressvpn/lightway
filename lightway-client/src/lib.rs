@@ -130,8 +130,9 @@ pub enum LightwayError {
 /// to the live socket without reopening it.
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionInfo {
-    /// The underlying socket, tagged with its transport type.
-    pub socket: io::outside::OutsideSocket,
+    /// The underlying socket, tagged with its transport type. `None` when
+    /// the outside IO has no single OS socket to name.
+    pub socket: Option<io::outside::OutsideSocket>,
     /// Remote peer address the connection is established to.
     pub peer_addr: std::net::SocketAddr,
 }

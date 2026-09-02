@@ -342,7 +342,7 @@ impl OutsideIO for Udp {
         }
     }
 
-    fn socket(&self) -> OutsideSocket {
+    fn socket(&self) -> Option<OutsideSocket> {
         #[cfg(unix)]
         use std::os::fd::AsRawFd;
         #[cfg(windows)]
@@ -351,7 +351,7 @@ impl OutsideIO for Udp {
         let handle = self.sock.as_raw_fd();
         #[cfg(windows)]
         let handle = self.sock.as_raw_socket();
-        OutsideSocket::Udp(handle)
+        Some(OutsideSocket::Udp(handle))
     }
 }
 
