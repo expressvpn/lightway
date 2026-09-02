@@ -237,13 +237,36 @@ impl UdpServer {
         self.send_queue.clone()
     }
 
-    fn data_received(
-        &self,
-        peer_addr: SocketAddr,
-        local_addr: SocketAddr,
-        reply_pktinfo: Option<libc::in_pktinfo>,
-        buf: &mut BytesMut,
-    ) {
+    /// The `IP_PKTINFO` to echo on replies to a packet that arrived on
+    /// `local_addr`.
+    ///
+    /// Derived rather than carried: the kernel's `ipi_spec_dst` is the
+    /// local address, which is what `local_addr` already holds, so there
+    /// is nothing extra to thread through the receive path.
+    ///
+    /// `None` when the socket is bound to a specific address, because the
+    /// kernel then picks the right source itself.
+    fn reply_pktinfo(&self, local_addr: SocketAddr) -> Option<libc::in_pktinfo> {
+        if !self.bind_mode.needs_pktinfo() {
+            return None;
+        }
+        let IpAddr::V4(v4) = local_addr.ip() else {
+            // `IP_PKTINFO` is IPv4 only, and the receive path only
+            // resolves a local address for IPv4.
+            return None;
+        };
+        Some(libc::in_pktinfo {
+            ipi_ifindex: 0,
+            ipi_spec_dst: libc::in_addr {
+                s_addr: v4.to_bits().to_be(),
+            },
+            ipi_addr: libc::in_addr { s_addr: 0 },
+        })
+    }
+
+    fn data_received(&self, peer_addr: SocketAddr, local_addr: SocketAddr, buf: &mut BytesMut) {
+        let reply_pktinfo = self.reply_pktinfo(local_addr);
+
         datagram::data_received(
             &self.conn_manager,
             buf,
@@ -280,14 +303,14 @@ impl UdpServer {
             buf.clear();
             buf.reserve(MAX_OUTSIDE_MTU);
 
-            let (peer_addr, local_addr, reply_pktinfo) = self
+            let (peer_addr, local_addr) = self
                 .sock
                 .async_io(Interest::READABLE, || {
                     read_single_from_socket(&self.sock, &mut buf, &self.bind_mode)
                 })
                 .await?;
 
-            self.data_received(peer_addr, local_addr, reply_pktinfo, &mut buf);
+            self.data_received(peer_addr, local_addr, &mut buf);
         }
     }
 
@@ -313,7 +336,7 @@ impl UdpServer {
             // `zip` stops at the shorter iterator, so this processes exactly the
             // slots that batch receive filled (one metadata entry per slot).
             for (buf, meta) in bufs.iter_mut().zip(pkt_metadata) {
-                self.data_received(meta.peer, meta.local, meta.reply_pktinfo, buf);
+                self.data_received(meta.0, meta.1, buf);
             }
         }
     }
@@ -333,10 +356,13 @@ impl Server for UdpServer {
     }
 }
 
-fn find_pktinfo_from_iter(
-    mut iter: cmsg::Iter<'_>,
-    local_port: u16,
-) -> Option<(SocketAddr, libc::in_pktinfo)> {
+/// Resolve the local address a packet arrived on from its `IP_PKTINFO`
+/// control message.
+///
+/// The reply `IP_PKTINFO` is not returned: it is a function of this
+/// address, rebuilt by [`UdpServer::reply_pktinfo`] when a reply is
+/// needed.
+fn find_local_addr_from_iter(mut iter: cmsg::Iter<'_>, local_port: u16) -> Option<SocketAddr> {
     iter.find_map(|cmsg| {
         match cmsg {
             cmsg::Message::IpPktinfo(pi) => {
@@ -348,13 +374,7 @@ fn find_pktinfo_from_iter(
                 let ipv4 = Ipv4Addr::from_bits(ipv4);
                 let ip = IpAddr::V4(ipv4);
 
-                let reply_pktinfo = libc::in_pktinfo {
-                    ipi_ifindex: 0,
-                    ipi_spec_dst: pi.ipi_spec_dst,
-                    ipi_addr: libc::in_addr { s_addr: 0 },
-                };
-
-                Some((SocketAddr::new(ip, local_port), reply_pktinfo))
+                Some(SocketAddr::new(ip, local_port))
             }
             _ => None,
         }
@@ -365,7 +385,7 @@ fn read_single_from_socket(
     sock: &Arc<tokio::net::UdpSocket>,
     buf: &mut BytesMut,
     bind_mode: &BindMode,
-) -> std::io::Result<(SocketAddr, SocketAddr, Option<libc::in_pktinfo>)> {
+) -> std::io::Result<(SocketAddr, SocketAddr)> {
     let sock = SockRef::from(sock.as_ref());
     let mut raw_buf = [MaybeUninitSlice::new(buf.spare_capacity_mut())];
 
@@ -428,32 +448,24 @@ fn read_single_from_socket(
     };
 
     #[allow(unsafe_code)]
-    let (local_addr, reply_pktinfo) = match *bind_mode {
+    let local_addr = match *bind_mode {
         BindMode::UnspecifiedAddress { local_port } => {
-            let Some((local_addr, reply_pktinfo)) =
+            let Some(local_addr) =
             // SAFETY: The call to `recvmsg` above updated
             // the control buffer length field.
-                find_pktinfo_from_iter(unsafe { control.iter(control_len) }, local_port) else {
+                find_local_addr_from_iter(unsafe { control.iter(control_len) }, local_port) else {
                 // Since we have a bound socket
                 // and we have set IP_PKTINFO
                 // sockopt this shouldn't happen.
                 metrics::udp_recv_missing_pktinfo();
                 return Err(std::io::Error::other( "recvmsg did not return IP_PKTINFO",));
             };
-            (local_addr, Some(reply_pktinfo))
+            local_addr
         }
-        BindMode::SpecificAddress { local_addr } => (local_addr, None),
+        BindMode::SpecificAddress { local_addr } => local_addr,
     };
 
-    Ok((peer_addr, local_addr, reply_pktinfo))
-}
-
-/// Per-packet metadata produced by batched receive.
-struct BatchRecvMetadata {
-    peer: SocketAddr,
-    local: SocketAddr,
-    /// The `in_pktinfo` to echo back on replies, when the bind mode needs it.
-    reply_pktinfo: Option<libc::in_pktinfo>,
+    Ok((peer_addr, local_addr))
 }
 
 fn read_multiple_from_socket(
@@ -461,7 +473,7 @@ fn read_multiple_from_socket(
     bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
     buf_slots: &mut [BatchRecvSlot; MAX_IO_BATCH_SIZE],
     bind_mode: &BindMode,
-) -> std::io::Result<Vec<BatchRecvMetadata>> {
+) -> std::io::Result<Vec<(SocketAddr, SocketAddr)>> {
     let sock = SockRef::from(sock.as_ref());
 
     let fd = sock.as_raw_fd();
@@ -483,27 +495,23 @@ fn read_multiple_from_socket(
             ));
         };
 
-        let (local_addr, reply_pktinfo) = match *bind_mode {
+        let local_addr = match *bind_mode {
             BindMode::UnspecifiedAddress { local_port } => {
-                let Some((local_addr, reply_pktinfo)) = slot
+                let Some(local_addr) = slot
                     .control_messages()
-                    .and_then(|iter| find_pktinfo_from_iter(iter, local_port))
+                    .and_then(|iter| find_local_addr_from_iter(iter, local_port))
                 else {
                     // We bind the socket and set the IP_PKTINFO sockopt, so
                     // this should not happen.
                     metrics::udp_recv_missing_pktinfo();
                     return Err(std::io::Error::other("recvmmsg did not return IP_PKTINFO"));
                 };
-                (local_addr, Some(reply_pktinfo))
+                local_addr
             }
-            BindMode::SpecificAddress { local_addr } => (local_addr, None),
+            BindMode::SpecificAddress { local_addr } => local_addr,
         };
 
-        metadata.push(BatchRecvMetadata {
-            peer: peer_addr,
-            local: local_addr,
-            reply_pktinfo,
-        });
+        metadata.push((peer_addr, local_addr));
     }
 
     Ok(metadata)
