@@ -86,7 +86,6 @@ impl IpPool {
     }
 }
 
-// Tests START -> panic, unwrap, expect allowed
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +398,3 @@ mod tests {
         assert_gt!(total_differences / count as f64, 512.0);
     }
 }
-
-// Tests END -> panic, unwrap, expect allowed
