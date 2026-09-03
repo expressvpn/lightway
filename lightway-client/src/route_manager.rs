@@ -409,6 +409,18 @@ impl RouteManagerInner {
         Ok(())
     }
 
+    /// Updates the server route by deleting the old one and adding a new one
+    async fn update_server_route(&mut self, new_route: Route) -> Result<(), RoutingTableError> {
+        if let Some(old_route) = self.server_route.clone()
+            && self.route_manager_async.delete(&old_route).await.is_ok()
+        {
+            self.server_route = None;
+        }
+        self.add_route(&new_route).await?;
+        self.server_route = Some(new_route);
+        Ok(())
+    }
+
     /// Adds LAN Route and stores it
     async fn add_route_lan(&mut self, route: Route) -> Result<(), RoutingTableError> {
         self.add_route(&route).await?;
@@ -545,13 +557,7 @@ impl RouteManagerInner {
                     );
                 }
 
-                // Update server route with new gateway/interface
-                if let Some(old_route) = self.server_route.take() {
-                    // Remove old route
-                    let _ = self.route_manager_async.delete(&old_route).await;
-                }
-
-                // Add new route with current gateway and interface
+                // Create new route with current gateway and interface
                 let prefix = host_prefix_len(&self.server_ip);
                 let mut new_server_route = Route::new(self.server_ip, prefix);
                 if let Some(if_index) = current_if_index {
@@ -563,7 +569,7 @@ impl RouteManagerInner {
                 #[cfg(windows)]
                 let new_server_route = new_server_route.with_metric(0);
 
-                self.add_route_server(new_server_route).await?;
+                self.update_server_route(new_server_route).await?;
 
                 tracing::info!("Updated server route for network change");
                 return Ok(true);
