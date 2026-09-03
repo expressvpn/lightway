@@ -763,10 +763,7 @@ impl<AppState: Send> Connection<AppState> {
             self.rotate_expresslane_key()?;
 
             // Start PMTU discovery
-            if let Some(ref mut pmtud) = self.pmtud {
-                let action = pmtud.online(&mut self.app_state);
-                self.handle_pmtud_action(action)?;
-            }
+            self.drive_pmtud(|pmtud, state| pmtud.online(state))?;
         }
 
         if matches!(new_state, State::LinkUp)
@@ -1663,6 +1660,28 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
+    /// Run one DPLPMTUD step, notify the application if the PMTUD status
+    /// changed, then carry out the action the step requested.
+    ///
+    /// The notification precedes the send: the state machine has already
+    /// moved on even if the probe cannot be sent, and the application must
+    /// see the same status the connection now applies to its own traffic.
+    fn drive_pmtud(
+        &mut self,
+        step: impl FnOnce(&mut dplpmtud::Dplpmtud<AppState>, &mut AppState) -> dplpmtud::Action,
+    ) -> ConnectionResult<()> {
+        let Some(pmtud) = self.pmtud.as_mut() else {
+            return Ok(());
+        };
+        let before = pmtud.status();
+        let action = step(pmtud, &mut self.app_state);
+        let after = pmtud.status();
+        if before != after {
+            self.event(Event::PmtudStateChanged(after));
+        }
+        self.handle_pmtud_action(action)
+    }
+
     /// Inject a tick to PMTUD (after timer started with
     /// [`crate::DplpmtudTimer::start`] expires).
     pub fn pmtud_tick(&mut self) -> ConnectionResult<()> {
@@ -1670,12 +1689,17 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         };
 
-        let Some(pmtud) = self.pmtud.as_mut() else {
-            return Ok(());
-        };
+        self.drive_pmtud(|pmtud, state| pmtud.tick(state))
+    }
 
-        let action = pmtud.tick(&mut self.app_state);
-        self.handle_pmtud_action(action)
+    /// Current path MTU discovery status, or `None` when PMTUD is not
+    /// enabled on this connection (no timer was supplied via
+    /// [`crate::ClientConnectionBuilder::with_pmtud_timer`], or the
+    /// connection is not a datagram connection).
+    ///
+    /// Changes are also delivered as [`Event::PmtudStateChanged`].
+    pub fn pmtud_status(&self) -> Option<dplpmtud::Status> {
+        self.pmtud.as_ref().map(|pmtud| pmtud.status())
     }
 
     /// Update the session id (only the one we wanted to rotate to) after the connection is validated.
@@ -1942,10 +1966,7 @@ impl<AppState: Send> Connection<AppState> {
             self.check_expresslane_health(&pong.payload)?;
         }
 
-        if let Some(ref mut pmtud) = self.pmtud {
-            let action = pmtud.pong_received(&pong, &mut self.app_state);
-            self.handle_pmtud_action(action)?;
-        }
+        self.drive_pmtud(|pmtud, state| pmtud.pong_received(&pong, state))?;
 
         Ok(())
     }

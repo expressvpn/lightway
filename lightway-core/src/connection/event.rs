@@ -1,5 +1,5 @@
 use crate::connection::ExpresslaneState;
-use crate::{SessionId, State};
+use crate::{PmtudStatus, SessionId, State};
 
 /// A lightway event
 #[derive(Debug)]
@@ -52,4 +52,9 @@ pub enum Event {
     },
     /// Expresslane state changed
     ExpresslaneStateChanged(ExpresslaneState),
+    /// Path MTU discovery state or estimate changed; see [`PmtudStatus`].
+    /// [`crate::Connection::pmtud_status`] returns the current snapshot.
+    ///
+    /// Client datagram connections built with a PMTUD timer only
+    PmtudStateChanged(PmtudStatus),
 }

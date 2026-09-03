@@ -860,3 +860,227 @@ async fn peer_that_stops_reporting_degrades() {
         "the first two windows must be tolerated (skip) and the third fail-safe"
     );
 }
+
+/// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
+/// fires once per state or estimate change (never for a no-op step), the
+/// getter agrees with the last event, and for every step that requests a
+/// probe the event is delivered before that probe reaches the outside I/O.
+#[tokio::test]
+async fn pmtud_reports_status_changes() {
+    /// One entry per PMTUD event and per outside send, in the order the
+    /// connection produced them: both happen synchronously inside the call
+    /// that drives the state machine, so the log preserves their ordering.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Entry {
+        Online,
+        Pmtud(PmtudStatus),
+        Send(usize),
+    }
+    type Log = Arc<Mutex<Vec<Entry>>>;
+
+    struct RecordingSock {
+        inner: Arc<TestDatagramSock>,
+        log: Log,
+    }
+
+    impl OutsideIOSendCallback for RecordingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            self.log.lock().unwrap().push(Entry::Send(buf.len()));
+            self.inner.send(buf)
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            self.inner.send_gso(bufs, gso_size)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            self.inner.peer_addr()
+        }
+
+        // Unix datagram sockets have no DF bit; accept the probe bracket.
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingEvents {
+        inner: EventStreamCallback,
+        log: Log,
+    }
+
+    impl EventCallback for RecordingEvents {
+        fn event(&mut self, event: Event) {
+            match &event {
+                Event::StateChanged(State::Online) => self.log.lock().unwrap().push(Entry::Online),
+                Event::PmtudStateChanged(status) => {
+                    self.log.lock().unwrap().push(Entry::Pmtud(*status))
+                }
+                _ => {}
+            }
+            self.inner.event(event);
+        }
+    }
+
+    // Generate the shared test PKI before the timeout window (RSA keygen is
+    // very slow on QEMU).
+    gen_shared_testing_pki();
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+
+    // The server answers every probe Ping with a Pong.
+    let mut server_task = tokio::spawn(server(server_sock, auth, pqc, None, None, None));
+
+    let log: Log = Default::default();
+    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (event_cb, mut event_stream) = EventStreamCallback::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let (pmtud_timer, pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+    let state = ConnectionState { ticker };
+    let outside: OutsideIOSendCallbackArg = Arc::new(RecordingSock {
+        inner: client_sock.clone(),
+        log: log.clone(),
+    });
+
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(outside, MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_event_cb(Box::new(RecordingEvents {
+        inner: event_cb,
+        log: log.clone(),
+    }))
+    .with_pmtud_timer(pmtud_timer)
+    .connect(state)
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&client), &mut join_set);
+
+    // Drain events so the stream never backpressures the connection.
+    tokio::spawn(async move { while event_stream.next().await.is_some() {} });
+
+    // Pump the client until the search converges. Nothing is lost on the
+    // socket pair, so no probe timer ever fires and every probe is confirmed.
+    let driver = async {
+        loop {
+            client_sock
+                .readable()
+                .await
+                .expect("client socket readable");
+            let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+            match client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+            let mut c = client.lock().unwrap();
+            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            c.outside_data_received(pkt).expect("outside data received");
+            if c.pmtud_status()
+                .is_some_and(|s| s.state == PmtudState::SearchComplete)
+            {
+                return;
+            }
+        }
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                _ = driver => {}
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
+
+    let log = log.lock().unwrap().clone();
+    let online = log
+        .iter()
+        .position(|e| *e == Entry::Online)
+        .expect("Online was reported");
+    let pmtud: Vec<(usize, PmtudStatus)> = log
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Entry::Pmtud(s) => Some((i, *s)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        pmtud.first().is_some_and(|(i, _)| *i > online),
+        "discovery starts once Online: {log:?}"
+    );
+
+    // One event per change, none for a no-op step: base 1250, big steps of
+    // 32 up to max_dtls_mtu(MAX_OUTSIDE_MTU) = 1419, at which point the
+    // search converges without an intermediate Searching(1419).
+    let expected = [
+        (PmtudState::Base, None),
+        (PmtudState::Searching, Some(1250)),
+        (PmtudState::Searching, Some(1282)),
+        (PmtudState::Searching, Some(1314)),
+        (PmtudState::Searching, Some(1346)),
+        (PmtudState::Searching, Some(1378)),
+        (PmtudState::Searching, Some(1410)),
+        (PmtudState::SearchComplete, Some(1419)),
+    ];
+    let observed: Vec<_> = pmtud.iter().map(|(_, s)| (s.state, s.plpmtu)).collect();
+    assert_eq!(observed, expected, "full log: {log:?}");
+    for (_, s) in &pmtud {
+        // wire::Data frame overhead: kind byte plus 2-byte length.
+        assert_eq!(s.max_packet_size, s.plpmtu.map(|p| p as usize - 3), "{s:?}");
+    }
+
+    // The getter reports the same snapshot as the last event.
+    assert_eq!(
+        client.lock().unwrap().pmtud_status(),
+        pmtud.last().map(|(_, s)| *s)
+    );
+
+    // Every snapshot that requests a probe is delivered BEFORE that probe
+    // is sent: the next log entry after it is the probe itself (an
+    // encrypted datagram at least as large as the probed PLPMTU, which here
+    // is never below the base).
+    for (i, s) in &pmtud {
+        if s.state == PmtudState::SearchComplete {
+            continue;
+        }
+        match log.get(i + 1) {
+            Some(Entry::Send(len)) => {
+                assert!(*len >= 1250, "probe after {s:?} was only {len} bytes")
+            }
+            other => panic!("expected the probe send right after {s:?}, found {other:?}"),
+        }
+    }
+}

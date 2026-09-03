@@ -806,6 +806,9 @@ async fn handle_events<A: 'static + Send + EventCallback>(
                 continue;
             }
             Event::FirstPacketReceived | Event::EncodingStateChanged { .. } => (), // will be handled by handle_global_events
+            Event::PmtudStateChanged(status) => {
+                info!(?status, "Path MTU discovery status changed");
+            }
 
             // Server-only events
             Event::SessionIdRotationAcknowledged { .. }

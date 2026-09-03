@@ -22,6 +22,16 @@ After calculating Path MTU, `Lightway` uses it for handling inside packets (from
 1. Fragment UDP packets inside lightway protocol if the size is larger than PMTU,
    which will be reassembled at the other end. Ref: `lightway_core::wire::DataFrag`
 
+The application can observe the outcome of discovery. The connection emits
+`Event::PmtudStateChanged(PmtudStatus)` on every state transition and whenever the PLPMTU
+estimate changes, and `Connection::pmtud_status()` returns the current `PmtudStatus` (`None`
+when PMTUD is not enabled). `PmtudStatus::max_packet_size` is the largest inside packet the
+connection sends in a single `Data` frame at the discovered PLPMTU; it is `None` while there is
+no estimate (`Disabled`, `Base`, `Error`). An application that sends packets outside the
+`Connection` (an offloaded data plane) can use it to size its own packets and to clamp TCP MSS,
+which is `max_packet_size - 40` for IPv4 (the IP and TCP headers), exactly as the connection
+does for the packets it sends itself.
+
 At present, PMTU discovery is only enabled on client side. In future, we may enable
 it in Server.
 

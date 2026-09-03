@@ -530,6 +530,9 @@ pub async fn client<S: TestSock>(
                 Event::EncodingStateChanged { enabled } => {
                     println!("Encoding state change to {enabled}")
                 }
+                Event::PmtudStateChanged(status) => {
+                    println!("PMTUD status change to {status:?}")
+                }
             }
         }
     });
