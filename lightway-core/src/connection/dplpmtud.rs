@@ -182,7 +182,7 @@ pub struct Status {
     /// Largest inside (application) packet that fits a single `Data`
     /// frame at `plpmtu`: the connection fragments inside packets above
     /// it and clamps TCP MSS to `max_packet_size - 40` (the IPv4 and TCP
-    /// headers). `None` whenever `plpmtu` is.
+    /// headers). `None` whenever `plpmtu` is `None`.
     pub max_packet_size: Option<usize>,
 }
 

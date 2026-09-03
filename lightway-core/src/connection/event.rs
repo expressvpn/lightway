@@ -52,24 +52,9 @@ pub enum Event {
     },
     /// Expresslane state changed
     ExpresslaneStateChanged(ExpresslaneState),
-    /// Path MTU discovery state or estimate changed.
+    /// Path MTU discovery state or estimate changed; see [`PmtudStatus`].
+    /// [`crate::Connection::pmtud_status`] returns the current snapshot.
     ///
-    /// Fired on every DPLPMTUD state transition and whenever the PLPMTU
-    /// estimate changes within a state (each confirmed search probe).
-    /// [`PmtudStatus::max_packet_size`] is the largest inside packet the
-    /// connection now sends unfragmented; `None` means no estimate is
-    /// available and the connection sizes packets by its configured
-    /// outside MTU instead.
-    ///
-    /// Only client datagram connections built with a PMTUD timer
-    /// ([`crate::ClientConnectionBuilder::with_pmtud_timer`]) emit this
-    /// event; servers and stream connections never do.
-    ///
-    /// The event is a notification of a change, delivered synchronously
-    /// from the call that drove the state machine. A consumer that
-    /// receives events through an asynchronous bridge which does not
-    /// preserve their order (for example one that spawns a task per
-    /// event) should read [`crate::Connection::pmtud_status`] for the
-    /// current snapshot rather than apply the event's payload.
+    /// Client datagram connections built with a PMTUD timer only
     PmtudStateChanged(PmtudStatus),
 }
