@@ -42,7 +42,7 @@ use crate::debug::WiresharkKeyLogger;
 use crate::dns_manager::{DnsConfigMode, DnsManager, DnsManagerError, DnsSetup};
 use crate::keepalive::Config as KeepaliveConfig;
 #[cfg(desktop)]
-use crate::route_manager::{RouteManager, RouteMode, RouteUpdater};
+use crate::route_manager::{RepinState, RouteManager, RouteMode, RouteUpdater};
 #[cfg(batch_receive)]
 use lightway_core::MAX_IO_BATCH_SIZE;
 pub use lightway_core::{
@@ -846,8 +846,9 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 /// socket (Apple platforms) and, when the wake-up represents a network transition,
 /// nudge the connection-level network-change handler. On Apple platforms the
 /// nudge also fires when the server route was actually replaced (Datagram
-/// wiring only). Owns the [`RouteUpdater`], so aborting the task removes the
-/// installed routes.
+/// wiring only). Failed route refreshes retry from inside the select! loop so
+/// fresh wake-ups are never blocked; a fresh event restarts the retry budget.
+/// Owns the [`RouteUpdater`], so aborting the task removes the installed routes.
 #[cfg(desktop)]
 async fn network_event_coordinator(
     mut route_updater: RouteUpdater,
@@ -859,15 +860,17 @@ async fn network_event_coordinator(
     network_change_signal: mpsc::Sender<()>,
 ) {
     tracing::info!("Reacting to network change events...");
-    loop {
-        let mut nudge = nudge_on_route_event;
+    let mut route_repin_state: Option<RepinState> = None;
 
-        tokio::select! {
+    loop {
+        // `Some(nudge)` is a fresh network event; `None` is a retry tick.
+        let event = tokio::select! {
             changed = route_rx.changed() => {
                 if changed.is_err() {
                     // Wake source gone; dropping the updater clears routes.
                     break;
                 }
+                let mut nudge = nudge_on_route_event;
                 // Fold a transition that fired alongside the route event into
                 // this iteration instead of waking a second time.
                 if let Some(rx) = transition_rx.as_mut()
@@ -876,6 +879,7 @@ async fn network_event_coordinator(
                     rx.mark_unchanged();
                     nudge = true;
                 }
+                Some(nudge)
             }
             changed = async {
                 match transition_rx.as_mut() {
@@ -888,22 +892,42 @@ async fn network_event_coordinator(
                     transition_rx = None;
                     continue;
                 }
-                nudge = true;
                 // A transition can complete on the address leg alone; consume
                 // any simultaneous route event so the pair is one iteration.
                 if route_rx.has_changed().unwrap_or(false) {
                     route_rx.mark_unchanged();
                 }
+                Some(true)
             }
-        }
+            // The deadline is absolute, so recreating the sleep future each
+            // iteration is fine.
+            _ = async { tokio::time::sleep_until(route_repin_state.as_ref().unwrap().next_at).await },
+                if route_repin_state.is_some() => None,
+        };
+
+        // A fresh event restarts the retry clock but keeps any nudge owed
+        // from the interrupted retry.
+        let mut state = match event {
+            Some(nudge) => {
+                // repin state always take `.take()` so a stale pending retry never survives past a fresh event.
+                let pending_nudge = route_repin_state.take().is_some_and(|p| p.nudge);
+                RepinState::new(nudge || pending_nudge)
+            }
+            None => route_repin_state.take().expect("branch guarded on is_some"),
+        };
 
         match route_updater.check_and_update_server_route().await {
+            Err(e) => {
+                route_updater.on_repin_failure(&mut state, &e);
+                // Reconnect and nudge wait for the terminal outcome.
+                route_repin_state = Some(state);
+                continue;
+            }
             // A replaced server route is ground truth that the path to the
             // server moved; probe it so the session floats promptly.
             #[cfg(apple)]
-            Ok(true) if nudge_on_route_update => nudge = true,
+            Ok(true) if nudge_on_route_update => state.nudge = true,
             Ok(_) => {}
-            Err(e) => tracing::warn!("Updating server route failed: {:?}", e),
         }
 
         // The connected outside socket pins the route resolved at connect()
@@ -913,7 +937,9 @@ async fn network_event_coordinator(
             io.reconnect();
         }
 
-        if nudge && let Err(e) = network_change_signal.send(()).await {
+        if state.nudge
+            && let Err(e) = network_change_signal.send(()).await
+        {
             tracing::error!("Failed to send network_change_signal: {e}");
         }
     }
