@@ -13,6 +13,7 @@ impl Tcp {
         remote_addr: SocketAddr,
         maybe_sock: Option<TcpStream>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<Self> {
         let sock = match maybe_sock {
             Some(s) => {
@@ -41,6 +42,25 @@ impl Tcp {
                     match socket2::SockRef::from(&socket).set_mark(fwmark) {
                         Ok(_) => tracing::info!("Applied firewall mark to outside TCP socket"),
                         Err(e) => tracing::warn!("Failed to set SO_MARK on TCP socket: {}", e),
+                    }
+                }
+
+                // The route lookup that binds the local address happens at
+                // connect() and IP_UNICAST_IF has no effect on an already-connected
+                // socket, so pin must be applied before connect.
+                #[cfg(windows)]
+                if pin_egress_interface {
+                    use std::os::windows::io::AsRawSocket;
+                    match crate::platform::windows::egress::pin_to_peer_interface(
+                        socket.as_raw_socket(),
+                        remote_addr,
+                    ) {
+                        Ok(if_index) => tracing::info!(
+                            "Pinned outside TCP socket egress to interface {if_index}"
+                        ),
+                        Err(e) => {
+                            tracing::warn!("Failed to pin outside TCP socket egress: {e}")
+                        }
                     }
                 }
 

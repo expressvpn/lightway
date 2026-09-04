@@ -7,6 +7,8 @@ use lightway_core::{IOCallbackResult, OutsideIOSendCallback, OutsideIOSendCallba
 use std::sync::OnceLock;
 #[cfg(apple)]
 use std::sync::atomic::AtomicBool;
+#[cfg(windows)]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -41,6 +43,12 @@ pub struct Udp {
     /// instance.
     #[cfg(any(ios, tvos, all(test, apple)))]
     dead: AtomicBool,
+    /// Interface index this socket's egress is pinned to via
+    /// `IP_UNICAST_IF`/`IPV6_UNICAST_IF`, or `0` when unpinned. Re-applied on
+    /// every network change by [`OutsideIO::pin_egress_interface`]. Windows
+    /// only.
+    #[cfg(windows)]
+    pinned_if_index: AtomicU32,
     /// Consecutive swallowed send errors, reset by a successful send; see
     /// [`Udp::note_swallowed_send`].
     swallowed_sends: AtomicU64,
@@ -53,6 +61,7 @@ impl Udp {
         remote_addr: SocketAddr,
         sock: Option<UdpSocket>,
         #[cfg(all(linux, not(feature = "mobile")))] fwmark: u32,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<Self> {
         let peer_addr = tokio::net::lookup_host(remote_addr)
             .await?
@@ -82,8 +91,31 @@ impl Udp {
             }
         }
 
+        // Pin egress to the interface that currently reaches the server so the
+        // routing table cannot later divert outside packets into our own tunnel.
+        // Applied before the socket is used, for the same reason the firewall mark is.
+        #[cfg(windows)]
+        let pinned_if_index = if pin_egress_interface {
+            use std::os::windows::io::AsRawSocket;
+            match crate::platform::windows::egress::pin_to_peer_interface(
+                sock.as_raw_socket(),
+                peer_addr,
+            ) {
+                Ok(if_index) => {
+                    tracing::info!("Pinned outside UDP socket egress to interface {if_index}");
+                    if_index
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to pin outside UDP socket egress: {e}");
+                    0
+                }
+            }
+        } else {
+            0
+        };
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
             .context("Failed to get IP MTU Discovery sockopt")?;
+
         // Check for the socket's writable ready status, so that it can be used
         // successfuly in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
@@ -100,6 +132,8 @@ impl Udp {
             dead_socket_cb: OnceLock::new(),
             #[cfg(any(ios, tvos, all(test, apple)))]
             dead: AtomicBool::new(false),
+            #[cfg(windows)]
+            pinned_if_index: AtomicU32::new(pinned_if_index),
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
@@ -342,6 +376,35 @@ impl OutsideIO for Udp {
         }
     }
 
+    #[cfg(windows)]
+    fn pin_egress_interface(&self, if_index: u32) {
+        use std::os::windows::io::AsRawSocket;
+
+        if if_index == 0 {
+            return;
+        }
+        let previous = self.pinned_if_index.load(Ordering::Relaxed);
+        if previous == if_index {
+            return;
+        }
+
+        match crate::platform::windows::egress::set_unicast_if(
+            self.sock.as_raw_socket(),
+            if_index,
+            self.peer_addr.is_ipv6(),
+        ) {
+            Ok(()) => {
+                self.pinned_if_index.store(if_index, Ordering::Relaxed);
+                tracing::info!(
+                    "Re-pinned outside UDP socket egress after network change: interface {previous} -> {if_index}"
+                );
+            }
+            Err(e) => tracing::warn!(
+                "Failed to re-pin outside UDP socket egress to interface {if_index}, keeping {previous}: {e}"
+            ),
+        }
+    }
+
     fn socket(&self) -> OutsideSocket {
         #[cfg(unix)]
         use std::os::fd::AsRawFd;
@@ -474,6 +537,27 @@ impl OutsideIOSendCallback for Udp {
                 {
                     cb();
                 }
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
+            #[cfg(windows)]
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::HostUnreachable
+                ) =>
+            {
+                // A roam that changes the local address makes Windows fail
+                // sends with WSAEADDRNOTAVAIL (10049) or, once the routes
+                // pinned to the old address are torn down, WSAEHOSTUNREACH
+                // (10065). Both are transient: the socket is unconnected, so
+                // the next send re-selects a source address on the pinned
+                // interface, and DTLS retransmission covers the gap.
+                //
+                // Letting these reach wolfSSL is fatal in a way the network
+                // is not: the send callback error latches the session in
+                // error state (-308) and no later recovery can revive it.
+                // `keepalive_timeout` remains the liveness backstop.
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
