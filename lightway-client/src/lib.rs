@@ -856,7 +856,8 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 /// nudge the connection-level network-change handler. On Apple platforms the
 /// nudge also fires when the server route was actually replaced (Datagram
 /// wiring only). Failed route refreshes retry from inside the select! loop so
-/// fresh wake-ups are never blocked; a fresh event restarts the retry budget.
+/// fresh wake-ups are never blocked, and a fresh event inherits the retry it
+/// supersedes, so consecutive failures keep backing off rather than resetting.
 /// Owns the [`RouteUpdater`], so aborting the task removes the installed routes.
 #[cfg(desktop)]
 async fn network_event_coordinator(
@@ -914,12 +915,11 @@ async fn network_event_coordinator(
                 if route_repin_state.is_some() => None,
         };
 
-        // A fresh event restarts the retry clock but keeps any nudge owed
-        // from the interrupted retry.
+        // A fresh event serves immediately but inherits the superseded retry's
+        // owed nudge, failure clock and back-off position, so a re-pin that
+        // keeps failing keeps escalating across events.
         let mut state = match event {
-            Some(nudge) => {
-                RepinState::new(nudge || route_repin_state.take().is_some_and(|p| p.nudge))
-            }
+            Some(nudge) => RepinState::for_event(nudge, route_repin_state.take()),
             None => route_repin_state.take().expect("branch guarded on is_some"),
         };
 

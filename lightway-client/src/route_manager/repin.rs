@@ -9,13 +9,23 @@ pub struct RepinState {
 }
 
 impl RepinState {
-    pub fn new(nudge: bool) -> Self {
-        let now = tokio::time::Instant::now();
-        Self {
-            started_at: now,
-            next_at: now,
-            nudge,
-            retry_count: 0,
+    /// State for a fresh network event, or superseding `pending`, if any.
+    pub fn for_event(nudge: bool, pending: Option<RepinState>) -> Self {
+        if let Some(pending) = pending {
+            Self {
+                started_at: pending.started_at,
+                nudge: nudge || pending.nudge,
+                next_at: pending.next_at,
+                retry_count: pending.retry_count,
+            }
+        } else {
+            let now = tokio::time::Instant::now();
+            Self {
+                started_at: now,
+                nudge,
+                next_at: now,
+                retry_count: 0,
+            }
         }
     }
 
