@@ -489,7 +489,11 @@ async fn inside_io_loop_gso(
             }
         };
 
-        if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        // Only for non-GSO packets: the kernel sets NEEDS_CSUM on TSO
+        // aggregates too, but `gso::build_segment` recomputes each
+        // segment's checksum from scratch, so folding the (up to
+        // ~64KB) superpacket here would be immediately discarded work.
+        if hdr.is_gso_none() && hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
             gso_none_checksum(pkt.as_mut(), hdr.csum_start, hdr.csum_offset);
         }
 

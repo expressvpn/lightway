@@ -66,6 +66,16 @@ pub trait OutsideIO: Sync + Send {
         }
     }
 
+    /// Upgrade to the GRO-aware batched receive interface, when this
+    /// instance routes receives through it. Default: not supported.
+    /// Capability is per-instance but does not require the `UDP_GRO`
+    /// sockopt to have stuck — the batched loop degrades to plain
+    /// single-datagram slots when the kernel does not coalesce.
+    #[cfg(linux)]
+    fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
+        None
+    }
+
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg;
 
     fn peer_addr(&self) -> SocketAddr;
@@ -82,4 +92,40 @@ pub trait OutsideIO: Sync + Send {
 
     /// Returns the underlying socket tagged with its transport type.
     fn socket(&self) -> OutsideSocket;
+}
+
+/// Outside IO backends that can receive GRO aggregates. Obtained from
+/// [`OutsideIO::as_gro`]; the GRO outside loop only accepts this type,
+/// so the capability check happens once at startup.
+///
+/// Implementers must also override [`OutsideIO::as_gro`] to return
+/// `Some(self)` — the default `None` hides the capability.
+#[cfg(linux)]
+pub trait OutsideIORecvGro: OutsideIO {
+    /// Fill up to `MAX_IO_BATCH_SIZE` datagrams in a single `recvmmsg`,
+    /// writing each datagram's GRO segment size into `gro_sizes[i]`
+    /// (`None` if the kernel did not coalesce that message). Returns the
+    /// datagram count (`>= 1` on `Ok`).
+    ///
+    /// Each datagram may itself be a GRO aggregate of many wire packets:
+    /// when `gro_sizes[i]` is `Some(gro_size)`, every wire packet in
+    /// `bufs[i]` is exactly `gro_size` bytes except a possibly-shorter
+    /// final one; `None` means `bufs[i]` holds a single wire packet.
+    ///
+    /// Read-side batching that cuts one `recvmsg` per datagram down to one
+    /// syscall per batch. It stacks with the kernel's socket-read
+    /// coalescing, driven by the `UDP_GRO` sockopt (valid peer checksums are
+    /// necessary but not sufficient). A zero-checksum peer is skipped by the
+    /// GRO engine, so every `gro_sizes[i]` is `None` and each slot holds one
+    /// wire packet — costing socket-read coalescing only; the independent
+    /// TUN-write coalescing is unaffected.
+    ///
+    /// Caller must ensure each buffer has spare capacity for a
+    /// maximum-size aggregate (64KiB) or the tail of the aggregate is
+    /// truncated.
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize>;
 }
