@@ -50,6 +50,7 @@ pub use crate::connection::ConnectionState;
 #[cfg(linux)]
 pub use crate::io::inside::InsideIORecvGso;
 pub use crate::io::inside::{InsideIO, InsideIORecv, InsideIORecvBatch};
+pub use crate::io::outside::{OutsideIO, RecvMeta};
 
 use crate::io::outside::udp::send_queue::SendQueue;
 use crate::ip_manager::IpManager;
@@ -118,6 +119,12 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerAuth<connection::ConnectionSta
 pub enum ServerConnectionMode {
     Stream(Option<TcpListener>),
     Datagram(Option<UdpSocket>),
+    /// A datagram transport supplied by the application, in place of the
+    /// socket the server otherwise creates. Every socket option on
+    /// `ServerConfig` goes unused, `enable_batch_send` included: the
+    /// batched inside loop needs the UDP send queue that only the built-in
+    /// socket provides.
+    DatagramIo(Box<dyn OutsideIO>),
 }
 
 impl std::fmt::Debug for ServerConnectionMode {
@@ -125,6 +132,7 @@ impl std::fmt::Debug for ServerConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
+            Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
         }
     }
 }
@@ -133,7 +141,9 @@ impl From<&ServerConnectionMode> for ConnectionType {
     fn from(value: &ServerConnectionMode) -> Self {
         match value {
             ServerConnectionMode::Stream(_) => ConnectionType::Stream,
-            ServerConnectionMode::Datagram(_) => ConnectionType::Datagram,
+            ServerConnectionMode::Datagram(_) | ServerConnectionMode::DatagramIo(_) => {
+                ConnectionType::Datagram
+            }
         }
     }
 }
@@ -555,6 +565,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     let ip_manager = Arc::new(ip_manager);
 
     let connection_type = config.mode;
+
     let auth = Arc::new(AuthAdapter(config.auth));
 
     let inside_io: Arc<dyn InsideIO> = match config.inside_io.take() {
@@ -648,8 +659,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 
     let mut server: Box<dyn Server> = match connection_type {
         ServerConnectionMode::Datagram(may_be_sock) => {
-            let udp_server = io::outside::UdpServer::new(
-                conn_manager.clone(),
+            let udp_io = io::outside::UdpIo::new(
                 config.bind_address,
                 config.udp_buffer_size,
                 config.enable_batch_receive,
@@ -657,9 +667,16 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 may_be_sock,
             )
             .await?;
-            send_queue = udp_server.send_queue();
-            Box::new(udp_server)
+            send_queue = udp_io.send_queue();
+            Box::new(io::outside::DatagramServer::new(
+                Box::new(udp_io),
+                conn_manager.clone(),
+            ))
         }
+        ServerConnectionMode::DatagramIo(outside_io) => Box::new(io::outside::DatagramServer::new(
+            outside_io,
+            conn_manager.clone(),
+        )),
         ServerConnectionMode::Stream(may_be_sock) => Box::new(
             io::outside::TcpServer::new(
                 conn_manager.clone(),

@@ -148,7 +148,6 @@ impl<T: Value> ConnectionMap<T> {
     }
 }
 
-// Tests START -> panic, unwrap, expect allowed
 #[cfg(test)]
 mod tests {
     use test_case::test_case;
@@ -405,5 +404,3 @@ mod tests {
         }
     }
 }
-
-// Tests END -> panic, unwrap, expect allowed

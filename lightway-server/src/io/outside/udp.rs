@@ -10,8 +10,8 @@ use lightway_app_utils::cmsg;
 use lightway_app_utils::sockopt;
 use lightway_app_utils::sockopt::socket_enable_pktinfo;
 use lightway_core::{
-    ConnectionType, Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU,
-    OutsideIOSendCallback, OutsidePacket, SessionId, Version,
+    IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsideIOSendCallback,
+    OutsideIOSendCallbackArg,
 };
 use socket2::{MaybeUninitSlice, MsgHdr, MsgHdrMut, SockAddr, SockRef};
 use std::os::fd::AsRawFd;
@@ -21,12 +21,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::io::Interest;
-use tracing::{info, warn};
+use tracing::info;
 
-use super::Server;
+use super::{OutsideIO, RecvMeta};
 use crate::io::outside::udp::batch_receive::{BatchRecvSlot, recv_multiple_with_metadata};
 use crate::io::outside::udp::send_queue::SendQueue;
-use crate::{connection_manager::ConnectionManager, metrics};
+use crate::metrics;
 
 enum BindMode {
     UnspecifiedAddress { local_port: u16 },
@@ -154,23 +154,29 @@ impl OutsideIOSendCallback for UdpSocket {
     }
 }
 
-pub(crate) struct UdpServer {
-    conn_manager: Arc<ConnectionManager>,
+/// Control-buffer size for one `IP_PKTINFO` control message.
+const PKTINFO_CONTROL_SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
+
+/// Outside IO over one UDP socket.
+pub(crate) struct UdpIo {
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
     batch_receive_enabled: bool,
     send_queue: Option<Arc<SendQueue>>,
+    /// Scratch for the batch receive path: per-packet control buffers and
+    /// source-address storage, reused across calls. The payload buffers
+    /// come from the caller.
+    batch_slots: [BatchRecvSlot; MAX_IO_BATCH_SIZE],
 }
 
-impl UdpServer {
+impl UdpIo {
     pub(crate) async fn new(
-        conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
         udp_buffer_size: ByteSize,
         enable_batch_receive: bool,
         enable_batch_send: bool,
         sock: Option<tokio::net::UdpSocket>,
-    ) -> Result<UdpServer> {
+    ) -> Result<UdpIo> {
         let sock = match sock {
             Some(s) => s,
             None => tokio::net::UdpSocket::bind(bind_address).await?,
@@ -215,7 +221,7 @@ impl UdpServer {
             if lightway_app_utils::recvmsg_x::is_batch_receive_available() {
                 true
             } else {
-                warn!(
+                tracing::warn!(
                     "batch receive (recvmsg_x) not available on this system, batch receive disabled"
                 );
                 false
@@ -224,12 +230,14 @@ impl UdpServer {
             false
         };
 
+        info!("Accepting traffic on {bind_mode}");
+
         Ok(Self {
-            conn_manager,
             sock,
             bind_mode,
             batch_receive_enabled,
             send_queue,
+            batch_slots: std::array::from_fn(|_| BatchRecvSlot::new()),
         })
     }
 
@@ -239,188 +247,117 @@ impl UdpServer {
         self.send_queue.clone()
     }
 
-    fn data_received(
-        &mut self,
-        peer_addr: SocketAddr,
-        local_addr: SocketAddr,
-        reply_pktinfo: Option<libc::in_pktinfo>,
-        buf: &mut BytesMut,
-    ) {
-        let pkt = OutsidePacket::Wire(buf, ConnectionType::Datagram);
-        let pkt = match self.conn_manager.parse_raw_outside_packet(pkt) {
-            Ok(hdr) => hdr,
-            Err(e) => {
-                metrics::udp_parse_wire_failed();
-                warn!("Extracting header from packet failed: {e}");
-                return;
-            }
-        };
-
-        let Some(hdr) = pkt.header() else {
-            metrics::udp_no_header();
-            warn!("Packet parsing error: Not a UDP frame");
-            return;
-        };
-        if !self.conn_manager.is_supported_version(hdr.version) {
-            // If the protocol version is not supported then drop
-            // the packet.
-            metrics::udp_bad_packet_version(hdr.version);
-            return;
+    /// The `IP_PKTINFO` to echo on replies to a packet that arrived on
+    /// `local_addr`.
+    ///
+    /// Derived rather than carried: the kernel's `ipi_spec_dst` is the
+    /// local address, which is what `local_addr` already holds, so there
+    /// is nothing extra to thread through the receive path.
+    ///
+    /// `None` when the socket is bound to a specific address, because the
+    /// kernel then picks the right source itself.
+    fn reply_pktinfo(&self, local_addr: SocketAddr) -> Option<libc::in_pktinfo> {
+        if !self.bind_mode.needs_pktinfo() {
+            return None;
         }
-
-        let may_be_conn = self.conn_manager.find_datagram_connection_with(peer_addr);
-        let (conn, update_peer_address) = match may_be_conn {
-            Some(conn) => (conn, false),
-            None => {
-                let conn_result = self.conn_manager.find_or_create_datagram_connection_with(
-                    peer_addr,
-                    hdr.version,
-                    hdr.session,
-                    local_addr,
-                    || {
-                        Arc::new(UdpSocket {
-                            sock: self.sock.clone(),
-                            peer_addr: RwLock::new((peer_addr, peer_addr.into())),
-                            reply_pktinfo,
-                            send_queue: self.send_queue.clone(),
-                        })
-                    },
-                );
-
-                match conn_result {
-                    Ok(conn) => conn,
-                    Err(_e) => {
-                        self.send_reject(peer_addr.into(), reply_pktinfo);
-                        return;
-                    }
-                }
-            }
+        let IpAddr::V4(v4) = local_addr.ip() else {
+            // `IP_PKTINFO` is IPv4 only, and the receive path only
+            // resolves a local address for IPv4.
+            return None;
         };
+        Some(libc::in_pktinfo {
+            ipi_ifindex: 0,
+            ipi_spec_dst: libc::in_addr {
+                s_addr: v4.to_bits().to_be(),
+            },
+            ipi_addr: libc::in_addr { s_addr: 0 },
+        })
+    }
+}
 
-        let session = hdr.session;
+#[async_trait]
+impl OutsideIO for UdpIo {
+    async fn recv(&mut self, buf: &mut BytesMut) -> IOCallbackResult<RecvMeta> {
+        buf.clear();
+        buf.reserve(MAX_OUTSIDE_MTU);
 
-        match conn.outside_data_received(pkt) {
-            Ok(0) => {
-                // We will hit this case when there is UDP packet duplication.
-                // TLS library skips duplicate packets and thus no frames read.
-                // It is also possible that adversary can capture the packet
-                // and replay it. In any case, skip processing further
-                if update_peer_address {
-                    metrics::udp_session_rotation_attempted_via_replay();
-                }
-            }
-            Ok(_) => {
-                // NOTE: We wait until the first successful TLS
-                // decrypt to protect against the case where a crafted
-                // packet with a session ID causes us to change the
-                // connection IP without verifying the SSL connection
-                // first
-                if update_peer_address {
-                    metrics::udp_conn_recovered_via_session(session);
-                    // Address first: the rotation announce must go to the
-                    // address the client roamed to.
-                    self.conn_manager.set_peer_addr(&conn, peer_addr);
-                    conn.begin_session_id_rotation();
-                }
-            }
-            Err(err) => {
-                warn!("Failed to process outside data: {err}");
-                let _ = conn.handle_outside_data_error(&err);
-                // Fatal or not, we are done with this packet.
-            }
+        let res = self
+            .sock
+            .async_io(Interest::READABLE, || {
+                read_single_from_socket(&self.sock, buf, &self.bind_mode)
+            })
+            .await;
+
+        match res {
+            Ok(meta) => IOCallbackResult::Ok(meta),
+            Err(err) => IOCallbackResult::Err(err),
         }
     }
 
-    fn send_reject(&self, peer_addr: SockAddr, reply_pktinfo: Option<libc::in_pktinfo>) {
-        metrics::udp_rejected_session();
-        let msg = Header {
-            version: Version::MINIMUM,
-            aggressive_mode: false,
-            session: SessionId::REJECTED,
-            expresslane_data: false,
-        };
+    async fn recv_many(
+        &mut self,
+        bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
+        metas: &mut Vec<RecvMeta>,
+    ) -> IOCallbackResult<()> {
+        if !self.batch_receive_enabled {
+            return match self.recv(&mut bufs[0]).await {
+                IOCallbackResult::Ok(meta) => {
+                    metas.push(meta);
+                    IOCallbackResult::Ok(())
+                }
+                IOCallbackResult::WouldBlock => IOCallbackResult::WouldBlock,
+                IOCallbackResult::Err(err) => IOCallbackResult::Err(err),
+            };
+        }
 
-        let mut buf = BytesMut::with_capacity(Header::WIRE_SIZE);
-        msg.append_to_wire(&mut buf);
+        // Split the borrow so the closure can hold the scratch slots
+        // mutably while reading `sock` and `bind_mode`.
+        let Self {
+            sock,
+            bind_mode,
+            batch_slots,
+            ..
+        } = self;
 
-        // Ignore failure to send.
+        let res = sock
+            .async_io(Interest::READABLE, || {
+                read_multiple_from_socket(sock, bufs, batch_slots, bind_mode, metas)
+            })
+            .await;
+
+        match res {
+            Ok(()) => IOCallbackResult::Ok(()),
+            Err(err) => IOCallbackResult::Err(err),
+        }
+    }
+
+    fn send_callback(&self, meta: &RecvMeta) -> OutsideIOSendCallbackArg {
+        Arc::new(UdpSocket {
+            sock: self.sock.clone(),
+            peer_addr: RwLock::new((meta.peer, meta.peer.into())),
+            reply_pktinfo: self.reply_pktinfo(meta.local),
+            send_queue: self.send_queue.clone(),
+        })
+    }
+
+    fn send_unconnected(&self, meta: &RecvMeta, buf: &[u8]) {
+        // Ignore failure to send: there is no connection to report against.
         let _ = send_to_socket(
             &self.sock,
-            &[IoSlice::new(&buf)],
-            &peer_addr,
-            reply_pktinfo,
+            &[IoSlice::new(buf)],
+            &meta.peer.into(),
+            self.reply_pktinfo(meta.local),
             None,
         );
     }
 }
 
-impl UdpServer {
-    /// Receive and process one packet at a time using `recvmsg`.
-    async fn run_single(&mut self) -> Result<()> {
-        let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
-        loop {
-            // Recover full capacity
-            buf.clear();
-            buf.reserve(MAX_OUTSIDE_MTU);
-
-            let (peer_addr, local_addr, reply_pktinfo) = self
-                .sock
-                .async_io(Interest::READABLE, || {
-                    read_single_from_socket(&self.sock, &mut buf, &self.bind_mode)
-                })
-                .await?;
-
-            self.data_received(peer_addr, local_addr, reply_pktinfo, &mut buf);
-        }
-    }
-
-    /// Receive and process packets in batches using the platform batch-receive
-    /// syscall (`recvmmsg` on Linux, `recvmsg_x` on macOS).
-    async fn run_batch(&mut self) -> Result<()> {
-        const SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
-        let mut buf_slots: [BatchRecvSlot<SIZE>; MAX_IO_BATCH_SIZE] =
-            std::array::from_fn(|_| BatchRecvSlot::new());
-        loop {
-            let pkt_metadata = self
-                .sock
-                .async_io(Interest::READABLE, || {
-                    read_multiple_from_socket(
-                        &self.sock,
-                        &mut buf_slots,
-                        MAX_IO_BATCH_SIZE,
-                        &self.bind_mode,
-                    )
-                })
-                .await?;
-            // `zip` stops at the shorter iterator, so this processes exactly the
-            // slots that batch receive filled (one metadata entry per slot).
-            for (slot, meta) in buf_slots.iter_mut().zip(pkt_metadata) {
-                self.data_received(meta.peer, meta.local, meta.reply_pktinfo, &mut slot.buf);
-                // Recover full capacity
-                slot.reset();
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl Server for UdpServer {
-    async fn run(&mut self) -> Result<()> {
-        info!("Accepting traffic on {}", self.bind_mode);
-
-        if self.batch_receive_enabled {
-            info!("Using batch receive");
-            return self.run_batch().await;
-        }
-
-        self.run_single().await
-    }
-}
-
-fn find_pktinfo_from_iter(
-    mut iter: cmsg::Iter<'_>,
-    local_port: u16,
-) -> Option<(SocketAddr, libc::in_pktinfo)> {
+/// Resolve the local address a packet arrived on from its `IP_PKTINFO`
+/// control message.
+///
+/// The reply `IP_PKTINFO` is not returned: it is a function of this
+/// address, rebuilt by [`UdpIo::reply_pktinfo`] when a reply is needed.
+fn find_local_addr_from_iter(mut iter: cmsg::Iter<'_>, local_port: u16) -> Option<SocketAddr> {
     iter.find_map(|cmsg| {
         match cmsg {
             cmsg::Message::IpPktinfo(pi) => {
@@ -432,13 +369,7 @@ fn find_pktinfo_from_iter(
                 let ipv4 = Ipv4Addr::from_bits(ipv4);
                 let ip = IpAddr::V4(ipv4);
 
-                let reply_pktinfo = libc::in_pktinfo {
-                    ipi_ifindex: 0,
-                    ipi_spec_dst: pi.ipi_spec_dst,
-                    ipi_addr: libc::in_addr { s_addr: 0 },
-                };
-
-                Some((SocketAddr::new(ip, local_port), reply_pktinfo))
+                Some(SocketAddr::new(ip, local_port))
             }
             _ => None,
         }
@@ -449,7 +380,7 @@ fn read_single_from_socket(
     sock: &Arc<tokio::net::UdpSocket>,
     buf: &mut BytesMut,
     bind_mode: &BindMode,
-) -> std::io::Result<(SocketAddr, SocketAddr, Option<libc::in_pktinfo>)> {
+) -> std::io::Result<RecvMeta> {
     let sock = SockRef::from(sock.as_ref());
     let mut raw_buf = [MaybeUninitSlice::new(buf.spare_capacity_mut())];
 
@@ -480,8 +411,7 @@ fn read_single_from_socket(
     // should be small compared with the conditional
     // logic and dynamically sized buffer needed to
     // allow omitting it.
-    const SIZE: usize = cmsg::Message::space::<libc::in_pktinfo>();
-    let mut control = cmsg::Buffer::<SIZE>::new();
+    let mut control = cmsg::Buffer::<PKTINFO_CONTROL_SIZE>::new();
 
     let mut msg = MsgHdrMut::new()
         .with_addr(&mut peer_sock_addr)
@@ -512,50 +442,40 @@ fn read_single_from_socket(
     };
 
     #[allow(unsafe_code)]
-    let (local_addr, reply_pktinfo) = match *bind_mode {
+    let local_addr = match *bind_mode {
         BindMode::UnspecifiedAddress { local_port } => {
-            let Some((local_addr, reply_pktinfo)) =
+            let Some(local_addr) =
             // SAFETY: The call to `recvmsg` above updated
             // the control buffer length field.
-                find_pktinfo_from_iter(unsafe { control.iter(control_len) }, local_port) else {
+                find_local_addr_from_iter(unsafe { control.iter(control_len) }, local_port) else {
                 // Since we have a bound socket
                 // and we have set IP_PKTINFO
                 // sockopt this shouldn't happen.
                 metrics::udp_recv_missing_pktinfo();
                 return Err(std::io::Error::other( "recvmsg did not return IP_PKTINFO",));
             };
-            (local_addr, Some(reply_pktinfo))
+            local_addr
         }
-        BindMode::SpecificAddress { local_addr } => (local_addr, None),
+        BindMode::SpecificAddress { local_addr } => local_addr,
     };
 
-    Ok((peer_addr, local_addr, reply_pktinfo))
+    Ok(RecvMeta {
+        peer: peer_addr,
+        local: local_addr,
+    })
 }
 
-/// Per-packet metadata produced by batched receive.
-struct BatchRecvMetadata {
-    /// The peer (remote) address the packet was received from.
-    peer: SocketAddr,
-    /// The resolved local address the packet was received on.
-    local: SocketAddr,
-    /// The `in_pktinfo` to echo back on replies, when the bind mode needs it.
-    reply_pktinfo: Option<libc::in_pktinfo>,
-}
-
-fn read_multiple_from_socket<const N: usize>(
+fn read_multiple_from_socket(
     sock: &Arc<tokio::net::UdpSocket>,
-    buf_slots: &mut [BatchRecvSlot<N>; MAX_IO_BATCH_SIZE],
-    max_batch_size: usize,
+    bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
+    slots: &mut [BatchRecvSlot; MAX_IO_BATCH_SIZE],
     bind_mode: &BindMode,
-) -> std::io::Result<Vec<BatchRecvMetadata>> {
+    metas: &mut Vec<RecvMeta>,
+) -> std::io::Result<()> {
     let sock = SockRef::from(sock.as_ref());
+    let n = recv_multiple_with_metadata(sock.as_raw_fd(), bufs, slots)?;
 
-    let fd = sock.as_raw_fd();
-    let n = recv_multiple_with_metadata(fd, buf_slots, max_batch_size)?;
-
-    let mut metadata = Vec::with_capacity(n);
-
-    for slot in buf_slots.iter_mut().take(n) {
+    for slot in slots.iter_mut().take(n) {
         if slot.truncated {
             metrics::udp_recv_truncated();
         }
@@ -569,40 +489,111 @@ fn read_multiple_from_socket<const N: usize>(
             ));
         };
 
-        let (local_addr, reply_pktinfo) = match *bind_mode {
+        let local_addr = match *bind_mode {
             BindMode::UnspecifiedAddress { local_port } => {
-                if let Some(ref mut control) = slot.control
-                    && let Some(control_len) = slot.control_length
-                {
-                    #[allow(unsafe_code)]
-                    let Some((local_addr, reply_pktinfo)) =
-                        // SAFETY: The call to `recvmmsg` above updated
-                        // the control buffer length field.
-                        find_pktinfo_from_iter(unsafe { control.iter(control_len) }, local_port) else {
-                        // Since we have a bound socket
-                        // and we have set IP_PKTINFO
-                        // sockopt this shouldn't happen.
-                        metrics::udp_recv_missing_pktinfo();
-                        return Err(std::io::Error::other("recvmmsg did not return IP_PKTINFO"));
-                    };
-                    (local_addr, Some(reply_pktinfo))
-                } else {
-                    // No cmsg found, returning error
+                let Some(local_addr) = slot
+                    .control_messages()
+                    .and_then(|iter| find_local_addr_from_iter(iter, local_port))
+                else {
+                    // The socket is bound and has the IP_PKTINFO sockopt
+                    // set, so this does not happen.
                     metrics::udp_recv_missing_pktinfo();
-                    return Err(std::io::Error::other(
-                        "recvmmsg did not return cmsg and IP_PKTINFO",
-                    ));
-                }
+                    return Err(std::io::Error::other("recvmmsg did not return IP_PKTINFO"));
+                };
+                local_addr
             }
-            BindMode::SpecificAddress { local_addr } => (local_addr, None),
+            BindMode::SpecificAddress { local_addr } => local_addr,
         };
 
-        metadata.push(BatchRecvMetadata {
+        metas.push(RecvMeta {
             peer: peer_addr,
             local: local_addr,
-            reply_pktinfo,
         });
     }
 
-    Ok(metadata)
+    Ok(())
+}
+
+#[cfg(linux)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytesize::ByteSize;
+    use lightway_core::MAX_OUTSIDE_MTU;
+    use std::time::Duration;
+
+    /// A socket bound to the unspecified address must echo the local
+    /// address back as `IP_PKTINFO` on replies, so a multi-homed server
+    /// answers from the address the client reached it on.
+    ///
+    /// The reply pktinfo is rebuilt from the received local address rather
+    /// than carried through the receive path, so this checks the round
+    /// trip: receive on 0.0.0.0, reply, and confirm the client sees the
+    /// reply arriving from the address it sent to.
+    ///
+    /// The client sits on `127.0.0.1` and addresses the server as
+    /// `127.0.0.2`, so the two outcomes differ: without the control message
+    /// the kernel sources the reply from `127.0.0.1`, and only an applied
+    /// `ipi_spec_dst` makes it `127.0.0.2`. Linux only, because macOS does
+    /// not configure the rest of `127/8`.
+    #[cfg(linux)]
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn reply_to_unconnected_peer_comes_from_the_address_it_arrived_on() {
+        let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+
+        let mut io = UdpIo::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+            ByteSize::kib(64),
+            false,
+            false,
+            Some(sock),
+        )
+        .await
+        .unwrap();
+
+        // A second loopback address, so the reply source distinguishes
+        // "pktinfo applied" from "kernel picked the default".
+        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), port);
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(b"hello", server_addr).await.unwrap();
+
+        let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+        let meta = match io.recv(&mut buf).await {
+            IOCallbackResult::Ok(meta) => meta,
+            other => panic!("recv failed: {other:?}"),
+        };
+
+        assert_eq!(&buf[..], b"hello");
+        assert_eq!(
+            meta.local, server_addr,
+            "IP_PKTINFO must resolve the address the client sent to"
+        );
+        assert_eq!(meta.peer, client.local_addr().unwrap());
+
+        // A missing control message is caught by the source-address
+        // assertion below, because the kernel then sources the reply from
+        // 127.0.0.1. A non-local `ipi_spec_dst` instead makes the send
+        // fail, which `send_unconnected` swallows, and the timeout catches
+        // that.
+        io.send_unconnected(&meta, b"rejected");
+
+        let mut reply = [0u8; 32];
+        let (len, from) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut reply))
+                .await
+                .expect("reply must arrive")
+                .unwrap();
+
+        assert_eq!(&reply[..len], b"rejected");
+        assert_eq!(
+            from, server_addr,
+            "reply must come from 127.0.0.2, which only an applied IP_PKTINFO achieves"
+        );
+    }
 }
