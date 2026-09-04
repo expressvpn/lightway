@@ -18,8 +18,6 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 
-use crate::common::certgen::gen_shared_testing_pki;
-
 #[derive(Default)]
 pub struct TestAuth {
     /// Captures the last [`AuthMethod`] seen by [`ServerAuth::authorize`]
@@ -225,17 +223,27 @@ impl OutsideIOSendCallback for TestStreamSock {
     }
 }
 
-pub async fn server<S: TestSock>(
-    sock: Arc<S>,
-    auth: Arc<TestAuth>,
-    pqc: PQCrypto,
-    expresslane: Option<std::time::Duration>,
-    conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
-    metrics: Option<ExpresslaneMetricsType>,
-) {
-    let pki = gen_shared_testing_pki();
-    let server_key = Secret::Asn1Buffer(&pki.server.key_der);
-    let server_cert = Secret::Asn1Buffer(&pki.server.cert_der);
+pub struct TestServerConfig<'a> {
+    pub auth: Arc<TestAuth>,
+    pub pqc: PQCrypto,
+    pub expresslane: Option<std::time::Duration>,
+    pub conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
+    pub metrics: Option<ExpresslaneMetricsType>,
+    pub cert: Secret<'a>,
+    pub key: Secret<'a>,
+}
+
+pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
+    let TestServerConfig {
+        auth,
+        pqc,
+        expresslane,
+        conn_out,
+        metrics,
+        cert: server_cert,
+        key: server_key,
+    } = config;
+
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -417,16 +425,27 @@ pub enum ClientTestState {
     MessageSent,
 }
 
-pub async fn client<S: TestSock>(
-    sock: Arc<S>,
-    cipher: Option<Cipher>,
-    pqc: PQCrypto,
-    server_dn: Option<&str>,
-    enable_codec: bool,
-    enable_expresslane: bool,
-    use_versioned_token: bool,
-) {
-    let ca_cert = RootCertificate::Asn1Buffer(&gen_shared_testing_pki().ca_cert_der);
+pub struct TestClientConfig<'a> {
+    pub cipher: Option<Cipher>,
+    pub pqc: PQCrypto,
+    pub server_dn: Option<&'a str>,
+    pub enable_codec: bool,
+    pub enable_expresslane: bool,
+    pub use_versioned_token: bool,
+    pub root_ca: RootCertificate<'a>,
+}
+
+pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
+    let TestClientConfig {
+        cipher,
+        pqc,
+        server_dn,
+        enable_codec,
+        enable_expresslane,
+        use_versioned_token,
+        root_ca: ca_cert,
+    } = config;
+
     let (tun, mut inside_rx) = ChannelTun::new();
     let client = Arc::new(Client);
 
