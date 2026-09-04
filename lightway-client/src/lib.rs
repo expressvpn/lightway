@@ -846,7 +846,9 @@ async fn network_event_coordinator(
         // from the interrupted retry.
         let mut state = match event {
             Some(nudge) => {
-                RepinState::new(nudge || route_repin_state.take().is_some_and(|p| p.nudge))
+                // repin state always take `.take()` so a stale pending retry never survives past a fresh event.
+                let pending_nudge = route_repin_state.take().is_some_and(|p| p.nudge);
+                RepinState::new(nudge || pending_nudge)
             }
             None => route_repin_state.take().expect("branch guarded on is_some"),
         };
