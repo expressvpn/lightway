@@ -110,7 +110,7 @@ impl OutsideIO for Tcp {
         self.peer_addr()
     }
 
-    fn socket(&self) -> OutsideSocket {
+    fn socket(&self) -> Option<OutsideSocket> {
         #[cfg(unix)]
         use std::os::fd::AsRawFd;
         #[cfg(windows)]
@@ -119,7 +119,7 @@ impl OutsideIO for Tcp {
         let handle = self.0.as_raw_fd();
         #[cfg(windows)]
         let handle = self.0.as_raw_socket();
-        OutsideSocket::Tcp(handle)
+        Some(OutsideSocket::Tcp(handle))
     }
 }
 

@@ -81,5 +81,6 @@ pub trait OutsideIO: Sync + Send {
     fn reconnect(&self) {}
 
     /// Returns the underlying socket tagged with its transport type.
-    fn socket(&self) -> OutsideSocket;
+    /// `None` when the transport has no single OS socket to name.
+    fn socket(&self) -> Option<OutsideSocket>;
 }

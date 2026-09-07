@@ -167,7 +167,6 @@ impl<T> IpManagerInner<T> {
     }
 }
 
-// Tests START -> panic, unwrap, expect allowed
 #[cfg(test)]
 mod tests {
     use ipnet::Ipv4Net;
@@ -417,5 +416,3 @@ mod tests {
         assert_eq!(count, total_hosts - 4); // 4 == local + dns + 2x reserved
     }
 }
-
-// Tests END -> panic, unwrap, expect allowed

@@ -34,8 +34,6 @@ impl<const N: usize> Buffer<N> {
         N
     }
 
-    pub fn reset(&mut self) {}
-
     /// Iterate over the control messages the kernel wrote.
     ///
     /// # Safety

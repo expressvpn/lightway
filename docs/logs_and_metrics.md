@@ -58,7 +58,6 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | udp_bad_packet_version | server | Counter | Counts UDP packets where the the version in the wire protocol header was not a version supported by the server |
 | udp_rejected_session | server | Counter | Counts UDP packets which were rejected due to the session id in the wire protocol header not being recognised |
 | udp_parse_wire_failed | server | Counter | Counts UDP packets which could not be parsed. Indicates plugin ingress chain failed |
-| udp_no_header | server | Counter | Counts UDP packets where the wire protocol header was not found/could not be found |
 | udp_session_rotation_begin | server | Counter | Counts connections which started a session ID rotation |
 | udp_session_rotation_finalized | server | Counter | Counts connections which completed a session ID rotation |
 | to_link_up_time | server | Histogram | Measures time between a connection being started (on first packet) and the Link Up state (i.e. (D)TLS negotiation complete) |
