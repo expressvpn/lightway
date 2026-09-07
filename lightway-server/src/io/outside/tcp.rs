@@ -40,6 +40,24 @@ impl OutsideIOSendCallback for TcpStream {
     }
 }
 
+/// The PROXY header is written by the proxy as soon as it accepts, so this
+/// only needs to cover the round trip. A socket which does not complete the
+/// header in time is dropped: these reads happen before the connection (and
+/// therefore the stale connection reaper) exists.
+const PROXY_PROTOCOL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn read_exact_with_timeout(
+    sock: &mut tokio::net::TcpStream,
+    buf: &mut [u8],
+    ctx: &'static str,
+) -> Result<()> {
+    match tokio::time::timeout(PROXY_PROTOCOL_READ_TIMEOUT, sock.read_exact(buf)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(anyhow!(err).context(ctx)),
+        Err(_) => Err(anyhow!("Timed out").context(ctx)),
+    }
+}
+
 async fn handle_proxy_protocol(sock: &mut tokio::net::TcpStream) -> Result<SocketAddr> {
     use ppp::v2::{Header, ParseError};
 
@@ -47,9 +65,12 @@ async fn handle_proxy_protocol(sock: &mut tokio::net::TcpStream) -> Result<Socke
     const MINIMUM_LENGTH: usize = 16;
 
     let mut header: Vec<u8> = [0; MINIMUM_LENGTH].into();
-    if let Err(err) = sock.read_exact(&mut header[..MINIMUM_LENGTH]).await {
-        return Err(anyhow!(err).context("Failed to read initial PROXY header"));
-    };
+    read_exact_with_timeout(
+        sock,
+        &mut header[..MINIMUM_LENGTH],
+        "Failed to read initial PROXY header",
+    )
+    .await?;
     let rest = match Header::try_from(&header[..]) {
         // Failure tells us exactly how many more bytes are required.
         Err(ParseError::Partial(_, rest)) => rest,
@@ -65,9 +86,12 @@ async fn handle_proxy_protocol(sock: &mut tokio::net::TcpStream) -> Result<Socke
 
     header.resize(MINIMUM_LENGTH + rest, 0);
 
-    if let Err(err) = sock.read_exact(&mut header[MINIMUM_LENGTH..]).await {
-        return Err(anyhow!(err).context("Failed to read remainder of PROXY header"));
-    };
+    read_exact_with_timeout(
+        sock,
+        &mut header[MINIMUM_LENGTH..],
+        "Failed to read remainder of PROXY header",
+    )
+    .await?;
 
     let header = match Header::try_from(&header[..]) {
         Ok(h) => h,
@@ -256,5 +280,100 @@ impl Server for TcpServer {
                 self.proxy_protocol,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use tokio::io::AsyncWriteExt as _;
+
+    /// PROXY v2 signature, ver_cmd = 0x21 (v2, PROXY), fam = 0x11 (TCP over
+    /// IPv4) and a 12 byte address block.
+    fn proxy_v2_header(source: SocketAddrV4, destination: SocketAddrV4) -> Vec<u8> {
+        let mut header = vec![
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11,
+        ];
+        header.extend_from_slice(&12u16.to_be_bytes());
+        header.extend_from_slice(&source.ip().octets());
+        header.extend_from_slice(&destination.ip().octets());
+        header.extend_from_slice(&source.port().to_be_bytes());
+        header.extend_from_slice(&destination.port().to_be_bytes());
+        header
+    }
+
+    /// Connect to `listener`, hand the accepted socket to
+    /// `handle_proxy_protocol` and send `to_send` from the client side. The
+    /// client socket is held open for the lifetime of the call.
+    async fn run_proxy_protocol(to_send: &[u8]) -> Result<Option<Result<SocketAddr>>> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+
+        let mut client = tokio::net::TcpStream::connect(addr).await?;
+        client.write_all(to_send).await?;
+
+        let (mut sock, _) = listener.accept().await?;
+
+        // Outer bound well past PROXY_PROTOCOL_READ_TIMEOUT: with the paused
+        // clock this fires immediately if the inner read has no deadline of
+        // its own, turning a hang into a test failure.
+        let result =
+            tokio::time::timeout(Duration::from_secs(60), handle_proxy_protocol(&mut sock))
+                .await
+                .ok();
+
+        drop(client);
+        Ok(result)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_proxy_header_times_out() {
+        let result = run_proxy_protocol(&[0x00])
+            .await
+            .unwrap()
+            .expect("handle_proxy_protocol did not return within 60s");
+
+        let err = result.expect_err("partial PROXY header must not be accepted");
+        assert!(
+            format!("{err:#}").contains("Timed out"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn truncated_proxy_header_body_times_out() {
+        let header = proxy_v2_header(
+            SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234),
+            SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 1), 443),
+        );
+
+        // Full 16 byte prefix, one byte of the 12 byte address block.
+        let result = run_proxy_protocol(&header[..17])
+            .await
+            .unwrap()
+            .expect("handle_proxy_protocol did not return within 60s");
+
+        let err = result.expect_err("truncated PROXY header must not be accepted");
+        assert!(
+            format!("{err:#}").contains("Timed out"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn complete_proxy_header_is_parsed() {
+        let source = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234);
+        let header = proxy_v2_header(
+            source,
+            SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 1), 443),
+        );
+
+        let result = run_proxy_protocol(&header)
+            .await
+            .unwrap()
+            .expect("handle_proxy_protocol did not return within 60s");
+
+        assert_eq!(result.unwrap(), SocketAddr::V4(source));
     }
 }
