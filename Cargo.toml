@@ -64,10 +64,11 @@ route_manager = { version = "0.2.6", features = ["async"] }
 schemars = "1.2.1"
 serde = "1.0.189"
 serde-env = "0.3"
+serde_json = "1.0.108"
 serde-saphyr = "0.0.22"
 serial_test = "3.4.0"
 socket2 = "0.6.0"
-struct-patch = { version =  "0.14.1", features= ["substrate"] }
+struct-patch = { version =  "0.14.1", features= ["substrate", "nesting"] }
 test-case = "3.1.0"
 thiserror = "2.0.3"
 tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal"] }

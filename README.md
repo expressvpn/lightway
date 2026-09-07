@@ -156,13 +156,14 @@ or `-5` to pick a different algorithm.
 > username / password authentication mechanisms and their own choice of password
 > hashing algorithms to suit their security needs.
 
-Please note that when providing env variables it should be in upper case and using "_" as a word separator,
-while using as cli config, it should be in lower case with "-" as the word separator.
+Please note that when providing env variables it should be in upper case, with nested config groups
+joined by a double underscore "__" (see below), while using as cli config, it should be in lower case
+with "-" as the word separator.
 
 > [!CAUTION]
-> Passing the `--password` option on the CLI will expose your password
+> Passing the `--auth-password` option on the CLI will expose your password
 > to other users on the system. It is recommended to provide the
-> password via the configuration file or via `LW_CLIENT_PASSWORD`
+> password via the configuration file or via `LW_CLIENT_AUTH__PASSWORD`
 > environment variable.
 
 ##### JWT Token
@@ -225,24 +226,26 @@ lightway-client --config-file './tests/client/client_config.yaml'
 [Example config file](./tests/client/client_config.yaml):
 
 Lightway-client also supports overriding the config using either env variables or cli arguments.
-Env variables should have the prefix `LW_CLIENT_`.
+Env variables should have the prefix `LW_CLIENT_`. Nested config groups are joined with a double
+underscore (e.g. `LW_CLIENT_KEEPALIVE__INTERVAL`), and list entries are indexed the same way
+(e.g. `LW_CLIENT_CONNECT__SERVERS__0__SERVER`).
 
 By default the client will use the existing MTU on the tunnel device, this can be overridden with
 the `--inside-mtu` option but note that this requires additional privileges, specifically the
 `CAP_SYS_ADMIN` capability.
 
-Running the client on linux platforms with `dns_config_mode: default` will require `CAP_DAC_OVERRIDE`
+Running the client on linux platforms with `network.dns_config_mode: default` will require `CAP_DAC_OVERRIDE`
 and ` CAP_FOWNER` permissions, to properly modify `resolv.conf`.
 
 > [!CAUTION]
-> Passing the `--password` option on the CLI will expose your password
+> Passing the `--auth-password` option on the CLI will expose your password
 > to other users on the system. It is recommended to provide the
-> password via the configuration file or via `LW_CLIENT_PASSWORD`
+> password via the configuration file or via `LW_CLIENT_AUTH__PASSWORD`
 > environment variable.
 
 > [!Note]
 > macOs has restrictions on tunnel name. It will only allow the format `utun[0-9]+`.
-> To avoid guessing the available number, do not provide `tun_name` config and let the
+> To avoid guessing the available number, do not provide `tun.name` config and let the
 > system decide the tunnel name.
 ## E2E Testing
 
@@ -530,7 +533,7 @@ Note that this is supported only with feature `debug` enabled.
 For example:
 
 ```bash
-cargo run --features debug --bin lightway-client -- --config-file=tests/client_conf.yaml --keylog "/tmp/client.log"
+cargo run --features debug --bin lightway-client -- --config-file=tests/client_conf.yaml --debug-keylog "/tmp/client.log"
 
 ```
 
@@ -541,6 +544,6 @@ https://wiki.wireshark.org/TLS#using-the-pre-master-secret
 
 ### TLS debug logging
 
-Both `lightway-client` and `lightway-server` support a `--tls-debug`
-option when built with their respective `debug` feature enabled. This
-enables TLS's debug logging.
+`lightway-server` supports a `--tls-debug` option, and `lightway-client`
+supports a `--debug-tls` option, both when built with their respective
+`debug` feature enabled. This enables TLS's debug logging.

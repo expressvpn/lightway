@@ -4,6 +4,7 @@
 pub mod args;
 #[cfg(unix)]
 pub mod cmsg;
+pub mod env_tree;
 #[cfg(apple)]
 pub mod recvmsg_x;
 pub mod sockopt;
