@@ -107,11 +107,10 @@ impl DatagramServer {
                 // packet with a session ID causes us to change the
                 // connection IP without verifying the SSL connection
                 // first
-                if roamed {
-                    metrics::udp_conn_recovered_via_session(hdr.session);
+                if roamed && self.conn_manager.set_peer_addr(&conn, meta.peer) {
                     // Address first: the rotation announce must go to the
                     // address the client roamed to.
-                    self.conn_manager.set_peer_addr(&conn, meta.peer);
+                    metrics::udp_conn_recovered_via_session(hdr.session);
                     conn.begin_session_id_rotation();
                 }
             }
