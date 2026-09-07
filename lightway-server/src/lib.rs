@@ -24,6 +24,28 @@ pub use lightway_core::{
 /// Implement this to handle events like session rotation and disconnection.
 pub type ServerEventCbType = Arc<dyn Fn(SessionId, &Event) + Send + Sync>;
 
+/// Handle for reporting an authenticated peer-address change from outside the
+/// lightway receive path - for example when part of the data plane runs in
+/// another component that sees the client's traffic first.
+///
+/// Trusted caller: this performs no authentication of its own. Only report an
+/// address that arrived on a packet you have already verified, or you hand an
+/// attacker the ability to redirect a client's downstream traffic.
+#[derive(Clone)]
+pub struct PeerAddrUpdater(Arc<ConnectionManager>);
+
+impl PeerAddrUpdater {
+    /// Adopt `addr` as the peer address for `session_id`.
+    ///
+    /// The caller must have already authenticated that `addr` is where
+    /// `session_id`'s traffic is now arriving from - this call does not
+    /// verify it. No-op (returns `false`) for an unknown session or one
+    /// already at `addr`; returns `true` when the address was changed.
+    pub fn update_peer_addr(&self, session_id: SessionId, addr: SocketAddr) -> bool {
+        self.0.update_peer_addr(session_id, addr)
+    }
+}
+
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
@@ -208,6 +230,12 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(ignore))]
     pub event_cb: Option<ServerEventCbType>,
 
+    /// Set to `Some(Arc::new(OnceLock::new()))` to receive a
+    /// [`PeerAddrUpdater`], which [`server`] fills in before the listener
+    /// starts.
+    #[educe(Debug(ignore))]
+    pub peer_addr_updater: Option<Arc<std::sync::OnceLock<PeerAddrUpdater>>>,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -310,6 +338,7 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             expresslane_cb: None,
             expresslane_metrics: None,
             event_cb: None,
+            peer_addr_updater: None,
             enable_pqc: config.enable_pqc,
             #[cfg(target_os = "linux")]
             enable_tun_offload: config.enable_tun_offload,
@@ -615,6 +644,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.event_cb,
         config.connection_age_expiration_interval,
     );
+
+    if let Some(slot) = &config.peer_addr_updater {
+        let _ = slot.set(PeerAddrUpdater(conn_manager.clone()));
+    }
 
     tokio::spawn(statistics::run(
         conn_manager.clone(),
