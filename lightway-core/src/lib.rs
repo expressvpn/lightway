@@ -78,9 +78,17 @@ pub const MAX_OUTSIDE_MTU: usize = 1500;
 pub const MIN_OUTSIDE_MTU: usize = 68;
 
 /// The minimum usable outside path (wire) MTU required for a given
-/// inside path MTU
+/// inside path MTU, carried in one datagram. Includes the `Data` frame
+/// the DTLS record carries around the inside packet, so it stays the
+/// exact inverse of the `advertised_inside_mtu` clamp.
 const fn dtls_required_outside_mtu(inside_mtu: usize) -> usize {
-    inside_mtu + IPV4_HEADER_SIZE + UDP_HEADER_SIZE + wire::Header::WIRE_SIZE + MAX_DTLS_HEADER_SIZE
+    inside_mtu
+        + IPV4_HEADER_SIZE
+        + UDP_HEADER_SIZE
+        + wire::Header::WIRE_SIZE
+        + MAX_DTLS_HEADER_SIZE
+        + wire::Data::WIRE_OVERHEAD
+        + std::mem::size_of::<wire::FrameKind>()
 }
 
 const IPV4_HEADER_SIZE: usize = 20;
@@ -91,16 +99,29 @@ const UDP_HEADER_SIZE: usize = 8;
 const MAX_DTLS_HEADER_SIZE: usize = 37;
 
 /// Default MTU size for DTLS on the outside path (max outside MTU less IP and UDP header size)
+///
+/// Saturating: `MIN_OUTSIDE_MTU` is below the overheads subtracted here, and a
+/// wrap would produce a near-`usize::MAX` MTU that reads as "everything fits".
 const fn max_dtls_outside_mtu(outside_mtu: usize) -> usize {
-    outside_mtu - IPV4_HEADER_SIZE - UDP_HEADER_SIZE - wire::Header::WIRE_SIZE
+    outside_mtu
+        .saturating_sub(IPV4_HEADER_SIZE)
+        .saturating_sub(UDP_HEADER_SIZE)
+        .saturating_sub(wire::Header::WIRE_SIZE)
 }
 
 /// Default MTU size for DTLS payload (max DTLS wire MTU less DTLS overheads)
+///
+/// Saturating for the same reason as [`max_dtls_outside_mtu`]: any
+/// `outside_mtu` below 81 would otherwise underflow.
 const fn max_dtls_mtu(outside_mtu: usize) -> usize {
-    max_dtls_outside_mtu(outside_mtu) - MAX_DTLS_HEADER_SIZE
+    max_dtls_outside_mtu(outside_mtu).saturating_sub(MAX_DTLS_HEADER_SIZE)
 }
 
 /// The smallest supported inside MTU.
+///
+/// Advisory, not a floor on what a connection advertises: a datagram carrier
+/// whose per-frame budget is smaller than a UDP datagram can advertise below
+/// it. An inside MTU the local carrier cannot satisfy is rejected by the peer.
 pub const MIN_INSIDE_MTU: usize = 1250;
 
 /// The largest supported inside MTU.

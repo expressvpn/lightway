@@ -1,3 +1,4 @@
+use crate::common::certgen::TestPki;
 use crate::common::packet_codec::TestPacketCodecFactory;
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -7,6 +8,7 @@ use lightway_app_utils::{
 };
 use lightway_core::*;
 use more_asserts::*;
+use rcgen::RsaKeySize;
 use std::{
     collections::HashSet,
     net::SocketAddr,
@@ -66,23 +68,35 @@ impl ServerAuthHandle for TestAuthHandle {
     }
 }
 
-pub struct ChannelTun(mpsc::UnboundedSender<Bytes>);
+/// The inside MTU a [`ChannelTun`] reports unless a test asks for another.
+pub const DEFAULT_TUN_MTU: usize = 1350;
+
+pub struct ChannelTun {
+    tx: mpsc::UnboundedSender<Bytes>,
+    mtu: usize,
+}
 
 impl ChannelTun {
     pub fn new() -> (Self, mpsc::UnboundedReceiver<Bytes>) {
+        Self::with_mtu(DEFAULT_TUN_MTU)
+    }
+
+    /// A tun that reports `mtu`, for a test that needs the inside interface to
+    /// be larger than the outside path can carry.
+    pub fn with_mtu(mtu: usize) -> (Self, mpsc::UnboundedReceiver<Bytes>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self(tx), rx)
+        (Self { tx, mtu }, rx)
     }
 }
 impl<T> InsideIOSendCallback<T> for ChannelTun {
     fn send(&self, buf: BytesMut, _state: &mut T) -> IOCallbackResult<usize> {
         let buf_len = buf.len();
-        self.0.send(buf.freeze()).expect("Send");
+        self.tx.send(buf.freeze()).expect("Send");
         IOCallbackResult::Ok(buf_len)
     }
 
     fn mtu(&self) -> usize {
-        1350
+        self.mtu
     }
 
     fn if_index(&self) -> std::io::Result<u32> {
@@ -169,12 +183,15 @@ impl OutsideIOSendCallback for TestDatagramSock {
         SocketAddr::from(([127, 0, 0, 1], 0))
     }
 
+    // A UnixDatagram has no IP layer to set DF on, so probing is a no-op
+    // rather than unimplemented: a test may enable PMTUD purely to reach the
+    // MTU checks that PMTUD gates, without ever completing a probe.
     fn enable_pmtud_probe(&self) -> std::io::Result<()> {
-        todo!()
+        Ok(())
     }
 
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
-        todo!()
+        Ok(())
     }
 }
 
@@ -231,6 +248,8 @@ pub struct TestServerConfig<'a> {
     pub metrics: Option<ExpresslaneMetricsType>,
     pub cert: Secret<'a>,
     pub key: Secret<'a>,
+    /// The MTU the server's tun reports; `None` is [`DEFAULT_TUN_MTU`].
+    pub inside_mtu: Option<usize>,
 }
 
 pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
@@ -242,11 +261,12 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
         metrics,
         cert: server_cert,
         key: server_key,
+        inside_mtu,
     } = config;
 
     let ip_pool = Arc::new(StaticIpPool);
 
-    let (tun, mut inside_rx) = ChannelTun::new();
+    let (tun, mut inside_rx) = ChannelTun::with_mtu(inside_mtu.unwrap_or(DEFAULT_TUN_MTU));
     let mut last_inside_rx = std::time::Instant::now();
 
     let packet_codec = TestPacketCodecFactory::default().build();
@@ -425,6 +445,16 @@ pub enum ClientTestState {
     MessageSent,
 }
 
+/// A PMTUD timer that never fires. The MTU checks PMTUD gates run at auth
+/// time, long before any probe would, so a test that only needs those checks
+/// does not need a real timer.
+struct NoopPmtudTimer;
+
+impl<AppState> DplpmtudTimer<AppState> for NoopPmtudTimer {
+    fn start(&self, _d: std::time::Duration, _state: &mut AppState) {}
+    fn stop(&self, _state: &mut AppState) {}
+}
+
 pub struct TestClientConfig<'a> {
     pub cipher: Option<Cipher>,
     pub pqc: PQCrypto,
@@ -433,6 +463,35 @@ pub struct TestClientConfig<'a> {
     pub enable_expresslane: bool,
     pub use_versioned_token: bool,
     pub root_ca: RootCertificate<'a>,
+    pub outside_mtu: usize,
+    pub enable_pmtud: bool,
+    pub strict_mtu: bool,
+    /// Where to report a fatal `outside_data_received` error instead of
+    /// panicking, so a test can assert on the typed [`ConnectionError`] rather
+    /// than on a substring of its `Display`.
+    pub fatal_error: Option<Arc<Mutex<Option<ConnectionError>>>>,
+}
+
+/// The common case: the shared valid PKI as trust anchor, the context's
+/// default cipher, [`PQCrypto::default`], no server domain-name validation, no
+/// codec, no expresslane, an unversioned auth token, no PMTUD, and a full-size
+/// non-strict outside MTU.
+impl Default for TestClientConfig<'static> {
+    fn default() -> Self {
+        Self {
+            cipher: None,
+            pqc: PQCrypto::default(),
+            server_dn: None,
+            enable_codec: false,
+            enable_expresslane: false,
+            use_versioned_token: false,
+            root_ca: TestPki::get_valid(2, RsaKeySize::_2048).root_ca(),
+            outside_mtu: MAX_OUTSIDE_MTU,
+            enable_pmtud: false,
+            strict_mtu: false,
+            fatal_error: None,
+        }
+    }
 }
 
 pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
@@ -444,6 +503,10 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
         enable_expresslane,
         use_versioned_token,
         root_ca: ca_cert,
+        outside_mtu,
+        enable_pmtud,
+        strict_mtu,
+        fatal_error,
     } = config;
 
     let (tun, mut inside_rx) = ChannelTun::new();
@@ -482,12 +545,16 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
 
     let client = client
         .build()
-        .start_connect(sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .start_connect(sock.clone().into_io_send_callback(), outside_mtu)
         .unwrap()
         .when(use_versioned_token, |b| {
             b.with_auth_versioned_token("LET ME IN", Version::MAXIMUM)
         })
         .when(!use_versioned_token, |b| b.with_auth_token("LET ME IN"))
+        .when(enable_pmtud, |b| {
+            b.with_pmtud_timer(Arc::new(NoopPmtudTimer))
+        })
+        .when(strict_mtu, |b| b.with_strict_mtu())
         .with_event_cb(Box::new(event_cb))
         .with_inside_pkt_codec(packet_codec);
 
@@ -628,7 +695,13 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
                 let pkt = OutsidePacket::Wire(&mut buf, sock.connection_type());
                 if let Err(err) = client.outside_data_received(pkt) {
                     // TODO: fatal vs non-fatal;
-                    panic!("{err}")
+                    match &fatal_error {
+                        Some(sink) => {
+                            sink.lock().unwrap().replace(err);
+                            return;
+                        }
+                        None => panic!("{err}"),
+                    }
                 }
 
                 println!("Client: {:?}", client.state());

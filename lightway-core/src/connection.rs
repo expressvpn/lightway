@@ -208,15 +208,20 @@ pub enum ConnectionError {
     #[error("Invalid inside packet: {0}")]
     InvalidInsidePacket(InvalidPacketError),
 
-    /// Invalid Outside MTU
+    /// The outside MTU cannot carry the inside MTU the peer advertised, and
+    /// this connection has no way to shrink the gap: either PMTUD is running
+    /// (so the advertised MTU was never achievable) or the carrier is
+    /// strict-MTU and cannot fall back on IP fragmentation.
     #[error(
-        "PMTUD required: inside MTU {inside_mtu} needs at least {required_outside_mtu} outside MTU"
+        "inside MTU {inside_mtu} requires at least {required_outside_mtu} outside MTU, but outside MTU is {outside_mtu}"
     )]
-    PathMtuDiscoveryRequired {
+    OutsideMtuTooSmallForInsideMtu {
         /// The inside MTU
         inside_mtu: usize,
         /// The required outside MTU to support the inside MTU without PMTUD
         required_outside_mtu: usize,
+        /// The actual outside MTU the connection was built with
+        outside_mtu: usize,
     },
 
     /// Plugin returns a reply packet
@@ -287,7 +292,7 @@ impl ConnectionError {
                     PacketCodecDoesNotExist => true,
                     PacketCodecError(_) => true,
                     Disconnected => true,
-                    PathMtuDiscoveryRequired { .. } => true,
+                    OutsideMtuTooSmallForInsideMtu { .. } => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
                     Tls(crate::tls::Error::Fatal(ErrorKind::PeerClosed)) => true,
@@ -579,6 +584,14 @@ pub struct Connection<AppState: Send = ()> {
     /// PMTU discovery state ([`ConnectionType::Datagram`] only)
     pmtud: Option<dplpmtud::Dplpmtud<AppState>>,
 
+    /// True if the outside carrier cannot fall back on IP
+    /// fragmentation for a datagram that exceeds `outside_mtu`, as a
+    /// carrier that frames Lightway inside its own datagrams cannot.
+    /// Such carriers must hard-fail an
+    /// unsatisfiable MTU immediately rather than rely on the
+    /// leniency classic PMTUD-off UDP gets from IP fragmentation.
+    strict_mtu: bool,
+
     /// Counter to use for `wire::DataFrag`
     fragment_counter: std::num::Wrapping<u16>,
 
@@ -620,6 +633,7 @@ struct NewConnectionArgs<AppState> {
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     pmtud_base_mtu: Option<u16>,
+    strict_mtu: bool,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
     expresslane: bool,
     expresslane_cb: Option<expresslane::ExpresslaneCbType<AppState>>,
@@ -679,6 +693,7 @@ impl<AppState: Send> Connection<AppState> {
                     )
                 }),
             },
+            strict_mtu: args.strict_mtu,
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,
             inside_pkt_encoder,
@@ -2464,6 +2479,41 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
+    /// The inside MTU to advertise to the peer: the inside interface's MTU,
+    /// reduced to what this connection's outside path can actually carry.
+    ///
+    /// The budget is the `Data` payload that fits one outside datagram:
+    /// `max_dtls_mtu` gives the DTLS record payload, and the record still
+    /// carries a `Data` frame around the inside packet.
+    ///
+    /// Datagram connections only. A stream carrier does not bound a single
+    /// inside packet, and the IP/UDP/DTLS-record overheads `max_dtls_mtu`
+    /// subtracts do not apply to it, so its inside MTU is advertised as-is.
+    ///
+    /// A ceiling only, with no clamp up to [`MIN_INSIDE_MTU`]: a datagram
+    /// carrier can genuinely fall below it, and advertising more than the
+    /// carrier can carry breaks the connection instead of saving it.
+    ///
+    /// [`MIN_INSIDE_MTU`]: crate::MIN_INSIDE_MTU
+    fn advertised_inside_mtu(
+        connection_type: ConnectionType,
+        outside_mtu: usize,
+        inside_mtu: usize,
+    ) -> usize {
+        if !connection_type.is_datagram() {
+            return inside_mtu;
+        }
+
+        let advertised =
+            wire::Data::maximum_packet_size_for_plpmtu(max_dtls_mtu(outside_mtu)).min(inside_mtu);
+        if advertised < inside_mtu {
+            info!(
+                "Advertising inside MTU {advertised} instead of {inside_mtu}: outside MTU {outside_mtu} cannot carry the full inside MTU"
+            );
+        }
+        advertised
+    }
+
     fn handle_auth_request(&mut self, auth_request: wire::AuthRequest) -> ConnectionResult<()> {
         let ConnectionMode::Server {
             auth,
@@ -2511,7 +2561,14 @@ impl<AppState: Send> Connection<AppState> {
                     local_ip: ip_config.client_ip.to_string(),
                     peer_ip: ip_config.server_ip.to_string(),
                     dns_ip: ip_config.dns_ip.to_string(),
-                    mtu: format!("{}", inside_io.mtu()),
+                    mtu: format!(
+                        "{}",
+                        Self::advertised_inside_mtu(
+                            self.connection_type,
+                            self.outside_mtu,
+                            inside_io.mtu()
+                        )
+                    ),
                     session: self.session_id,
                 });
 
@@ -2549,11 +2606,12 @@ impl<AppState: Send> Connection<AppState> {
         if let Ok(inside_mtu) = cfg.mtu.parse()
             && self.connection_type.is_datagram()
             && self.outside_mtu < dtls_required_outside_mtu(inside_mtu)
-            && self.pmtud.is_some()
+            && (self.pmtud.is_some() || self.strict_mtu)
         {
-            return Err(ConnectionError::PathMtuDiscoveryRequired {
+            return Err(ConnectionError::OutsideMtuTooSmallForInsideMtu {
                 inside_mtu,
                 required_outside_mtu: dtls_required_outside_mtu(inside_mtu),
+                outside_mtu: self.outside_mtu,
             });
         }
 
@@ -2962,6 +3020,7 @@ impl<AppState: Send> Connection<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{MAX_INSIDE_MTU, MAX_OUTSIDE_MTU, MIN_INSIDE_MTU, MIN_OUTSIDE_MTU};
 
     #[cfg(target_os = "linux")]
     mod gso_batch_tests {
@@ -3066,5 +3125,70 @@ mod tests {
     fn tick_data_is_nameable_and_debuggable() {
         fn assert_traits<T: std::fmt::Debug + Clone>() {}
         assert_traits::<crate::ExpresslaneTickData>();
+    }
+
+    /// A stream carrier does not bound a single inside packet, so its inside
+    /// MTU must reach the peer untouched even when the datagram formula would
+    /// have reduced it.
+    #[test]
+    fn advertised_inside_mtu_is_unclamped_for_stream() {
+        assert_eq!(
+            Conn::advertised_inside_mtu(ConnectionType::Stream, MIN_OUTSIDE_MTU, MAX_INSIDE_MTU),
+            MAX_INSIDE_MTU
+        );
+    }
+
+    /// A datagram carrier only clamps an inside MTU that genuinely does not
+    /// fit; anything the Data frame budget can carry passes through. A
+    /// narrow-budget carrier sizes its inside MTU from its own budget before
+    /// it reaches this function, so a clamp that rewrote safe values would
+    /// shrink every tunnel.
+    #[test]
+    fn advertised_inside_mtu_is_unclamped_when_the_budget_fits() {
+        let budget = wire::Data::maximum_packet_size_for_plpmtu(max_dtls_mtu(MAX_OUTSIDE_MTU));
+        assert_eq!(
+            Conn::advertised_inside_mtu(ConnectionType::Datagram, MAX_OUTSIDE_MTU, budget),
+            budget
+        );
+        assert_eq!(
+            Conn::advertised_inside_mtu(ConnectionType::Datagram, MAX_OUTSIDE_MTU, MAX_INSIDE_MTU),
+            budget,
+            "an inside MTU above the Data frame budget is reduced to it"
+        );
+    }
+
+    /// `dtls_required_outside_mtu` must be the exact inverse of the clamp
+    /// here, which is `Data::maximum_packet_size_for_plpmtu(max_dtls_mtu(..))`.
+    /// The two helpers meet across the connection: this side advertises with
+    /// one, the peer's strict-MTU check compares with the other, so an
+    /// off-by-one in either rejects a carrier that does fit. Not a floor;
+    /// `accept` admits a datagram outside MTU as low as one inside byte.
+    #[test]
+    fn advertised_inside_mtu_at_the_accepted_minimum_is_min_inside_mtu() {
+        let outside_mtu = dtls_required_outside_mtu(MIN_INSIDE_MTU);
+        assert_eq!(
+            Conn::advertised_inside_mtu(ConnectionType::Datagram, outside_mtu, MAX_INSIDE_MTU),
+            MIN_INSIDE_MTU
+        );
+    }
+
+    /// The DTLS budget helpers subtract 81 bytes of overhead, so an outside MTU
+    /// anywhere in `MIN_OUTSIDE_MTU..81` underflows on plain subtraction: a
+    /// panic under overflow checks, or a near-`usize::MAX` budget in release
+    /// that reads as "the full inside MTU fits".
+    #[test]
+    fn max_dtls_mtu_saturates_instead_of_underflowing() {
+        assert_eq!(max_dtls_mtu(MIN_OUTSIDE_MTU), 0);
+        assert_eq!(max_dtls_mtu(0), 0);
+    }
+
+    /// `tests/connection.rs` cannot see `dtls_required_outside_mtu`, so it
+    /// spells the datagram floor out as a literal sum. Pin the value here, so
+    /// a change to any overhead constant fails here rather than there. The
+    /// last two terms are the `Data` frame around the inside packet: its u16
+    /// length field and its FrameKind byte.
+    #[test]
+    fn dtls_required_outside_mtu_for_one_inside_byte() {
+        assert_eq!(dtls_required_outside_mtu(1), 1 + 20 + 8 + 16 + 37 + 2 + 1);
     }
 }

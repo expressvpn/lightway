@@ -35,3 +35,24 @@ does for the packets it sends itself.
 At present, PMTU discovery is only enabled on client side. In future, we may enable
 it in Server.
 
+## Outside MTU and the advertised inside MTU
+
+A datagram connection carries each inside packet in one outside datagram. The outside MTU
+therefore bounds the inside MTU. `ServerConnectionBuilder::with_outside_mtu` sets the outside
+MTU for a carrier whose per-frame budget is below the wire MTU, because it frames Lightway
+inside its own datagrams. The DTLS record size follows that MTU.
+
+The server reduces the inside MTU it advertises to what its own outside path can carry. The
+reduction is a ceiling only. A carrier that already sizes its inside MTU under the budget
+passes through unchanged. A stream carrier is never reduced.
+
+`MIN_INSIDE_MTU` is advisory. It is not a floor on what a connection advertises. A datagram
+carrier whose per-frame budget is smaller than a UDP datagram can advertise below it. That
+budget can also depend on what the peer announces, so the connection builder cannot know it.
+
+A client rejects an advertised inside MTU that its own outside MTU cannot carry. It returns
+`ConnectionError::OutsideMtuTooSmallForInsideMtu`. The client applies this check only in two
+cases: PMTUD runs, or `ClientConnectionBuilder::with_strict_mtu` marks the carrier as unable to
+fall back on IP fragmentation. A carrier with neither relies on fragmentation and stays
+connected.
+

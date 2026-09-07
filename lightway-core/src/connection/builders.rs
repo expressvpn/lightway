@@ -10,7 +10,7 @@ use crate::{
     PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
-    max_dtls_outside_mtu,
+    dtls_required_outside_mtu, max_dtls_outside_mtu,
     plugin::PluginFactoryError,
     wire::SessionId,
 };
@@ -56,6 +56,7 @@ pub struct ClientConnectionBuilder<AppState> {
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
+    strict_mtu: bool,
 }
 
 impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
@@ -112,6 +113,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             pmtud_base_mtu: None,
             outside_plugins,
             inside_pkt_codec: None,
+            strict_mtu: false,
         })
     }
 
@@ -211,6 +213,19 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
+    /// Marks the outside carrier as unable to fall back on IP
+    /// fragmentation for oversized datagrams, as a carrier that frames
+    /// Lightway inside its own datagrams does. An `outside_mtu` too
+    /// small for the peer's inside MTU
+    /// then fails the connection immediately instead of relying on
+    /// fragmentation, which classic PMTUD-off UDP still gets.
+    pub fn with_strict_mtu(self) -> Self {
+        Self {
+            strict_mtu: true,
+            ..self
+        }
+    }
+
     /// Sets the Inside Packet Codec which should be used for Lightway connection.
     /// See [`PacketEncoderType`] and [`PacketDecoderType`].
     pub fn with_inside_pkt_codec(
@@ -263,6 +278,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: self.pmtud_timer,
             pmtud_base_mtu: self.pmtud_base_mtu,
+            strict_mtu: self.strict_mtu,
             inside_pkt_codec: self.inside_pkt_codec,
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),
@@ -283,12 +299,13 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     ctx: &'a ServerContext<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
-    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    outside_io: OutsideIOSendCallbackArg,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
+    outside_mtu: usize,
 }
 
 impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
@@ -304,35 +321,14 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
 
         let session_id = StandardUniform.sample(&mut *ctx.rng.lock().unwrap());
 
-        let outside_mtu = MAX_OUTSIDE_MTU;
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
-
-        let io = super::TlsIOAdapter {
-            connection_type,
-            protocol_version,
-            aggressive_send: false,
-            outside_mtu,
-            recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
-        };
-        let session_config =
-            crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
-                s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
-                    .with_dtls_nonblocking(true)
-                    .with_dtls13_allow_ch_frag(true)
-            });
 
         Ok(Self {
             connection_type,
             protocol_version,
             ctx,
-            session_config,
+            outside_io,
             session_id,
             auth,
             ip_pool,
@@ -340,7 +336,24 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
             outside_plugins,
             inside_pkt_codec: None,
+            outside_mtu: MAX_OUTSIDE_MTU,
         })
+    }
+
+    /// Sets the outside path (wire) MTU, for a carrier whose per-frame budget
+    /// is smaller than the wire MTU because it frames Lightway inside its own
+    /// datagrams. The DTLS MTU is derived from it, so it bounds every record
+    /// the connection emits.
+    ///
+    /// Range-checked by [`Self::accept`], which for a datagram connection
+    /// requires enough outside MTU to carry one inside byte: below
+    /// that the carrier cannot carry the smallest inside MTU Lightway may
+    /// advertise, and the budget can be peer-derived.
+    pub fn with_outside_mtu(self, outside_mtu: usize) -> Self {
+        Self {
+            outside_mtu,
+            ..self
+        }
     }
 
     /// Sets the callback to notify events
@@ -379,7 +392,46 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             ));
         }
 
-        let session = self.ctx.tls_ctx.new_session(self.session_config)?;
+        // One byte of inside packet, deliberately not
+        // `dtls_required_outside_mtu(MIN_INSIDE_MTU)`. A datagram carrier's
+        // per-frame budget can depend on what the peer announces, so it is not
+        // knowable here and can fall under that bound. An inside MTU the
+        // carrier cannot satisfy is for the peer's strict-MTU check to
+        // reject, which is the check that knows the real budget.
+        let min_outside_mtu = if self.connection_type.is_datagram() {
+            MIN_OUTSIDE_MTU.max(dtls_required_outside_mtu(1))
+        } else {
+            MIN_OUTSIDE_MTU
+        };
+        if !(min_outside_mtu..=MAX_OUTSIDE_MTU).contains(&self.outside_mtu) {
+            return Err(ConnectionBuilderError::UnsupportedOutsideMtu(
+                self.outside_mtu,
+            ));
+        }
+
+        // Built here rather than in `new` so `with_outside_mtu` can still
+        // change the MTU the send buffer and the DTLS record size derive from.
+        let io = super::TlsIOAdapter {
+            connection_type: self.connection_type,
+            protocol_version: self.protocol_version,
+            aggressive_send: false,
+            outside_mtu: self.outside_mtu,
+            recv_buf: BytesMut::new(),
+            send_buf: super::io_adapter::SendBuffer::new(self.outside_mtu),
+            io: self.outside_io,
+            session_id: self.session_id,
+            outside_plugins: self.outside_plugins.clone(),
+            #[cfg(target_os = "linux")]
+            gso_buf: super::io_adapter::GsoBuffer::default(),
+        };
+        let session_config =
+            crate::tls::SessionConfig::new(io).when(self.connection_type.is_datagram(), |s| {
+                s.with_dtls_mtu(max_dtls_outside_mtu(self.outside_mtu) as u16)
+                    .with_dtls_nonblocking(true)
+                    .with_dtls13_allow_ch_frag(true)
+            });
+
+        let session = self.ctx.tls_ctx.new_session(session_config)?;
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
@@ -395,7 +447,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
                 pending_session_id: None,
             },
             rng: self.ctx.rng.clone(),
-            outside_mtu: MAX_OUTSIDE_MTU,
+            outside_mtu: self.outside_mtu,
             inside_io: Some(self.ctx.inside_io.clone()),
             schedule_tick_cb: self.ctx.schedule_tick_cb,
             event_cb: self.event_cb,
@@ -404,6 +456,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: None,
             pmtud_base_mtu: None,
+            strict_mtu: false,
             inside_pkt_codec: self.inside_pkt_codec,
             expresslane: self.ctx.expresslane,
             expresslane_cb: self.ctx.expresslane_cb.clone(),

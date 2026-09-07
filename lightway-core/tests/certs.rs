@@ -19,6 +19,13 @@ use crate::common::get_test_timeout;
 use rcgen::RsaKeySize;
 
 async fn handshake(pki: &'static TestPki) -> Result<(), String> {
+    // Built before the timed window: the defaults touch the shared valid PKI,
+    // whose keygen only happens on first use.
+    let client_config = TestClientConfig {
+        root_ca: pki.root_ca(),
+        ..Default::default()
+    };
+
     let attempt = tokio::spawn(async move {
         let (client_sock, server_sock) = UnixStream::pair().expect("UnixStream");
         let client_sock = Arc::new(TestStreamSock(client_sock));
@@ -39,20 +46,10 @@ async fn handshake(pki: &'static TestPki) -> Result<(), String> {
                     metrics: None,
                     cert,
                     key,
+                    inside_mtu: None,
                 },
             ),
-            client(
-                client_sock,
-                TestClientConfig {
-                    cipher: None,
-                    pqc,
-                    server_dn: None,
-                    enable_codec: false,
-                    enable_expresslane: false,
-                    use_versioned_token: false,
-                    root_ca: pki.root_ca(),
-                },
-            )
+            client(client_sock, client_config)
         )
     });
 

@@ -26,23 +26,33 @@ async fn run_test_tcp<S: TestSock>(
     client_sock: Arc<S>,
 ) -> Arc<Mutex<Option<AuthMethod>>> {
     // Inside packet codec is only supported by Lightway UDP
-    run_test(cipher, pqc, server_sock, client_sock, false, false, false).await
+    run_test(
+        server_sock,
+        client_sock,
+        TestClientConfig {
+            cipher,
+            pqc,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn run_test<S: TestSock>(
-    cipher: Option<Cipher>,
-    pqc: PQCrypto,
     server_sock: Arc<S>,
     client_sock: Arc<S>,
-    enable_codec: bool,
-    enable_expresslane: bool,
-    use_versioned_token: bool,
+    params: TestClientConfig<'_>,
 ) -> Arc<Mutex<Option<AuthMethod>>> {
     let (auth, last_method) = TestAuth::new();
 
     // Take the shared test PKI before the timeout window: RSA keygen is very
     // slow on QEMU (especially on RISCV) and only happens on first use.
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+    let pqc = params.pqc;
+    let expresslane_rotation_interval = params
+        .enable_expresslane
+        .then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL);
 
     let test = async move {
         let (cert, key) = pki.server_secrets();
@@ -52,26 +62,15 @@ async fn run_test<S: TestSock>(
                 TestServerConfig {
                     auth,
                     pqc,
-                    expresslane: enable_expresslane
-                        .then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+                    expresslane: expresslane_rotation_interval,
                     conn_out: None,
                     metrics: None,
                     cert,
                     key,
+                    inside_mtu: None,
                 },
             ),
-            client(
-                client_sock,
-                TestClientConfig {
-                    cipher,
-                    pqc,
-                    server_dn: None,
-                    enable_codec,
-                    enable_expresslane,
-                    use_versioned_token,
-                    root_ca: pki.root_ca(),
-                },
-            )
+            client(client_sock, params)
         )
     };
 
@@ -106,23 +105,18 @@ async fn test_datagram_connection(
     enable_expresslane: bool,
 ) {
     // Communicate over a local datagram socket for simplicity
-    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
-    let socket = socket2::SockRef::from(&client_sock);
-    socket.set_recv_buffer_size(1024 * 256).unwrap();
-    let socket = socket2::SockRef::from(&server_sock);
-    socket.set_recv_buffer_size(1024 * 256).unwrap();
-
-    let server_sock = Arc::new(TestDatagramSock(server_sock));
-    let client_sock = Arc::new(TestDatagramSock(client_sock));
+    let (server_sock, client_sock) = datagram_sock_pair();
 
     run_test(
-        cipher,
-        pqc,
         server_sock,
         client_sock,
-        enable_codec,
-        enable_expresslane,
-        false,
+        TestClientConfig {
+            cipher,
+            pqc,
+            enable_codec,
+            enable_expresslane,
+            ..Default::default()
+        },
     )
     .await;
 }
@@ -160,6 +154,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
             metrics: None,
             cert,
             key,
+            inside_mtu: None,
         },
     ));
 
@@ -317,27 +312,17 @@ async fn test_stream_connection(cipher: Option<Cipher>, pqc: PQCrypto) {
 /// client's [`Version::MAXIMUM`].
 #[tokio::test]
 async fn test_datagram_connection_versioned_token() {
-    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
-    let socket = socket2::SockRef::from(&client_sock);
-    socket.set_recv_buffer_size(1024 * 256).unwrap();
-    let socket = socket2::SockRef::from(&server_sock);
-    socket.set_recv_buffer_size(1024 * 256).unwrap();
+    let (server_sock, client_sock) = datagram_sock_pair();
 
-    let server_sock = Arc::new(TestDatagramSock(server_sock));
-    let client_sock = Arc::new(TestDatagramSock(client_sock));
-
-    let pqc = PQCrypto {
-        server_pqc: false,
-        keyshare: None,
-    };
+    let pqc = no_pqc();
     let last_method = run_test(
-        None,
-        pqc,
         server_sock,
         client_sock,
-        false,
-        false,
-        true, // use_versioned_token
+        TestClientConfig {
+            pqc,
+            use_versioned_token: true,
+            ..Default::default()
+        },
     )
     .await;
 
@@ -363,18 +348,15 @@ async fn test_stream_connection_versioned_token() {
 
     let _ = client_sock.writable().await;
 
-    let pqc = PQCrypto {
-        server_pqc: false,
-        keyshare: None,
-    };
+    let pqc = no_pqc();
     let last_method = run_test(
-        None,
-        pqc,
         server_sock,
         client_sock,
-        false,
-        false,
-        true, // use_versioned_token
+        TestClientConfig {
+            pqc,
+            use_versioned_token: true,
+            ..Default::default()
+        },
     )
     .await;
 
@@ -393,7 +375,7 @@ async fn test_stream_connection_versioned_token() {
 #[cfg_attr(boringssl, test_case(Some("invalid") => panics "TLS Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
 #[cfg_attr(wolfssl, test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
 #[tokio::test]
-async fn test_server_dn(server_dn: Option<&str>) {
+async fn test_server_dn(server_dn: Option<&'static str>) {
     // Communicate over a local stream socket for simplicity
     let (client_sock, server_sock) = UnixStream::pair().expect("UnixStream");
     let server_sock = Arc::new(TestStreamSock(server_sock));
@@ -422,20 +404,18 @@ async fn test_server_dn(server_dn: Option<&str>) {
                         metrics: None,
                         cert,
                         key,
+                        inside_mtu: None,
                     },
                 )
             },
             client(
                 client_sock,
                 TestClientConfig {
-                    cipher: None,
                     pqc,
                     server_dn,
-                    enable_codec: false,
-                    enable_expresslane: false,
-                    use_versioned_token: false,
                     root_ca: pki.root_ca(),
-                },
+                    ..Default::default()
+                }
             )
         )
     };
@@ -534,6 +514,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
             metrics: None,
             cert,
             key,
+            inside_mtu: None,
         },
     );
 
@@ -695,6 +676,7 @@ async fn expresslane_health_probe(
             metrics: server_metrics,
             cert,
             key,
+            inside_mtu: None,
         },
     );
 
@@ -961,13 +943,12 @@ async fn pmtud_reports_status_changes() {
             self.inner.peer_addr()
         }
 
-        // Unix datagram sockets have no DF bit; accept the probe bracket.
         fn enable_pmtud_probe(&self) -> std::io::Result<()> {
-            Ok(())
+            self.inner.enable_pmtud_probe()
         }
 
         fn disable_pmtud_probe(&self) -> std::io::Result<()> {
-            Ok(())
+            self.inner.disable_pmtud_probe()
         }
     }
 
@@ -1015,6 +996,7 @@ async fn pmtud_reports_status_changes() {
             metrics: None,
             cert,
             key,
+            inside_mtu: None,
         },
     ));
 
@@ -1155,4 +1137,254 @@ async fn pmtud_reports_status_changes() {
             other => panic!("expected the probe send right after {s:?}, found {other:?}"),
         }
     }
+}
+
+fn datagram_sock_pair() -> (Arc<TestDatagramSock>, Arc<TestDatagramSock>) {
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let socket = socket2::SockRef::from(&client_sock);
+    socket.set_recv_buffer_size(1024 * 256).unwrap();
+    let socket = socket2::SockRef::from(&server_sock);
+    socket.set_recv_buffer_size(1024 * 256).unwrap();
+
+    (
+        Arc::new(TestDatagramSock(server_sock)),
+        Arc::new(TestDatagramSock(client_sock)),
+    )
+}
+
+fn no_pqc() -> PQCrypto {
+    PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    }
+}
+
+/// A server whose tun keeps the kernel default 1500 must not advertise an
+/// inside MTU no client can carry. `dtls_required_outside_mtu(1500)` is 1584,
+/// above `MAX_OUTSIDE_MTU`, so a PMTUD client rejects the auth response and the
+/// connection dies immediately after authenticating. The server must instead
+/// advertise what its own outside path can carry.
+#[tokio::test]
+async fn server_advertises_an_inside_mtu_a_client_can_carry() {
+    let (server_sock, client_sock) = datagram_sock_pair();
+    let (auth, _) = TestAuth::new();
+
+    // Take the shared test PKI before the timeout window (see run_test).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+
+    let fatal_error = Arc::new(Mutex::new(None));
+    let params = TestClientConfig {
+        pqc: no_pqc(),
+        enable_pmtud: true,
+        fatal_error: Some(fatal_error.clone()),
+        root_ca: pki.root_ca(),
+        ..Default::default()
+    };
+
+    // `select!`, not `join!`: the server future only ever returns once its
+    // client is done, and a client that rejects the MTU gives up mid-auth.
+    let server_config = TestServerConfig {
+        auth,
+        pqc: no_pqc(),
+        expresslane: None,
+        conn_out: None,
+        metrics: None,
+        cert,
+        key,
+        inside_mtu: Some(MAX_INSIDE_MTU),
+    };
+    let test = async move {
+        tokio::select! {
+            _ = server(server_sock, server_config) => false,
+            _ = client(client_sock, params) => true,
+        }
+    };
+    let client_returned =
+        tokio::time::timeout(std::time::Duration::from_millis(get_test_timeout()), test)
+            .await
+            .expect("Timed out");
+
+    let err = fatal_error.lock().unwrap().take();
+    assert!(
+        err.is_none(),
+        "the server advertised an inside MTU the client cannot carry: {err:?}"
+    );
+    // `client` returns only after it went Online and round-tripped its
+    // message, or after it recorded a fatal error. Without this the test also
+    // passes when the server future wins the race and the client never
+    // authenticated at all.
+    assert!(client_returned, "the client never completed its exchange");
+}
+
+/// The smallest outside MTU a datagram connection accepts: enough to carry one
+/// byte of inside packet after IP/UDP/wire/DTLS overhead, plus the 3 bytes of
+/// `Data` frame around it. Spelled out because `dtls_required_outside_mtu` is
+/// crate-private; the sum is pinned by `dtls_required_outside_mtu_for_one_inside_byte`
+/// in `connection.rs`. Deliberately not `MIN_INSIDE_MTU`-derived: a datagram
+/// carrier's budget can depend on what its peer announces, so `accept` cannot
+/// know it.
+const MIN_DATAGRAM_OUTSIDE_MTU: usize = 1 + 20 + 8 + 16 + 37 + 3;
+
+/// A realistic per-frame budget for a carrier that frames Lightway inside its
+/// own datagrams, at the standard IPv4 path MTU: (1500 - 20 IP - 8 UDP) send
+/// ceiling, less 44 bytes of the carrier's own per-frame overhead. Such a
+/// carrier sizes its inside MTU to the `Data` frame budget of this, 1344.
+/// Pinned because `accept` must admit the value the carrier really passes.
+const NARROW_CARRIER_BUDGET: usize = 1428;
+
+/// [`ServerConnectionBuilder::with_outside_mtu`] must reject an MTU the carrier
+/// cannot actually use and accept values inside the usable range. The range is
+/// checked by `accept()`, the first step that can report an error.
+#[tokio::test]
+async fn with_outside_mtu_validates_range() {
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (server_cert, server_key) = pki.server_secrets();
+    let (auth, _) = TestAuth::new();
+    let ip_pool = Arc::new(StaticIpPool);
+    let (tun, _) = ChannelTun::new();
+
+    let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
+        ConnectionType::Datagram,
+        server_cert,
+        server_key,
+        auth,
+        ip_pool,
+        Arc::new(tun),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .with_minimum_protocol_version(Version::MINIMUM)
+    .unwrap()
+    .with_maximum_protocol_version(Version::MAXIMUM)
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let (_client_sock, server_sock) = UnixDatagram::pair().unwrap();
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let io = server_sock.clone().into_io_send_callback();
+
+    let accept_with_mtu = |outside_mtu| {
+        let (ticker, _ticker_task) = ConnectionTicker::new();
+        server_ctx
+            .start_accept(Version::MAXIMUM, io.clone())
+            .unwrap()
+            .with_outside_mtu(outside_mtu)
+            .accept(ticker)
+    };
+
+    for (label, outside_mtu) in [
+        ("below the datagram floor", MIN_DATAGRAM_OUTSIDE_MTU - 1),
+        // The RFC-791 IP minimum is 13 bytes short of the 81 bytes of overhead
+        // `max_dtls_mtu` subtracts, so it is not a usable datagram MTU at all.
+        ("the RFC-791 IP minimum", MIN_OUTSIDE_MTU),
+        ("above the wire MTU", MAX_OUTSIDE_MTU + 1),
+    ] {
+        let err = accept_with_mtu(outside_mtu)
+            .err()
+            .unwrap_or_else(|| panic!("expected an error for {label} ({outside_mtu})"));
+        assert!(
+            matches!(err, ConnectionBuilderError::UnsupportedOutsideMtu(_)),
+            "expected UnsupportedOutsideMtu for {label} ({outside_mtu}), got {err:?}"
+        );
+    }
+
+    assert!(
+        accept_with_mtu(NARROW_CARRIER_BUDGET).is_ok(),
+        "a narrow-budget carrier's real budget must be accepted, or it carries nothing"
+    );
+    assert!(
+        accept_with_mtu(MIN_DATAGRAM_OUTSIDE_MTU).is_ok(),
+        "expected the bottom of the usable datagram range to be accepted"
+    );
+    assert!(
+        accept_with_mtu(MAX_OUTSIDE_MTU).is_ok(),
+        "expected the full wire MTU to be accepted"
+    );
+}
+
+/// ChannelTun reports `mtu() = 1350`, so `dtls_required_outside_mtu(1350)` is
+/// 1350 + 20 + 8 + 16 + 37 + 3 = 1434. An `outside_mtu` of 1400 is below that (so
+/// the strict-MTU guard fires) but close enough to `MAX_OUTSIDE_MTU` that the
+/// DTLS handshake still completes normally.
+const INSUFFICIENT_OUTSIDE_MTU: usize = 1400;
+
+/// Classic PMTUD-off UDP with an `outside_mtu` too small for the
+/// server-negotiated inside MTU must still reach `Online`, relying on
+/// IP fragmentation. Without the `pmtud.is_some() || strict_mtu` guard this
+/// hard-fails every such connection instead of falling back to fragmentation.
+#[tokio::test]
+async fn test_datagram_insufficient_outside_mtu_without_pmtud_falls_back_to_fragmentation() {
+    let (server_sock, client_sock) = datagram_sock_pair();
+
+    run_test(
+        server_sock,
+        client_sock,
+        TestClientConfig {
+            pqc: no_pqc(),
+            outside_mtu: INSUFFICIENT_OUTSIDE_MTU,
+            // Classic UDP, which fragments instead.
+            strict_mtu: false,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+/// The same undersized-`outside_mtu` scenario, but for a strict-MTU
+/// carrier, which has no IP-fragmentation fallback: this
+/// must still hard-fail at auth, since silently proceeding would mean
+/// packets that can never be delivered.
+#[tokio::test]
+async fn test_datagram_insufficient_outside_mtu_strict_mtu_hard_fails() {
+    let (server_sock, client_sock) = datagram_sock_pair();
+    let (auth, _) = TestAuth::new();
+
+    // Take the shared test PKI before the timeout window (see run_test).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+
+    let fatal_error = Arc::new(Mutex::new(None));
+    let params = TestClientConfig {
+        pqc: no_pqc(),
+        outside_mtu: INSUFFICIENT_OUTSIDE_MTU,
+        // No fragmentation fallback.
+        strict_mtu: true,
+        fatal_error: Some(fatal_error.clone()),
+        root_ca: pki.root_ca(),
+        ..Default::default()
+    };
+
+    // `select!`, not `join!`: the server future only ever returns once its
+    // client is done, and this client gives up mid-auth.
+    let server_config = TestServerConfig {
+        auth,
+        pqc: no_pqc(),
+        expresslane: None,
+        conn_out: None,
+        metrics: None,
+        cert,
+        key,
+        inside_mtu: None,
+    };
+    let test = async move {
+        tokio::select! {
+            _ = server(server_sock, server_config) => {},
+            _ = client(client_sock, params) => {},
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(get_test_timeout()), test)
+        .await
+        .expect("Timed out");
+
+    let err = fatal_error
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the client must reject the server's inside MTU");
+    assert!(
+        matches!(err, ConnectionError::OutsideMtuTooSmallForInsideMtu { .. }),
+        "expected OutsideMtuTooSmallForInsideMtu, got {err:?}"
+    );
 }

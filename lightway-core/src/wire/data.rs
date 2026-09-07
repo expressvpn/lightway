@@ -30,7 +30,7 @@ pub(crate) struct Data<'data> {
 
 impl Data<'_> {
     /// Wire overhead in bytes
-    const WIRE_OVERHEAD: usize = 2;
+    pub(crate) const WIRE_OVERHEAD: usize = 2;
 
     /// The maximum payload size for a given Packetization Layer PMTU
     pub(crate) fn maximum_packet_size_for_plpmtu(plpmtu: usize) -> usize {
