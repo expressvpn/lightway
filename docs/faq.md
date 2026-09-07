@@ -16,8 +16,24 @@ at compile time via cargo features (the two are mutually exclusive). See
 
 Lightway apps does not currently provide full IPv6 support on either the client or server.
 
- - IPv6 traffic handling is incomplete
- - IPv6 firewalling and leak prevention are not handled by Lightway
+ - IPv6 traffic is not carried by the tunnel
+ - On desktop, in route modes `default` and `lan`, the client blocks all IPv6
+   traffic, so IPv6 (including DNS queries to IPv6 resolvers) cannot bypass
+   the tunnel. On Linux and macOS it adds unreachable routes, so IPv6
+   connections fail straight away and applications fall back to IPv4; on
+   Windows it routes IPv6 into the tunnel interface, where it is discarded.
+   This is controlled by `block_ipv6`, which is on by default; in `lan` mode
+   unique local addresses (`fc00::/7`) keep following the existing IPv6
+   default route. Link-local and multicast traffic stays on its on-link
+   routes.
+ - On Linux hosts managed by systemd-networkd, its default
+   `ManageForeignRoutes=yes` makes it remove these unreachable routes when it
+   reconfigures a link (for example on `networkctl reload` or a restart of
+   systemd-networkd), and the client does not add them back while connected.
+   Set `ManageForeignRoutes=no` in the `[Network]` section of
+   `networkd.conf` to keep them. NetworkManager leaves them in place.
+ - Without `block_ipv6` (or in route mode `noexec`, or on mobile) IPv6
+   firewalling and leak prevention are not handled by Lightway
  - Rate limiting is out of scope for the Lightway client at this time
 
 Full IPv6 support for both the Lightway client and server is planned for a future release.
@@ -30,7 +46,8 @@ If you are using the Lightway server/client, you are responsible for ensuring th
 
  - Applying any required rate limiting
  - Blocking or restricting IPv6 traffic
- - Preventing IPv6 traffic from bypassing the tunnel
+ - Preventing IPv6 traffic from bypassing the tunnel where `block_ipv6` does
+   not apply (route mode `noexec`, `block_ipv6: false`, or mobile)
 
 Without proper firewall configuration, traffic may bypass the tunnel depending on system and network settings.
 
