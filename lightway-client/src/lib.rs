@@ -61,7 +61,10 @@ use std::time::Instant;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -228,6 +231,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
+    /// Route all IPv6 traffic into a blackhole so it cannot bypass the
+    /// tunnel (route modes Default and Lan)
+    #[cfg(desktop)]
+    pub block_ipv6: bool,
+
     /// Firewall mark applied to the outside socket (Linux only).
     #[cfg(linux)]
     pub fwmark: u32,
@@ -375,6 +383,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
             route_mode: config.route_mode,
+            #[cfg(desktop)]
+            block_ipv6: config.block_ipv6,
             #[cfg(linux)]
             fwmark: config.fwmark,
             #[cfg(desktop)]
@@ -733,6 +743,17 @@ impl TracerTrigger {
     }
 }
 
+/// Set once the one-time IPv6 drop warning has been logged.
+static IPV6_DROP_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a dropped inside packet warrants the one-time IPv6 warning: its
+/// IP version nibble is 6 and `warned` was not yet set (it is set here).
+/// Cheap enough for the per-packet error path.
+fn ipv6_drop_warning_due(buf: &[u8], warned: &AtomicBool) -> bool {
+    let is_ipv6 = buf.first().is_some_and(|byte| byte >> 4 == 6);
+    is_ipv6 && !warned.swap(true, Ordering::Relaxed)
+}
+
 /// Shared body of the inside IO loops: rewrite the source/DNS
 /// addresses, dispatch the packet into the connection and map the
 /// recoverable errors. Returns `Ok(Some(last_outside_data_received))`
@@ -771,9 +792,16 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
             let _ = inside_io.try_send(reply, ip_config);
             Ok(None)
         }
-        // Ignore the packet till the connection is online, and ignore
-        // invalid inside packets
-        Err(ConnectionError::InvalidState) | Err(ConnectionError::InvalidInsidePacket(_)) => {
+        // Ignore the packet till the connection is online
+        Err(ConnectionError::InvalidState) => Ok(None),
+        // Ignore invalid inside packets. On Windows `block_ipv6` steers the
+        // host's IPv6 traffic into the TUN by design; say so once.
+        Err(ConnectionError::InvalidInsidePacket(_)) => {
+            if ipv6_drop_warning_due(buf, &IPV6_DROP_WARNED) {
+                tracing::warn!(
+                    "dropping IPv6 traffic from the tunnel interface; the tunnel carries IPv4 only"
+                );
+            }
             Ok(None)
         }
         Err(err) => {
@@ -1081,6 +1109,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
+        block_ipv6: bool,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
         route_rx: watch::Receiver<()>,
@@ -1091,15 +1120,22 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         let tun_index = self.inside_io.if_index()?;
 
         tracing::trace!(
-            "Starting route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
+            "Starting route manager: mode: {:?}, block_ipv6: {}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
             route_mode,
+            block_ipv6,
             server_ip,
             tun_index,
             tun_peer_ip,
             tun_dns_ip
         );
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            block_ipv6,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+        )?;
         let route_updater = route_manager.start().await?;
 
         // A weak ref keeps the coordinator task from extending the outside
@@ -1823,6 +1859,7 @@ pub async fn client<
         connection
             .initialize_routes(
                 config.route_mode,
+                config.block_ipv6,
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
                 route_rx,
@@ -1855,6 +1892,25 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
+
+    #[test]
+    fn test_ipv6_drop_warning_due_fires_once_for_ipv6_only() {
+        let warned = AtomicBool::new(false);
+        // Version nibble 4 and 6 respectively; the rest of the header is irrelevant
+        let ipv4 = [0x45u8, 0, 0, 20];
+        let ipv6 = [0x60u8, 0, 0, 0];
+
+        assert!(!ipv6_drop_warning_due(&[], &warned));
+        assert!(!ipv6_drop_warning_due(&ipv4, &warned));
+        assert!(!warned.load(Ordering::Relaxed));
+
+        assert!(ipv6_drop_warning_due(&ipv6, &warned));
+        assert!(warned.load(Ordering::Relaxed));
+
+        // Latched: neither family reports again
+        assert!(!ipv6_drop_warning_due(&ipv6, &warned));
+        assert!(!ipv6_drop_warning_due(&ipv4, &warned));
+    }
 
     #[test_case(1, vec![], false => None)]
     #[test_case(1, vec![0], true => Some(0))]

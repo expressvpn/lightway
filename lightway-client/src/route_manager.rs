@@ -56,6 +56,24 @@ const TUNNEL_ROUTES: [(IpAddr, u8); 2] = [
     ),
 ];
 
+// IPv6 sink routes: both halves of the IPv6 space, sent to a blackhole so the
+// traffic cannot bypass the tunnel (see `ipv6_sink_routes`)
+const IPV6_SINK_ROUTES: [(IpAddr, u8); 2] = [
+    (
+        // First half (::/1)
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        1,
+    ),
+    (
+        // Second half (8000::/1)
+        IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+        1,
+    ),
+];
+
+// RFC 4193 unique local addresses, kept out of the IPv6 sink in RouteMode::Lan
+const IPV6_LAN_NETWORK: (IpAddr, u8) = (IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0)), 7);
+
 #[derive(
     Debug, PartialEq, Copy, Clone, clap::ValueEnum, JsonSchema, Serialize, Deserialize, Default,
 )]
@@ -110,6 +128,36 @@ fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
     )
 }
 
+/// Routes that steer all IPv6 traffic into a blackhole, because the tunnel
+/// carries IPv4 only.
+///
+/// On macOS they are gateway routes via `::1`: the kernel binds them to the
+/// loopback interface and discards the looped-back packets, since their
+/// destination is not local and forwarding is off. (An interface route on
+/// the TUN is refused with ENETUNREACH because the TUN has no IPv6 address.)
+/// On Linux they are device routes on `lo`, discarded the same way. On
+/// Windows the TUN adapter carries a link-local address, so they are
+/// interface routes on the TUN and the inside path drops what arrives.
+///
+/// Link-local (fe80::/10) and multicast (ff00::/8) keep their more specific
+/// on-link routes on all three platforms, and when the outside connection is
+/// IPv6 the /128 server route wins over these /1 halves.
+fn ipv6_sink_routes(#[cfg(windows)] tun_index: u32) -> Vec<Route> {
+    IPV6_SINK_ROUTES
+        .iter()
+        .map(|&(network, prefix)| {
+            let route = Route::new(network, prefix);
+            #[cfg(macos)]
+            let route = route.with_gateway(IpAddr::V6(Ipv6Addr::LOCALHOST));
+            #[cfg(linux)]
+            let route = route.with_if_name("lo".to_string());
+            #[cfg(windows)]
+            let route = route.with_if_index(tun_index).with_metric(0);
+            route
+        })
+        .collect()
+}
+
 pub struct RouteManager {
     inner: Option<RouteManagerInner>,
     task: Option<JoinHandle<()>>,
@@ -117,6 +165,7 @@ pub struct RouteManager {
 
 struct RouteManagerInner {
     routing_mode: RouteMode,
+    block_ipv6: bool,
     route_manager: SyncRouteManager,
     route_manager_async: AsyncRouteManager,
     server_ip: IpAddr,
@@ -131,6 +180,7 @@ struct RouteManagerInner {
 impl RouteManager {
     pub fn new(
         routing_mode: RouteMode,
+        block_ipv6: bool,
         server_ip: IpAddr,
         tun_index: u32,
         tun_peer_ip: IpAddr,
@@ -138,6 +188,7 @@ impl RouteManager {
     ) -> Result<Self, RoutingTableError> {
         let inner = Some(RouteManagerInner::new(
             routing_mode,
+            block_ipv6,
             server_ip,
             tun_index,
             tun_peer_ip,
@@ -197,6 +248,7 @@ impl RouteUpdater {
 impl RouteManagerInner {
     fn new(
         routing_mode: RouteMode,
+        block_ipv6: bool,
         server_ip: IpAddr,
         tun_index: u32,
         tun_peer_ip: IpAddr,
@@ -208,14 +260,15 @@ impl RouteManagerInner {
             AsyncRouteManager::new().map_err(RoutingTableError::AsyncRoutingManagerError)?;
         Ok(Self {
             routing_mode,
+            block_ipv6,
             route_manager,
             route_manager_async,
             server_ip,
             tun_index,
             tun_peer_ip,
             tun_dns_ip,
-            vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + 1),
-            lan_routes: Vec::with_capacity(LAN_NETWORKS.len()),
+            vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + IPV6_SINK_ROUTES.len() + 1),
+            lan_routes: Vec::with_capacity(LAN_NETWORKS.len() + 1),
             server_route: None,
         })
     }
@@ -494,7 +547,65 @@ impl RouteManagerInner {
         let dns_route = dns_route.with_metric(0);
 
         self.add_route_vpn(dns_route).await?;
+
+        if self.block_ipv6 {
+            self.install_ipv6_sink().await?;
+        } else {
+            warn!("IPv6 traffic is not routed through the tunnel");
+        }
         Ok(())
+    }
+
+    /// Route all IPv6 traffic into a blackhole (see [`ipv6_sink_routes`]).
+    /// In [`RouteMode::Lan`] unique local addresses keep following the
+    /// current IPv6 default route so LAN IPv6 still works.
+    async fn install_ipv6_sink(&mut self) -> Result<(), RoutingTableError> {
+        if self.routing_mode == RouteMode::Lan {
+            self.install_ipv6_lan_route().await;
+        }
+
+        for sink_route in ipv6_sink_routes(
+            #[cfg(windows)]
+            self.tun_index,
+        ) {
+            self.add_route_vpn(sink_route).await?;
+        }
+
+        tracing::info!("IPv6 traffic is discarded while connected");
+        Ok(())
+    }
+
+    /// Keep fc00::/7 on the interface (and gateway) of the current IPv6
+    /// default route. Best effort: without an IPv6 default route there is no
+    /// IPv6 LAN to keep, and a failure here must not stop the connection.
+    async fn install_ipv6_lan_route(&mut self) {
+        let (network, prefix) = IPV6_LAN_NETWORK;
+
+        let default_route = match self.find_best_default_route(&network) {
+            Ok(route) => route,
+            Err(e) => {
+                tracing::debug!("No IPv6 default route, not adding an IPv6 LAN route: {e}");
+                return;
+            }
+        };
+        let Some(if_index) = default_route.if_index() else {
+            tracing::debug!("IPv6 default route has no interface, not adding an IPv6 LAN route");
+            return;
+        };
+
+        let mut lan_route = Route::new(network, prefix).with_if_index(if_index);
+        // Only use gateway if it matches the route's address family
+        if let Some(gw) = default_route.gateway()
+            && same_ip_family(&network, &gw)
+        {
+            lan_route = lan_route.with_gateway(gw);
+        }
+        #[cfg(windows)]
+        let lan_route = lan_route.with_metric(0);
+
+        if let Err(e) = self.add_route_lan(lan_route).await {
+            warn!("Failed to add IPv6 LAN route, LAN IPv6 is routed into the tunnel: {e}");
+        }
     }
 
     /// Check if server route needs updating due to network changes. Returns
@@ -593,6 +704,41 @@ mod tests {
         (route1, route2, route3, gateway_ip)
     }
 
+    /// Whether `route`, as listed by the system, is the installed form of
+    /// the sink route `expected`: same destination and the platform's
+    /// blackhole target (loopback gateway, loopback device or TUN index).
+    fn sink_route_installed(route: &Route, expected: &Route) -> bool {
+        if route.destination() != expected.destination() || route.prefix() != expected.prefix() {
+            return false;
+        }
+        #[cfg(macos)]
+        return route.gateway() == expected.gateway();
+        #[cfg(linux)]
+        return route.if_name() == expected.if_name();
+        #[cfg(windows)]
+        return route.if_index() == expected.if_index();
+    }
+
+    /// Whether every IPv6 sink route is present in `routes`
+    fn ipv6_sink_routes_in_system(routes: &[Route], #[cfg(windows)] tun_index: u32) -> bool {
+        ipv6_sink_routes(
+            #[cfg(windows)]
+            tun_index,
+        )
+        .iter()
+        .all(|expected| routes.iter().any(|r| sink_route_installed(r, expected)))
+    }
+
+    /// Whether any IPv6 sink route is present in `routes`
+    fn any_ipv6_sink_route_in_system(routes: &[Route], #[cfg(windows)] tun_index: u32) -> bool {
+        ipv6_sink_routes(
+            #[cfg(windows)]
+            tun_index,
+        )
+        .iter()
+        .any(|expected| routes.iter().any(|r| sink_route_installed(r, expected)))
+    }
+
     /// Compares two routes for equality based on destination, prefix, gateway, and interface
     fn routes_equal(route1: &Route, route2: &Route) -> bool {
         route1.destination() == route2.destination()
@@ -673,8 +819,14 @@ mod tests {
         }
 
         // Create RouteManagerInner directly for testing
-        let route_manager =
-            RouteManagerInner::new(route_mode, server_ip, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
+        let route_manager = RouteManagerInner::new(
+            route_mode,
+            true,
+            server_ip,
+            tun_index,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        )?;
 
         // Return tuple - RouteManagerInner will be dropped first, then TUN device, RouteRestorer last
         Ok((restorer, tun_device, route_manager))
@@ -730,6 +882,73 @@ mod tests {
         Standard,
         Server,
         Lan,
+    }
+
+    #[test]
+    fn test_ipv6_sink_routes() {
+        let routes = ipv6_sink_routes(
+            #[cfg(windows)]
+            7,
+        );
+        let expected = [
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+        ];
+        assert_eq!(routes.len(), expected.len());
+        for (route, network) in routes.iter().zip(expected) {
+            assert_eq!(route.destination(), network);
+            assert_eq!(route.prefix(), 1);
+            // macOS: a gateway route via loopback; an interface route on the
+            // TUN is refused because the TUN has no IPv6 address
+            #[cfg(macos)]
+            {
+                assert_eq!(route.gateway(), Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+                assert_eq!(route.if_index(), None);
+            }
+            // Linux: a device route on loopback
+            #[cfg(linux)]
+            {
+                assert_eq!(route.if_name().map(String::as_str), Some("lo"));
+                assert_eq!(route.gateway(), None);
+            }
+            // Windows: an interface route on the TUN, which has a link-local
+            #[cfg(windows)]
+            {
+                assert_eq!(route.if_index(), Some(7));
+                assert_eq!(route.gateway(), None);
+                assert_eq!(route.metric(), Some(0));
+            }
+        }
+    }
+
+    #[test_case(EXTERNAL_IP_V6 ; "global unicast")]
+    #[test_case(IpAddr::V6(Ipv6Addr::LOCALHOST) ; "loopback")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)) ; "link local")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)) ; "multicast")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)) ; "unique local")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0x7fff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff)) ; "top of lower half")]
+    #[test_case(IpAddr::V6(Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff)) ; "top of upper half")]
+    fn test_ipv6_sink_routes_cover_exactly_one_half(addr: IpAddr) {
+        let covering = ipv6_sink_routes(
+            #[cfg(windows)]
+            1,
+        )
+        .iter()
+        .filter(|route| route.contains(&addr))
+        .count();
+        assert_eq!(covering, 1);
+    }
+
+    #[test]
+    fn test_ipv6_sink_routes_ignore_ipv4() {
+        assert!(
+            ipv6_sink_routes(
+                #[cfg(windows)]
+                1
+            )
+            .iter()
+            .all(|route| !route.contains(&EXTERNAL_IP_V4))
+        );
     }
 
     #[test_case(RouteMode::Default)]
@@ -918,7 +1137,98 @@ mod tests {
                 });
                 assert!(lan_route_in_system);
             }
+
+            // The IPv6 LAN route follows the IPv6 default route, if there is one
+            let (ula_network, ula_prefix) = IPV6_LAN_NETWORK;
+            let ipv6_default = route_manager.find_best_default_route(&ula_network);
+            let ula_route = route_manager
+                .lan_routes
+                .iter()
+                .find(|r| r.destination() == ula_network && r.prefix() == ula_prefix);
+            match ipv6_default {
+                Ok(ipv6_default) => {
+                    let ula_route = ula_route.expect("IPv6 LAN route recorded");
+                    assert_eq!(ula_route.if_index(), ipv6_default.if_index());
+                    let ula_route_in_system = routes_after_init.iter().any(|r| {
+                        r.destination() == ula_network
+                            && r.prefix() == ula_prefix
+                            && r.if_index() == ipv6_default.if_index()
+                    });
+                    assert!(ula_route_in_system);
+                }
+                Err(_) => assert!(ula_route.is_none()),
+            }
         }
+
+        // Verify the IPv6 sink routes are present in system and removed on cleanup
+        if [RouteMode::Default, RouteMode::Lan].contains(&route_mode) {
+            assert!(ipv6_sink_routes_in_system(
+                &routes_after_init,
+                #[cfg(windows)]
+                tun_index
+            ));
+
+            route_manager.cleanup_sync();
+            let routes_after_cleanup = route_manager.route_manager.list().unwrap();
+            assert!(!any_ipv6_sink_route_in_system(
+                &routes_after_cleanup,
+                #[cfg(windows)]
+                tun_index
+            ));
+        } else {
+            assert!(!any_ipv6_sink_route_in_system(
+                &routes_after_init,
+                #[cfg(windows)]
+                tun_index
+            ));
+        }
+    }
+
+    #[test_case(RouteMode::Default)]
+    #[test_case(RouteMode::Lan)]
+    #[tokio::test]
+    #[serial_test::serial(route_manager)]
+    #[ignore = "May falsely fail during development due to local route settings"]
+    async fn test_privileged_initialize_route_manager_without_ipv6_sink(route_mode: RouteMode) {
+        let (_restorer, _tun_device, mut route_manager) =
+            create_test_setup(route_mode, EXTERNAL_IP_V4).await.unwrap();
+        route_manager.block_ipv6 = false;
+
+        let tun_index = route_manager.tun_index;
+
+        route_manager.install_routes().await.unwrap();
+
+        let routes_after_init = route_manager.route_manager.list().unwrap();
+
+        // IPv4 tunnel routes are installed as usual
+        for (network, prefix) in TUNNEL_ROUTES {
+            let route_in_system = routes_after_init.iter().any(|r| {
+                r.destination() == network
+                    && r.prefix() == prefix
+                    && r.gateway() == Some(TUN_PEER_IP)
+                    && r.if_index() == Some(tun_index)
+            });
+            assert!(route_in_system);
+        }
+
+        // Nothing IPv6 is touched
+        assert!(!any_ipv6_sink_route_in_system(
+            &routes_after_init,
+            #[cfg(windows)]
+            tun_index
+        ));
+        assert!(
+            route_manager
+                .vpn_routes
+                .iter()
+                .all(|r| r.destination().is_ipv4())
+        );
+        assert!(
+            route_manager
+                .lan_routes
+                .iter()
+                .all(|r| r.destination().is_ipv4())
+        );
     }
 
     #[test_case(RouteMode::Lan)]
@@ -967,7 +1277,8 @@ mod tests {
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_route_manager_start_stop(route_mode: RouteMode) {
         let mut route_manager =
-            RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+            RouteManager::new(route_mode, true, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP)
+                .unwrap();
 
         // Test that we can start the route manager
         let start_result = route_manager.start().await;
@@ -999,6 +1310,7 @@ mod tests {
 
         let mut route_manager = RouteManager::new(
             RouteMode::NoExec,
+            true,
             EXTERNAL_IP_V4,
             0,
             TUN_PEER_IP,
@@ -1021,17 +1333,26 @@ mod tests {
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[test_case(RouteMode::Default)]
-    #[test_case(RouteMode::Lan)]
+    #[test_case(RouteMode::Default, true)]
+    #[test_case(RouteMode::Default, false)]
+    #[test_case(RouteMode::Lan, true)]
+    #[test_case(RouteMode::Lan, false)]
     #[tokio::test]
-    async fn test_route_manager_inner_structure(route_mode: RouteMode) {
+    async fn test_route_manager_inner_structure(route_mode: RouteMode, block_ipv6: bool) {
         // Test that RouteManagerInner can be created directly
-        let inner_result =
-            RouteManagerInner::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP);
+        let inner_result = RouteManagerInner::new(
+            route_mode,
+            block_ipv6,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+        );
         assert!(inner_result.is_ok());
 
         let inner = inner_result.unwrap();
         assert_eq!(inner.routing_mode, route_mode);
+        assert_eq!(inner.block_ipv6, block_ipv6);
         assert_eq!(inner.server_ip, EXTERNAL_IP_V4);
         assert_eq!(inner.tun_index, 0);
         assert_eq!(inner.tun_peer_ip, TUN_PEER_IP);
@@ -1045,6 +1366,7 @@ mod tests {
     async fn test_route_manager_double_start_error() {
         let mut route_manager = RouteManager::new(
             RouteMode::NoExec,
+            true,
             EXTERNAL_IP_V4,
             0,
             TUN_PEER_IP,
@@ -1098,6 +1420,7 @@ mod tests {
         // Don't create a TUN device for NoExec mode; it needs no privileges
         let mut route_manager = RouteManager::new(
             RouteMode::NoExec,
+            true,
             EXTERNAL_IP_V4,
             1,
             TUN_PEER_IP,
@@ -1116,6 +1439,7 @@ mod tests {
         // Test that RouteManagerInner can be created with IPv6 server
         let inner = RouteManagerInner::new(
             RouteMode::Default,
+            true,
             EXTERNAL_IP_V6,
             1,
             TUN_PEER_IP,
@@ -1181,6 +1505,20 @@ mod tests {
                     && r.if_index() == Some(tun_index)
             });
             assert!(dns_route_in_system, "IPv4 DNS route not found");
+
+            // The IPv6 sink coexists with the /128 server route, which wins
+            // for the server itself
+            assert!(
+                ipv6_sink_routes_in_system(
+                    &routes_after_init,
+                    #[cfg(windows)]
+                    tun_index
+                ),
+                "IPv6 sink routes not found"
+            );
+            let server_route = route_manager.find_route(&EXTERNAL_IP_V6).unwrap();
+            assert_eq!(server_route.prefix(), Ipv6Addr::BITS as u8);
+            assert_ne!(server_route.if_index(), Some(tun_index));
         }
     }
 
