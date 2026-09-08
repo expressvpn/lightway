@@ -158,6 +158,38 @@ fn ipv6_sink_routes(#[cfg(windows)] tun_index: u32) -> Vec<Route> {
         .collect()
 }
 
+/// Whether `err` says the host has no IPv6 address family at all (Linux
+/// booted with `ipv6.disable=1`, Windows with the IPv6 stack disabled).
+fn ipv6_unsupported_error(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    let unsupported = libc::EAFNOSUPPORT;
+    #[cfg(windows)]
+    let unsupported = windows_sys::Win32::Networking::WinSock::WSAEAFNOSUPPORT;
+    err.raw_os_error() == Some(unsupported)
+}
+
+/// Decide from an IPv6 socket probe whether the sink has anything to do.
+/// Only a missing address family says no; any other failure keeps the sink
+/// on, so a transient error cannot quietly switch it off.
+fn ipv6_available_from_probe(probe: Result<(), std::io::Error>) -> bool {
+    match probe {
+        Ok(()) => true,
+        Err(err) if ipv6_unsupported_error(&err) => false,
+        Err(err) => {
+            tracing::debug!("IPv6 socket probe failed, assuming IPv6 is available: {err}");
+            true
+        }
+    }
+}
+
+/// Probe the host for an IPv6 stack by opening, and dropping, an IPv6
+/// datagram socket. Unprivileged, and independent of current connectivity,
+/// which can change while connected.
+fn host_has_ipv6() -> bool {
+    let probe = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).map(drop);
+    ipv6_available_from_probe(probe)
+}
+
 pub struct RouteManager {
     inner: Option<RouteManagerInner>,
     task: Option<JoinHandle<()>>,
@@ -560,6 +592,18 @@ impl RouteManagerInner {
     /// In [`RouteMode::Lan`] unique local addresses keep following the
     /// current IPv6 default route so LAN IPv6 still works.
     async fn install_ipv6_sink(&mut self) -> Result<(), RoutingTableError> {
+        if !host_has_ipv6() {
+            tracing::info!("IPv6 is unavailable on this host; nothing to discard");
+            return Ok(());
+        }
+        #[cfg(windows)]
+        if !utils::interface_has_ipv6(self.tun_index) {
+            warn!(
+                "IPv6 is not bound to the tunnel adapter; IPv6 traffic is not routed through the tunnel"
+            );
+            return Ok(());
+        }
+
         if self.routing_mode == RouteMode::Lan {
             self.install_ipv6_lan_route().await;
         }
@@ -937,6 +981,47 @@ mod tests {
         .filter(|route| route.contains(&addr))
         .count();
         assert_eq!(covering, 1);
+    }
+
+    #[test]
+    fn test_ipv6_unsupported_error_matches_address_family_error() {
+        #[cfg(unix)]
+        let unsupported = std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
+        #[cfg(windows)]
+        let unsupported = std::io::Error::from_raw_os_error(
+            windows_sys::Win32::Networking::WinSock::WSAEAFNOSUPPORT,
+        );
+        assert!(ipv6_unsupported_error(&unsupported));
+    }
+
+    #[test]
+    fn test_ipv6_unsupported_error_ignores_other_errors() {
+        #[cfg(unix)]
+        let other = std::io::Error::from_raw_os_error(libc::EEXIST);
+        #[cfg(windows)]
+        let other = std::io::Error::from_raw_os_error(ERROR_OBJECT_ALREADY_EXISTS as i32);
+        assert!(!ipv6_unsupported_error(&other));
+        assert!(!ipv6_unsupported_error(&std::io::Error::other(
+            "no OS error code"
+        )));
+    }
+
+    #[test]
+    fn test_ipv6_available_only_denied_by_address_family_error() {
+        #[cfg(unix)]
+        let unsupported = std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
+        #[cfg(windows)]
+        let unsupported = std::io::Error::from_raw_os_error(
+            windows_sys::Win32::Networking::WinSock::WSAEAFNOSUPPORT,
+        );
+        // A socket came up: IPv6 is there
+        assert!(ipv6_available_from_probe(Ok(())));
+        // The address family is missing: nothing to sink
+        assert!(!ipv6_available_from_probe(Err(unsupported)));
+        // Any other failure must not switch the sink off
+        assert!(ipv6_available_from_probe(Err(std::io::Error::other(
+            "transient"
+        ))));
     }
 
     #[test]
