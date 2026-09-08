@@ -15,8 +15,15 @@ at compile time via cargo features (the two are mutually exclusive). See
 ## Does Lightway client/server applications support IPv6 ?
 
 Lightway apps does not currently provide full IPv6 support on either the client or server.
+The one supported piece is the outside connection: the encrypted transport between the
+client and the server can run over IPv6 as well as IPv4. That is the extent of it.
 
- - IPv6 traffic is not carried by the tunnel
+ - The server can bind to an IPv6 address and the client can connect to one. The client
+   uses the first address its configured server name resolves to, so on a dual-stack host
+   that may be IPv6; there is no address-family preference setting yet
+ - IPv6 traffic is not carried by the tunnel. Any IPv6 packet that still reaches the
+   tunnel interface is rejected by lightway-core as an unsupported packet and dropped,
+   so none is ever sent to the server
  - On desktop, in route modes `default` and `lan`, the client routes all IPv6
    traffic into a blackhole (the loopback interface on macOS and Linux, the
    tunnel interface on Windows) where it is discarded, so IPv6 (including DNS
