@@ -527,6 +527,20 @@ impl ConnectionManager {
         true
     }
 
+    /// Rotate `session_id`'s expresslane key now, bypassing the periodic
+    /// interval. Returns `false` if nothing happened, either because the
+    /// session is unknown or because the attempt failed.
+    pub(crate) fn rotate_expresslane_key(self: &Arc<Self>, session_id: SessionId) -> bool {
+        let Some(conn) = self.find_datagram_connection_by_session(session_id) else {
+            return false;
+        };
+        if let Err(err) = conn.rotate_expresslane_key_now() {
+            warn!(?err, ?session_id, "offload-requested key rotation failed");
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn remove_connection(&self, conn: &Connection) {
         self.connections.lock().remove(conn)
     }
