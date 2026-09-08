@@ -250,6 +250,7 @@ mod tests {
                 client_ip: Ipv4Addr::new(10, 125, 0, 5),
                 server_ip: Ipv4Addr::new(10, 125, 0, 6),
                 dns_ip: Ipv4Addr::new(10, 125, 0, 1),
+                mtu: None,
             },
             false,
             true,

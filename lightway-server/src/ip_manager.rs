@@ -182,6 +182,7 @@ mod tests {
             client_ip: "10.125.0.5".parse().unwrap(),
             server_ip: "10.125.0.6".parse().unwrap(),
             dns_ip: "10.125.0.1".parse().unwrap(),
+            mtu: None,
         }
     }
 

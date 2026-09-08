@@ -543,6 +543,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         client_ip: config.lightway_client_ip,
         server_ip: config.lightway_server_ip,
         dns_ip: config.lightway_dns_ip,
+        mtu: None,
     };
 
     let reserved_ips = [config.lightway_client_ip, config.lightway_server_ip]
@@ -842,6 +843,7 @@ mod tests {
                 client_ip: Ipv4Addr::new(10, 125, 0, 5),
                 server_ip: Ipv4Addr::new(10, 125, 0, 6),
                 dns_ip: Ipv4Addr::new(10, 125, 0, 1),
+                mtu: None,
             },
             false,
             true,
