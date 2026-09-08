@@ -25,7 +25,9 @@ Lightway apps does not currently provide full IPv6 support on either the client 
    This is controlled by `block_ipv6`, which is on by default; in `lan` mode
    unique local addresses (`fc00::/7`) keep following the existing IPv6
    default route. Link-local and multicast traffic stays on its on-link
-   routes.
+   routes. A host with no IPv6 stack has nothing to block and skips these
+   routes; on Windows they are also skipped, with a warning, when IPv6 is not
+   bound to the tunnel adapter.
  - On Linux hosts managed by systemd-networkd, its default
    `ManageForeignRoutes=yes` makes it remove these unreachable routes when it
    reconfigures a link (for example on `networkctl reload` or a restart of
