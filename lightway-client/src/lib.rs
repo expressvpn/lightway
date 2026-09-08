@@ -33,7 +33,7 @@ use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
     InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType, State,
-    ipv4_update_destination, ipv4_update_source,
+    ipv4_update_destination, ipv4_update_source, ipv6_is_valid_packet,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -62,10 +62,7 @@ use std::time::Instant;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, Once, Weak},
     time::Duration,
 };
 use tokio::{
@@ -783,16 +780,8 @@ impl TracerTrigger {
     }
 }
 
-/// Set once the one-time IPv6 drop warning has been logged.
-static IPV6_DROP_WARNED: AtomicBool = AtomicBool::new(false);
-
-/// Whether a dropped inside packet warrants the one-time IPv6 warning: its
-/// IP version nibble is 6 and `warned` was not yet set (it is set here).
-/// Cheap enough for the per-packet error path.
-fn ipv6_drop_warning_due(buf: &[u8], warned: &AtomicBool) -> bool {
-    let is_ipv6 = buf.first().is_some_and(|byte| byte >> 4 == 6);
-    is_ipv6 && !warned.swap(true, Ordering::Relaxed)
-}
+/// Guards the one-time IPv6 drop warning.
+static IPV6_DROP_WARNING: Once = Once::new();
 
 /// Shared body of the inside IO loops: rewrite the source/DNS
 /// addresses, dispatch the packet into the connection and map the
@@ -809,6 +798,16 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
         &mut BytesMut,
     ) -> std::result::Result<(), ConnectionError>,
 ) -> Result<Option<Instant>> {
+    // Pre-emptively drop IPv6 packets, so that we don't hold the connection lock
+    if ipv6_is_valid_packet(buf) {
+        IPV6_DROP_WARNING.call_once(|| {
+            tracing::warn!(
+                "dropping IPv6 traffic from the tunnel interface; the tunnel carries IPv4 only"
+            );
+        });
+        return Ok(None);
+    }
+
     let mut conn = conn.lock().unwrap();
 
     // Update source IP address to server assigned IP address
@@ -834,16 +833,8 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
         }
         // Ignore the packet till the connection is online
         Err(ConnectionError::InvalidState) => Ok(None),
-        // Ignore invalid inside packets. On Windows `block_ipv6` steers the
-        // host's IPv6 traffic into the TUN by design; say so once.
-        Err(ConnectionError::InvalidInsidePacket(_)) => {
-            if ipv6_drop_warning_due(buf, &IPV6_DROP_WARNED) {
-                tracing::warn!(
-                    "dropping IPv6 traffic from the tunnel interface; the tunnel carries IPv4 only"
-                );
-            }
-            Ok(None)
-        }
+        // Ignore other invalid inside packets
+        Err(ConnectionError::InvalidInsidePacket(_)) => Ok(None),
         Err(err) => {
             // Fatal error
             Err(err.into())
@@ -2111,25 +2102,6 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
-
-    #[test]
-    fn test_ipv6_drop_warning_due_fires_once_for_ipv6_only() {
-        let warned = AtomicBool::new(false);
-        // Version nibble 4 and 6 respectively; the rest of the header is irrelevant
-        let ipv4 = [0x45u8, 0, 0, 20];
-        let ipv6 = [0x60u8, 0, 0, 0];
-
-        assert!(!ipv6_drop_warning_due(&[], &warned));
-        assert!(!ipv6_drop_warning_due(&ipv4, &warned));
-        assert!(!warned.load(Ordering::Relaxed));
-
-        assert!(ipv6_drop_warning_due(&ipv6, &warned));
-        assert!(warned.load(Ordering::Relaxed));
-
-        // Latched: neither family reports again
-        assert!(!ipv6_drop_warning_due(&ipv6, &warned));
-        assert!(!ipv6_drop_warning_due(&ipv4, &warned));
-    }
 
     #[test]
     fn sni_header_flows_from_config_into_client_config() {
