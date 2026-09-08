@@ -123,11 +123,16 @@ pub enum State {
     Disconnected = 1,
 }
 
+/// Why an inside packet was rejected (see [`ConnectionError::InvalidInsidePacket`])
 #[derive(Debug, Error)]
 pub enum InvalidPacketError {
     /// Packet is not IPv4
     #[error("Invalid ipv4 packet")]
     InvalidIpv4Packet,
+
+    /// Packet is IPv6, which the tunnel does not carry
+    #[error("Unsupported IPv6 packet")]
+    UnsupportedIpv6Packet,
 
     /// Packet size greater than MAX_MTU
     #[error("Packet size greater than MAX_MTU")]
@@ -139,6 +144,18 @@ pub enum InvalidPacketError {
     /// metrics.
     #[error("Invalid GSO superpacket")]
     InvalidGsoPacket,
+}
+
+impl InvalidPacketError {
+    /// The error for an inside packet that failed the IPv4 check: IPv6 is
+    /// reported as such so callers can tell it from garbage.
+    pub(crate) fn for_non_ipv4(pkt: &[u8]) -> Self {
+        if crate::utils::ipv6_is_valid_packet(pkt) {
+            Self::UnsupportedIpv6Packet
+        } else {
+            Self::InvalidIpv4Packet
+        }
+    }
 }
 
 /// An error from an operation on a [`Connection`]
@@ -1105,7 +1122,7 @@ impl<AppState: Send> Connection<AppState> {
     /// The returned Poll value reflects the inside I/O requirements.
     pub fn inside_data_received(&mut self, pkt: &mut BytesMut) -> ConnectionResult<()> {
         use ConnectionError::InvalidInsidePacket;
-        use InvalidPacketError::{InvalidIpv4Packet, InvalidPacketSize};
+        use InvalidPacketError::InvalidPacketSize;
 
         // Fatal error:
         // In case of protocol disconnection instead of explicit disconnect
@@ -1128,7 +1145,9 @@ impl<AppState: Send> Connection<AppState> {
         }
         // If not ipv4 packet, return error
         if !ipv4_is_valid_packet(pkt.as_ref()) {
-            return Err(InvalidInsidePacket(InvalidIpv4Packet));
+            return Err(InvalidInsidePacket(InvalidPacketError::for_non_ipv4(
+                pkt.as_ref(),
+            )));
         }
 
         // Rotate keys only when there is live traffic
@@ -1187,7 +1206,6 @@ impl<AppState: Send> Connection<AppState> {
         hdr: &crate::gso::VirtioNetHdr,
     ) -> ConnectionResult<()> {
         use ConnectionError::InvalidInsidePacket;
-        use InvalidPacketError::InvalidIpv4Packet;
 
         if matches!(self.state, State::Disconnected) {
             return Err(ConnectionError::Disconnected);
@@ -1204,7 +1222,9 @@ impl<AppState: Send> Connection<AppState> {
 
         // No MTU check — GSO superpacket is intentionally oversized
         if !ipv4_is_valid_packet(pkt.as_ref()) {
-            return Err(InvalidInsidePacket(InvalidIpv4Packet));
+            return Err(InvalidInsidePacket(InvalidPacketError::for_non_ipv4(
+                pkt.as_ref(),
+            )));
         }
 
         let _ = self.rotate_expresslane_key();
@@ -2610,7 +2630,9 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if !ipv4_is_valid_packet(inside_pkt.as_ref()) {
-            return Err(InvalidInsidePacket(InvalidIpv4Packet));
+            return Err(InvalidInsidePacket(InvalidPacketError::for_non_ipv4(
+                inside_pkt.as_ref(),
+            )));
         }
 
         let Some(inside_io) = &self.inside_io else {
