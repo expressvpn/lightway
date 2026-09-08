@@ -1306,6 +1306,7 @@ pub async fn connect<
         timeout: config.keepalive_timeout,
         continuous: config.continuous_keepalive,
         tracer_trigger_timeout: Some(config.tracer_packet_timeout),
+        network_change_timeout: None,
     };
     let (keepalive, keepalive_task) =
         Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
