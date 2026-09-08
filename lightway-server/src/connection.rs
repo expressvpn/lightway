@@ -105,6 +105,7 @@ impl Connection {
             pub fn mark_offload_activity(&self, rx: bool, tx: bool);
             pub fn peer_addr(&self) -> SocketAddr;
             pub fn set_peer_addr(&self, addr: SocketAddr) -> SocketAddr;
+            pub fn rotate_expresslane_key_now(&self) -> ConnectionResult<()>;
             pub fn current_cipher(&self) -> Option<String>;
             pub fn current_curve(&self) -> Option<String>;
             pub fn state(&self) -> State;
