@@ -90,6 +90,34 @@ pub trait ExpresslaneMetrics {
 /// Convenience type for [`ExpresslaneMetrics`] trait objects.
 pub type ExpresslaneMetricsType = Arc<dyn ExpresslaneMetrics + Send + Sync>;
 
+/// Something an offload engine observed about a session that this library
+/// cannot see for itself.
+///
+/// An engine reporting these must only report what it has authenticated.
+/// A peer address that has not been verified hands an attacker the ability
+/// to redirect that session's traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffloadEvent {
+    /// A datagram for `session_id` authenticated from `addr`, which differs
+    /// from the address this session is currently sending to.
+    ///
+    /// Server-side only in practice: a client's peer is its server, whose
+    /// address does not move under it.
+    PeerAddrChanged {
+        /// The session the engine observed.
+        session_id: SessionId,
+        /// The authenticated source address.
+        addr: SocketAddr,
+    },
+    /// `session_id` has spent enough of its current key's budget that the
+    /// key should be rotated, regardless of how long ago the last rotation
+    /// was.
+    KeyRotationNeeded {
+        /// The session the engine observed.
+        session_id: SessionId,
+    },
+}
+
 /// Expresslane state machine and connection-level state.
 ///
 /// Groups all expresslane-related connection state: the state machine,
@@ -100,6 +128,10 @@ pub(crate) struct Expresslane<AppState: Send> {
     pub(crate) state: ExpresslaneState,
     /// Counter value last sent in the ExpresslaneConfig message
     pub(crate) config_counter: u64,
+    /// `config_counter` value as of the last resolved (acked or abandoned)
+    /// expresslane config exchange. Differs from `config_counter` exactly
+    /// while a config exchange is outstanding.
+    pub(crate) resolved_config_counter: u64,
     /// Number of retransmissions done with the latest pending expresslane config packet
     pub(crate) retransmit_count: u8,
     /// Last key rotation timestamp
@@ -141,6 +173,7 @@ impl<AppState: Send> Expresslane<AppState> {
         Self {
             state,
             config_counter: 0,
+            resolved_config_counter: 0,
             retransmit_count: 0,
             last_key_rotation: None,
             prev_peer_sent: 0,
@@ -180,6 +213,44 @@ impl<AppState: Send> Expresslane<AppState> {
             None => true,
             Some(last) => last.elapsed() > self.keys_rotation_interval,
         }
+    }
+
+    /// Whether an expresslane config exchange is outstanding - sent but not
+    /// yet acked or abandoned. A forcing caller must not start a second
+    /// exchange on top of one still in flight.
+    pub(crate) fn rotation_outstanding(&self) -> bool {
+        self.config_counter != self.resolved_config_counter
+    }
+
+    /// Guard decision for a forced rotation attempt: `Some` is the value the
+    /// caller should return without attempting the rotation, `None` means
+    /// proceed. `Degraded` is checked ahead of the outstanding gate so a
+    /// forced rotation on a degraded session always errors, even while a
+    /// prior (never resolved) exchange is still outstanding.
+    pub(crate) fn rotate_now_gate(&self) -> Option<crate::ConnectionResult<()>> {
+        if matches!(self.state, ExpresslaneState::Degraded) {
+            return Some(Err(crate::ConnectionError::ExpreslaneDegraded));
+        }
+        if self.rotation_outstanding() {
+            return Some(Ok(()));
+        }
+        None
+    }
+
+    /// Guard decision for a periodic rotation attempt: `Some` is the value
+    /// the caller should return without attempting the rotation, `None`
+    /// means proceed. Mirrors [`Self::rotate_now_gate`] with the interval
+    /// check in place of the outstanding one - `Degraded` first, so a
+    /// degraded session still inside the rotation interval errors rather
+    /// than reading as a quiet no-op.
+    pub(crate) fn rotate_periodic_gate(&self) -> Option<crate::ConnectionResult<()>> {
+        if matches!(self.state, ExpresslaneState::Degraded) {
+            return Some(Err(crate::ConnectionError::ExpreslaneDegraded));
+        }
+        if !self.time_to_rotate_key() {
+            return Some(Ok(()));
+        }
+        None
     }
 }
 
@@ -244,6 +315,82 @@ mod tests {
     fn callback_version_type_is_publicly_nameable() {
         let v: crate::ExpresslaneVersion = crate::ExpresslaneVersion::MAX;
         assert_eq!(v, crate::ExpresslaneVersion::Version2);
+    }
+
+    /// A fresh config counter with nothing yet resolved reads as outstanding;
+    /// once resolution catches up, it does not.
+    #[test]
+    fn outstanding_tracks_the_gap_between_sent_and_resolved() {
+        let mut xp = expresslane();
+        assert!(
+            !xp.rotation_outstanding(),
+            "nothing sent yet, nothing can be outstanding"
+        );
+
+        xp.config_counter += 1;
+        assert!(
+            xp.rotation_outstanding(),
+            "sent counter has moved ahead of resolved"
+        );
+
+        xp.resolved_config_counter = xp.config_counter;
+        assert!(
+            !xp.rotation_outstanding(),
+            "resolved caught up with sent, nothing outstanding"
+        );
+    }
+
+    /// A second exchange started before the first resolves keeps the gate
+    /// shut - only catching resolution up, not another send, closes it.
+    #[test]
+    fn outstanding_holds_across_a_second_send_before_resolution() {
+        let mut xp = expresslane();
+        xp.config_counter += 1;
+        assert!(xp.rotation_outstanding());
+
+        // A forcing caller that ignored the gate and sent again anyway.
+        xp.config_counter += 1;
+        assert!(
+            xp.rotation_outstanding(),
+            "still outstanding after a second unresolved send"
+        );
+
+        xp.resolved_config_counter = xp.config_counter;
+        assert!(!xp.rotation_outstanding());
+    }
+
+    /// Regression: a forced rotation on a degraded session must error, even
+    /// while a prior exchange never resolved (the degrade notice itself
+    /// timed out unacked). Degraded has to win over the outstanding gate,
+    /// or a session stuck this way silently reports success forever.
+    #[test]
+    fn degraded_wins_over_outstanding_in_the_forcing_gate() {
+        let mut xp = expresslane();
+        xp.state = ExpresslaneState::Degraded;
+        xp.config_counter += 1; // sent, never resolved - permanently outstanding
+
+        assert!(xp.rotation_outstanding());
+        assert!(matches!(
+            xp.rotate_now_gate(),
+            Some(Err(crate::ConnectionError::ExpreslaneDegraded))
+        ));
+    }
+
+    /// Regression: a periodic rotation on a degraded session, still inside
+    /// the rotation interval, must error rather than read as "not due yet".
+    /// Degraded has to win over the interval gate too, symmetric with
+    /// [`degraded_wins_over_outstanding_in_the_forcing_gate`].
+    #[test]
+    fn degraded_wins_over_interval_in_the_periodic_gate() {
+        let mut xp = expresslane();
+        xp.state = ExpresslaneState::Degraded;
+        xp.last_key_rotation = Some(Instant::now()); // well inside the interval
+
+        assert!(!xp.time_to_rotate_key());
+        assert!(matches!(
+            xp.rotate_periodic_gate(),
+            Some(Err(crate::ConnectionError::ExpreslaneDegraded))
+        ));
     }
 }
 
