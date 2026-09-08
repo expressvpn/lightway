@@ -2130,10 +2130,17 @@ impl<AppState: Send> Connection<AppState> {
         last_config: ExpresslaneTickData,
     ) -> ConnectionResult<()> {
         if !matches!(self.state, State::Online) {
+            // Abandoned, not outstanding - matches the give-up path below:
+            // a retransmit that can no longer happen must not leave
+            // rotation_outstanding() latched true for the rest of the
+            // connection's life.
+            self.expresslane.resolved_config_counter = self.expresslane.config_counter;
             return Err(ConnectionError::InvalidState);
         }
 
         if !self.expresslane_supported() {
+            // Same reasoning as the State::Online check above.
+            self.expresslane.resolved_config_counter = self.expresslane.config_counter;
             return Err(ConnectionError::InvalidConnectionType);
         }
         let last_config = last_config.0;
@@ -2159,6 +2166,8 @@ impl<AppState: Send> Connection<AppState> {
             // lands here too and must not undo it.
             if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
                 warn!("Expresslane degrade notice transmit timed out");
+                // resolved_config_counter is left stale here on purpose: Degraded is checked
+                // before rotation_outstanding() in the forcing path, so it can never gate on it.
                 return Ok(());
             }
 
@@ -2167,6 +2176,9 @@ impl<AppState: Send> Connection<AppState> {
             // The stamp was taken before the outcome was known. Drop it so
             // recovery does not wait a whole rotation interval.
             self.expresslane.last_key_rotation = None;
+            // Abandoned, not outstanding - a forcing caller must be able to
+            // try again rather than wait on a peer that already timed out.
+            self.expresslane.resolved_config_counter = self.expresslane.config_counter;
             return Ok(());
         }
 
@@ -2265,6 +2277,7 @@ impl<AppState: Send> Connection<AppState> {
                 debug!("Updating expresslane self keys");
                 self.publish_expresslane_key();
                 self.expresslane.retransmit_count = 0;
+                self.expresslane.resolved_config_counter = config.counter;
                 // Self key updated, check if expresslane is now ready.
                 // Don't re-activate if we're degraded — the degradation
                 // config ACK uses an INVALID key which must not be used
@@ -2320,8 +2333,46 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    /// Rotate expresslane key
+    /// Rotate expresslane key, subject to the configured rotation interval.
     pub fn rotate_expresslane_key(&mut self) -> ConnectionResult<()> {
+        let gate = self.expresslane.rotate_periodic_gate();
+        self.rotate_expresslane_key_gated(gate)
+    }
+
+    /// Rotate expresslane key regardless of the rotation interval.
+    ///
+    /// For a caller that knows the current key's budget is spent - an
+    /// offload engine reporting [`crate::OffloadEvent::KeyRotationNeeded`] - where
+    /// waiting for the interval would keep using a key past its limit.
+    /// Prefer [`Self::rotate_expresslane_key`] for periodic rotation.
+    ///
+    /// A no-op while a config exchange from an earlier rotation is still
+    /// outstanding: an offload engine that has not seen the counter reset
+    /// will keep reporting the same session on every drain until the key
+    /// actually changes, and restarting the exchange on every report would
+    /// give it no chance to complete.
+    pub fn rotate_expresslane_key_now(&mut self) -> ConnectionResult<()> {
+        let gate = self.expresslane.rotate_now_gate();
+        self.rotate_expresslane_key_gated(gate)
+    }
+
+    /// Rotate subject to an already-taken guard decision. The two public
+    /// entry points differ only in which guard they consult.
+    fn rotate_expresslane_key_gated(
+        &mut self,
+        gate: expresslane::RotateGate,
+    ) -> ConnectionResult<()> {
+        if !self.expresslane_supported() {
+            return Ok(());
+        }
+        match gate {
+            expresslane::RotateGate::Degraded => Err(ConnectionError::ExpreslaneDegraded),
+            expresslane::RotateGate::Skip => Ok(()),
+            expresslane::RotateGate::Proceed => self.rotate_expresslane_key_inner(),
+        }
+    }
+
+    fn rotate_expresslane_key_inner(&mut self) -> ConnectionResult<()> {
         if !self.expresslane_supported() {
             return Ok(());
         }
@@ -2329,10 +2380,6 @@ impl<AppState: Send> Connection<AppState> {
         // Don't allow key rotation if expresslane is degraded
         if matches!(self.expresslane.state, ExpresslaneState::Degraded) {
             return Err(ConnectionError::ExpreslaneDegraded);
-        }
-
-        if !self.expresslane.time_to_rotate_key() {
-            return Ok(());
         }
 
         let key_bytes: [u8; EXPRESSLANE_KEY_SIZE] =
