@@ -4,6 +4,7 @@ mod connection_manager;
 mod io;
 mod ip_manager;
 pub mod metrics;
+mod offload_events;
 mod offload_stats;
 mod statistics;
 
@@ -16,35 +17,13 @@ use connection::Connection;
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
     ConnectionType, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, Event, ExpresslaneCbType,
-    ExpresslaneMetricsType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
-    ServerAuthResult, SessionId, Version,
+    ExpresslaneMetricsType, OffloadEvent, PluginFactoryError, PluginFactoryList, ServerAuth,
+    ServerAuthHandle, ServerAuthResult, SessionId, Version,
 };
 
 /// Callback type for receiving per-connection events with session ID.
 /// Implement this to handle events like session rotation and disconnection.
 pub type ServerEventCbType = Arc<dyn Fn(SessionId, &Event) + Send + Sync>;
-
-/// Handle for reporting an authenticated peer-address change from outside the
-/// lightway receive path - for example when part of the data plane runs in
-/// another component that sees the client's traffic first.
-///
-/// Trusted caller: this performs no authentication of its own. Only report an
-/// address that arrived on a packet you have already verified, or you hand an
-/// attacker the ability to redirect a client's downstream traffic.
-#[derive(Clone)]
-pub struct PeerAddrUpdater(Arc<ConnectionManager>);
-
-impl PeerAddrUpdater {
-    /// Adopt `addr` as the peer address for `session_id`.
-    ///
-    /// The caller must have already authenticated that `addr` is where
-    /// `session_id`'s traffic is now arriving from - this call does not
-    /// verify it. No-op (returns `false`) for an unknown session or one
-    /// already at `addr`; returns `true` when the address was changed.
-    pub fn update_peer_addr(&self, session_id: SessionId, addr: SocketAddr) -> bool {
-        self.0.update_peer_addr(session_id, addr)
-    }
-}
 
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
@@ -230,11 +209,10 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(ignore))]
     pub event_cb: Option<ServerEventCbType>,
 
-    /// Set to `Some(Arc::new(OnceLock::new()))` to receive a
-    /// [`PeerAddrUpdater`], which [`server`] fills in before the listener
-    /// starts.
+    /// Events from an offload engine that owns part of the data plane.
+    /// Dropped by [`server`] into a consumer task; close the sender to stop it.
     #[educe(Debug(ignore))]
-    pub peer_addr_updater: Option<Arc<std::sync::OnceLock<PeerAddrUpdater>>>,
+    pub offload_events: Option<tokio::sync::mpsc::Receiver<OffloadEvent>>,
 
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
@@ -338,7 +316,7 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             expresslane_cb: None,
             expresslane_metrics: None,
             event_cb: None,
-            peer_addr_updater: None,
+            offload_events: None,
             enable_pqc: config.enable_pqc,
             #[cfg(target_os = "linux")]
             enable_tun_offload: config.enable_tun_offload,
@@ -645,10 +623,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.connection_age_expiration_interval,
     );
 
-    if let Some(slot) = &config.peer_addr_updater {
-        let _ = slot.set(PeerAddrUpdater(conn_manager.clone()));
-    }
-
     tokio::spawn(statistics::run(
         conn_manager.clone(),
         ip_manager.clone(),
@@ -677,6 +651,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             provider,
             offload_stats::DEFAULT_OFFLOAD_STATS_INTERVAL,
         ));
+    }
+
+    if let Some(events) = config.offload_events.take() {
+        tokio::spawn(offload_events::run(conn_manager.clone(), events));
     }
 
     let mut server: Box<dyn Server> = match connection_type {
