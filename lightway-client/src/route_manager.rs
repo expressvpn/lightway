@@ -577,6 +577,10 @@ impl RouteManagerInner {
                 tracing::info!("Updated server route for network change");
                 return Ok(true);
             }
+        } else {
+            warn!("Server route missing - reinstalling with {current_route:}");
+            self.add_route_server(current_route).await?;
+            return Ok(true);
         }
 
         Ok(false)
