@@ -241,6 +241,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[educe(Debug(ignore))]
     pub expresslane_metrics: Option<lightway_core::ExpresslaneMetricsType>,
 
+    /// Events from an offload engine that owns part of the data plane.
+    /// Taken by [`client`] into a consumer task; close the sender to stop it.
+    #[educe(Debug(ignore))]
+    pub offload_events: Option<mpsc::Receiver<lightway_core::OffloadEvent>>,
+
     /// Enable PMTU discovery for Udp connections
     pub enable_pmtud: bool,
 
@@ -349,6 +354,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
             expresslane_cb: None,
             expresslane_metrics: None,
+            offload_events: None,
             keepalive_interval: config.keepalive_interval.into(),
             keepalive_timeout: config.keepalive_timeout.into(),
             continuous_keepalive: config.keepalive_continuous,
@@ -1015,6 +1021,33 @@ pub async fn encoding_request_task<ExtAppState: Send + Sync>(
     }
 
     tracing::info!("toggle encode task has finished");
+}
+
+/// Apply events an offload engine reported about this connection.
+pub async fn offload_events_task<ExtAppState: Send + Sync>(
+    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    mut events: mpsc::Receiver<lightway_core::OffloadEvent>,
+) {
+    while let Some(event) = events.recv().await {
+        let Some(conn) = weak.upgrade() else {
+            break; // Connection disconnected.
+        };
+        match event {
+            lightway_core::OffloadEvent::KeyRotationNeeded { session_id } => {
+                if let Err(e) = conn.lock().unwrap().rotate_expresslane_key_now() {
+                    tracing::error!(?session_id, "offload-requested key rotation failed: {e}");
+                }
+            }
+            // A client's peer is its server, whose address does not move
+            // under it. Following an apparent change would let an on-path
+            // attacker redirect this client's uploads.
+            lightway_core::OffloadEvent::PeerAddrChanged { session_id, addr } => {
+                tracing::debug!(?session_id, %addr, "ignoring peer-address event on a client");
+            }
+        }
+    }
+
+    tracing::info!("offload events task has finished");
 }
 
 async fn config_reload_task(
@@ -1766,6 +1799,13 @@ pub async fn client<
     if let Some(reload_signal) = config.config_reload_signal.take() {
         let encoding_request = connection.encoding_request_signal.clone();
         tokio::spawn(config_reload_task(reload_signal, encoding_request));
+    }
+
+    if let Some(events) = config.offload_events.take() {
+        tokio::spawn(offload_events_task(
+            Arc::downgrade(&connection.conn),
+            events,
+        ));
     }
 
     let connection_stop_signal = connection.stop_signal.take().unwrap();

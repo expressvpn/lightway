@@ -4,6 +4,7 @@ mod connection_manager;
 mod io;
 mod ip_manager;
 pub mod metrics;
+mod offload_events;
 mod offload_stats;
 mod statistics;
 
@@ -16,8 +17,8 @@ use connection::Connection;
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
     ConnectionType, DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, Event, ExpresslaneCbType,
-    ExpresslaneMetricsType, PluginFactoryError, PluginFactoryList, ServerAuth, ServerAuthHandle,
-    ServerAuthResult, SessionId, Version,
+    ExpresslaneMetricsType, OffloadEvent, PluginFactoryError, PluginFactoryList, ServerAuth,
+    ServerAuthHandle, ServerAuthResult, SessionId, Version,
 };
 
 /// Callback type for receiving per-connection events with session ID.
@@ -218,6 +219,11 @@ pub struct ServerConfig<SA: for<'a> ServerAuth<AuthState<'a>>> {
     #[educe(Debug(ignore))]
     pub event_cb: Option<ServerEventCbType>,
 
+    /// Events from an offload engine that owns part of the data plane.
+    /// Dropped by [`server`] into a consumer task; close the sender to stop it.
+    #[educe(Debug(ignore))]
+    pub offload_events: Option<tokio::sync::mpsc::Receiver<OffloadEvent>>,
+
     /// Enable Post Quantum Crypto
     pub enable_pqc: bool,
 
@@ -320,6 +326,7 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             expresslane_cb: None,
             expresslane_metrics: None,
             event_cb: None,
+            offload_events: None,
             enable_pqc: config.enable_pqc,
             #[cfg(target_os = "linux")]
             enable_tun_offload: config.enable_tun_offload,
@@ -655,6 +662,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             provider,
             offload_stats::DEFAULT_OFFLOAD_STATS_INTERVAL,
         ));
+    }
+
+    if let Some(events) = config.offload_events.take() {
+        tokio::spawn(offload_events::run(conn_manager.clone(), events));
     }
 
     let mut server: Box<dyn Server> = match connection_type {

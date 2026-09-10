@@ -138,6 +138,11 @@ impl SessionId {
         Self(value)
     }
 
+    /// Create a SessionId from raw wire bytes.
+    pub const fn from_bytes(value: [u8; 8]) -> Self {
+        Self(value)
+    }
+
     /// Is this `SessionId` one of the statically defined values
     pub fn is_reserved(&self) -> bool {
         self == &Self::EMPTY || self == &Self::REJECTED

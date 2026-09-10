@@ -102,6 +102,10 @@ impl<T> ConnectionMap<T> {
         self.by_socket_addr.get(&sock).cloned()
     }
 
+    pub(crate) fn find_by_session(&self, session: SessionId) -> Option<Arc<T>> {
+        self.by_session_id.get(&session).cloned()
+    }
+
     /// Update the current connection mapped by `old_addr` to be
     /// mapped instead by `new_addr`.
     ///
@@ -402,5 +406,38 @@ mod tests {
             assert!(Arc::ptr_eq(&actual[0], &vb));
             assert!(Arc::ptr_eq(&actual[1], &va));
         }
+    }
+
+    #[test]
+    fn find_by_session_returns_the_mapped_connection() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let v = Arc::new(V {
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        m.insert(&v).unwrap();
+
+        let found = m.find_by_session(SESSION_ID_A).expect("session is mapped");
+        assert!(Arc::ptr_eq(&v, &found));
+        assert!(m.find_by_session(SESSION_ID_B).is_none());
+    }
+
+    #[test]
+    fn find_by_session_follows_a_session_id_change() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let v = Arc::new(V {
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        m.insert(&v).unwrap();
+        m.update_session_id_for_connection(SESSION_ID_A, SESSION_ID_B);
+
+        assert!(m.find_by_session(SESSION_ID_A).is_none());
+        let found = m
+            .find_by_session(SESSION_ID_B)
+            .expect("session is remapped");
+        assert!(Arc::ptr_eq(&v, &found));
     }
 }
