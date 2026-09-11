@@ -77,6 +77,8 @@ pub enum RoutingTableError {
     AsyncRoutingManagerError(std::io::Error),
     #[error("Failed to Add {0}: {1}")]
     AddRouteError(Route, std::io::Error),
+    #[error("Failed to add server route (fatal): {0}")]
+    ServerRouteAddFailed(std::io::Error),
     #[error("Default interface not found: {0}")]
     DefaultInterfaceNotFound(std::io::Error),
     #[error("Default route not found")]
@@ -409,17 +411,20 @@ impl RouteManagerInner {
         Ok(())
     }
 
-    /// Updates the server route by adding the new one first, then deleting the old
-    /// This ensures we never leave the server route missing if the operation is interrupted
+    /// Updates the server route by deleting the old route first, then adding the new one.
+    /// Returns ServerRouteAddFailed if adding the new route fails (fatal error that stops the VPN).
+    /// This ensures we never leave the server route in an inconsistent state.
     async fn update_server_route(&mut self, new_route: Route) -> Result<(), RoutingTableError> {
-        self.add_route(&new_route).await?;
-
-        if let Some(old_route) = self.server_route.clone() {
-            if old_route != new_route {
-                let _ = self.route_manager_async.delete(&old_route).await;
-            }
+        if let Some(old_route) = self.server_route.clone()
+            && self.route_manager_async.delete(&old_route).await.is_ok()
+        {
+            self.server_route = None;
         }
-
+        self.add_route(&new_route).await.map_err(|e| {
+            RoutingTableError::ServerRouteAddFailed(std::io::Error::other(format!(
+                "Server route add failed: {e:?}"
+            )))
+        })?;
         self.server_route = Some(new_route);
         Ok(())
     }

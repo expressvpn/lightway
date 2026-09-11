@@ -925,10 +925,20 @@ async fn network_event_coordinator(
 
         match route_updater.check_and_update_server_route().await {
             Err(e) => {
-                route_updater.on_repin_failure(&mut state, &e);
-                // Reconnect and nudge wait for the terminal outcome.
-                route_repin_state = Some(state);
-                continue;
+                match &e {
+                    route_manager::RoutingTableError::ServerRouteAddFailed(_) => {
+                        tracing::error!(
+                            "Fatal error updating server route: {e}. Shutting down VPN."
+                        );
+                        break;
+                    }
+                    _ => {
+                        route_updater.on_repin_failure(&mut state, &e);
+                        // Reconnect and nudge wait for the terminal outcome.
+                        route_repin_state = Some(state);
+                        continue;
+                    }
+                }
             }
             // A replaced server route is ground truth that the path to the
             // server moved; probe it so the session floats promptly.
