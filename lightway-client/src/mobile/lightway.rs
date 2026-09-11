@@ -214,7 +214,7 @@ pub(crate) async fn async_lightway_start(
                     connect_conf,
                     sni_header: config.sni_header.clone(),
                     socket: outside_sockets[instance_id].take(),
-                    enable_keepalive: config.keepalive_continuous,
+                    enable_keepalive: !config.disable_keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
                     expresslane_keys_rotation_interval: config
                         .expresslane_keys_rotation_interval
