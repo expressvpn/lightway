@@ -543,47 +543,46 @@ impl RouteManagerInner {
             let route_changed =
                 server_gateway != current_gateway || server_if_index != current_if_index;
 
-            if self.repin_mode.needs_repin(route_changed) {
-                if route_changed {
-                    tracing::debug!(
-                        "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
-                        server_gateway,
-                        server_if_index,
-                        current_gateway,
-                        current_if_index
-                    );
-                } else {
-                    tracing::debug!(
-                        "Re-pinning server route with unchanged (interface, gateway): ({:?}, {:?})",
-                        current_if_index,
-                        current_gateway
-                    );
-                }
-
-                // Create new route with current gateway and interface
-                let prefix = host_prefix_len(&self.server_ip);
-                let mut new_server_route = Route::new(self.server_ip, prefix);
-                if let Some(if_index) = current_if_index {
-                    new_server_route = new_server_route.with_if_index(if_index);
-                }
-                if let Some(gateway) = current_gateway {
-                    new_server_route = new_server_route.with_gateway(gateway);
-                }
-                #[cfg(windows)]
-                let new_server_route = new_server_route.with_metric(0);
-
-                self.update_server_route(new_server_route).await?;
-
-                tracing::info!("Updated server route for network change");
-                return Ok(true);
+            if !self.repin_mode.needs_repin(route_changed) {
+                return Ok(false);
             }
+
+            if route_changed {
+                tracing::debug!(
+                    "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
+                    server_gateway,
+                    server_if_index,
+                    current_gateway,
+                    current_if_index
+                );
+            } else {
+                tracing::debug!(
+                    "Re-pinning server route with unchanged (interface, gateway): ({:?}, {:?})",
+                    current_if_index,
+                    current_gateway
+                );
+            }
+
+            // Create new route with current gateway and interface
+            let prefix = host_prefix_len(&self.server_ip);
+            let mut new_server_route = Route::new(self.server_ip, prefix);
+            if let Some(if_index) = current_if_index {
+                new_server_route = new_server_route.with_if_index(if_index);
+            }
+            if let Some(gateway) = current_gateway {
+                new_server_route = new_server_route.with_gateway(gateway);
+            }
+            #[cfg(windows)]
+            let new_server_route = new_server_route.with_metric(0);
+
+            self.update_server_route(new_server_route).await?;
+
+            tracing::info!("Updated server route for network change");
         } else {
             warn!("Server route missing - reinstalling with {current_route:}");
             self.add_route_server(current_route).await?;
-            return Ok(true);
         }
-
-        Ok(false)
+        Ok(true)
     }
 }
 
