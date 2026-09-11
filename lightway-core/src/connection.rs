@@ -1319,16 +1319,23 @@ impl<AppState: Send> Connection<AppState> {
         // we only need capacity here — no zero-init.
         let mut segment = BytesMut::with_capacity(mtu);
 
-        // Can this aggregate travel as one `UDP_SEGMENT` batch? If not,
-        // fall back to one datagram per segment rather than dropping it.
-        let batched = gso_fits_one_batch(gso_segs);
+        // Can this aggregate travel as one `UDP_SEGMENT` batch? If not
+        // (too many segments, or the socket latched GSO off after the
+        // egress path rejected it), send one datagram per segment rather
+        // than dropping it.
+        let batched = gso_fits_one_batch(gso_segs) && self.session.io_cb().io.gso_enabled();
         if !batched {
             crate::metrics::gso_batch_skipped();
-            tracing::warn!(
-                gso_segs,
-                MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
-                "GSO batching skipped, sending segments individually"
-            );
+            // Warn only for an oversized aggregate. The other reason — the
+            // socket latched GSO off — already warns once when it
+            // disengages, so don't repeat it here on every aggregate.
+            if !gso_fits_one_batch(gso_segs) {
+                tracing::warn!(
+                    gso_segs,
+                    MAX_GSO_SEGS = gso::MAX_GSO_SEGS,
+                    "GSO batching skipped, sending segments individually"
+                );
+            }
         }
 
         // Open the GSO coalescing buffer — IO callback will coalesce
