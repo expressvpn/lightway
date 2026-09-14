@@ -489,6 +489,58 @@ impl ConnectionManager {
             .update_socketaddr_for_connection(old_addr, new_addr);
     }
 
+    pub(crate) fn find_datagram_connection_by_session(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Option<Arc<Connection>> {
+        self.connections.lock().find_by_session(session_id)
+    }
+
+    /// Adopt `addr` as the peer address for `session_id`, on the caller's
+    /// authority that the change is authenticated.
+    ///
+    /// Applies the same two steps, in the same order, as the datagram receive
+    /// path: the address first, then the rotation announce, which has to go to
+    /// the address the client moved to. No-op for an unknown session, a
+    /// non-datagram connection, or one already at `addr`. Returns whether the
+    /// address was actually changed.
+    ///
+    /// Datagram-only: `by_session_id` is also populated for streaming
+    /// connections, so a session lookup alone cannot tell the two apart.
+    pub(crate) fn update_peer_addr(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        addr: SocketAddr,
+    ) -> bool {
+        let Some(conn) = self.find_datagram_connection_by_session(session_id) else {
+            return false;
+        };
+        if !conn.connection_type().is_datagram() {
+            return false;
+        }
+        if conn.peer_addr() == addr {
+            return false;
+        }
+        self.set_peer_addr(&conn, addr);
+        conn.begin_session_id_rotation();
+        metrics::udp_conn_recovered_via_session(session_id);
+        true
+    }
+
+    /// Rotate `session_id`'s expresslane key now, bypassing the periodic
+    /// interval. Returns `false` if nothing happened, either because the
+    /// session is unknown or because the attempt failed.
+    pub(crate) fn rotate_expresslane_key(self: &Arc<Self>, session_id: SessionId) -> bool {
+        let Some(conn) = self.find_datagram_connection_by_session(session_id) else {
+            return false;
+        };
+        if let Err(err) = conn.rotate_expresslane_key_now() {
+            warn!(?err, ?session_id, "offload-requested key rotation failed");
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn remove_connection(&self, conn: &Connection) {
         self.connections.lock().remove(conn)
     }
