@@ -50,7 +50,7 @@ route_manager.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Address-change watching (PF_ROUTE doorbell + getifaddrs snapshot diff).
-netwatcher = { version = "0.7.1", features = ["tokio"] }
+netwatcher = { version = "0.8.0", features = ["tokio"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
 socket2.workspace = true
