@@ -67,7 +67,10 @@ serde-env = "0.3"
 serde-saphyr = "0.0.22"
 serial_test = "3.4.0"
 socket2 = "0.6.0"
-struct-patch = { version =  "0.14.1", features= ["substrate"] }
+# Pinned: 0.14.2 leaks `#[cfg(feature = "nesting")]` into the `Patch` derive
+# expansion, tripping `unexpected_cfgs` in consuming crates under `-D warnings`.
+# See https://github.com/yanganto/struct-patch/issues/185 - unpin once fixed.
+struct-patch = { version =  "=0.14.1", features= ["substrate"] }
 test-case = "3.1.0"
 thiserror = "2.0.3"
 tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal"] }
