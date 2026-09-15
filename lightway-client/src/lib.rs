@@ -156,6 +156,22 @@ pub struct BestConnectionInfo {
     pub ip_config: InsideIpConfig,
 }
 
+/// Classified wake sources for network changes, supplied by an embedder that
+/// runs its own [`NetworkChangeMonitor`].
+#[derive(Clone)]
+pub struct NetworkSignals {
+    /// An applicable default route changed; drives route fixups.
+    pub routes: watch::Receiver<()>,
+    /// The machine moved networks. The only source that nudges the connection.
+    pub transitions: Option<watch::Receiver<()>>,
+}
+
+impl NetworkSignals {
+    pub(crate) fn wake_sources(&self) -> (watch::Receiver<()>, Option<watch::Receiver<()>>) {
+        (self.routes.clone(), self.transitions.clone())
+    }
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct ClientConfig<ExtAppState: Send + Sync> {
@@ -272,11 +288,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// check (default)
     pub inside_pkt_codec_stall_timeout: Duration,
 
-    /// Signal for notifying a network change event
-    /// network change being defined as a change in
-    /// wifi networks or a change of network interfaces
+    /// Classified network-change wake sources supplied by the embedder. When
+    /// unset the client spawns its own [`NetworkChangeMonitor`].
     #[educe(Debug(ignore))]
-    pub network_change_signal: Option<watch::Receiver<()>>,
+    pub network_signals: Option<NetworkSignals>,
 
     /// Signal for triggering a runtime config reload.
     /// Each received value is applied to the running connection.
@@ -375,7 +390,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             inside_pkt_codec_config: None,
             inside_pkt_codec_stall_timeout: Duration::ZERO,
             config_reload_signal,
-            network_change_signal: None,
+            network_signals: None,
             best_connection_selected_signal: None,
             #[cfg(feature = "debug")]
             tls_debug: config.tls_debug,
@@ -862,14 +877,13 @@ async fn network_event_coordinator(
     mut route_updater: RouteUpdater,
     mut route_rx: watch::Receiver<()>,
     mut transition_rx: Option<watch::Receiver<()>>,
-    nudge_on_route_event: bool,
     #[cfg(apple)] nudge_on_route_update: bool,
     #[cfg(apple)] outside_io: Weak<dyn OutsideIO>,
     network_change_signal: mpsc::Sender<()>,
 ) {
     tracing::info!("Reacting to network change events...");
     loop {
-        let mut nudge = nudge_on_route_event;
+        let mut nudge = false;
 
         tokio::select! {
             changed = route_rx.changed() => {
@@ -1061,13 +1075,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         }
     }
 
-    /// Install routes and spawn the network-event coordinator, which reacts
-    /// to `route_rx`/`transition_rx` wake-ups (see
-    /// `network_event_coordinator`). Set `nudge_on_route_event` when
-    /// `route_rx` events are unclassified (an embedder-supplied signal) so
-    /// each one also nudges the connection's network-change handler;
-    /// `nudge_on_route_update` (Apple) nudges when the refresh actually
-    /// replaced the server route.
+    /// Install routes and spawn the network-event coordinator.
     #[cfg(desktop)]
     #[allow(clippy::too_many_arguments)]
     pub async fn initialize_routes(
@@ -1077,7 +1085,6 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         tun_dns_ip: IpAddr,
         route_rx: watch::Receiver<()>,
         transition_rx: Option<watch::Receiver<()>>,
-        nudge_on_route_event: bool,
         #[cfg(apple)] nudge_on_route_update: bool,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
@@ -1101,7 +1108,6 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             route_updater,
             route_rx,
             transition_rx,
-            nudge_on_route_event,
             #[cfg(apple)]
             nudge_on_route_update,
             #[cfg(apple)]
@@ -1590,7 +1596,7 @@ fn validate_client_config<
     config: &ClientConfig<ExtAppState>,
     servers: &[ClientConnectionConfig<EventHandler>],
 ) -> Result<()> {
-    if config.network_change_signal.is_some() && config.keepalive_interval.is_zero() {
+    if config.network_signals.is_some() && config.keepalive_interval.is_zero() {
         return Err(anyhow!(
             "Keepalive interval cannot be zero when network change signal is set"
         ));
@@ -1733,7 +1739,9 @@ pub async fn client<
     // below) delivers the embedder signal's nudge after the route and socket
     // refresh instead, so this forwarder only serves non-desktop builds.
     #[cfg(not(desktop))]
-    if let Some(mut network_change_signal) = config.network_change_signal.clone() {
+    if let Some(mut network_change_signal) =
+        config.network_signals.as_ref().map(|s| s.routes.clone())
+    {
         let connection_network_change_signal = connection.network_change_signal.clone();
         #[cfg(apple)]
         let outside_io = Arc::downgrade(&connection.outside_io);
@@ -1782,11 +1790,8 @@ pub async fn client<
     let mut network_change_monitor: Option<NetworkChangeMonitor> = None;
     #[cfg(desktop)]
     {
-        // Wake sources for the network-event coordinator. An embedder-supplied
-        // signal is unclassified, so every event serves as both the route hint
-        // and a transition; the internal monitor distinguishes the two.
-        let (route_rx, transition_rx, nudge_on_route_event) = match config.network_change_signal {
-            Some(ref rx) => (rx.clone(), None, true),
+        let (route_rx, transition_rx) = match config.network_signals {
+            Some(ref signals) => signals.wake_sources(),
             None => {
                 let monitor = NetworkChangeMonitor::spawn(vec![config.tun_local_ip.into()])?;
                 let route_rx = monitor.subscribe_routes();
@@ -1801,7 +1806,7 @@ pub async fn client<
                 let transition_rx: Option<watch::Receiver<()>> = None;
 
                 network_change_monitor = Some(monitor);
-                (route_rx, transition_rx, false)
+                (route_rx, transition_rx)
             }
         };
 
@@ -1822,7 +1827,6 @@ pub async fn client<
                 config.tun_dns_ip.into(),
                 route_rx,
                 transition_rx,
-                nudge_on_route_event,
                 #[cfg(apple)]
                 nudge_on_route_update,
             )
@@ -2188,5 +2192,35 @@ mod tests {
             enable_inside_pkt_encoding: current_encoding,
         };
         current.delta(&prev).enable_inside_pkt_encoding
+    }
+
+    #[test]
+    fn transitions_are_carried_separately_from_routes() {
+        let (_route_tx, routes) = watch::channel(());
+        let (transition_tx, transitions) = watch::channel(());
+        let signals = NetworkSignals {
+            routes,
+            transitions: Some(transitions),
+        };
+
+        let (route_rx, transition_rx) = signals.wake_sources();
+        let transition_rx = transition_rx.expect("transitions must survive wake_sources");
+
+        transition_tx.send(()).unwrap();
+        assert!(transition_rx.has_changed().unwrap());
+        assert!(!route_rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn signals_without_transitions_yield_no_transition_source() {
+        let (_route_tx, routes) = watch::channel(());
+        let signals = NetworkSignals {
+            routes,
+            transitions: None,
+        };
+
+        let (_route_rx, transition_rx) = signals.wake_sources();
+
+        assert!(transition_rx.is_none());
     }
 }
