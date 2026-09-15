@@ -1985,7 +1985,7 @@ dependencies = [
  "num_enum",
  "once_cell",
  "parking_lot",
- "pem 3.0.6",
+ "pem 4.0.0",
  "pnet",
  "pnet_packet",
  "rand 0.10.2",
