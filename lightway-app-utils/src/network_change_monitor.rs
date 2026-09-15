@@ -187,16 +187,21 @@ impl Drop for NetworkChangeMonitor {
     }
 }
 
-/// A real default-route event: prefix 0 with a proper gateway, excluding
-/// macOS interface-scoped defaults (a non-primary service's churn is not a
-/// path change).
+/// A real default-route event: an unspecified destination with prefix 0 and a
+/// proper gateway, excluding macOS interface-scoped defaults.
+///
+/// The destination test is not redundant with the prefix: `route_manager`
+/// reports prefix 0 for routes whose trailing netmask sockaddr it fails to
+/// read, so ordinary routes can arrive looking like defaults.
 fn is_applicable_route(route: &Route) -> bool {
     // `Route::if_scope` only exists on macOS.
     #[cfg(macos)]
     if route.if_scope() {
         return false;
     }
-    route.prefix() == 0 && route.gateway().is_some_and(|gw| !gw.is_unspecified())
+    route.destination().is_unspecified()
+        && route.prefix() == 0
+        && route.gateway().is_some_and(|gw| !gw.is_unspecified())
 }
 
 /// Bridge netwatcher's interface updates to a unit-event channel, diffing our
@@ -336,6 +341,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::net::IpAddr;
+    use test_case::test_case;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -448,5 +454,51 @@ mod tests {
         assert!(!d.on_route(at(t0, 3)));
         // ... and emits once the cooldown has passed (evidence still fresh).
         assert!(d.on_addr(at(t0, 5)));
+    }
+
+    fn route(dest: &str, prefix: u8, gw: &str) -> Route {
+        Route::new(ip(dest), prefix).with_gateway(ip(gw))
+    }
+
+    /// Prefixes as observed on macOS, where the netmask sockaddr was unread.
+    #[test_case("10.0.0.0",    "10.4.90.239"  ; "RFC1918 10/8 via LAN gateway")]
+    #[test_case("172.16.0.0",  "10.4.90.239"  ; "RFC1918 172.16/12")]
+    #[test_case("192.168.0.0", "10.4.90.239"  ; "RFC1918 192.168/16")]
+    #[test_case("169.254.0.0", "10.4.90.239"  ; "link-local 169.254/16")]
+    #[test_case("224.0.0.0",   "10.4.90.239"  ; "multicast 224/4")]
+    #[test_case("128.0.0.0",   "100.64.0.5"   ; "split-default upper half")]
+    fn misparsed_route_is_not_a_default_route(dest: &str, gw: &str) {
+        assert!(!is_applicable_route(&route(dest, 0, gw)));
+    }
+
+    #[test]
+    fn genuine_default_route_is_applicable() {
+        assert!(is_applicable_route(&route("0.0.0.0", 0, "10.89.10.254")));
+    }
+
+    #[test]
+    fn genuine_v6_default_route_is_applicable() {
+        assert!(is_applicable_route(&route(
+            "::",
+            0,
+            "fe80::aab8:e0ff:fe03:515e"
+        )));
+    }
+
+    #[test]
+    fn route_without_gateway_is_not_applicable() {
+        assert!(!is_applicable_route(&Route::new(ip("0.0.0.0"), 0)));
+    }
+
+    #[test]
+    fn unspecified_gateway_is_not_applicable() {
+        assert!(!is_applicable_route(&route("0.0.0.0", 0, "0.0.0.0")));
+    }
+
+    #[cfg(macos)]
+    #[test]
+    fn interface_scoped_default_is_not_applicable() {
+        let r = route("0.0.0.0", 0, "10.89.10.254").with_if_scope(true);
+        assert!(!is_applicable_route(&r));
     }
 }
