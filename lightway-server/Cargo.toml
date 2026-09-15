@@ -27,7 +27,7 @@ clap.workspace = true
 delegate.workspace = true
 educe.workspace = true
 ipnet.workspace = true
-jsonwebtoken = { version = "10.0.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 libc.workspace = true
 lightway-app-utils.workspace = true
 lightway-core = { workspace = true, default-features = false }
