@@ -21,6 +21,11 @@
 
 let
   singlePackage = builtins.length packages == 1;
+
+  # Compare full triples, not `.system`: musl and gnu on the same arch share a
+  # `.system` string, and treating a musl host as native drags in a
+  # musl-hosted LLVM that no binary cache serves.
+  isCross = stdenv.hostPlatform.config != stdenv.buildPlatform.config;
   cargoToml = builtins.fromTOML (builtins.readFile ../${builtins.head packages}/Cargo.toml);
 
   # Package-specific metadata
@@ -81,32 +86,28 @@ rustPlatform.buildRustPackage {
     git
     perl
   ]
-  ++ lib.optionals (stdenv.hostPlatform.system == stdenv.buildPlatform.system) [
+  ++ lib.optionals (!isCross) [
     # For native builds, use bindgenHook normally
     rustPlatform.bindgenHook
   ];
 
   # For cross-compilation, manually configure bindgen
   # Use build platform's libclang but target platform's headers
-  LIBCLANG_PATH = lib.optionalString (
-    stdenv.hostPlatform.system != stdenv.buildPlatform.system
-  ) "${lib.getLib buildPackages.llvmPackages.libclang}/lib";
+  LIBCLANG_PATH = lib.optionalString isCross "${lib.getLib buildPackages.llvmPackages.libclang}/lib";
 
-  BINDGEN_EXTRA_CLANG_ARGS =
-    lib.optionalString (stdenv.hostPlatform.system != stdenv.buildPlatform.system)
-      (
-        lib.concatStringsSep " " (
-          [
-            "--target=${stdenv.hostPlatform.config}"
-            "-isystem ${lib.getDev stdenv.cc.libc}/include"
-            "-I${buildPackages.llvmPackages.clang}/resource-root/include"
-          ]
-          ++ lib.optionals (stdenv.cc ? nix-support) [
-            "$(< ${stdenv.cc}/nix-support/libc-cflags)"
-            "$(< ${stdenv.cc}/nix-support/cc-cflags)"
-          ]
-        )
-      );
+  BINDGEN_EXTRA_CLANG_ARGS = lib.optionalString isCross (
+    lib.concatStringsSep " " (
+      [
+        "--target=${stdenv.hostPlatform.config}"
+        "-isystem ${lib.getDev stdenv.cc.libc}/include"
+        "-I${buildPackages.llvmPackages.clang}/resource-root/include"
+      ]
+      ++ lib.optionals (stdenv.cc ? nix-support) [
+        "$(< ${stdenv.cc}/nix-support/libc-cflags)"
+        "$(< ${stdenv.cc}/nix-support/cc-cflags)"
+      ]
+    )
+  );
 
   # RUSTFLAGS configuration for different build scenarios:
   #
