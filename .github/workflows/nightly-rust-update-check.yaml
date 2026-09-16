@@ -47,7 +47,7 @@ jobs:
     # actual version change so we don't bump the input (and open a spurious PR) on an unchanged night.
     - name: Install Nix
       if: steps.check-version.outputs.changed == 'true'
-      uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+      uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
 
     - name: Update rust-overlay in flake.lock
       if: steps.check-version.outputs.changed == 'true'
