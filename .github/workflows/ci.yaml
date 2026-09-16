@@ -60,7 +60,7 @@ jobs:
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
       - name: Run +${{ matrix.target }} on Earthly
@@ -68,84 +68,84 @@ jobs:
 
       - name: Upload lightway-client artifact (x86_64, wolfssl)
         if: matrix.target == 'build-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-x86_64-unknown-linux-gnu-wolfssl
           path: target/release/lightway-client
 
       - name: Upload lightway-server artifact (x86_64, wolfssl)
         if: matrix.target == 'build-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-x86_64-unknown-linux-gnu-wolfssl
           path: target/release/lightway-server
 
       - name: Upload lightway-client artifact (arm64, wolfssl)
         if: matrix.target == 'build-cross-arm64-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-aarch64-unknown-linux-gnu-wolfssl
           path: target/aarch64-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (arm64, wolfssl)
         if: matrix.target == 'build-cross-arm64-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-aarch64-unknown-linux-gnu-wolfssl
           path: target/aarch64-unknown-linux-gnu/release/lightway-server
 
       - name: Upload lightway-client artifact (riscv64, wolfssl)
         if: matrix.target == 'build-cross-riscv64-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-riscv64gc-unknown-linux-gnu-wolfssl
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (riscv64, wolfssl)
         if: matrix.target == 'build-cross-riscv64-wolfssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-riscv64gc-unknown-linux-gnu-wolfssl
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
 
       - name: Upload lightway-client artifact (x86_64, boringssl)
         if: matrix.target == 'build-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-x86_64-unknown-linux-gnu-boringssl-beta
           path: target/release/lightway-client
 
       - name: Upload lightway-server artifact (x86_64, boringssl)
         if: matrix.target == 'build-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-x86_64-unknown-linux-gnu-boringssl-beta
           path: target/release/lightway-server
 
       - name: Upload lightway-client artifact (arm64, boringssl)
         if: matrix.target == 'build-cross-arm64-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-aarch64-unknown-linux-gnu-boringssl-beta
           path: target/aarch64-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (arm64, boringssl)
         if: matrix.target == 'build-cross-arm64-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-aarch64-unknown-linux-gnu-boringssl-beta
           path: target/aarch64-unknown-linux-gnu/release/lightway-server
 
       - name: Upload lightway-client artifact (riscv64, boringssl)
         if: matrix.target == 'build-cross-riscv64-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-riscv64gc-unknown-linux-gnu-boringssl-beta
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
 
       - name: Upload lightway-server artifact (riscv64, boringssl)
         if: matrix.target == 'build-cross-riscv64-boringssl'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-riscv64gc-unknown-linux-gnu-boringssl-beta
           path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
@@ -163,7 +163,7 @@ jobs:
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Run +cross-compat on Earthly
         run: earthly --ci --allow-privileged +cross-compat --debian ${{ matrix.distro }}
 
@@ -180,7 +180,7 @@ jobs:
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
       - name: Run +e2e-wolfssl on Earthly
@@ -199,7 +199,7 @@ jobs:
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Run +e2e-boringssl on Earthly
         run: earthly --ci --allow-privileged +e2e-boringssl --debian ${{ matrix.distro }}
 
@@ -212,7 +212,7 @@ jobs:
         with:
           version: ~v0.8
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
       - name: Run +coverage on Earthly
@@ -227,7 +227,7 @@ jobs:
           cat output/summary.txt  >> "$GITHUB_OUTPUT"
           echo ""                 >> "$GITHUB_OUTPUT"
           echo "$EOF"             >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: coverage
           path: output/html
@@ -280,7 +280,7 @@ jobs:
           state: open
       - name: Find Coverage Comment
         if: steps.find-pr.outputs.number
-        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e # v3
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
         id: coverage-comment
         with:
           issue-number: ${{ steps.find-pr.outputs.number }}
@@ -288,7 +288,7 @@ jobs:
           body-includes: 'Code coverage summary'
       - name: Create or update comment
         if: steps.find-pr.outputs.number
-        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
         with:
           comment-id: ${{ steps.coverage-comment.outputs.comment-id }}
           issue-number: ${{ steps.find-pr.outputs.number }}
@@ -307,7 +307,7 @@ jobs:
     name: Mobile Lib Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -336,7 +336,7 @@ jobs:
           AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-release.aar
           echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
       - name: Upload AAR artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-android-aar
           path: ${{ steps.build-android-aar.outputs.path }}
@@ -344,7 +344,7 @@ jobs:
       - name: Build JsonSchema
         run: nix develop -c cargo run --features=mobile,wolfssl -p lightway-client -- -c client.schema.json -g jsonschema
       - name: Upload JsonSchema artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-jsonschema
           path: client.schema.json
@@ -375,7 +375,7 @@ jobs:
             os: macos-26
             build_msrv: false
     steps:
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
 
@@ -399,28 +399,28 @@ jobs:
 
       - name: Upload lightway-client artifact (WolfSSL)
         if: matrix.target == 'aarch64-darwin'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-${{ matrix.target }}-wolfssl
           path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact (WolfSSL)
         if: matrix.target == 'aarch64-darwin'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-${{ matrix.target }}-wolfssl
           path: result/bin/lightway-server
 
       - name: Upload lightway-client artifact (BoringSSL beta)
         if: matrix.target == 'aarch64-darwin-boringssl-beta'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-${{ matrix.target }}
           path: result/bin/lightway-client
 
       - name: Upload lightway-server artifact (BoringSSL beta)
         if: matrix.target == 'aarch64-darwin-boringssl-beta'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-server-${{ matrix.target }}
           path: result/bin/lightway-server
@@ -433,7 +433,7 @@ jobs:
       matrix:
         os: [macos-26, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
 
@@ -483,7 +483,7 @@ jobs:
             arch: arm64
             backend: boringssl
     steps:
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
       - name: Get Rust version
@@ -500,7 +500,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache cargo registry
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -545,7 +545,7 @@ jobs:
         run: cargo test --target ${{ matrix.target }} -p lightway-client ${{ steps.cargo-flags.outputs.features }}
 
       - name: Upload lightway-client artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lightway-client-${{ matrix.target }}-${{ matrix.backend == 'boringssl' && 'boringssl-beta' || 'wolfssl' }}
           path: target/${{ matrix.target }}/release/lightway-client.exe
@@ -561,12 +561,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4.3.1
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: recursive
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           path: artifacts/
 
@@ -607,7 +607,7 @@ jobs:
           chmod +x release-assets/*
 
       - name: Create nightly release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: lightway-nightly
           name: Nightly Build
