@@ -32,7 +32,8 @@ use lightway_app_utils::{
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, State, ipv4_update_destination, ipv4_update_source,
+    InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType, State,
+    ipv4_update_destination, ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -309,6 +310,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// check (default)
     pub inside_pkt_codec_stall_timeout: Duration,
 
+    /// Interval at which inside packet codec statistics are logged.
+    /// The codec's statistics are logged verbatim as an opaque string.
+    /// `Duration::ZERO` disables logging (default)
+    pub inside_pkt_codec_stats_interval: Duration,
+
     /// Classified network-change wake sources supplied by the embedder. When
     /// unset the client spawns its own [`NetworkChangeMonitor`].
     #[educe(Debug(ignore))]
@@ -410,6 +416,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
             inside_pkt_codec_config: None,
             inside_pkt_codec_stall_timeout: Duration::ZERO,
+            inside_pkt_codec_stats_interval: Duration::ZERO,
             config_reload_signal,
             network_signals: None,
             best_connection_selected_signal: None,
@@ -1078,6 +1085,44 @@ pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
     Ok(())
 }
 
+/// Periodically log the inside packet codec's own statistics.
+///
+/// The codec reports a JSON object which is logged verbatim; its contents are
+/// opaque to lightway. Holds its own handles to the encoder and decoder so it
+/// never contends with the data path for the connection lock.
+///
+/// [`client`] spawns this itself. It is public for embedders that drive their
+/// own connection loop and so never build a [`ClientConfig`].
+pub async fn codec_stats_task(
+    encoder: PacketEncoderType,
+    decoder: PacketDecoderType,
+    interval: Duration,
+) {
+    if interval.is_zero() {
+        return;
+    }
+
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+        let (encoder_stats, decoder_stats) = (encoder.stats(), decoder.stats());
+        // A codec reporting nothing at all would only produce a line of empty
+        // objects, so skip the tick entirely. A codec reporting just one half
+        // still has something worth saying.
+        if encoder_stats.is_none() && decoder_stats.is_none() {
+            continue;
+        }
+        tracing::info!(
+            target: "codec_stats",
+            encoder = encoder_stats.as_deref().unwrap_or("{}"),
+            decoder = decoder_stats.as_deref().unwrap_or("{}"),
+            "Inside packet codec statistics"
+        );
+    }
+}
+
 pub async fn encoding_request_task<ExtAppState: Send + Sync>(
     weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mut signal: tokio::sync::mpsc::Receiver<bool>,
@@ -1361,17 +1406,20 @@ pub async fn connect<
         set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
     }
 
-    let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver) = match &inside_pkt_codec {
-        Some(codec_factory) => {
-            let codec = codec_factory.build();
-            (
-                Some((codec.encoder, codec.decoder)),
-                Some(codec.encoded_pkt_receiver),
-                Some(codec.decoded_pkt_receiver),
-            )
-        }
-        None => (None, None, None),
-    };
+    let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver, codec_stats_handles) =
+        match &inside_pkt_codec {
+            Some(codec_factory) => {
+                let codec = codec_factory.build();
+                let stats_handles = (codec.encoder.clone(), codec.decoder.clone());
+                (
+                    Some((codec.encoder, codec.decoder)),
+                    Some(codec.encoded_pkt_receiver),
+                    Some(codec.decoded_pkt_receiver),
+                    Some(stats_handles),
+                )
+            }
+            None => (None, None, None, None),
+        };
 
     let ctx_builder = ClientContextBuilder::new(
         connection_type,
@@ -1484,6 +1532,14 @@ pub async fn connect<
         handle_decoded_pkt_send(Arc::downgrade(&conn), decoded_pkt_receiver),
     );
 
+    let codec_stats_join_handle = codec_stats_handles.map(|(encoder, decoder)| {
+        tokio::spawn(codec_stats_task(
+            encoder,
+            decoder,
+            config.inside_pkt_codec_stats_interval,
+        ))
+    });
+
     let (encoding_request_tx, encoding_request_rx) = mpsc::channel(1);
     tokio::spawn(encoding_request_task(
         Arc::downgrade(&conn),
@@ -1543,6 +1599,9 @@ pub async fn connect<
         inside_io_loop.abort();
         encoded_pkt_send_task.abort();
         decoded_pkt_send_task.abort();
+        if let Some(codec_stats_join_handle) = codec_stats_join_handle {
+            codec_stats_join_handle.abort();
+        }
         network_change_task.abort();
         ticker_task.abort();
 
@@ -2368,5 +2427,101 @@ mod tests {
         config_pmtud: bool,
     ) -> (usize, bool) {
         effective_outside_io_settings(required, config_mtu, config_pmtud)
+    }
+
+    struct StubEncoder(Option<&'static str>);
+
+    impl lightway_core::PacketEncoder for StubEncoder {
+        fn store(
+            &self,
+            _data: &mut bytes::BytesMut,
+        ) -> lightway_core::PacketCodecResult<lightway_core::CodecStatus> {
+            Ok(lightway_core::CodecStatus::PacketAccepted)
+        }
+        fn get_encoding_state(&self) -> bool {
+            false
+        }
+        fn set_encoding_state(&self, _enabled: bool) {}
+        fn stats(&self) -> Option<String> {
+            self.0.map(|s| s.to_string())
+        }
+    }
+
+    struct StubDecoder(Option<&'static str>);
+
+    impl lightway_core::PacketDecoder for StubDecoder {
+        fn store(
+            &self,
+            _data: &mut bytes::BytesMut,
+        ) -> lightway_core::PacketCodecResult<lightway_core::CodecStatus> {
+            Ok(lightway_core::CodecStatus::PacketAccepted)
+        }
+        fn stats(&self) -> Option<String> {
+            self.0.map(|s| s.to_string())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[tracing_test::traced_test]
+    async fn codec_stats_task_logs_the_codec_blobs() {
+        let encoder = Arc::new(StubEncoder(Some(r#"{"packets_stored":7}"#)));
+        let decoder = Arc::new(StubDecoder(Some(r#"{"packets_stored":5}"#)));
+
+        // The task loops forever; the first tick fires immediately, so a short
+        // timeout is enough to observe one report. Run inline rather than
+        // spawned so the test's tracing subscriber sees the output.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(10),
+            codec_stats_task(encoder, decoder, Duration::from_secs(1)),
+        )
+        .await;
+
+        assert!(logs_contain("Inside packet codec statistics"));
+        // The blobs are logged as string fields, so the renderer escapes the
+        // quotes inside them.
+        assert!(logs_contain(r#"{\"packets_stored\":7}"#));
+        assert!(logs_contain(r#"{\"packets_stored\":5}"#));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[tracing_test::traced_test]
+    async fn codec_stats_task_stays_silent_when_the_codec_reports_nothing() {
+        let encoder = Arc::new(StubEncoder(None));
+        let decoder = Arc::new(StubDecoder(None));
+
+        let _ = tokio::time::timeout(
+            Duration::from_millis(10),
+            codec_stats_task(encoder, decoder, Duration::from_secs(1)),
+        )
+        .await;
+
+        assert!(!logs_contain("Inside packet codec statistics"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[tracing_test::traced_test]
+    async fn codec_stats_task_logs_when_only_one_half_reports() {
+        let encoder = Arc::new(StubEncoder(Some(r#"{"packets_stored":7}"#)));
+        let decoder = Arc::new(StubDecoder(None));
+
+        let _ = tokio::time::timeout(
+            Duration::from_millis(10),
+            codec_stats_task(encoder, decoder, Duration::from_secs(1)),
+        )
+        .await;
+
+        assert!(logs_contain("Inside packet codec statistics"));
+        assert!(logs_contain(r#"{\"packets_stored\":7}"#));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[tracing_test::traced_test]
+    async fn codec_stats_task_is_disabled_by_a_zero_interval() {
+        let encoder = Arc::new(StubEncoder(Some(r#"{"packets_stored":7}"#)));
+        let decoder = Arc::new(StubDecoder(Some(r#"{"packets_stored":5}"#)));
+
+        codec_stats_task(encoder, decoder, Duration::ZERO).await;
+
+        assert!(!logs_contain("Inside packet codec statistics"));
     }
 }
