@@ -2,7 +2,7 @@ use lightway_app_utils::{PacketCodec, PacketCodecFactory};
 use lightway_core::{CodecStatus, PacketCodecResult, PacketDecoder, PacketEncoder};
 
 use bytes::BytesMut;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -33,6 +33,7 @@ impl PacketCodecFactory for TestPacketCodecFactory {
 #[derive(Clone)]
 struct TestPacketEncoder {
     inner: Arc<Mutex<TestPacketEncoderInner>>,
+    packets_stored: Arc<AtomicU64>,
 }
 
 struct TestPacketEncoderInner {
@@ -44,6 +45,7 @@ impl TestPacketEncoder {
     fn new(encoded_pkt_sender: UnboundedSender<BytesMut>) -> Self {
         TestPacketEncoder {
             inner: Arc::new(Mutex::new(TestPacketEncoderInner::new(encoded_pkt_sender))),
+            packets_stored: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -59,6 +61,8 @@ impl TestPacketEncoderInner {
 
 impl PacketEncoder for TestPacketEncoder {
     fn store(&self, data: &mut bytes::BytesMut) -> PacketCodecResult<CodecStatus> {
+        self.packets_stored.fetch_add(1, Ordering::Relaxed);
+
         let encoder = self
             .inner
             .lock()
@@ -93,22 +97,33 @@ impl PacketEncoder for TestPacketEncoder {
             .expect("TestPacketEncoder inner lock in get_encoding_state()");
         encoder.codec_enabled
     }
+
+    fn stats(&self) -> Option<String> {
+        Some(format!(
+            r#"{{"packets_stored":{}}}"#,
+            self.packets_stored.load(Ordering::Relaxed)
+        ))
+    }
 }
 
 struct TestPacketDecoder {
     decoded_pkt_sender: Arc<Mutex<UnboundedSender<BytesMut>>>,
+    packets_stored: Arc<AtomicU64>,
 }
 
 impl TestPacketDecoder {
     fn new(decoded_pkt_sender: UnboundedSender<BytesMut>) -> Self {
         TestPacketDecoder {
             decoded_pkt_sender: Arc::new(Mutex::new(decoded_pkt_sender)),
+            packets_stored: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 impl PacketDecoder for TestPacketDecoder {
     fn store(&self, data: &mut BytesMut) -> PacketCodecResult<CodecStatus> {
+        self.packets_stored.fetch_add(1, Ordering::Relaxed);
+
         let sender = self
             .decoded_pkt_sender
             .lock()
@@ -120,6 +135,13 @@ impl PacketDecoder for TestPacketDecoder {
         sender.send(data.clone()).expect("TestPacketDecoder send");
 
         Ok(CodecStatus::PacketAccepted)
+    }
+
+    fn stats(&self) -> Option<String> {
+        Some(format!(
+            r#"{{"packets_stored":{}}}"#,
+            self.packets_stored.load(Ordering::Relaxed)
+        ))
     }
 }
 
