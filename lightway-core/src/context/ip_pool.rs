@@ -11,6 +11,8 @@ pub struct InsideIpConfig {
     pub server_ip: Ipv4Addr,
     /// DNS server for client to use
     pub dns_ip: Ipv4Addr,
+    /// Inside Tun MTU
+    pub mtu: Option<u16>,
 }
 
 impl TryFrom<AuthSuccessWithConfigV4> for InsideIpConfig {
@@ -21,6 +23,7 @@ impl TryFrom<AuthSuccessWithConfigV4> for InsideIpConfig {
             client_ip: value.local_ip.parse()?,
             server_ip: value.peer_ip.parse()?,
             dns_ip: value.dns_ip.parse()?,
+            mtu: value.mtu.parse().ok(),
         })
     }
 }
