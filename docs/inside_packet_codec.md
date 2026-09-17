@@ -155,3 +155,27 @@ A single request is issued per stall episode.
 
 The check is evaluated on the inside-to-outside path, so it only runs while the client is sending traffic; an idle connection is never downgraded. A timeout of
 `Duration::ZERO` (the default) disables the check.
+## Statistics
+
+A codec can report statistics about itself through an optional method on each of the encoder and decoder traits:
+
+```rust
+/// A snapshot of codec-defined statistics, as a JSON object.
+fn stats(&self) -> Option<String>;
+```
+
+Lightway treats the returned string as opaque. It is never parsed, validated or interpreted, and the schema is entirely the codec's to define and change. A
+codec that has nothing to report returns `None`, which is the default, so implementing the method is optional.
+
+`stats()` is called from a reporting task outside the data path, so implementations must return promptly and must not block packet processing. The task holds
+its own handles to the encoder and decoder, so reporting never contends with the data path for the connection lock.
+
+The client logs these snapshots periodically when `ClientConfig::inside_pkt_codec_stats_interval` is set to a non-zero duration; `Duration::ZERO` (the default)
+disables logging. The events use the `codec_stats` target, so they can be filtered independently of the rest of the client's logging. For the test codec in
+`lightway-core/tests/common/packet_codec.rs`, which reports how many packets it has been given, the line looks like:
+
+```
+Inside packet codec statistics codec="Test Packet Codec" encoder="{\"packets_stored\":42}" decoder="{\"packets_stored\":40}"
+```
+
+The `encoder` and `decoder` fields name the source of each snapshot, not its contents.
