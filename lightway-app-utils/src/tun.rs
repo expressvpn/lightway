@@ -19,9 +19,50 @@ use std::sync::Arc;
 use tun_rs::AsyncDevice;
 #[cfg(desktop)]
 use tun_rs::DeviceBuilder;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::NO_ERROR,
+    NetworkManagement::IpHelper::{GetIpInterfaceEntry, MIB_IPINTERFACE_ROW, SetIpInterfaceEntry},
+    Networking::WinSock::AF_INET,
+};
 
 #[cfg(feature = "io-uring")]
 use crate::IOUring;
+
+/// Skip the duplicate IP check to avoid delaying traffic after connect.
+/// The tunnel has no other devices that could claim the same IP.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn disable_ipv4_dad(if_index: u32) -> std::io::Result<()> {
+    let mut row = MIB_IPINTERFACE_ROW {
+        Family: AF_INET,
+        InterfaceIndex: if_index,
+        ..Default::default()
+    };
+
+    // SAFETY: row is initialized and stays alive while Windows fills it in.
+    let result = unsafe { GetIpInterfaceEntry(&mut row) };
+    if result != NO_ERROR {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+
+    if row.DadTransmits == 0 {
+        return Ok(());
+    }
+
+    // Setting to 0 disables DAD, so Windows skips checking if the IP is already in use.
+    row.DadTransmits = 0;
+    // Windows rejects IPv4 updates unless this is zero.
+    row.SitePrefixLength = 0;
+
+    // SAFETY: we're passing back the same row Windows filled in above.
+    let result = unsafe { SetIpInterfaceEntry(&mut row) };
+    if result != NO_ERROR {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+
+    Ok(())
+}
 
 /// Configuration options for creating a interface
 ///
@@ -273,6 +314,13 @@ impl TunConfig {
                             // remove address before adding it to prevent error
                             // when address is already present
                             let _ = device.remove_address(address);
+                            #[cfg(windows)]
+                            if let Err(error) = device.if_index().and_then(disable_ipv4_dad) {
+                                tracing::warn!(
+                                    ?error,
+                                    "Failed to disable IPv4 duplicate address detection"
+                                );
+                            }
                             device.add_address_v4(ipv4_addr, netmask)?;
                         } else {
                             device.set_network_address(ipv4_addr, netmask, self.destination)?;
