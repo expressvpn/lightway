@@ -1,0 +1,135 @@
+name: CI / build-linux
+on:
+  workflow_call:
+
+jobs:
+  earthly:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: test-miri
+            privileged: false
+          - target: test-wolfssl
+            privileged: true
+          - target: test-boringssl
+            privileged: true
+          - target: test-cross-arm64-wolfssl
+            privileged: true
+          - target: test-cross-riscv64-wolfssl
+            privileged: true
+          - target: build-wolfssl
+            privileged: false
+          - target: build-boringssl
+            privileged: false
+          - target: build-cross-arm64-wolfssl
+            privileged: false
+          - target: build-cross-riscv64-wolfssl
+            privileged: false
+          - target: build-cross-arm64-boringssl
+            privileged: false
+          - target: build-cross-riscv64-boringssl
+            privileged: false
+          - target: fmt
+            privileged: false
+          - target: lint
+            privileged: false
+          - target: check-dependencies
+            privileged: false
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    steps:
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203 # v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: Run +${{ matrix.target }} on Earthly
+        run: earthly --ci --output ${{ matrix.privileged == true && '--allow-privileged' || '' }} +${{ matrix.target }}
+
+      - name: Upload lightway-client artifact (x86_64, wolfssl)
+        if: matrix.target == 'build-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-x86_64-unknown-linux-gnu-wolfssl
+          path: target/release/lightway-client
+
+      - name: Upload lightway-server artifact (x86_64, wolfssl)
+        if: matrix.target == 'build-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-x86_64-unknown-linux-gnu-wolfssl
+          path: target/release/lightway-server
+
+      - name: Upload lightway-client artifact (arm64, wolfssl)
+        if: matrix.target == 'build-cross-arm64-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-aarch64-unknown-linux-gnu-wolfssl
+          path: target/aarch64-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (arm64, wolfssl)
+        if: matrix.target == 'build-cross-arm64-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-aarch64-unknown-linux-gnu-wolfssl
+          path: target/aarch64-unknown-linux-gnu/release/lightway-server
+
+      - name: Upload lightway-client artifact (riscv64, wolfssl)
+        if: matrix.target == 'build-cross-riscv64-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-riscv64gc-unknown-linux-gnu-wolfssl
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (riscv64, wolfssl)
+        if: matrix.target == 'build-cross-riscv64-wolfssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-riscv64gc-unknown-linux-gnu-wolfssl
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
+
+      - name: Upload lightway-client artifact (x86_64, boringssl)
+        if: matrix.target == 'build-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-x86_64-unknown-linux-gnu-boringssl-beta
+          path: target/release/lightway-client
+
+      - name: Upload lightway-server artifact (x86_64, boringssl)
+        if: matrix.target == 'build-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-x86_64-unknown-linux-gnu-boringssl-beta
+          path: target/release/lightway-server
+
+      - name: Upload lightway-client artifact (arm64, boringssl)
+        if: matrix.target == 'build-cross-arm64-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-aarch64-unknown-linux-gnu-boringssl-beta
+          path: target/aarch64-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (arm64, boringssl)
+        if: matrix.target == 'build-cross-arm64-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-aarch64-unknown-linux-gnu-boringssl-beta
+          path: target/aarch64-unknown-linux-gnu/release/lightway-server
+
+      - name: Upload lightway-client artifact (riscv64, boringssl)
+        if: matrix.target == 'build-cross-riscv64-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-riscv64gc-unknown-linux-gnu-boringssl-beta
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-client
+
+      - name: Upload lightway-server artifact (riscv64, boringssl)
+        if: matrix.target == 'build-cross-riscv64-boringssl'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-riscv64gc-unknown-linux-gnu-boringssl-beta
+          path: target/riscv64gc-unknown-linux-gnu/release/lightway-server
