@@ -26,18 +26,6 @@ jobs:
           - package: lightway-aarch64-darwin-msrv
             verify_type: "skip"
             build_type: "native"
-          - package: lightway-x86_64-linux-musl
-            verify_type: "skip"
-            build_type: "cross"
-          - package: lightway-x86_64-linux-gnu
-            verify_type: "skip"
-            build_type: "cross"
-          - package: lightway-aarch64-linux-musl
-            verify_type: "skip"
-            build_type: "cross"
-          - package: lightway-aarch64-linux-gnu
-            verify_type: "skip"
-            build_type: "cross"
 
     steps:
       - uses: actions/checkout@v7.0.1
