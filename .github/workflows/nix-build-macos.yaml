@@ -1,0 +1,41 @@
+name: Nix build / macos
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: ${{ matrix.package }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: lightway-aarch64-darwin
+            verify_type: "skip"
+            build_type: "native"
+          - package: lightway-aarch64-darwin-msrv
+            verify_type: "skip"
+            build_type: "native"
+          - package: lightway-x86_64-linux-musl
+            verify_type: "skip"
+            build_type: "cross"
+          - package: lightway-x86_64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+          - package: lightway-aarch64-linux-musl
+            verify_type: "skip"
+            build_type: "cross"
+          - package: lightway-aarch64-linux-gnu
+            verify_type: "skip"
+            build_type: "cross"
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: ./.github/actions/nix-build
+        with:
+          package: ${{ matrix.package }}
+          platform: aarch64-darwin
+          build_type: ${{ matrix.build_type }}
+          verify_type: ${{ matrix.verify_type }}
