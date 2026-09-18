@@ -23,6 +23,7 @@ jobs:
   verify-builds:
     name: Verify All Builds
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [x86_64-linux, aarch64-linux, macos]
     if: always()  # Run even if some builds failed
     steps:
