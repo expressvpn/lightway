@@ -24,56 +24,31 @@ jobs:
           # Native builds
           - runner: ubuntu-latest
             platform: x86_64-linux
-            package: lightway-client-x86_64-linux-gnu
+            package: lightway-x86_64-linux-gnu
             verify_type: "dynamically linked"
             build_type: "native"
           - runner: ubuntu-latest
             platform: x86_64-linux
-            package: lightway-server-x86_64-linux-gnu
-            verify_type: "dynamically linked"
-            build_type: "native"
-          - runner: ubuntu-latest
-            platform: x86_64-linux
-            package: lightway-client-x86_64-linux-gnu-msrv
-            verify_type: "dynamically linked"
-            build_type: "native"
-          - runner: ubuntu-latest
-            platform: x86_64-linux
-            package: lightway-server-x86_64-linux-gnu-msrv
+            package: lightway-x86_64-linux-gnu-msrv
             verify_type: "dynamically linked"
             build_type: "native"
 
           # Musl static builds (same arch, different libc)
           - runner: ubuntu-latest
             platform: x86_64-linux
-            package: lightway-client-x86_64-linux-musl
-            verify_type: "static-pie linked"
-            build_type: "native"
-          - runner: ubuntu-latest
-            platform: x86_64-linux
-            package: lightway-server-x86_64-linux-musl
+            package: lightway-x86_64-linux-musl
             verify_type: "static-pie linked"
             build_type: "native"
 
           # Cross-compile to aarch64
           - runner: ubuntu-latest
             platform: x86_64-linux
-            package: lightway-client-aarch64-linux-musl
+            package: lightway-aarch64-linux-musl
             verify_type: "musl-static"
             build_type: "cross"
           - runner: ubuntu-latest
             platform: x86_64-linux
-            package: lightway-server-aarch64-linux-musl
-            verify_type: "musl-static"
-            build_type: "cross"
-          - runner: ubuntu-latest
-            platform: x86_64-linux
-            package: lightway-client-aarch64-linux-gnu
-            verify_type: "dynamically linked"
-            build_type: "cross"
-          - runner: ubuntu-latest
-            platform: x86_64-linux
-            package: lightway-server-aarch64-linux-gnu
+            package: lightway-aarch64-linux-gnu
             verify_type: "dynamically linked"
             build_type: "cross"
 
@@ -83,56 +58,31 @@ jobs:
           # Native builds
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux
-            package: lightway-client-aarch64-linux-gnu
+            package: lightway-aarch64-linux-gnu
             verify_type: "dynamically linked"
             build_type: "native"
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux
-            package: lightway-server-aarch64-linux-gnu
-            verify_type: "dynamically linked"
-            build_type: "native"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-client-aarch64-linux-gnu-msrv
-            verify_type: "dynamically linked"
-            build_type: "native"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-server-aarch64-linux-gnu-msrv
+            package: lightway-aarch64-linux-gnu-msrv
             verify_type: "dynamically linked"
             build_type: "native"
 
           # Musl static builds (same arch, different libc)
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux
-            package: lightway-client-aarch64-linux-musl
-            verify_type: "musl-static"
-            build_type: "native"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-server-aarch64-linux-musl
+            package: lightway-aarch64-linux-musl
             verify_type: "musl-static"
             build_type: "native"
 
           # Cross-compile to x86_64
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux
-            package: lightway-client-x86_64-linux-musl
+            package: lightway-x86_64-linux-musl
             verify_type: "static-pie linked"
             build_type: "cross"
           - runner: ubuntu-24.04-arm
             platform: aarch64-linux
-            package: lightway-server-x86_64-linux-musl
-            verify_type: "static-pie linked"
-            build_type: "cross"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-client-x86_64-linux-gnu
-            verify_type: "dynamically linked"
-            build_type: "cross"
-          - runner: ubuntu-24.04-arm
-            platform: aarch64-linux
-            package: lightway-server-x86_64-linux-gnu
+            package: lightway-x86_64-linux-gnu
             verify_type: "dynamically linked"
             build_type: "cross"
 
@@ -142,69 +92,38 @@ jobs:
           # Native builds
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-client-aarch64-darwin
+            package: lightway-aarch64-darwin
             verify_type: "skip"  # macOS binaries
             build_type: "native"
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-server-aarch64-darwin
-            verify_type: "skip"
-            build_type: "native"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-client-aarch64-darwin-msrv
-            verify_type: "skip"
-            build_type: "native"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-server-aarch64-darwin-msrv
+            package: lightway-aarch64-darwin-msrv
             verify_type: "skip"
             build_type: "native"
 
           # Cross-compile to x86_64 Linux
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-client-x86_64-linux-musl
+            package: lightway-x86_64-linux-musl
             verify_type: "skip"  # Verified on Linux
             build_type: "cross"
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-server-x86_64-linux-musl
-            verify_type: "skip"
-            build_type: "cross"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-client-x86_64-linux-gnu
-            verify_type: "skip"
-            build_type: "cross"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-server-x86_64-linux-gnu
+            package: lightway-x86_64-linux-gnu
             verify_type: "skip"
             build_type: "cross"
 
           # Cross-compile to aarch64 Linux
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-client-aarch64-linux-musl
+            package: lightway-aarch64-linux-musl
             verify_type: "skip"
             build_type: "cross"
           - runner: macos-latest
             platform: aarch64-darwin
-            package: lightway-server-aarch64-linux-musl
+            package: lightway-aarch64-linux-gnu
             verify_type: "skip"
             build_type: "cross"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-client-aarch64-linux-gnu
-            verify_type: "skip"
-            build_type: "cross"
-          - runner: macos-latest
-            platform: aarch64-darwin
-            package: lightway-server-aarch64-linux-gnu
-            verify_type: "skip"
-            build_type: "cross"
-
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -231,62 +150,65 @@ jobs:
       - name: Verify binary linking type (Linux only)
         if: matrix.verify_type != 'skip'
         run: |
-          binary_path=$(find result/bin -type f | head -n 1)
-          echo "Checking binary: $binary_path"
+          # A combined package ships two binaries; both have to pass.
+          for binary_path in result/bin/*; do
+            echo "Checking binary: $binary_path"
 
-          file_output=$(file "$binary_path")
-          echo "File output: $file_output"
+            file_output=$(file "$binary_path")
+            echo "File output: $file_output"
 
-          # For musl-static, verify by checking NEEDED entries (not file output)
-          if [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
-            echo "Verifying musl static binary (checking NEEDED entries)..."
+            # For musl-static, verify by checking NEEDED entries (not file output)
+            if [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
+              echo "Verifying musl static binary (checking NEEDED entries)..."
 
-            # Check for NEEDED entries using readelf
-            if readelf -d "$binary_path" 2>&1 | grep -q "(NEEDED)"; then
-              echo "✗ Binary has NEEDED entries (not truly static):"
-              readelf -d "$binary_path" | grep "(NEEDED)"
+              # Check for NEEDED entries using readelf
+              if readelf -d "$binary_path" 2>&1 | grep -q "(NEEDED)"; then
+                echo "✗ Binary has NEEDED entries (not truly static):"
+                readelf -d "$binary_path" | grep "(NEEDED)"
+                exit 1
+              fi
+
+              echo "✓ Binary is truly static (no NEEDED entries)"
+              echo "Note: aarch64 may show 'dynamically linked' in file output (cosmetic only)"
+
+            # For other types, check file output
+            elif echo "$file_output" | grep -q "${{ matrix.verify_type }}"; then
+              echo "✓ Binary is correctly ${{ matrix.verify_type }}"
+            else
+              echo "✗ Expected '${{ matrix.verify_type }}' but got:"
+              echo "$file_output"
               exit 1
             fi
 
-            echo "✓ Binary is truly static (no NEEDED entries)"
-            echo "Note: aarch64 may show 'dynamically linked' in file output (cosmetic only)"
-
-          # For other types, check file output
-          elif echo "$file_output" | grep -q "${{ matrix.verify_type }}"; then
-            echo "✓ Binary is correctly ${{ matrix.verify_type }}"
-          else
-            echo "✗ Expected '${{ matrix.verify_type }}' but got:"
-            echo "$file_output"
-            exit 1
-          fi
-
-          # Additional verification for static builds
-          if [[ "${{ matrix.verify_type }}" == "static-pie linked" ]] || [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
-            echo "Verifying no dynamic dependencies..."
-            if ldd "$binary_path" 2>&1 | grep -v "not a dynamic executable" | grep -v "statically linked" | grep -v "linux-vdso"; then
-              if ldd "$binary_path" 2>&1 | grep "=>"; then
-                echo "✗ Static binary has unexpected dynamic dependencies:"
-                ldd "$binary_path"
-                exit 1
+            # Additional verification for static builds
+            if [[ "${{ matrix.verify_type }}" == "static-pie linked" ]] || [[ "${{ matrix.verify_type }}" == "musl-static" ]]; then
+              echo "Verifying no dynamic dependencies..."
+              if ldd "$binary_path" 2>&1 | grep -v "not a dynamic executable" | grep -v "statically linked" | grep -v "linux-vdso"; then
+                if ldd "$binary_path" 2>&1 | grep "=>"; then
+                  echo "✗ Static binary has unexpected dynamic dependencies:"
+                  ldd "$binary_path"
+                  exit 1
+                fi
               fi
+              echo "✓ No unexpected dynamic dependencies found"
             fi
-            echo "✓ No unexpected dynamic dependencies found"
-          fi
+          done
 
       - name: Show binary info
         run: |
-          binary_path=$(find result/bin -type f | head -n 1)
-          echo "=== Binary Information ==="
-          ls -lh "$binary_path"
-          file "$binary_path"
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            echo ""
-            echo "=== Dynamic Dependencies ==="
-            ldd "$binary_path" 2>&1 || true
-            echo ""
-            echo "=== ELF Header ==="
-            readelf -h "$binary_path" || true
-          fi
+          for binary_path in result/bin/*; do
+            echo "=== Binary Information ==="
+            ls -lh "$binary_path"
+            file "$binary_path"
+            if [[ "${{ runner.os }}" == "Linux" ]]; then
+              echo ""
+              echo "=== Dynamic Dependencies ==="
+              ldd "$binary_path" 2>&1 || true
+              echo ""
+              echo "=== ELF Header ==="
+              readelf -h "$binary_path" || true
+            fi
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
