@@ -4,6 +4,13 @@ on:
   workflow_call:
 
 jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/nix-setup
+      - run: nix flake check
+
   build:
     name: ${{ matrix.package }}
     runs-on: ubuntu-latest
@@ -30,6 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/nix-build
         with:
           package: ${{ matrix.package }}
