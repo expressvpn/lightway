@@ -1,0 +1,155 @@
+name: CI / nix
+on:
+  workflow_call:
+
+jobs:
+  nix-mobile-build:
+    name: Mobile Lib Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+
+      - name: Check with mobile
+        working-directory: ./lightway-client
+        run: nix develop -c cargo check --features=mobile
+      - name: Clippy with mobile
+        working-directory: ./lightway-client
+        run: nix develop -c cargo clippy --features=mobile --all-targets -- -D warnings
+      - name: Test with mobile features
+        working-directory: ./lightway-client
+        run: nix develop -c cargo test --features=mobile-test
+
+      - name: Build Android AAR
+        id: build-android-aar
+        run: |
+          nix develop .#android -c build
+          AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-release.aar
+          echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-android-aar
+          path: ${{ steps.build-android-aar.outputs.path }}
+          if-no-files-found: error
+      - name: Build JsonSchema
+        run: nix develop -c cargo run --features=mobile,wolfssl -p lightway-client -- -c client.schema.json -g jsonschema
+      - name: Upload JsonSchema artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-jsonschema
+          path: client.schema.json
+          if-no-files-found: error
+
+  nix-build:
+    name: Nix Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            os: ubuntu-latest
+            build_msrv: false
+          - target: x86_64-linux-gnu
+            os: ubuntu-latest
+            build_msrv: true
+          - target: aarch64-darwin
+            os: macos-26
+            build_msrv: false
+          # BoringSSL backend builds (no MSRV). Validates boring-sys's CMake
+          # invocation under the nix toolchain on the platforms we ship to most.
+          - target: x86_64-linux-gnu-boringssl-beta
+            os: ubuntu-latest
+            build_msrv: false
+          - target: aarch64-darwin-boringssl-beta
+            os: macos-26
+            build_msrv: false
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+
+      - run: mkdir -p build/
+
+      - name: Build lightway server and client on MSRV version
+        if: matrix.build_msrv
+        run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }}-msrv --print-build-logs
+
+      - name: Build lightway server and client
+        if: ${{ !matrix.build_msrv }}
+        run: nix build -j 2 --cores 0 .#lightway-${{ matrix.target }} --print-build-logs
+
+      - name: Upload lightway-client artifact (WolfSSL)
+        if: matrix.target == 'aarch64-darwin'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-${{ matrix.target }}-wolfssl
+          path: result/bin/lightway-client
+
+      - name: Upload lightway-server artifact (WolfSSL)
+        if: matrix.target == 'aarch64-darwin'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-${{ matrix.target }}-wolfssl
+          path: result/bin/lightway-server
+
+      - name: Upload lightway-client artifact (BoringSSL beta)
+        if: matrix.target == 'aarch64-darwin-boringssl-beta'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-${{ matrix.target }}
+          path: result/bin/lightway-client
+
+      - name: Upload lightway-server artifact (BoringSSL beta)
+        if: matrix.target == 'aarch64-darwin-boringssl-beta'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-server-${{ matrix.target }}
+          path: result/bin/lightway-server
+
+  nix-tests:
+    name: Nix tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+
+      - run: nix flake check
+
+      - name: Run clippy
+        run: nix develop --command cargo make clippy
+
+      - name: Run privileged tests (macOS only)
+        if: matrix.os == 'macos-26'
+        run: sudo nix develop --command cargo test test_privileged -- --ignored
