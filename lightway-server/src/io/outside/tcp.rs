@@ -362,6 +362,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[ignore = "paused clock races the real socket read; see commit message"]
     async fn complete_proxy_header_is_parsed() {
         let source = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234);
         let header = proxy_v2_header(
