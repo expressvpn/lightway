@@ -7,6 +7,7 @@
       pkgsDarwinX64,
       system,
       rustStable,
+      crane,
       ...
     }:
     let
@@ -96,10 +97,7 @@
         {
           inherit (config) pkgsCross rustTarget isStatic;
           inherit rust;
-          rustPlatform = config.pkgsCross.makeRustPlatform {
-            cargo = rust;
-            rustc = rust;
-          };
+          craneLib = (crane.mkLib config.pkgsCross).overrideToolchain (_: rust);
         };
 
       # Helper: Build package for a target
@@ -107,9 +105,9 @@
         packages: toolchain:
         toolchain.pkgsCross.callPackage ../. {
           inherit packages;
-          rustPlatform = toolchain.rustPlatform;
+          craneLib = toolchain.craneLib;
           isStatic = toolchain.isStatic;
-          # Don't pass platformSuffix - rustPlatform adds target triple automatically for cross-compilation
+          # Don't pass platformSuffix - the target triple is added automatically for cross-compilation
         };
 
       # Helper: Create both client and server for a target
@@ -129,7 +127,7 @@
         packages: toolchain: features:
         toolchain.pkgsCross.callPackage ../. {
           inherit packages features;
-          rustPlatform = toolchain.rustPlatform;
+          craneLib = toolchain.craneLib;
           isStatic = toolchain.isStatic;
           noDefaultFeatures = true;
         };
