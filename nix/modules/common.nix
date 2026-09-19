@@ -1,4 +1,5 @@
 # Common module - shared Rust toolchains and configuration
+{ inputs, ... }:
 {
   perSystem =
     { pkgs, ... }:
@@ -20,6 +21,7 @@
       # Export via _module.args for use in other modules
       _module.args = {
         inherit rustStable rustMsrv rustNightly;
+        crane = inputs.crane;
       };
     };
 }

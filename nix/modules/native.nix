@@ -7,24 +7,21 @@
       system,
       rustStable,
       rustMsrv,
+      crane,
       ...
     }:
     let
       # Rust platforms
-      rustPlatformStable = pkgs.makeRustPlatform {
-        cargo = rustStable.minimal;
-        rustc = rustStable.minimal;
-      };
-      rustPlatformMsrv = pkgs.makeRustPlatform {
-        cargo = rustMsrv.minimal;
-        rustc = rustMsrv.minimal;
-      };
+      # A craneLib per toolchain. Artifacts are toolchain-bound, so stable and
+      # MSRV get their own dependency derivations.
+      craneStable = (crane.mkLib pkgs).overrideToolchain (_: rustStable.minimal);
+      craneMsrv = (crane.mkLib pkgs).overrideToolchain (_: rustMsrv.minimal);
 
       # Helper: Build package with the default (wolfssl) backend
       mkPackage =
-        packages: pkgs: rustPlatform:
+        packages: pkgs: craneLib:
         pkgs.callPackage ../. {
-          inherit packages rustPlatform;
+          inherit packages craneLib;
           isStatic = false;
           platformSuffix = nativeSuffix;
         };
@@ -45,24 +42,24 @@
       # Native packages for all platforms
       nativePackages = {
         # Pinned stable builds
-        "lightway-client-${nativeSuffix}" = mkPackage [ "lightway-client" ] pkgs rustPlatformStable;
-        "lightway-server-${nativeSuffix}" = mkPackage [ "lightway-server" ] pkgs rustPlatformStable;
+        "lightway-client-${nativeSuffix}" = mkPackage [ "lightway-client" ] pkgs craneStable;
+        "lightway-server-${nativeSuffix}" = mkPackage [ "lightway-server" ] pkgs craneStable;
 
         # Combined stable build - client+server in one derivation to compile deps once
         "lightway-${nativeSuffix}" = mkPackage [
           "lightway-client"
           "lightway-server"
-        ] pkgs rustPlatformStable;
+        ] pkgs craneStable;
 
         # MSRV builds
-        "lightway-client-${nativeSuffix}-msrv" = mkPackage [ "lightway-client" ] pkgs rustPlatformMsrv;
-        "lightway-server-${nativeSuffix}-msrv" = mkPackage [ "lightway-server" ] pkgs rustPlatformMsrv;
+        "lightway-client-${nativeSuffix}-msrv" = mkPackage [ "lightway-client" ] pkgs craneMsrv;
+        "lightway-server-${nativeSuffix}-msrv" = mkPackage [ "lightway-server" ] pkgs craneMsrv;
 
         # Combined MSRV build - client+server in one derivation to compile deps once
         "lightway-${nativeSuffix}-msrv" = mkPackage [
           "lightway-client"
           "lightway-server"
-        ] pkgs rustPlatformMsrv;
+        ] pkgs craneMsrv;
 
         # BoringSSL backend builds - combined client+server to compile the
         # shared dependency graph once.
@@ -71,7 +68,7 @@
             "lightway-client"
             "lightway-server"
           ];
-          rustPlatform = rustPlatformStable;
+          craneLib = craneStable;
           isStatic = false;
           platformSuffix = "${nativeSuffix}-boringssl-beta";
           noDefaultFeatures = true;
