@@ -1,0 +1,57 @@
+name: CI / e2e
+on:
+  workflow_call:
+
+jobs:
+  cross-compat:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm]
+    steps:
+      - uses: earthly/actions-setup@v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v7.0.1
+      - name: Run +cross-compat on Earthly
+        run: earthly --ci --allow-privileged +cross-compat --debian ${{ matrix.distro }}
+
+  e2e-wolfssl:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm]
+    steps:
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203 # v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: Run +e2e-wolfssl on Earthly
+        run: earthly --ci --allow-privileged +e2e-wolfssl --debian ${{ matrix.distro }}
+
+  e2e-boringssl:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm]
+    steps:
+      - uses: earthly/actions-setup@v1
+        with:
+          version: ~v0.8
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v7.0.1
+      - name: Run +e2e-boringssl on Earthly
+        run: earthly --ci --allow-privileged +e2e-boringssl --debian ${{ matrix.distro }}

@@ -1,0 +1,95 @@
+name: Nix build
+description: Build a lightway nix package, verify its linking type and upload it
+
+inputs:
+  package:
+    description: Flake package attribute to build
+    required: true
+  platform:
+    description: Nix system of the runner, used in the artifact name
+    required: true
+  build_type:
+    description: native or cross, used in the artifact name
+    required: true
+  verify_type:
+    description: Expected linking type, or "skip" to not verify
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build ${{ inputs.package }}
+      shell: bash
+      run: nix build .#${{ inputs.package }} -o result --print-build-logs
+
+    - name: Verify binary linking type (Linux only)
+      if: inputs.verify_type != 'skip'
+      shell: bash
+      run: |
+        # A combined package ships two binaries; both have to pass.
+        for binary_path in result/bin/*; do
+          echo "Checking binary: $binary_path"
+
+          file_output=$(file "$binary_path")
+          echo "File output: $file_output"
+
+          # For musl-static, verify by checking NEEDED entries (not file output)
+          if [[ "${{ inputs.verify_type }}" == "musl-static" ]]; then
+            echo "Verifying musl static binary (checking NEEDED entries)..."
+
+            # Check for NEEDED entries using readelf
+            if readelf -d "$binary_path" 2>&1 | grep -q "(NEEDED)"; then
+              echo "✗ Binary has NEEDED entries (not truly static):"
+              readelf -d "$binary_path" | grep "(NEEDED)"
+              exit 1
+            fi
+
+            echo "✓ Binary is truly static (no NEEDED entries)"
+            echo "Note: aarch64 may show 'dynamically linked' in file output (cosmetic only)"
+
+          # For other types, check file output
+          elif echo "$file_output" | grep -q "${{ inputs.verify_type }}"; then
+            echo "✓ Binary is correctly ${{ inputs.verify_type }}"
+          else
+            echo "✗ Expected '${{ inputs.verify_type }}' but got:"
+            echo "$file_output"
+            exit 1
+          fi
+
+          # Additional verification for static builds
+          if [[ "${{ inputs.verify_type }}" == "static-pie linked" ]] || [[ "${{ inputs.verify_type }}" == "musl-static" ]]; then
+            echo "Verifying no dynamic dependencies..."
+            if ldd "$binary_path" 2>&1 | grep -v "not a dynamic executable" | grep -v "statically linked" | grep -v "linux-vdso"; then
+              if ldd "$binary_path" 2>&1 | grep "=>"; then
+                echo "✗ Static binary has unexpected dynamic dependencies:"
+                ldd "$binary_path"
+                exit 1
+              fi
+            fi
+            echo "✓ No unexpected dynamic dependencies found"
+          fi
+        done
+
+    - name: Show binary info
+      shell: bash
+      run: |
+        for binary_path in result/bin/*; do
+          echo "=== Binary Information ==="
+          ls -lh "$binary_path"
+          file "$binary_path"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            echo ""
+            echo "=== Dynamic Dependencies ==="
+            ldd "$binary_path" 2>&1 || true
+            echo ""
+            echo "=== ELF Header ==="
+            readelf -h "$binary_path" || true
+          fi
+        done
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: ${{ inputs.package }}-${{ inputs.build_type }}-${{ inputs.platform }}
+        path: result/bin/*
+        if-no-files-found: error

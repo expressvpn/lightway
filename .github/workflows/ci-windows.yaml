@@ -1,0 +1,100 @@
+name: CI / windows
+on:
+  workflow_call:
+
+jobs:
+  windows-build:
+    name: Windows Build (${{ matrix.target }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_COLOR: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: x64
+            backend: wolfssl
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            arch: arm64
+            backend: wolfssl
+          # BoringSSL backend. x64 runners ship MASM (via VS Build Tools),
+          # Perl, and CMake, which is everything boring-sys's CMake build
+          # needs. ARM64 additionally needs clang-cl + Ninja (see below).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: x64
+            backend: boringssl
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            arch: arm64
+            backend: boringssl
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: Get Rust version
+        id: rust-version
+        shell: bash
+        run: |
+          RUST_VERSION=$(grep "FROM rust" Earthfile | awk -F'[:\\-]' '{print $2}')
+          echo "version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ matrix.backend }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check code formatting
+        if: matrix.backend == 'wolfssl'
+        run: cargo fmt --check
+
+      - name: Set backend-specific cargo flags
+        id: cargo-flags
+        shell: bash
+        run: |
+          if [ "${{ matrix.backend }}" = "boringssl" ]; then
+            echo "features=--no-default-features --features boringssl" >> "$GITHUB_OUTPUT"
+          else
+            echo "features=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure BoringSSL ARM64 build (clang-cl + Ninja)
+        if: matrix.backend == 'boringssl' && matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          # BoringSSL's CMake cannot assemble its ARM64 sources under the
+          # Visual Studio generator; upstream builds Windows ARM64 with
+          # clang-cl + Ninja, both preinstalled on the windows-11-arm image.
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+
+      - name: Run clippy
+        run: >-
+          cargo clippy --package lightway-client --target ${{ matrix.target }} ${{ steps.cargo-flags.outputs.features }} -- -D warnings
+
+      - name: Build lightway client
+        run: >-
+          cargo build --release --bin lightway-client --target ${{ matrix.target }} ${{ steps.cargo-flags.outputs.features }}
+
+      - name: Run tests (${{ matrix.arch }}, ${{ matrix.backend }})
+        run: cargo test --target ${{ matrix.target }} -p lightway-client ${{ steps.cargo-flags.outputs.features }}
+
+      - name: Upload lightway-client artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-client-${{ matrix.target }}-${{ matrix.backend == 'boringssl' && 'boringssl-beta' || 'wolfssl' }}
+          path: target/${{ matrix.target }}/release/lightway-client.exe

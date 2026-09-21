@@ -1,0 +1,36 @@
+name: Nix cross-build from macOS
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Saturday 20:00 UTC
+    - cron: '0 20 * * 6'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+jobs:
+  build:
+    timeout-minutes: 90
+    name: ${{ matrix.package }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: lightway-x86_64-linux-musl
+          - package: lightway-x86_64-linux-gnu
+          - package: lightway-aarch64-linux-musl
+          - package: lightway-aarch64-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/nix-build
+        with:
+          package: ${{ matrix.package }}
+          platform: aarch64-darwin
+          build_type: cross
+          verify_type: skip

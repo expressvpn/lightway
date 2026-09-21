@@ -1,0 +1,48 @@
+name: Nix build / aarch64-linux
+
+on:
+  workflow_call:
+
+jobs:
+  flake-check:
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/nix-setup
+      - run: nix flake check
+
+  build:
+    timeout-minutes: 90
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: lightway-aarch64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - package: lightway-aarch64-linux-gnu-msrv
+            verify_type: "dynamically linked"
+            build_type: "native"
+          - package: lightway-aarch64-linux-musl
+            verify_type: "musl-static"
+            build_type: "native"
+          - package: lightway-x86_64-linux-musl
+            verify_type: "static-pie linked"
+            build_type: "cross"
+          - package: lightway-x86_64-linux-gnu
+            verify_type: "dynamically linked"
+            build_type: "cross"
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/nix-build
+        with:
+          package: ${{ matrix.package }}
+          platform: aarch64-linux
+          build_type: ${{ matrix.build_type }}
+          verify_type: ${{ matrix.verify_type }}
