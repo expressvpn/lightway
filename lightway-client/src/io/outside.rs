@@ -83,4 +83,15 @@ pub trait OutsideIO: Sync + Send {
     /// Returns the underlying socket tagged with its transport type.
     /// `None` when the transport has no single OS socket to name.
     fn socket(&self) -> Option<OutsideSocket>;
+
+    /// The outside MTU this transport requires, when it imposes one of its own.
+    ///
+    /// Return `Some` only when your frame ceiling is also the effective path
+    /// ceiling. Lightway's own path-MTU discovery is switched off for the
+    /// connection when you do, because probing cannot discover anything the
+    /// transport has already fixed. `None` means the client config's
+    /// `outside_mtu` and `enable_pmtud` apply unchanged.
+    fn required_outside_mtu(&self) -> Option<usize> {
+        None
+    }
 }
