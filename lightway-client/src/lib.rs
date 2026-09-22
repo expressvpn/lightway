@@ -17,7 +17,7 @@ uniffi::setup_scaffolding!();
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::{FutureExt, stream::FuturesUnordered};
+use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -72,18 +72,34 @@ use tokio::{
 use tokio_stream::{StreamExt, StreamMap};
 use tracing::info;
 
+/// Dials an outside transport when the connection attempt starts, rather
+/// than before it.
+///
+/// The future runs inside the parallel-connect race, so a transport that has
+/// to reach the network to come up is bounded by
+/// [`ClientConfig::preferred_connection_wait_interval`] like any other
+/// connection, and its failure is a per-connection error rather than a fatal
+/// one.
+///
+/// Named "Connector", not "Factory": this crate already has
+/// [`PluginFactory`](lightway_core::PluginFactory), which takes `&self` and
+/// is called once per connection - a reusable producer. This is an
+/// `FnOnce` consumed exactly once, and it dials the network rather than
+/// constructing an object. "Connector" matches hyper/tower usage and
+/// carries no reuse implication.
+pub type OutsideIoConnector =
+    Box<dyn FnOnce() -> BoxFuture<'static, Result<Arc<dyn io::outside::OutsideIO>>> + Send>;
+
 /// Connection type
 /// Applications can also attach socket for library to use directly,
 /// if there is any customisations needed
+#[non_exhaustive]
 pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
-    /// A datagram transport supplied by the application, in place of the
-    /// socket the client otherwise creates. Every socket option in the
-    /// client config goes unused.
-    DatagramIo(Arc<dyn io::outside::OutsideIO>),
-    /// A stream transport supplied by the application; see `DatagramIo`.
-    StreamIo(Arc<dyn io::outside::OutsideIO>),
+    /// A datagram transport the application connects when the connection
+    /// attempt starts; see [`OutsideIoConnector`].
+    DatagramIoConnector(OutsideIoConnector),
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -91,8 +107,7 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
-            Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
-            Self::StreamIo(_) => f.debug_tuple("StreamIo").finish(),
+            Self::DatagramIoConnector(_) => f.debug_tuple("DatagramIoConnector").finish(),
         }
     }
 }
@@ -1179,8 +1194,13 @@ pub async fn connect<
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match mode {
-            ClientConnectionMode::DatagramIo(io) => (ConnectionType::Datagram, io),
-            ClientConnectionMode::StreamIo(io) => (ConnectionType::Stream, io),
+            ClientConnectionMode::DatagramIoConnector(connector) => {
+                let io = connector()
+                    .await
+                    .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+                    .context("Outside IO connector")?;
+                (ConnectionType::Datagram, io)
+            }
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
                 let mut sock = io::outside::Udp::new(
@@ -1982,6 +2002,28 @@ mod tests {
         assert_eq!(best_index, 1);
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_select_best_pending_connect_does_not_delay_a_ready_one() {
+        let (tx1, rx1) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async { std::future::pending().await }) as BoxedConnectFut);
+        futs.push(Box::pin(async move { (1usize, Ok((rx1, ()))) }));
+
+        tokio::spawn(async move {
+            let _ = tx1.send(());
+        });
+
+        let start = Instant::now();
+        let (best_index, connections) = select_best_from_futures(futs, Duration::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(best_index, 1);
+        assert_eq!(connections.len(), 1);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 
     #[test_case(0, "No servers available" ; "empty futures")]
