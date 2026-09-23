@@ -17,7 +17,7 @@ uniffi::setup_scaffolding!();
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{FutureExt, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -72,21 +72,9 @@ use tokio::{
 use tokio_stream::{StreamExt, StreamMap};
 use tracing::info;
 
-/// Builds an outside transport when the connection attempt starts, rather
-/// than before it.
-///
-/// The future runs inside the parallel-connect race, so a transport that has
-/// to reach the network to come up is bounded by
-/// [`ClientConfig::preferred_connection_wait_interval`] like any other
-/// connection, and its failure is a per-connection error rather than a fatal
-/// one.
-pub type OutsideIoFactory =
-    Box<dyn FnOnce() -> BoxFuture<'static, Result<Arc<dyn io::outside::OutsideIO>>> + Send>;
-
 /// Connection type
 /// Applications can also attach socket for library to use directly,
 /// if there is any customisations needed
-#[non_exhaustive]
 pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
@@ -96,9 +84,6 @@ pub enum ClientConnectionMode {
     DatagramIo(Arc<dyn io::outside::OutsideIO>),
     /// A stream transport supplied by the application; see `DatagramIo`.
     StreamIo(Arc<dyn io::outside::OutsideIO>),
-    /// A datagram transport the application builds when the connection
-    /// attempt starts; see [`OutsideIoFactory`].
-    DatagramIoFactory(OutsideIoFactory),
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -108,7 +93,6 @@ impl std::fmt::Debug for ClientConnectionMode {
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
             Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
             Self::StreamIo(_) => f.debug_tuple("StreamIo").finish(),
-            Self::DatagramIoFactory(_) => f.debug_tuple("DatagramIoFactory").finish(),
         }
     }
 }
@@ -1220,13 +1204,6 @@ pub async fn connect<
         match mode {
             ClientConnectionMode::DatagramIo(io) => (ConnectionType::Datagram, io),
             ClientConnectionMode::StreamIo(io) => (ConnectionType::Stream, io),
-            ClientConnectionMode::DatagramIoFactory(factory) => {
-                let io = factory()
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to build outside IO: {e}"))
-                    .context("Outside IO factory")?;
-                (ConnectionType::Datagram, io)
-            }
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
                 let mut sock = io::outside::Udp::new(
@@ -1286,6 +1263,12 @@ pub async fn connect<
                 (ConnectionType::Stream, Arc::new(sock))
             }
         };
+
+    outside_io
+        .setup()
+        .await
+        .inspect_err(|e| tracing::error!("Failed to set up outside IO: {e}"))
+        .context("Outside IO setup")?;
 
     let required_outside_mtu = outside_io.required_outside_mtu();
     let (outside_mtu, enable_pmtud) = effective_outside_io_settings(

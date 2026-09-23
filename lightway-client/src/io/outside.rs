@@ -36,6 +36,12 @@ impl OutsideSocket {
 
 #[async_trait]
 pub trait OutsideIO: Sync + Send {
+    /// Establish the transport. Called once, inside the connect race, before
+    /// any other method is used.
+    async fn setup(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn set_send_buffer_size(&self, size: usize) -> Result<()>;
     fn set_recv_buffer_size(&self, size: usize) -> Result<()>;
 
