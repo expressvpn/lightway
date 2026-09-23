@@ -894,6 +894,9 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 /// wiring only). Failed route refreshes retry from inside the select! loop so
 /// fresh wake-ups are never blocked, and a fresh event inherits the retry it
 /// supersedes, so consecutive failures keep backing off rather than resetting.
+/// Fatal routing errors ([`route_manager::RoutingTableError::is_fatal`]) are
+/// not retried: they stop the VPN via the stop signal and park until the
+/// route manager aborts this task.
 /// Owns the [`RouteUpdater`], so aborting the task removes the installed routes.
 #[cfg(desktop)]
 async fn network_event_coordinator(
@@ -962,29 +965,27 @@ async fn network_event_coordinator(
         };
 
         match route_updater.check_and_update_server_route().await {
-            Err(e) => {
-                match &e {
-                    route_manager::RoutingTableError::ServerRouteAddFailed(_) => {
-                        let reason = format!("Server route add failed: {e:?}");
-                        tracing::error!("{reason}");
-                        if let Some(ref tx) = stop_signal {
-                            let _ = tx.send(reason).await;
-                        }
-                        // Do not return here. The main task needs the routes to stay installed
-                        // while it completes graceful shutdown (Goodbye frame, state machine
-                        // transition to Disconnected). When route_manager.stop() aborts this task,
-                        // RouteUpdater will drop and cleanup_sync() will remove routes at the
-                        // right moment. This ensures traffic stays fail-closed during shutdown
-                        // instead of falling back to the physical NIC in the clear.
-                        std::future::pending::<()>().await;
-                    }
-                    _ => {
-                        route_updater.on_repin_failure(&mut state, &e);
-                        // Reconnect and nudge wait for the terminal outcome.
-                        route_repin_state = Some(state);
-                        continue;
-                    }
+            // Fatal routing errors stop the VPN instead of retrying: the
+            // routing state can no longer be trusted.
+            Err(e) if e.is_fatal() => {
+                let reason = format!("Fatal routing error, stopping VPN: {e}");
+                tracing::error!("{reason}");
+                if let Some(ref tx) = stop_signal {
+                    let _ = tx.send(reason).await;
                 }
+                // Do not return here. The main task needs the routes to stay installed
+                // while it completes graceful shutdown (Goodbye frame, state machine
+                // transition to Disconnected). When route_manager.stop() aborts this task,
+                // RouteUpdater will drop and cleanup_sync() will remove routes at the
+                // right moment. This ensures traffic stays fail-closed during shutdown
+                // instead of falling back to the physical NIC in the clear.
+                std::future::pending::<()>().await;
+            }
+            Err(e) => {
+                route_updater.on_repin_failure(&mut state, &e);
+                // Reconnect and nudge wait for the terminal outcome.
+                route_repin_state = Some(state);
+                continue;
             }
             // A replaced server route is ground truth that the path to the
             // server moved; probe it so the session floats promptly.
