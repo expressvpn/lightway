@@ -17,7 +17,7 @@ uniffi::setup_scaffolding!();
 use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use bytesize::ByteSize;
-use futures::{FutureExt, stream::FuturesUnordered};
+use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -72,18 +72,34 @@ use tokio::{
 use tokio_stream::{StreamExt, StreamMap};
 use tracing::info;
 
+/// Dials an outside transport when the connection attempt starts, rather
+/// than before it.
+///
+/// The future runs inside the parallel-connect race, so a transport that has
+/// to reach the network to come up is bounded by
+/// [`ClientConfig::preferred_connection_wait_interval`] like any other
+/// connection, and its failure is a per-connection error rather than a fatal
+/// one.
+///
+/// Named "Connector", not "Factory": this crate already has
+/// [`PluginFactory`](lightway_core::PluginFactory), which takes `&self` and
+/// is called once per connection - a reusable producer. This is an
+/// `FnOnce` consumed exactly once, and it dials the network rather than
+/// constructing an object. "Connector" matches hyper/tower usage and
+/// carries no reuse implication.
+pub type OutsideIoConnector =
+    Box<dyn FnOnce() -> BoxFuture<'static, Result<Arc<dyn io::outside::OutsideIO>>> + Send>;
+
 /// Connection type
 /// Applications can also attach socket for library to use directly,
 /// if there is any customisations needed
+#[non_exhaustive]
 pub enum ClientConnectionMode {
     Stream(Option<TcpStream>),
     Datagram(Option<UdpSocket>),
-    /// A datagram transport supplied by the application, in place of the
-    /// socket the client otherwise creates. Every socket option in the
-    /// client config goes unused.
-    DatagramIo(Arc<dyn io::outside::OutsideIO>),
-    /// A stream transport supplied by the application; see `DatagramIo`.
-    StreamIo(Arc<dyn io::outside::OutsideIO>),
+    /// A datagram transport the application connects when the connection
+    /// attempt starts; see [`OutsideIoConnector`].
+    DatagramIoConnector(OutsideIoConnector),
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -91,8 +107,7 @@ impl std::fmt::Debug for ClientConnectionMode {
         match self {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
-            Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
-            Self::StreamIo(_) => f.debug_tuple("StreamIo").finish(),
+            Self::DatagramIoConnector(_) => f.debug_tuple("DatagramIoConnector").finish(),
         }
     }
 }
@@ -176,6 +191,9 @@ impl NetworkSignals {
 #[educe(Debug)]
 pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Outside (wire) MTU
+    ///
+    /// A transport may override this per connection; see
+    /// [`io::outside::OutsideIO::required_outside_mtu`].
     pub outside_mtu: usize,
 
     /// Alternate Inside IO to use
@@ -258,6 +276,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub expresslane_metrics: Option<lightway_core::ExpresslaneMetricsType>,
 
     /// Enable PMTU discovery for Udp connections
+    ///
+    /// A transport may override this per connection; see
+    /// [`io::outside::OutsideIO::required_outside_mtu`].
     pub enable_pmtud: bool,
 
     /// Base MTU for PMTU discovery
@@ -1146,6 +1167,23 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     }
 }
 
+/// Resolve a connection's outside-IO settings from its transport's required
+/// MTU, falling back to the client-wide config.
+///
+/// A transport that fixes the size of the frames it can carry owns path-MTU
+/// discovery for the connection, so Lightway's own probing is turned off for
+/// it.
+fn effective_outside_io_settings(
+    required: Option<usize>,
+    config_mtu: usize,
+    config_pmtud: bool,
+) -> (usize, bool) {
+    match required {
+        Some(mtu) => (mtu, false),
+        None => (config_mtu, config_pmtud),
+    }
+}
+
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -1179,8 +1217,13 @@ pub async fn connect<
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
         match mode {
-            ClientConnectionMode::DatagramIo(io) => (ConnectionType::Datagram, io),
-            ClientConnectionMode::StreamIo(io) => (ConnectionType::Stream, io),
+            ClientConnectionMode::DatagramIoConnector(connector) => {
+                let io = connector()
+                    .await
+                    .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+                    .context("Outside IO connector")?;
+                (ConnectionType::Datagram, io)
+            }
             ClientConnectionMode::Datagram(maybe_sock) => {
                 #[cfg_attr(not(batch_receive), allow(unused_mut))]
                 let mut sock = io::outside::Udp::new(
@@ -1240,6 +1283,20 @@ pub async fn connect<
                 (ConnectionType::Stream, Arc::new(sock))
             }
         };
+
+    let required_outside_mtu = outside_io.required_outside_mtu();
+    let (outside_mtu, enable_pmtud) = effective_outside_io_settings(
+        required_outside_mtu,
+        config.outside_mtu,
+        config.enable_pmtud,
+    );
+
+    if required_outside_mtu.is_some() {
+        tracing::info!(
+            outside_mtu,
+            "Transport requires its own outside MTU; PMTUD disabled for this connection"
+        );
+    }
 
     let (event_cb, event_stream) = EventStreamCallback::new();
 
@@ -1303,10 +1360,7 @@ pub async fn connect<
 
     let conn_builder = ctx_builder
         .build()
-        .start_connect(
-            outside_io.clone().into_io_send_callback(),
-            config.outside_mtu,
-        )?
+        .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
         .with_auth(auth)
         .with_event_cb(Box::new(event_cb))
         .with_inside_pkt_codec(inside_io_codec)
@@ -1314,7 +1368,7 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
-        .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
+        .when(connection_type.is_datagram() && enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
         .with_pq_crypto(config.keyshare.into());
@@ -1351,7 +1405,7 @@ pub async fn connect<
 
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),
-        config.outside_mtu,
+        outside_mtu,
         connection_type,
         outside_io.clone(),
         keepalive.clone(),
@@ -1984,6 +2038,28 @@ mod tests {
         assert_eq!(connections[0].0, 1);
     }
 
+    #[tokio::test]
+    async fn test_select_best_pending_connect_does_not_delay_a_ready_one() {
+        let (tx1, rx1) = oneshot::channel::<()>();
+
+        let futs = FuturesUnordered::new();
+        futs.push(Box::pin(async { std::future::pending().await }) as BoxedConnectFut);
+        futs.push(Box::pin(async move { (1usize, Ok((rx1, ()))) }));
+
+        tokio::spawn(async move {
+            let _ = tx1.send(());
+        });
+
+        let start = Instant::now();
+        let (best_index, connections) = select_best_from_futures(futs, Duration::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(best_index, 1);
+        assert_eq!(connections.len(), 1);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
     #[test_case(0, "No servers available" ; "empty futures")]
     #[test_case(1, "No servers are able to connect" ; "single future fails")]
     #[test_case(2, "No servers are able to connect" ; "all futures fail")]
@@ -2222,5 +2298,17 @@ mod tests {
         let (_route_rx, transition_rx) = signals.wake_sources();
 
         assert!(transition_rx.is_none());
+    }
+
+    #[test_case(None, 1500, true => (1500, true) ; "no required mtu uses config unchanged")]
+    #[test_case(None, 1500, false => (1500, false) ; "no required mtu uses config pmtud off")]
+    #[test_case(Some(1200), 1500, true => (1200, false) ; "required mtu forces pmtud off even when config enables it")]
+    #[test_case(Some(1200), 1500, false => (1200, false) ; "required mtu keeps pmtud off when config already disables it")]
+    fn test_effective_outside_io_settings(
+        required: Option<usize>,
+        config_mtu: usize,
+        config_pmtud: bool,
+    ) -> (usize, bool) {
+        effective_outside_io_settings(required, config_mtu, config_pmtud)
     }
 }
