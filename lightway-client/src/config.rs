@@ -348,10 +348,10 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "windows"))]
     pub enable_dpapi: bool,
 
-    /// SNI header for TLS connections
-    #[cfg(feature = "mobile")]
-    #[patch(attribute(clap(skip)))]
-    #[schemars(extend("x-cfg" = "mobile"))]
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(
+        doc = "SNI (Server Name Indication) header to send during the TLS handshake"
+    ))]
     pub sni_header: String,
 
     #[patch(attribute(clap(short, long)))]
@@ -581,7 +581,6 @@ impl Default for Config {
             wintun_ring_capacity: ByteSize::mib(8),
             #[cfg(windows)]
             enable_dpapi: false,
-            #[cfg(feature = "mobile")]
             sni_header: String::new(),
             accept_unknowns: false,
             unknowns: HashMap::new(),
