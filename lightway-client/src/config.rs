@@ -233,6 +233,20 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "linux"))]
     pub fwmark: u32,
 
+    #[cfg(windows)]
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(
+        attribute(doc = r#"Disable pinning the outside socket's egress interface
+    via IP_UNICAST_IF / IPV6_UNICAST_IF.
+    Pinning is enabled by default to prevent the tunnel's own default route from
+    capturing outside traffic. Set this flag only when the platform routing policy
+    handles egress selection externally."#)
+    )]
+    #[schemars(extend("x-cfg" = "windows"))]
+    pub disable_pin_egress_interface: bool,
+
     #[cfg(desktop)]
     #[patch(attribute(clap(long, value_enum)))]
     #[patch(attribute(doc = r#"DNS configuration mode
@@ -558,6 +572,8 @@ impl Default for Config {
             route_mode: RouteMode::default(),
             #[cfg(linux)]
             fwmark: 0,
+            #[cfg(windows)]
+            disable_pin_egress_interface: false,
             #[cfg(desktop)]
             dns_config_mode: DnsConfigMode::default(),
             log_level: LogLevel::Info,
