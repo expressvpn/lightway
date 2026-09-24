@@ -125,17 +125,46 @@ mod tests {
     fn test_session_config_builder() {
         let mock_io = MockIOAdapter::new();
 
+        // Deliberately distinct values for checked_domain_name and SNI: if
+        // these were ever accidentally conflated into a single field (e.g.
+        // both setters writing the same field), a test using the same value
+        // for both would not catch it.
         let config = SessionConfig::new(mock_io)
             .with_dtls_mtu(1500)
-            .with_checked_domain_name("example.com")
-            .with_sni("example.com");
+            .with_checked_domain_name("cert1.example.com")
+            .with_sni("cert2.example.com");
 
         assert_eq!(config.dtls_mtu, Some(1500));
-        assert_eq!(config.checked_domain_name, Some("example.com".to_string()));
+        assert_eq!(
+            config.checked_domain_name,
+            Some("cert1.example.com".to_string())
+        );
         assert_eq!(
             config.server_name_indication,
-            Some("example.com".to_string())
+            Some("cert2.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn test_sni_independent_of_checked_domain_name() {
+        // SNI (sent to the server during the handshake) and checked_domain_name
+        // (used for certificate verification) must be settable independently --
+        // setting one must never populate or affect the other.
+        let mock_io = MockIOAdapter::new();
+        let config = SessionConfig::new(mock_io).with_sni("cert2.example.com");
+        assert_eq!(
+            config.server_name_indication,
+            Some("cert2.example.com".to_string())
+        );
+        assert_eq!(config.checked_domain_name, None);
+
+        let mock_io = MockIOAdapter::new();
+        let config = SessionConfig::new(mock_io).with_checked_domain_name("cert1.example.com");
+        assert_eq!(
+            config.checked_domain_name,
+            Some("cert1.example.com".to_string())
+        );
+        assert_eq!(config.server_name_indication, None);
     }
 
     #[test]
