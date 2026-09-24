@@ -4764,9 +4764,8 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wolfssl"
-version = "7.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37615b1a3804f015511d20db2d7e93bae8c0b25df20742f911cd4649c045c30a"
+version = "8.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?rev=c72a7f50cdb51b79a6c7040971588b7fca596778#c72a7f50cdb51b79a6c7040971588b7fca596778"
 dependencies = [
  "bytes",
  "log",
@@ -4776,9 +4775,8 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "4.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee74667400bc07eb651930d58e51ee0012ea3cece1b475efc8fc498d9202bf0"
+version = "5.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?rev=c72a7f50cdb51b79a6c7040971588b7fca596778#c72a7f50cdb51b79a6c7040971588b7fca596778"
 dependencies = [
  "autotools",
  "bindgen",
