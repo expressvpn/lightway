@@ -934,6 +934,22 @@ mod tests {
     }
 
     #[test]
+    fn sni_header_defaults_to_empty() {
+        let config = Config::default();
+        assert!(config.sni_header.is_empty());
+    }
+
+    #[test]
+    fn sni_header_parses_from_cli() {
+        let matches =
+            ConfigPatch::try_parse_from(["lightway-client", "--sni-header", "example.com"])
+                .unwrap();
+        let mut config = Config::default();
+        config.apply(matches);
+        assert_eq!(config.sni_header, "example.com");
+    }
+
+    #[test]
     fn config_unknown_fields_cause_error() {
         let yaml = "unknown_field: true\n";
         let patch = serde_saphyr::from_str::<ConfigPatch>(yaml).expect("should parse");

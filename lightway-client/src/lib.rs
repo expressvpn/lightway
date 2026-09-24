@@ -2035,6 +2035,27 @@ mod tests {
 
     use test_case::test_case;
 
+    #[test]
+    fn sni_header_flows_from_config_into_client_config() {
+        let mut config = config::Config::default();
+        config.sni_header = "example.com".to_string();
+
+        let client_config: ClientConfig<()> =
+            ClientConfig::try_from_reload_sig_and_config(None, config).unwrap();
+
+        assert_eq!(client_config.sni_header, "example.com");
+    }
+
+    #[test]
+    fn sni_header_defaults_to_empty_in_client_config() {
+        let config = config::Config::default();
+
+        let client_config: ClientConfig<()> =
+            ClientConfig::try_from_reload_sig_and_config(None, config).unwrap();
+
+        assert!(client_config.sni_header.is_empty());
+    }
+
     #[test_case(1, vec![], false => None)]
     #[test_case(1, vec![0], true => Some(0))]
     #[test_case(2, vec![], false => None)]
