@@ -24,7 +24,7 @@ repository = "https://github.com/expressvpn/lightway"
 edition = "2024"
 authors = ["lightway-developers@expressvpn.com"]
 license = "AGPL-3.0-only"
-rust-version = "1.91.0"
+rust-version = "1.98.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -41,12 +41,12 @@ unnecessary_safety_comment = "deny"
 anyhow = "1.0.79"
 async-trait = "0.1.77"
 bytes = "1.5.0"
-bytesize = { version = "1.3.0", features = ["serde"] }
+bytesize = { version = "2.7.0", features = ["serde"] }
 clap = { version = "4.4.7", features = ["derive"] }
 ctrlc = { version = "3.4.6" }
 cfg_aliases = "0.2.2"
-delegate = "0.12.0"
-educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
+delegate = "0.13.5"
+educe = { version = "0.8.1", default-features = false, features = ["Debug"] }
 internet-checksum = "0.2.1"
 ipnet = { version = "2.8.0", features = ["serde"]}
 libc = "0.2.152"
@@ -64,8 +64,8 @@ route_manager = { version = "0.2.6", features = ["async"] }
 schemars = "1.2.1"
 serde = "1.0.189"
 serde-env = "0.3"
-serde-saphyr = "0.0.22"
-serial_test = "3.4.0"
+serde-saphyr = "1.3.0"
+serial_test = "4.0.1"
 socket2 = "0.6.0"
 # Pinned: 0.14.2 leaks `#[cfg(feature = "nesting")]` into the `Patch` derive
 # expansion, tripping `unexpected_cfgs` in consuming crates under `-D warnings`.
