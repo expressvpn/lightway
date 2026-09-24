@@ -191,6 +191,9 @@ impl NetworkSignals {
 #[educe(Debug)]
 pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Outside (wire) MTU
+    ///
+    /// A transport may override this per connection; see
+    /// [`io::outside::OutsideIO::required_outside_mtu`].
     pub outside_mtu: usize,
 
     /// Alternate Inside IO to use
@@ -273,6 +276,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     pub expresslane_metrics: Option<lightway_core::ExpresslaneMetricsType>,
 
     /// Enable PMTU discovery for Udp connections
+    ///
+    /// A transport may override this per connection; see
+    /// [`io::outside::OutsideIO::required_outside_mtu`].
     pub enable_pmtud: bool,
 
     /// Base MTU for PMTU discovery
@@ -1161,6 +1167,23 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     }
 }
 
+/// Resolve a connection's outside-IO settings from its transport's required
+/// MTU, falling back to the client-wide config.
+///
+/// A transport that fixes the size of the frames it can carry owns path-MTU
+/// discovery for the connection, so Lightway's own probing is turned off for
+/// it.
+fn effective_outside_io_settings(
+    required: Option<usize>,
+    config_mtu: usize,
+    config_pmtud: bool,
+) -> (usize, bool) {
+    match required {
+        Some(mtu) => (mtu, false),
+        None => (config_mtu, config_pmtud),
+    }
+}
+
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -1261,6 +1284,20 @@ pub async fn connect<
             }
         };
 
+    let required_outside_mtu = outside_io.required_outside_mtu();
+    let (outside_mtu, enable_pmtud) = effective_outside_io_settings(
+        required_outside_mtu,
+        config.outside_mtu,
+        config.enable_pmtud,
+    );
+
+    if required_outside_mtu.is_some() {
+        tracing::info!(
+            outside_mtu,
+            "Transport requires its own outside MTU; PMTUD disabled for this connection"
+        );
+    }
+
     let (event_cb, event_stream) = EventStreamCallback::new();
 
     let (ticker, ticker_task) = ConnectionTicker::new();
@@ -1323,10 +1360,7 @@ pub async fn connect<
 
     let conn_builder = ctx_builder
         .build()
-        .start_connect(
-            outside_io.clone().into_io_send_callback(),
-            config.outside_mtu,
-        )?
+        .start_connect(outside_io.clone().into_io_send_callback(), outside_mtu)?
         .with_auth(auth)
         .with_event_cb(Box::new(event_cb))
         .with_inside_pkt_codec(inside_io_codec)
@@ -1334,7 +1368,7 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
-        .when(connection_type.is_datagram() && config.enable_pmtud, |b| {
+        .when(connection_type.is_datagram() && enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
         .with_pq_crypto(config.keyshare.into());
@@ -1371,7 +1405,7 @@ pub async fn connect<
 
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),
-        config.outside_mtu,
+        outside_mtu,
         connection_type,
         outside_io.clone(),
         keepalive.clone(),
@@ -2264,5 +2298,17 @@ mod tests {
         let (_route_rx, transition_rx) = signals.wake_sources();
 
         assert!(transition_rx.is_none());
+    }
+
+    #[test_case(None, 1500, true => (1500, true) ; "no required mtu uses config unchanged")]
+    #[test_case(None, 1500, false => (1500, false) ; "no required mtu uses config pmtud off")]
+    #[test_case(Some(1200), 1500, true => (1200, false) ; "required mtu forces pmtud off even when config enables it")]
+    #[test_case(Some(1200), 1500, false => (1200, false) ; "required mtu keeps pmtud off when config already disables it")]
+    fn test_effective_outside_io_settings(
+        required: Option<usize>,
+        config_mtu: usize,
+        config_pmtud: bool,
+    ) -> (usize, bool) {
+        effective_outside_io_settings(required, config_mtu, config_pmtud)
     }
 }
