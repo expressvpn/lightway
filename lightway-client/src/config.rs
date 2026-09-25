@@ -220,6 +220,16 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub route_mode: RouteMode,
 
+    #[cfg(desktop)]
+    #[patch(attribute(clap(long, num_args = 0..=1, default_missing_value = "true")))]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = r#"Route all IPv6 traffic into a blackhole so it cannot bypass the
+    tunnel. Applies to route modes default and lan."#
+    ))]
+    #[schemars(extend("x-cfg" = "desktop"))]
+    pub block_ipv6: bool,
+
     #[cfg(linux)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(long)))]
@@ -556,6 +566,8 @@ impl Default for Config {
             enable_batch_receive: false,
             #[cfg(desktop)]
             route_mode: RouteMode::default(),
+            #[cfg(desktop)]
+            block_ipv6: true,
             #[cfg(linux)]
             fwmark: 0,
             #[cfg(desktop)]
@@ -839,6 +851,33 @@ mod tests {
 
         assert_eq!(config.server.is_empty(), !has_top_level_server);
         assert_eq!(config.servers.len(), servers_len);
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn block_ipv6_defaults_on() {
+        assert!(Config::default().block_ipv6);
+    }
+
+    #[cfg(desktop)]
+    #[test_case(&["lightway-client"], true ; "absent keeps it on")]
+    #[test_case(&["lightway-client", "--block-ipv6"], true ; "bare flag keeps it on")]
+    #[test_case(&["lightway-client", "--block-ipv6", "false"], false ; "value turns it off")]
+    #[test_case(&["lightway-client", "--block-ipv6=false"], false ; "equals form turns it off")]
+    fn block_ipv6_from_cli(args: &[&str], expected: bool) {
+        let mut config = Config::default();
+        config.apply(ConfigPatch::try_parse_from(args).unwrap());
+        assert_eq!(config.block_ipv6, expected);
+    }
+
+    #[cfg(desktop)]
+    #[test_case("log_level: info", true ; "absent keeps it on")]
+    #[test_case("block_ipv6: true", true ; "file keeps it on")]
+    #[test_case("block_ipv6: false", false ; "file turns it off")]
+    fn block_ipv6_from_file(yaml: &str, expected: bool) {
+        let mut config = Config::default();
+        config.apply(serde_saphyr::from_str::<ConfigPatch>(yaml).unwrap());
+        assert_eq!(config.block_ipv6, expected);
     }
 
     fn get_byte_pattern() -> String {
