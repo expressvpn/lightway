@@ -13,6 +13,9 @@ use windows_sys::Win32::Foundation::ERROR_OBJECT_ALREADY_EXISTS;
 #[cfg(windows)]
 use crate::platform::windows::utils;
 
+pub mod repin;
+pub use repin::{RepinMode, RepinState};
+
 // LAN networks for RouteMode::Lan
 const LAN_NETWORKS: [(IpAddr, u8); 5] = [
     (
@@ -74,6 +77,10 @@ pub enum RoutingTableError {
     AsyncRoutingManagerError(std::io::Error),
     #[error("Failed to Add {0}: {1}")]
     AddRouteError(Route, std::io::Error),
+    #[error("Failed to add server route (fatal): {0}")]
+    ServerRouteAddFailed(std::io::Error),
+    #[error("Tracked server route is missing (fatal): {0}")]
+    ServerRouteMissing(IpAddr),
     #[error("Default interface not found: {0}")]
     DefaultInterfaceNotFound(std::io::Error),
     #[error("Default route not found")]
@@ -90,6 +97,16 @@ pub enum RoutingTableError {
     RoutingManagerError(std::io::Error),
     #[error("Server route already exists, try modifying it instead")]
     ServerRouteAlreadyExists,
+}
+
+impl RoutingTableError {
+    /// Errors that stop the VPN instead of being retried with back-off.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            RoutingTableError::ServerRouteAddFailed(_) | RoutingTableError::ServerRouteMissing(_)
+        )
+    }
 }
 
 /// Returns the host prefix length for an IP address
@@ -126,6 +143,7 @@ struct RouteManagerInner {
     vpn_routes: Vec<Route>,
     lan_routes: Vec<Route>,
     server_route: Option<Route>,
+    repin_mode: RepinMode,
 }
 
 impl RouteManager {
@@ -186,11 +204,19 @@ pub struct RouteUpdater {
 impl RouteUpdater {
     /// Refresh the server route if the default route changed (a no-op in
     /// NoExec mode). Returns whether the server route was actually replaced.
+    /// Errors classified fatal by [`RoutingTableError::is_fatal`] stop the
+    /// VPN; the caller retries everything else with back-off.
     pub async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
         if self.inner.routing_mode == RouteMode::NoExec {
             return Ok(false);
         }
         self.inner.check_and_update_server_route().await
+    }
+
+    /// Delegate a failed re-pin to the mode handler, which updates the retry
+    /// deadline on `state` and logs at the appropriate level.
+    pub fn on_repin_failure(&self, state: &mut RepinState, error: &RoutingTableError) {
+        RepinMode::on_failure(state, error);
     }
 }
 
@@ -217,6 +243,10 @@ impl RouteManagerInner {
             vpn_routes: Vec::with_capacity(TUNNEL_ROUTES.len() + 1),
             lan_routes: Vec::with_capacity(LAN_NETWORKS.len()),
             server_route: None,
+            repin_mode: cfg_select! {
+                apple => { RepinMode::Always }
+                _ =>     { RepinMode::OnRouteChange }
+            },
         })
     }
 
@@ -395,6 +425,25 @@ impl RouteManagerInner {
         Ok(())
     }
 
+    /// Updates the server route by deleting the old route first, then adding the new one.
+    /// Returns ServerRouteAddFailed if adding the new route fails (stops the VPN immediately).
+    /// Other errors retry with exponential back-off. This ensures we never leave the server
+    /// route in an inconsistent state.
+    async fn update_server_route(&mut self, new_route: Route) -> Result<(), RoutingTableError> {
+        if let Some(old_route) = self.server_route.clone()
+            && self.route_manager_async.delete(&old_route).await.is_ok()
+        {
+            self.server_route = None;
+        }
+        self.add_route(&new_route).await.map_err(|e| {
+            RoutingTableError::ServerRouteAddFailed(std::io::Error::other(format!(
+                "Server route add failed: {e:?}"
+            )))
+        })?;
+        self.server_route = Some(new_route);
+        Ok(())
+    }
+
     /// Adds LAN Route and stores it
     async fn add_route_lan(&mut self, route: Route) -> Result<(), RoutingTableError> {
         self.add_route(&route).await?;
@@ -498,54 +547,67 @@ impl RouteManagerInner {
     }
 
     /// Check if server route needs updating due to network changes. Returns
-    /// whether the server route was actually replaced.
+    /// whether the server route was actually replaced. Errors classified
+    /// fatal by [`RoutingTableError::is_fatal`] stop the VPN; the caller
+    /// retries everything else with exponential back-off.
     async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
+        // The tracked server route is guaranteed Some by `install_routes()`
+        // and preserved by `update_server_route()` (which fatals on a failed
+        // add). None means the invariant is broken and there is no trusted
+        // route to reinstall from, so fail fatally instead of silently
+        // degrading.
+        let Some(server_route) = self.server_route.clone() else {
+            return Err(RoutingTableError::ServerRouteMissing(self.server_ip));
+        };
+        let server_gateway = server_route.gateway();
+        let server_if_index = server_route.if_index();
+
         // Find the current default route to the server
         let server_ip = self.server_ip;
         let current_route = self.find_best_default_route(&server_ip)?;
         let current_gateway = current_route.gateway();
         let current_if_index = current_route.if_index();
 
-        if let Some(server_route) = &self.server_route {
-            let server_gateway = server_route.gateway();
-            let server_if_index = server_route.if_index();
+        // Check if the route to the server has changed
+        let route_changed =
+            server_gateway != current_gateway || server_if_index != current_if_index;
 
-            // Check if the route to the server has changed
-            if server_gateway != current_gateway || server_if_index != current_if_index {
-                tracing::debug!(
-                    "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
-                    server_gateway,
-                    server_if_index,
-                    current_gateway,
-                    current_if_index
-                );
-
-                // Update server route with new gateway/interface
-                if let Some(old_route) = self.server_route.take() {
-                    // Remove old route
-                    let _ = self.route_manager_async.delete(&old_route).await;
-                }
-
-                // Add new route with current gateway and interface
-                let prefix = host_prefix_len(&self.server_ip);
-                let mut new_server_route = Route::new(self.server_ip, prefix);
-                if let Some(if_index) = current_if_index {
-                    new_server_route = new_server_route.with_if_index(if_index);
-                }
-                if let Some(gateway) = current_gateway {
-                    new_server_route = new_server_route.with_gateway(gateway);
-                }
-                #[cfg(windows)]
-                let new_server_route = new_server_route.with_metric(0);
-
-                self.add_route_server(new_server_route).await?;
-
-                tracing::info!("Updated server route for network change");
-                return Ok(true);
-            }
+        if !self.repin_mode.needs_repin(route_changed) {
+            return Ok(false);
         }
 
-        Ok(false)
+        if route_changed {
+            tracing::debug!(
+                "Default route changed - old (interface, gateway): ({:?}, {:?}), new (interface, gateway): ({:?}, {:?})",
+                server_gateway,
+                server_if_index,
+                current_gateway,
+                current_if_index
+            );
+        } else {
+            tracing::debug!(
+                "Re-pinning server route with unchanged (interface, gateway): ({:?}, {:?})",
+                current_if_index,
+                current_gateway
+            );
+        }
+
+        // Create new route with current gateway and interface
+        let prefix = host_prefix_len(&self.server_ip);
+        let mut new_server_route = Route::new(self.server_ip, prefix);
+        if let Some(if_index) = current_if_index {
+            new_server_route = new_server_route.with_if_index(if_index);
+        }
+        if let Some(gateway) = current_gateway {
+            new_server_route = new_server_route.with_gateway(gateway);
+        }
+        #[cfg(windows)]
+        let new_server_route = new_server_route.with_metric(0);
+
+        self.update_server_route(new_server_route).await?;
+
+        tracing::info!("Updated server route for network change");
+        Ok(true)
     }
 }
 
@@ -1079,9 +1141,12 @@ mod tests {
         assert!(inner.server_route.is_some());
         let initial_server_route = inner.server_route.as_ref().unwrap().clone();
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
@@ -1202,9 +1267,12 @@ mod tests {
         assert_eq!(initial_server_route.destination(), EXTERNAL_IP_V6);
         assert_eq!(initial_server_route.prefix(), Ipv6Addr::BITS as u8);
 
-        // Test check_and_update_server_route when no change is needed
+        // Test check_and_update_server_route when no change is needed but repin in MacOS
         let result = inner.check_and_update_server_route().await;
-        assert!(matches!(result, Ok(false)));
+        cfg_select! {
+            macos => { assert!(matches!(result, Ok(true))); }
+            _ =>     { assert!(matches!(result, Ok(false))); }
+        }
 
         // Server route should remain unchanged
         assert!(inner.server_route.is_some());
