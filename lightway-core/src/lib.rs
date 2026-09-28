@@ -31,7 +31,7 @@ pub use cipher::Cipher;
 pub use connection::{
     ClientConnectionBuilder, Connection, ConnectionActivity, ConnectionBuilderError,
     ConnectionError, ConnectionResult, Event, EventCallback, EventCallbackArg, ExpresslaneState,
-    ServerConnectionBuilder, State,
+    InvalidPacketError, ServerConnectionBuilder, State,
     dplpmtud::{State as PmtudState, Status as PmtudStatus, Timer as DplpmtudTimer},
     expresslane::*,
 };

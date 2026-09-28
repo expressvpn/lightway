@@ -24,6 +24,11 @@ pub(crate) fn ipv4_is_valid_packet(buf: &[u8]) -> bool {
     ip_version == 4
 }
 
+/// Whether `buf` starts with an IPv6 header, i.e. its version nibble is 6.
+pub(crate) fn ipv6_is_valid_packet(buf: &[u8]) -> bool {
+    buf.first().is_some_and(|first_byte| first_byte >> 4 == 6)
+}
+
 // Structure to calculate incremental checksum
 struct Checksum(u16);
 
@@ -288,6 +293,21 @@ mod tests {
     #[test_case(SOURCE_2_DEST_2 => true; "SOURCE_2_TO_DEST_2")]
     fn test_ipv4_is_valid_packet(buf: &[u8]) -> bool {
         ipv4_is_valid_packet(buf)
+    }
+
+    #[test_case(&[] => false; "empty")]
+    #[test_case(&[0x40] => false; "v4")]
+    #[test_case(&[0x60] => true; "v6")]
+    #[test_case(&[0xff] => false; "garbage")]
+    fn test_ipv6_is_valid_packet(buf: &[u8]) -> bool {
+        ipv6_is_valid_packet(buf)
+    }
+
+    #[test_case(&[0x60, 0, 0, 0] => matches crate::connection::InvalidPacketError::UnsupportedIpv6Packet; "v6 is unsupported")]
+    #[test_case(&[0xff] => matches crate::connection::InvalidPacketError::InvalidIpv4Packet; "garbage is invalid ipv4")]
+    #[test_case(&[] => matches crate::connection::InvalidPacketError::InvalidIpv4Packet; "empty is invalid ipv4")]
+    fn test_invalid_packet_error_for_non_ipv4(buf: &[u8]) -> crate::connection::InvalidPacketError {
+        crate::connection::InvalidPacketError::for_non_ipv4(buf)
     }
 
     #[test]
