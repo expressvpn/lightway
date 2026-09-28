@@ -25,8 +25,8 @@ Until then, Lightway should be considered IPv4-focused, and deployments should b
 
 ## Firewall Configuration
 
-The Lightway client does not configure or manage firewall rules.
-If you are using the Lightway client, you are responsible for ensuring that appropriate firewall rules are in place, including (but not limited to):
+The Lightway server/client does not configure or manage firewall rules.
+If you are using the Lightway server/client, you are responsible for ensuring that appropriate firewall rules are in place, including (but not limited to):
 
  - Applying any required rate limiting
  - Blocking or restricting IPv6 traffic
