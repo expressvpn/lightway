@@ -52,12 +52,6 @@ rustPlatform.buildRustPackage {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
-    # boring is a git dependency, not a registry crate, so Cargo.lock has no
-    # checksum for it. Nix's importCargoLock needs an explicit hash here.
-    # One entry covers both `boring` and `boring-sys` since they share a git source.
-    outputHashes = {
-      "boring-5.1.0" = "sha256-4yrvuS2wk9R2IMztzSCaNOVJypXRRkcfwINbFrMZwXA=";
-    };
   };
 
   # Features use the pkg/feature form: plain --features only applies to the

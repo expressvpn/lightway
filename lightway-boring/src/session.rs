@@ -476,8 +476,9 @@ where
     }
 }
 
-// Declared by hand: boring-sys at the pinned revision does not bind the DTLS
-// timeout helpers, so we link BoringSSL's exported symbols directly.
+// Declared by hand: BoringSSL's ssl.h only forward-declares `struct timeval`
+// on Windows, so bindgen's `boring_sys::timeval` is opaque there. Bind with
+// `libc::timeval` instead, which has the right layout on every target.
 unsafe extern "C" {
     /// Ref: <https://github.com/google/boringssl/blob/master/include/openssl/ssl.h> (DTLSv1_get_timeout)
     fn DTLSv1_get_timeout(ssl: *const boring_sys::SSL, out: *mut libc::timeval) -> i32;
