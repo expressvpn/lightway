@@ -25,7 +25,13 @@ impl<T: Send + Sync> Connection for Weak<Mutex<lightway_core::Connection<Connect
 
 pub trait SleepManager: Send {
     fn sleep_for_interval(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
-    fn sleep_for_timeout(&self) -> impl std::future::Future<Output = ()> + std::marker::Send;
+    /// Sleep for the reply timeout of a pending keepalive. `short_timeout` is
+    /// true when the pending keepalive was triggered by a network change
+    /// notification, allowing a shorter timeout for such probes.
+    fn sleep_for_timeout(
+        &self,
+        short_timeout: bool,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn continuous(&self) -> bool;
 }
 
@@ -35,6 +41,12 @@ pub struct Config {
     pub timeout: Duration,
     pub continuous: bool,
     pub tracer_trigger_timeout: Option<Duration>,
+    /// Reply timeout for keepalives triggered by a network change notification.
+    /// Network-change events are often spurious (e.g. the platform reporting a
+    /// path update for an unrelated interface), so callers may want a shorter
+    /// timeout here to bound the delay before escalating to a reconnect when
+    /// the path really is dead. `None` falls back to `timeout`.
+    pub network_change_timeout: Option<Duration>,
 }
 
 impl SleepManager for Config {
@@ -42,8 +54,13 @@ impl SleepManager for Config {
         tokio::time::sleep(self.interval).await
     }
 
-    async fn sleep_for_timeout(&self) {
-        tokio::time::sleep(self.timeout).await
+    async fn sleep_for_timeout(&self, short_timeout: bool) {
+        let timeout = if short_timeout {
+            self.network_change_timeout.unwrap_or(self.timeout)
+        } else {
+            self.timeout
+        };
+        tokio::time::sleep(timeout).await
     }
 
     fn continuous(&self) -> bool {
@@ -148,6 +165,10 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
 
     let mut state = State::Inactive;
 
+    // True while the pending/needed keepalive was triggered by a network
+    // change notification; such probes may use a shorter reply timeout.
+    let mut network_change_probe = false;
+
     // Unlike the interval timeout this should not be reset if the
     // select picks a different case.
     let timeout: OptionFuture<_> = None.into();
@@ -173,6 +194,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         // this branch of the select we have achieved
                         // the aim of not sending keepalives if there
                         // is active traffic.
+                        network_change_probe = false;
                         timeout.as_mut().set(None.into());
                         continue
                     },
@@ -183,11 +205,13 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                             tracing::info!("reply received turning off network change keepalives");
                             State::Inactive
                         };
+                        network_change_probe = false;
                         timeout.as_mut().set(None.into())
                     },
                     Message::NetworkChange => {
                         tracing::info!("sending keepalives because of {:?}", msg);
                         state = State::Needed;
+                        network_change_probe = true;
                         // Reset timeout to make sure we start again
                         // When there is a network interruption, mobile clients may send
                         // suspend to avoid keepalive dropping the connection.
@@ -206,6 +230,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                         // Suspend keepalives whenever the timer is active
                         tracing::info!("suspending keepalives");
                         state = State::Suspended;
+                        network_change_probe = false;
                         timeout.as_mut().set(None.into())
                     },
                 }
@@ -217,7 +242,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                 }
                 state = State::Pending;
                 if timeout.is_terminated() {
-                    let fut = config.sleep_for_timeout().fuse();
+                    let fut = config.sleep_for_timeout(network_change_probe).fuse();
                     timeout.as_mut().set(Some(fut).into());
                 }
             }
@@ -228,7 +253,7 @@ async fn keepalive<CONFIG: SleepManager, CONNECTION: Connection>(
                 }
                 state = State::Pending;
                 if timeout.is_terminated() {
-                    let fut = config.sleep_for_timeout().fuse();
+                    let fut = config.sleep_for_timeout(network_change_probe).fuse();
                     timeout.as_mut().set(Some(fut).into());
                 }
             }
@@ -315,7 +340,7 @@ mod tests {
             self.interval_trigger.notified().await;
         }
 
-        async fn sleep_for_timeout(&self) {
+        async fn sleep_for_timeout(&self, _short_timeout: bool) {
             if self.timeout.is_zero() {
                 return;
             }
