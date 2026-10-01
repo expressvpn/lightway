@@ -251,6 +251,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(linux)]
     pub fwmark: u32,
 
+    /// Disable pinning the outside UDP socket to the physical egress interface
+    /// via `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Windows).
+    #[cfg(windows)]
+    pub disable_pin_egress_interface: bool,
+
     /// DNS configuration mode
     #[cfg(desktop)]
     pub dns_config_mode: DnsConfigMode,
@@ -404,6 +409,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             route_mode: config.route_mode,
             #[cfg(linux)]
             fwmark: config.fwmark,
+            #[cfg(windows)]
+            disable_pin_egress_interface: config.disable_pin_egress_interface,
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -895,10 +902,14 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
 
 /// Single consumer for network-change wake-ups. Reacts to each one with the
 /// steps in order: refresh the server route, re-`connect()` the outside
-/// socket (Apple platforms) and, when the wake-up represents a network transition,
-/// nudge the connection-level network-change handler. On Apple platforms the
-/// nudge also fires when the server route was actually replaced (Datagram
-/// wiring only). Failed route refreshes retry from inside the select! loop so
+/// socket (Apple platforms), re-pin its egress interface to the server route's
+/// interface (Windows) and, when the wake-up represents a network transition,
+/// nudge the connection-level network-change handler. The egress pin is also
+/// applied once at startup, before the first event, so `NoExec` (which
+/// installs no server route) is protected from the first packet. On Apple
+/// platforms the nudge also fires when the server route was actually replaced
+/// (Datagram wiring only). Failed route refreshes retry from inside the
+/// select! loop so
 /// fresh wake-ups are never blocked, and a fresh event inherits the retry it
 /// supersedes, so consecutive failures keep backing off rather than resetting.
 /// Fatal routing errors ([`route_manager::RoutingTableError::is_fatal`]) are
@@ -911,12 +922,25 @@ async fn network_event_coordinator(
     mut route_rx: watch::Receiver<()>,
     mut transition_rx: Option<watch::Receiver<()>>,
     #[cfg(apple)] nudge_on_route_update: bool,
-    #[cfg(apple)] outside_io: Weak<dyn OutsideIO>,
+    #[cfg(any(apple, windows))] outside_io: Weak<dyn OutsideIO>,
+    #[cfg(windows)] pin_egress_interface: bool,
     network_change_signal: mpsc::Sender<()>,
     stop_signal: Option<mpsc::Sender<String>>,
 ) {
     tracing::info!("Reacting to network change events...");
     let mut route_repin_state: Option<RepinState> = None;
+
+    // Pin the egress up front, before the first event: in `NoExec` no server
+    // host route protects outside traffic, so the pin must be in place from
+    // the first packet; with routes installed it matches the host route's
+    // interface. Later pins refresh it on network changes.
+    #[cfg(windows)]
+    if pin_egress_interface
+        && let Some(if_index) = route_updater.server_egress_if_index()
+        && let Some(io) = outside_io.upgrade()
+    {
+        io.pin_egress_interface(if_index);
+    }
 
     loop {
         // `Some(nudge)` is a fresh network event; `None` is a retry tick.
@@ -1006,6 +1030,17 @@ async fn network_event_coordinator(
         #[cfg(apple)]
         if let Some(io) = outside_io.upgrade() {
             io.reconnect();
+        }
+
+        // Refresh the egress pin from the server route we just validated. The
+        // index usually does not change (a Wi-Fi roam keeps the adapter), but
+        // switching adapters entirely does change it.
+        #[cfg(windows)]
+        if pin_egress_interface
+            && let Some(if_index) = route_updater.server_egress_if_index()
+            && let Some(io) = outside_io.upgrade()
+        {
+            io.pin_egress_interface(if_index);
         }
 
         if state.nudge
@@ -1199,6 +1234,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         transition_rx: Option<watch::Receiver<()>>,
         #[cfg(apple)] nudge_on_route_update: bool,
         stop_signal: Option<mpsc::Sender<String>>,
+        #[cfg(windows)] pin_egress_interface: bool,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -1223,8 +1259,10 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             transition_rx,
             #[cfg(apple)]
             nudge_on_route_update,
-            #[cfg(apple)]
+            #[cfg(any(apple, windows))]
             Arc::downgrade(&self.outside_io),
+            #[cfg(windows)]
+            pin_egress_interface,
             self.network_change_signal.clone(),
             stop_signal,
         )));
@@ -2000,6 +2038,8 @@ pub async fn client<
                 #[cfg(apple)]
                 nudge_on_route_update,
                 stop_signal,
+                #[cfg(windows)]
+                !config.disable_pin_egress_interface,
             )
             .await?;
     }
