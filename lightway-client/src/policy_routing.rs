@@ -14,14 +14,15 @@
 //!
 //! # How this fixes it
 //!
-//! The tunnel routes move out of *main* into a private table, and four rules
+//! The tunnel routes move out of *main* into a private table, and five rules
 //! determine which table is consulted:
 //!
 //! ```text
-//! Rule MARKED:          fwmark <MARK>              lookup main   # (1) tunnel socket → WAN
-//! Rule SERVER:          to <SERVER_IP>/32          lookup main   # (2) rp_filter fix (see below)
-//! Rule MARKED_FALLBACK: fwmark <MARK>              unreachable   # (3) loop-breaker (see below)
-//! Rule TUNNEL:          (no condition)             lookup <TABLE># (4) all other traffic → tunnel
+//! Rule MARKED:           fwmark <MARK>              lookup main    # (1) tunnel socket → WAN
+//! Rule SERVER:           to <SERVER_IP>/32          lookup main    # (2) rp_filter fix (see below)
+//! Rule MARKED_FALLBACK:  fwmark <MARK>              unreachable    # (3) loop-breaker (see below)
+//! Rule SUPPRESS_DEFAULT: (no condition)             suppress 0/0   # (4) allow LAN routes (see below)
+//! Rule TUNNEL:           (no condition)             lookup <TABLE> # (5) all other traffic → tunnel
 //! ```
 //!
 //! The tunnel's outside socket carries `<MARK>`, so its outgoing packets hit
@@ -68,6 +69,20 @@
 //!   returns `ENETUNREACH` to the caller.  The outside I/O callback already treats
 //!   this as a transient send failure, dropping the packet cleanly and preventing
 //!   the loop.
+//!
+//! # Rule SUPPRESS_DEFAULT — prevent LAN traffic routing into tunnel
+//!
+//! Without this rule, unmarked packets for local subnets (e.g., LAN addresses)
+//! would match the default route (`0.0.0.0/0`) in *main*, which points to the
+//! WAN gateway. The kernel would then fall through to Rule TUNNEL and send all
+//! LAN traffic through the tunnel — incorrect behavior for split-tunneling.
+//!
+//! Rule SUPPRESS_DEFAULT (`suppress-prefixlen 0 lookup main`) prevents the
+//! default route from being matched, allowing more-specific routes (like
+//! `192.168.0.0/16` for LAN) to take precedence. Non-default LAN routes in
+//! *main* are used before falling through to Rule TUNNEL. Similar to WireGuard's
+//! approach, `suppress-prefixlen 0` means "match any route except the default
+//! route (0/0)".
 
 use std::net::Ipv4Addr;
 
@@ -84,12 +99,13 @@ const RT_TABLES_PATH: &str = "/etc/iproute2/rt_tables";
 ///
 /// Each rule and the tunnel routing table get a distinct name under this prefix:
 ///
-/// | Rule            | Name                                  | Visible in              |
-/// | --------------- | ------------------------------------- | ----------------------- |
-/// | MARKED          | `lightway-marked-0x<fwmark>`          | tracing log             |
-/// | SERVER          | `lightway-server`                     | tracing log             |
-/// | MARKED_FALLBACK | `lightway-marked-0x<fwmark>-fallback` | tracing log             |
-/// | TUNNEL (table)  | `lightway-tunnel`                     | tracing log + rt_tables |
+/// | Rule             | Name                                  | Visible in              |
+/// | ---------------- | ------------------------------------- | ----------------------- |
+/// | MARKED           | `lightway-marked-0x<fwmark>`          | tracing log             |
+/// | SERVER           | `lightway-server`                     | tracing log             |
+/// | MARKED_FALLBACK  | `lightway-marked-0x<fwmark>-fallback` | tracing log             |
+/// | SUPPRESS_DEFAULT | `lightway-suppress-default`           | tracing log             |
+/// | TUNNEL (table)   | `lightway-tunnel`                     | tracing log + rt_tables |
 ///
 /// Only the tunnel routing table name is registered in `/etc/iproute2/rt_tables`
 /// because ip rules themselves have no name field; the kernel identifies them by
@@ -191,6 +207,11 @@ pub const RULE_PRIORITY_SERVER: u32 = 105;
 /// See the module-level documentation for a full explanation.
 pub const RULE_PRIORITY_MARKED_FALLBACK: u32 = 107;
 
+/// Suppresses the default route (prefixlen 0) to prevent LAN traffic from being
+/// routed into the tunnel. Must be between [`RULE_PRIORITY_MARKED_FALLBACK`]
+/// and [`RULE_PRIORITY_TUNNEL`].
+pub const RULE_PRIORITY_SUPPRESS_DEFAULT: u32 = 109;
+
 /// Priority of the rule sending everything else into the tunnel table.
 pub const RULE_PRIORITY_TUNNEL: u32 = 110;
 
@@ -211,6 +232,8 @@ pub struct FWMarkConfig {
     pub rule_priority_server: u32,
     /// Priority of the loop-breaker rule (must be < `rule_priority_tunnel`).
     pub rule_priority_marked_fallback: u32,
+    /// Priority of the suppress-default rule (must be < `rule_priority_tunnel`).
+    pub rule_priority_suppress_default: u32,
     /// Priority of the catch-all tunnel rule (must be > `rule_priority_marked` and `rule_priority_marked_fallback`).
     pub rule_priority_tunnel: u32,
 }
@@ -233,6 +256,7 @@ pub struct PolicyRouting {
     rule_priority_marked: u32,
     rule_priority_server: u32,
     rule_priority_marked_fallback: u32,
+    rule_priority_suppress_default: u32,
     rule_priority_tunnel: u32,
 }
 
@@ -262,6 +286,7 @@ impl PolicyRouting {
             rule_priority_marked: cfg.rule_priority_marked,
             rule_priority_server: cfg.rule_priority_server,
             rule_priority_marked_fallback: cfg.rule_priority_marked_fallback,
+            rule_priority_suppress_default: cfg.rule_priority_suppress_default,
             rule_priority_tunnel: cfg.rule_priority_tunnel,
         })
     }
@@ -312,6 +337,18 @@ impl PolicyRouting {
         )
         .await
         .context("Failed to add fwmark fallback rule")?;
+
+        // Suppress the default route from being matched via main table,
+        // allowing more-specific routes (e.g. LAN) to be used instead.
+        // This prevents LAN traffic from being incorrectly routed into the tunnel.
+        let suppress_name = format!("{TABLE_PREFIX}-suppress-default");
+        self.add_suppress_default_rule(
+            self.rule_priority_suppress_default,
+            RT_TABLE_MAIN,
+            &suppress_name,
+        )
+        .await
+        .context("Failed to add suppress-default rule")?;
 
         // Register the tunnel table name so that `ip rule show` displays
         // `from all lookup lightway-tunnel` instead of a bare table id.
@@ -422,6 +459,62 @@ impl PolicyRouting {
             rule_name,
             "Added fwmark unreachable ip rule"
         );
+        Ok(())
+    }
+
+    /// Adds a rule that suppresses the default route from being matched.
+    ///
+    /// This allows more-specific routes from the main table (like LAN routes) to be
+    /// used instead of falling through to the tunnel. The suppress_prefixlen=0 flag
+    /// prevents the kernel from matching the default route (0.0.0.0/0), similar to
+    /// WireGuard's approach. Traffic to non-default destinations will match main
+    /// table routes before being sent to the tunnel table.
+    async fn add_suppress_default_rule(
+        &mut self,
+        priority: u32,
+        table: u32,
+        rule_name: &str,
+    ) -> Result<()> {
+        // Use the system `ip` command to set suppress_prefixlength since rtnetlink
+        // doesn't expose suppress_prefixlen directly. suppress_prefixlength 0 prevents
+        // matching the default route (0.0.0.0/0).
+        let mut child = tokio::process::Command::new("ip")
+            .args([
+                "rule",
+                "add",
+                "prio",
+                &priority.to_string(),
+                "lookup",
+                &table.to_string(),
+                "suppress_prefixlength",
+                "0",
+            ])
+            .spawn()
+            .context("Failed to spawn ip rule command")?;
+
+        let status = child
+            .wait()
+            .await
+            .context("Failed to wait for ip rule command")?;
+
+        if !status.success() {
+            anyhow::bail!("ip rule command failed with status: {}", status);
+        }
+
+        // Create a matching record in installed for cleanup purposes (so cleanup() can remove it).
+        let mut req = self
+            .handle
+            .rule()
+            .add()
+            .v4()
+            .priority(priority)
+            .table_id(table)
+            .action(RuleAction::ToTable);
+
+        let message = req.message_mut().clone();
+        self.installed.push(message);
+
+        tracing::debug!(priority, table, rule_name, "Added suppress-default ip rule");
         Ok(())
     }
 

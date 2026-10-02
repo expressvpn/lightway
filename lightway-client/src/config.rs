@@ -3,7 +3,7 @@ use super::dns_manager::DnsConfigMode;
 #[cfg(linux)]
 use super::policy_routing::{
     DEFAULT_FWMARK, RULE_PRIORITY_MARKED, RULE_PRIORITY_MARKED_FALLBACK, RULE_PRIORITY_SERVER,
-    RULE_PRIORITY_TUNNEL,
+    RULE_PRIORITY_SUPPRESS_DEFAULT, RULE_PRIORITY_TUNNEL,
 };
 #[cfg(linux)]
 use super::route_manager::FWMARK_ROUTE_TABLE;
@@ -301,6 +301,16 @@ pub struct Config {
     #[patch(attribute(serde(default)))]
     #[patch(attribute(clap(long)))]
     #[patch(
+        attribute(doc = r#"Priority of the suppress-default ip rule (route_mode=fwmark).
+        Must be less than rule_priority_tunnel."#)
+    )]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub rule_priority_suppress_default: u32,
+
+    #[cfg(linux)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(clap(long)))]
+    #[patch(
         attribute(doc = r#"Priority of the ip rule that sends all other traffic into the
         tunnel table (route_mode=fwmark). Must be greater than rule_priority_marked_fallback."#)
     )]
@@ -457,6 +467,7 @@ impl Config {
             rule_priority_marked: self.rule_priority_marked,
             rule_priority_server: self.rule_priority_server,
             rule_priority_marked_fallback: self.rule_priority_marked_fallback,
+            rule_priority_suppress_default: self.rule_priority_suppress_default,
             rule_priority_tunnel: self.rule_priority_tunnel,
         }
     }
@@ -624,7 +635,7 @@ impl Config {
                     ("rule_priority_tunnel", self.rule_priority_tunnel),
                 ] {
                     anyhow::ensure!(
-                        priority >= 1 && priority <= 32765,
+                        (1..=32765).contains(&priority),
                         "{} must be in 1..=32765 (reserved: 0, 32766=main, 32767=local)",
                         name,
                     );
@@ -645,6 +656,17 @@ impl Config {
                     "rule_priority_marked_fallback ({}) must be less than rule_priority_tunnel ({})",
                     self.rule_priority_marked_fallback,
                     self.rule_priority_tunnel,
+                );
+                // Rule SUPPRESS_DEFAULT (109) must fit between MARKED_FALLBACK and TUNNEL.
+                anyhow::ensure!(
+                    self.rule_priority_marked_fallback
+                        < crate::policy_routing::RULE_PRIORITY_SUPPRESS_DEFAULT
+                        && crate::policy_routing::RULE_PRIORITY_SUPPRESS_DEFAULT
+                            < self.rule_priority_tunnel,
+                    "rule_priority_marked_fallback ({}) and rule_priority_tunnel ({}) must allow RULE_PRIORITY_SUPPRESS_DEFAULT ({})",
+                    self.rule_priority_marked_fallback,
+                    self.rule_priority_tunnel,
+                    crate::policy_routing::RULE_PRIORITY_SUPPRESS_DEFAULT,
                 );
                 // Rule SERVER must precede Rule TUNNEL: server-IP lookups must resolve
                 // via main so that rp_filter accepts incoming server packets.
@@ -714,6 +736,8 @@ impl Default for Config {
             rule_priority_server: RULE_PRIORITY_SERVER,
             #[cfg(linux)]
             rule_priority_marked_fallback: RULE_PRIORITY_MARKED_FALLBACK,
+            #[cfg(linux)]
+            rule_priority_suppress_default: RULE_PRIORITY_SUPPRESS_DEFAULT,
             #[cfg(linux)]
             rule_priority_tunnel: RULE_PRIORITY_TUNNEL,
             #[cfg(desktop)]
