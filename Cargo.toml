@@ -61,6 +61,7 @@ rand = "0.10.0"
 rcgen = { version = "0.14", features = ["aws_lc_rs"] }
 regex = "1"
 route_manager = { version = "0.2.6", features = ["async"] }
+rtnetlink = "0.20"  # use netlink-packet-route 0.28 which as the same as route_manager using.
 schemars = "1.2.1"
 serde = "1.0.189"
 serde-env = "0.3"
@@ -73,7 +74,7 @@ socket2 = "0.6.0"
 struct-patch = { version =  "=0.14.1", features= ["substrate"] }
 test-case = "3.1.0"
 thiserror = "2.0.3"
-tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal"] }
+tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal", "process"] }
 tokio-stream = "0.1.14"
 tokio-util = "0.7.10"
 tracing = "0.1.37"
