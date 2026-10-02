@@ -296,6 +296,12 @@ impl PolicyRouting {
     /// Call this *before* any tunnel route is installed, so that no traffic can
     /// be routed into the tunnel while only a subset of the rules exists.
     pub async fn install(&mut self) -> Result<()> {
+        // Clean up any stale rules from a previous crashed/incomplete start.
+        // If the process dies after calling install() but before cleanup(), these
+        // rules would remain and cause `File exists` errors on the next start.
+        // This ensures idempotence: restarting always cleans up first.
+        self.cleanup_old_rules().await;
+
         let marked_name = format!("{TABLE_PREFIX}-marked-0x{:x}", self.fwmark);
         let server_name = format!("{TABLE_PREFIX}-server");
         let marked_fallback_name = format!("{TABLE_PREFIX}-marked-0x{:x}-fallback", self.fwmark);
@@ -516,6 +522,39 @@ impl PolicyRouting {
 
         tracing::debug!(priority, table, rule_name, "Added suppress-default ip rule");
         Ok(())
+    }
+
+    /// Attempts to delete any stale rules from a previous incomplete start.
+    ///
+    /// Called at the start of `install()` to ensure idempotence: if the process
+    /// crashes after rules are added but before cleanup() runs, the next start
+    /// will clean them up before adding new ones. Failures are logged (stale rules
+    /// are bad, but silently failing to start is worse).
+    async fn cleanup_old_rules(&self) {
+        let priorities = [
+            self.rule_priority_marked,
+            self.rule_priority_server,
+            self.rule_priority_marked_fallback,
+            self.rule_priority_suppress_default,
+            self.rule_priority_tunnel,
+        ];
+
+        for priority in priorities {
+            let mut req = self
+                .handle
+                .rule()
+                .add() // add() to get a builder, won't actually add
+                .v4()
+                .priority(priority);
+            let msg = req.message_mut().clone();
+
+            if let Err(e) = self.handle.rule().del(msg).execute().await {
+                tracing::debug!(
+                    priority,
+                    "Stale rule cleanup at priority (expected if rule doesn't exist): {e}"
+                );
+            }
+        }
     }
 
     /// Removes every rule this instance installed and unregisters the table
