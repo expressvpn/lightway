@@ -290,6 +290,10 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Base MTU for PMTU discovery
     pub pmtud_base_mtu: Option<u16>,
 
+    /// SNI (Server Name Indication) header to send during the TLS handshake.
+    /// Empty string means no SNI is sent.
+    pub sni_header: String,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -415,6 +419,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
             pmtud_base_mtu: config.pmtud_base_mtu,
+            sni_header: config.sni_header.clone(),
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -1502,6 +1507,9 @@ pub async fn connect<
         .when_some(server_dn, |b, sdn| {
             b.with_server_domain_name_validation(&sdn)
         })
+        .when(!config.sni_header.is_empty(), |b| {
+            b.with_sni_header(&config.sni_header)
+        })
         .when(connection_type.is_datagram() && enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
@@ -2066,6 +2074,27 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
+
+    #[test]
+    fn sni_header_flows_from_config_into_client_config() {
+        let mut config = config::Config::default();
+        config.sni_header = "example.com".to_string();
+
+        let client_config: ClientConfig<()> =
+            ClientConfig::try_from_reload_sig_and_config(None, config).unwrap();
+
+        assert_eq!(client_config.sni_header, "example.com");
+    }
+
+    #[test]
+    fn sni_header_defaults_to_empty_in_client_config() {
+        let config = config::Config::default();
+
+        let client_config: ClientConfig<()> =
+            ClientConfig::try_from_reload_sig_and_config(None, config).unwrap();
+
+        assert!(client_config.sni_header.is_empty());
+    }
 
     #[test_case(1, vec![], false => None)]
     #[test_case(1, vec![0], true => Some(0))]
