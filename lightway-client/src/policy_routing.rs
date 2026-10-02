@@ -83,14 +83,16 @@
 //! *main* are used before falling through to Rule TUNNEL.
 //! `suppress-prefixlen 0` means "match any route except the default route (0/0)".
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{Context, Result};
+use futures::TryStreamExt;
 // Use rtnetlink's re-export rather than depending on netlink-packet-route
 // directly: that guarantees these types come from the exact same crate version
 // rtnetlink itself was built against.
-use rtnetlink::Handle;
+use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
+use rtnetlink::{Handle, IpVersion};
 
 /// Drop-in file that registers the tunnel routing table name with iproute2.
 ///
@@ -220,6 +222,7 @@ pub struct PolicyRouting {
     rule_priority_marked_fallback: u32,
     rule_priority_suppress_default: u32,
     rule_priority_tunnel: u32,
+    cfg: FWMarkConfig,
 }
 
 impl PolicyRouting {
@@ -250,6 +253,7 @@ impl PolicyRouting {
             rule_priority_marked_fallback: cfg.rule_priority_marked_fallback,
             rule_priority_suppress_default: cfg.rule_priority_suppress_default,
             rule_priority_tunnel: cfg.rule_priority_tunnel,
+            cfg,
         })
     }
 
@@ -258,6 +262,12 @@ impl PolicyRouting {
     /// Call this *before* any tunnel route is installed, so that no traffic can
     /// be routed into the tunnel while only a subset of the rules exists.
     pub async fn install(&mut self) -> Result<()> {
+        // Clean up any stale rules from a previous crashed/incomplete start.
+        // If the process dies after calling install() but before cleanup(), these
+        // rules would remain and cause `File exists` errors on the next start.
+        // This ensures idempotence: restarting always cleans up first.
+        self.cleanup_old_rules().await;
+
         let marked_name = format!("{TABLE_PREFIX}-marked-0x{:x}", self.fwmark);
         let server_name = format!("{TABLE_PREFIX}-server");
         let marked_fallback_name = format!("{TABLE_PREFIX}-marked-0x{:x}-fallback", self.fwmark);
@@ -458,6 +468,55 @@ impl PolicyRouting {
         Ok(())
     }
 
+    /// Attempts to delete any stale Lightway rules from a previous incomplete start.
+    ///
+    /// Called at the start of `install()` to ensure idempotence: if the process
+    /// crashes after rules are added but before cleanup() runs, the next start
+    /// will clean them up before adding new ones.
+    ///
+    /// Rules are matched on their full shape (see [`classify_rule`]), never on
+    /// priority alone, so a rule that other software installed at the same
+    /// priority is left untouched. Each matching rule is deleted by sending the
+    /// exact message the kernel reported back to it, which is how
+    /// `ip rule flush` works too.
+    ///
+    /// Failures are logged (stale rules are bad, but silently failing to start
+    /// is worse).
+    async fn cleanup_old_rules(&self) {
+        let mut rules = self.handle.rule().get(IpVersion::V4).execute();
+        let mut stale = Vec::new();
+        loop {
+            match rules.try_next().await {
+                Ok(Some(rule)) => {
+                    if let Some(name) = classify_rule(&self.cfg, &rule) {
+                        stale.push((name, rule));
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("Failed to list ip rules during stale rule cleanup: {e}");
+                    break;
+                }
+            }
+        }
+
+        for (name, rule) in stale {
+            let priority = rule_priority(&rule);
+            match self.handle.rule().del(rule).execute().await {
+                Ok(()) => tracing::info!(
+                    rule = name,
+                    priority,
+                    "Removed stale policy routing rule left by a previous run"
+                ),
+                Err(e) => tracing::warn!(
+                    rule = name,
+                    priority,
+                    "Failed to remove stale policy routing rule: {e}"
+                ),
+            }
+        }
+    }
+
     /// Removes every rule this instance installed and unregisters the table
     /// name from `/etc/iproute2/rt_tables.d/lightway.conf`.
     ///
@@ -471,5 +530,280 @@ impl PolicyRouting {
         }
         unregister_rt_table();
         tracing::info!("Removed policy routing rules");
+    }
+}
+
+/// Returns the name of the Lightway rule that `rule` (as reported by the
+/// kernel) corresponds to, or `None` when it is not one of ours.
+///
+/// A rule is only recognised when *everything* matches what
+/// [`PolicyRouting::install`] would have created: priority, action, table,
+/// fwmark, destination prefix and suppress-prefixlen, plus the absence of any
+/// other selector (source prefix, interface names, uid or port ranges, ...).
+/// Sharing a priority with one of our rules is therefore never enough to be
+/// deleted.
+///
+/// The SERVER rule is matched for *any* IPv4 `/32` destination, not only the
+/// current server address, so that a stale rule for a previous server does not
+/// keep steering that address around the tunnel.
+fn classify_rule(cfg: &FWMarkConfig, rule: &RuleMessage) -> Option<&'static str> {
+    let header = &rule.header;
+    if header.family != AddressFamily::Inet || header.src_len != 0 || header.tos != 0 {
+        return None;
+    }
+
+    let mut priority = None;
+    let mut fwmark = None;
+    let mut table = u32::from(header.table);
+    let mut suppress_prefixlen = None;
+    let mut destination = None;
+    for attr in &rule.attributes {
+        match attr {
+            RuleAttribute::Priority(p) => priority = Some(*p),
+            RuleAttribute::FwMark(m) => fwmark = Some(*m),
+            RuleAttribute::Table(t) => table = *t,
+            RuleAttribute::SuppressPrefixLen(n) => suppress_prefixlen = Some(*n),
+            RuleAttribute::Destination(IpAddr::V4(a)) => destination = Some(*a),
+            RuleAttribute::Destination(IpAddr::V6(_)) => return None,
+            // Reported by the kernel for every rule; they do not narrow the match.
+            RuleAttribute::FwMask(_) | RuleAttribute::Protocol(_) => {}
+            // Attributes this crate version does not know about. The kernel
+            // only reports selectors that are actually set, so one of these
+            // could be a selector we cannot see; it is accepted anyway so a
+            // newer kernel that adds an always-present attribute does not
+            // make our own rules unrecognisable.
+            RuleAttribute::Other(_) => {}
+            // Any other selector means this rule was not installed by us.
+            _ => return None,
+        }
+    }
+
+    let priority = priority?;
+    let to_main = header.action == RuleAction::ToTable && table == RT_TABLE_MAIN;
+    let no_destination = destination.is_none() && header.dst_len == 0;
+
+    if priority == cfg.rule_priority_marked
+        && to_main
+        && fwmark == Some(cfg.fwmark)
+        && suppress_prefixlen.is_none()
+        && no_destination
+    {
+        return Some("MARKED");
+    }
+    if priority == cfg.rule_priority_server
+        && to_main
+        && fwmark.is_none()
+        && suppress_prefixlen.is_none()
+        && destination.is_some()
+        && header.dst_len == Ipv4Addr::BITS as u8
+    {
+        return Some("SERVER");
+    }
+    if priority == cfg.rule_priority_marked_fallback
+        && header.action == RuleAction::Unreachable
+        && fwmark == Some(cfg.fwmark)
+        && suppress_prefixlen.is_none()
+        && no_destination
+    {
+        return Some("MARKED_FALLBACK");
+    }
+    if priority == cfg.rule_priority_suppress_default
+        && to_main
+        && fwmark.is_none()
+        && suppress_prefixlen == Some(0)
+        && no_destination
+    {
+        return Some("SUPPRESS_DEFAULT");
+    }
+    if priority == cfg.rule_priority_tunnel
+        && header.action == RuleAction::ToTable
+        && table == u32::from(cfg.table)
+        && fwmark.is_none()
+        && suppress_prefixlen.is_none()
+        && no_destination
+    {
+        return Some("TUNNEL");
+    }
+    None
+}
+
+/// Priority attribute of a rule, for logging.
+fn rule_priority(rule: &RuleMessage) -> Option<u32> {
+    rule.attributes.iter().find_map(|attr| match attr {
+        RuleAttribute::Priority(p) => Some(*p),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rtnetlink::packet_route::route::RouteProtocol;
+
+    fn cfg() -> FWMarkConfig {
+        FWMarkConfig {
+            fwmark: DEFAULT_FWMARK,
+            table: 100,
+            rule_priority_marked: RULE_PRIORITY_MARKED,
+            rule_priority_server: RULE_PRIORITY_SERVER,
+            rule_priority_marked_fallback: RULE_PRIORITY_MARKED_FALLBACK,
+            rule_priority_suppress_default: RULE_PRIORITY_SUPPRESS_DEFAULT,
+            rule_priority_tunnel: RULE_PRIORITY_TUNNEL,
+        }
+    }
+
+    /// Builds a rule the way the kernel reports it: `table` in the header,
+    /// `FRA_PROTOCOL` always present.
+    fn rule(
+        priority: u32,
+        action: RuleAction,
+        table: u32,
+        extra: Vec<RuleAttribute>,
+    ) -> RuleMessage {
+        let mut msg = RuleMessage::default();
+        msg.header.family = AddressFamily::Inet;
+        msg.header.action = action;
+        msg.header.table = table.min(255) as u8;
+        msg.attributes.push(RuleAttribute::Priority(priority));
+        if table > 255 {
+            msg.attributes.push(RuleAttribute::Table(table));
+        }
+        msg.attributes
+            .push(RuleAttribute::Protocol(RouteProtocol::Unspec));
+        msg.attributes.extend(extra);
+        msg
+    }
+
+    #[test]
+    fn recognises_own_rules() {
+        let c = cfg();
+
+        let marked = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![
+                RuleAttribute::FwMark(c.fwmark),
+                RuleAttribute::FwMask(u32::MAX),
+            ],
+        );
+        assert_eq!(classify_rule(&c, &marked), Some("MARKED"));
+
+        let mut server = rule(
+            c.rule_priority_server,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::Destination(IpAddr::V4(Ipv4Addr::new(
+                198, 51, 100, 7,
+            )))],
+        );
+        server.header.dst_len = 32;
+        assert_eq!(
+            classify_rule(&c, &server),
+            Some("SERVER"),
+            "any /32 server IP is ours"
+        );
+
+        let fallback = rule(
+            c.rule_priority_marked_fallback,
+            RuleAction::Unreachable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::FwMark(c.fwmark)],
+        );
+        assert_eq!(classify_rule(&c, &fallback), Some("MARKED_FALLBACK"));
+
+        let suppress = rule(
+            c.rule_priority_suppress_default,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::SuppressPrefixLen(0)],
+        );
+        assert_eq!(classify_rule(&c, &suppress), Some("SUPPRESS_DEFAULT"));
+
+        let tunnel = rule(
+            c.rule_priority_tunnel,
+            RuleAction::ToTable,
+            u32::from(c.table),
+            vec![],
+        );
+        assert_eq!(classify_rule(&c, &tunnel), Some("TUNNEL"));
+    }
+
+    #[test]
+    fn ignores_foreign_rules_at_same_priority() {
+        let c = cfg();
+
+        // Same priority as MARKED, but somebody else's mark.
+        let other_mark = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::FwMark(c.fwmark + 1)],
+        );
+        assert_eq!(classify_rule(&c, &other_mark), None);
+
+        // Same priority as MARKED, no mark at all (e.g. `from all lookup main`).
+        let plain_main = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![],
+        );
+        assert_eq!(classify_rule(&c, &plain_main), None);
+
+        // Same priority as TUNNEL, but a different table.
+        let other_table = rule(
+            c.rule_priority_tunnel,
+            RuleAction::ToTable,
+            u32::from(c.table) + 1,
+            vec![],
+        );
+        assert_eq!(classify_rule(&c, &other_table), None);
+
+        // Looks like MARKED but carries an extra selector.
+        let mut with_source = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![
+                RuleAttribute::FwMark(c.fwmark),
+                RuleAttribute::Source(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))),
+            ],
+        );
+        with_source.header.src_len = 8;
+        assert_eq!(classify_rule(&c, &with_source), None);
+
+        let with_iif = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![
+                RuleAttribute::FwMark(c.fwmark),
+                RuleAttribute::Iifname("eth0".into()),
+            ],
+        );
+        assert_eq!(classify_rule(&c, &with_iif), None);
+
+        // Same priority as SERVER, but not a host route.
+        let mut subnet = rule(
+            c.rule_priority_server,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::Destination(IpAddr::V4(Ipv4Addr::new(
+                198, 51, 100, 0,
+            )))],
+        );
+        subnet.header.dst_len = 24;
+        assert_eq!(classify_rule(&c, &subnet), None);
+
+        // IPv6 rules are never ours.
+        let mut v6 = rule(
+            c.rule_priority_marked,
+            RuleAction::ToTable,
+            RT_TABLE_MAIN,
+            vec![RuleAttribute::FwMark(c.fwmark)],
+        );
+        v6.header.family = AddressFamily::Inet6;
+        assert_eq!(classify_rule(&c, &v6), None);
     }
 }
