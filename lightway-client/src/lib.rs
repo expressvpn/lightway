@@ -6,7 +6,7 @@ pub mod io;
 pub mod keepalive;
 pub mod platform;
 #[cfg(linux)]
-pub mod policy_routing;
+pub use route_manager::policy_routing;
 #[cfg(desktop)]
 pub mod route_manager;
 
@@ -1210,8 +1210,6 @@ pub struct ClientConnection<T: Send + Sync> {
     encoding_request_signal: mpsc::Sender<bool>,
     #[cfg(desktop)]
     route_manager: Option<RouteManager>,
-    #[cfg(linux)]
-    policy_routing: Option<policy_routing::PolicyRouting>,
     #[cfg(desktop)]
     dns_manager: Option<DnsManager>,
 }
@@ -1252,20 +1250,8 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             tun_peer_ip,
             tun_dns_ip
         );
-        // Under Fwmark mode the policy rules must exist *before* any tunnel
-        // route is installed. Installing the tunnel table first would leave a
-        // window where traffic can reach the tunnel table with no fwmark rule to
-        // keep the tunnel's own packets out of it.
-        #[cfg(linux)]
-        if route_mode == RouteMode::Fwmark {
-            let mut pr = policy_routing::PolicyRouting::new(fwmark_config, server_ip)?;
-            if let Err(e) = pr.install().await {
-                pr.cleanup().await;
-                return Err(e);
-            }
-            self.policy_routing = Some(pr);
-        }
-
+        // Under Fwmark mode the route manager installs the policy rules
+        // itself, before any tunnel route, and removes them on stop.
         let mut route_manager = RouteManager::new(
             route_mode,
             server_ip,
@@ -1273,7 +1259,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             tun_peer_ip,
             tun_dns_ip,
             #[cfg(linux)]
-            fwmark_config.table,
+            fwmark_config,
         )?;
         let route_updater = route_manager.start().await?;
 
@@ -1684,8 +1670,6 @@ pub async fn connect<
         encoding_request_signal: encoding_request_tx,
         #[cfg(desktop)]
         route_manager: None,
-        #[cfg(linux)]
-        policy_routing: None,
         #[cfg(desktop)]
         dns_manager: None,
     })
@@ -2077,17 +2061,16 @@ pub async fn client<
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
 
-    let result = connection.task.await?;
+    // Held without `?` so the route manager always tears routes and policy
+    // rules down, even when the connection task failed or panicked.
+    let result = match connection.task.await {
+        Ok(result) => result,
+        Err(e) => Err(anyhow::Error::from(e)),
+    };
 
     #[cfg(desktop)]
     if let Some(mut route_manager) = connection.route_manager {
         let _ = route_manager.stop().await;
-    }
-
-    // Rules come down after the routes they steer traffic to.
-    #[cfg(linux)]
-    if let Some(mut pr) = connection.policy_routing {
-        pr.cleanup().await;
     }
 
     // Dropping the monitor aborts its background task.

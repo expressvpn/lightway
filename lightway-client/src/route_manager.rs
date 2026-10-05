@@ -122,6 +122,8 @@ pub enum RoutingTableError {
     RoutingManagerError(std::io::Error),
     #[error("Server route already exists, try modifying it instead")]
     ServerRouteAlreadyExists,
+    #[error("Policy routing error: {0}")]
+    PolicyRoutingError(anyhow::Error),
 }
 
 impl RoutingTableError {
@@ -155,6 +157,11 @@ fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
 pub struct RouteManager {
     inner: Option<RouteManagerInner>,
     task: Option<JoinHandle<()>>,
+    /// Linux fwmark policy rules (`RouteMode::Fwmark` only). Created in
+    /// [`Self::new`] (no netlink connection yet), installed by [`Self::start`],
+    /// removed by [`Self::stop`].
+    #[cfg(linux)]
+    policy: Option<policy_routing::PolicyRouting>,
 }
 
 struct RouteManagerInner {
@@ -180,7 +187,7 @@ impl RouteManager {
         tun_index: u32,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
-        #[cfg(linux)] fwmark_route_table: u8,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<Self, RoutingTableError> {
         let inner = Some(RouteManagerInner::new(
             routing_mode,
@@ -189,9 +196,15 @@ impl RouteManager {
             tun_peer_ip,
             tun_dns_ip,
             #[cfg(linux)]
-            fwmark_route_table,
+            fwmark_config.table,
         )?);
-        Ok(Self { inner, task: None })
+        Ok(Self {
+            inner,
+            task: None,
+            #[cfg(linux)]
+            policy: (routing_mode == RouteMode::Fwmark)
+                .then(|| policy_routing::PolicyRouting::new(fwmark_config, server_ip)),
+        })
     }
 
     /// Install the routes required to use the tunnel (NoExec installs
@@ -203,7 +216,31 @@ impl RouteManager {
             return Err(RoutingTableError::InsufficientPermissions);
         };
 
-        inner.install_routes().await?;
+        // Under Fwmark mode the policy rules must exist *before* any tunnel
+        // route is installed. Installing the tunnel table first would leave a
+        // window where traffic can reach the tunnel table with no fwmark rule
+        // to keep the tunnel's own packets out of it.
+        #[cfg(linux)]
+        if let Some(pr) = self.policy.as_mut()
+            && let Err(e) = pr.install().await
+        {
+            pr.cleanup().await;
+            return Err(RoutingTableError::PolicyRoutingError(e));
+        }
+
+        let routes_result = inner.install_routes().await;
+
+        // start() leaves no system state behind on failure: the routes are
+        // gone when `inner` drops, so the policy rules steering traffic to
+        // them must go too.
+        #[cfg(linux)]
+        if routes_result.is_err()
+            && let Some(pr) = self.policy.as_mut()
+        {
+            pr.cleanup().await;
+        }
+
+        routes_result?;
         Ok(RouteUpdater { inner })
     }
 
@@ -219,6 +256,13 @@ impl RouteManager {
 
             // Wait till the task finishes to clear routes
             let _ = task.await;
+        }
+
+        // Rules come down after the routes they steer traffic to; the routes
+        // are gone once the aborted task above drops its RouteUpdater.
+        #[cfg(linux)]
+        if let Some(mut pr) = self.policy.take() {
+            pr.cleanup().await;
         }
 
         Ok(())
@@ -721,6 +765,30 @@ impl Drop for RouteManagerInner {
     }
 }
 
+/// Best-effort safety net: if [`RouteManager::stop`] was never called (e.g. an
+/// error return before teardown), detach a task to remove the policy rules.
+#[cfg(linux)]
+impl Drop for RouteManager {
+    fn drop(&mut self) {
+        if let Some(mut pr) = self.policy.take() {
+            // Netlink rule cleanup is async, so it cannot run inline in Drop.
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move { pr.cleanup().await });
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "RouteManager dropped without stop() outside a tokio runtime; fwmark policy rules may be left installed"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(linux)]
+pub mod policy_routing;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +809,19 @@ mod tests {
     const TUN_DNS_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4));
     const ROUTE_TEST_IP1: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
     const ROUTE_TEST_IP2: IpAddr = IpAddr::V4(Ipv4Addr::new(200, 1, 1, 1));
+
+    #[cfg(linux)]
+    fn test_fwmark_config() -> policy_routing::FWMarkConfig {
+        policy_routing::FWMarkConfig {
+            fwmark: policy_routing::DEFAULT_FWMARK,
+            table: FWMARK_ROUTE_TABLE,
+            rule_priority_marked: policy_routing::RULE_PRIORITY_MARKED,
+            rule_priority_server: policy_routing::RULE_PRIORITY_SERVER,
+            rule_priority_marked_fallback: policy_routing::RULE_PRIORITY_MARKED_FALLBACK,
+            rule_priority_suppress_default: policy_routing::RULE_PRIORITY_SUPPRESS_DEFAULT,
+            rule_priority_tunnel: policy_routing::RULE_PRIORITY_TUNNEL,
+        }
+    }
 
     /// Helper to create test routes with gateway lookup
     fn create_test_routes_with_gateway(
@@ -1146,7 +1227,7 @@ mod tests {
             TUN_PEER_IP,
             TUN_DNS_IP,
             #[cfg(linux)]
-            FWMARK_ROUTE_TABLE,
+            test_fwmark_config(),
         )
         .unwrap();
 
@@ -1185,7 +1266,7 @@ mod tests {
             TUN_PEER_IP,
             TUN_DNS_IP,
             #[cfg(linux)]
-            0,
+            test_fwmark_config(),
         )
         .unwrap();
         let updater = route_manager.start().await.unwrap();
@@ -1240,7 +1321,7 @@ mod tests {
             TUN_PEER_IP,
             TUN_DNS_IP,
             #[cfg(linux)]
-            FWMARK_ROUTE_TABLE,
+            test_fwmark_config(),
         )
         .unwrap();
 
@@ -1298,7 +1379,7 @@ mod tests {
             TUN_PEER_IP,
             TUN_DNS_IP,
             #[cfg(linux)]
-            FWMARK_ROUTE_TABLE,
+            test_fwmark_config(),
         )
         .unwrap();
 
