@@ -119,8 +119,7 @@ const TABLE_PREFIX: &str = "lightway";
 /// Duplicates are harmless because the kernel never reads this file and
 /// `unregister_rt_table` removes all matching lines on cleanup.
 fn register_rt_table(id: u32, name: &str) -> Result<()> {
-    let content = std::fs::read_to_string(RT_TABLES_PATH)
-        .unwrap_or_default();
+    let content = std::fs::read_to_string(RT_TABLES_PATH).unwrap_or_default();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -249,71 +248,82 @@ const RT_TABLE_MAIN: u32 = 254;
 /// The installed rules are remembered so that [`Self::cleanup`] removes exactly
 /// what was added, rather than deleting anything that happens to match.
 pub struct PolicyRouting {
-    handle: Handle,
+    /// Netlink connection, opened lazily by [`Self::install`]; `None` until
+    /// then, so construction stays cheap and runtime-free.
+    handle: Option<Handle>,
     /// Netlink connection task; dropping it tears the connection down.
-    _conn: tokio::task::JoinHandle<()>,
+    _conn: Option<tokio::task::JoinHandle<()>>,
     installed: Vec<RuleMessage>,
-    fwmark: u32,
-    table: u8,
     server_ipv4: Option<Ipv4Addr>,
-    rule_priority_marked: u32,
-    rule_priority_server: u32,
-    rule_priority_marked_fallback: u32,
-    rule_priority_suppress_default: u32,
-    rule_priority_tunnel: u32,
+    cfg: FWMarkConfig,
 }
 
 impl PolicyRouting {
-    /// Opens a netlink connection for rule manipulation.
+    /// Stores the fwmark parameters for rule manipulation.
     ///
     /// `server_ip` should be the VPN server's IPv4 address.  It is used to
     /// install the rp_filter-bypass rule (priority [`RULE_PRIORITY_SERVER`]).
-    /// Pass `None` for IPv6-only servers where rp_filter handling is not needed.
-    pub fn new(cfg: FWMarkConfig, server_ip: std::net::IpAddr) -> Result<Self> {
+    /// IPv6-only servers need no rp_filter handling; the address is then
+    /// simply unused.
+    pub fn new(cfg: FWMarkConfig, server_ip: std::net::IpAddr) -> Self {
         let server_ipv4 = match server_ip {
             std::net::IpAddr::V4(a) => Some(a),
             std::net::IpAddr::V6(_) => None,
         };
+        Self {
+            handle: None,
+            _conn: None,
+            installed: Vec::new(),
+            server_ipv4,
+            cfg,
+        }
+    }
+
+    /// Opens the netlink connection on first use.
+    fn connect(&mut self) -> Result<()> {
+        if self.handle.is_some() {
+            return Ok(());
+        }
         let (conn, handle, _) =
             rtnetlink::new_connection().context("Failed to open netlink connection for rules")?;
-        let conn = tokio::spawn(async move {
+        self._conn = Some(tokio::spawn(async move {
             conn.await;
-        });
-        Ok(Self {
-            handle,
-            _conn: conn,
-            installed: Vec::new(),
-            fwmark: cfg.fwmark,
-            table: cfg.table,
-            server_ipv4,
-            rule_priority_marked: cfg.rule_priority_marked,
-            rule_priority_server: cfg.rule_priority_server,
-            rule_priority_marked_fallback: cfg.rule_priority_marked_fallback,
-            rule_priority_suppress_default: cfg.rule_priority_suppress_default,
-            rule_priority_tunnel: cfg.rule_priority_tunnel,
-        })
+        }));
+        self.handle = Some(handle);
+        Ok(())
+    }
+
+    /// Returns the netlink handle; only valid once [`Self::connect`] has run.
+    fn netlink(&mut self) -> &mut Handle {
+        self.handle
+            .as_mut()
+            .expect("netlink connection is opened by install()")
     }
 
     /// Installs all policy routing rules.
     ///
-    /// Call this *before* any tunnel route is installed, so that no traffic can
-    /// be routed into the tunnel while only a subset of the rules exists.
+    /// Opens the netlink connection on the first call. Call this *before* any
+    /// tunnel route is installed, so that no traffic can be routed into the
+    /// tunnel while only a subset of the rules exists.
     pub async fn install(&mut self) -> Result<()> {
+        self.connect()?;
+
         // Clean up any stale rules from a previous crashed/incomplete start.
         // If the process dies after calling install() but before cleanup(), these
         // rules would remain and cause `File exists` errors on the next start.
         // This ensures idempotence: restarting always cleans up first.
         self.cleanup_old_rules().await;
 
-        let marked_name = format!("{TABLE_PREFIX}-marked-0x{:x}", self.fwmark);
+        let marked_name = format!("{TABLE_PREFIX}-marked-0x{:x}", self.cfg.fwmark);
         let server_name = format!("{TABLE_PREFIX}-server");
-        let marked_fallback_name = format!("{TABLE_PREFIX}-marked-0x{:x}-fallback", self.fwmark);
+        let marked_fallback_name =
+            format!("{TABLE_PREFIX}-marked-0x{:x}-fallback", self.cfg.fwmark);
         let tunnel_name = format!("{TABLE_PREFIX}-tunnel");
 
         // Rule MARKED: marked traffic (the tunnel socket) resolves via `main`.
         self.add_rule(
-            self.rule_priority_marked,
-            Some(self.fwmark),
+            self.cfg.rule_priority_marked,
+            Some(self.cfg.fwmark),
             RT_TABLE_MAIN,
             &marked_name,
         )
@@ -325,7 +335,7 @@ impl PolicyRouting {
         // reply packets (which arrive on the physical interface, not the tunnel).
         if let Some(server_ipv4) = self.server_ipv4 {
             self.add_rule_with_destination(
-                self.rule_priority_server,
+                self.cfg.rule_priority_server,
                 server_ipv4,
                 Ipv4Addr::BITS as u8,
                 RT_TABLE_MAIN,
@@ -340,8 +350,8 @@ impl PolicyRouting {
         // absent), return ENETUNREACH instead of falling through to
         // rule_priority_tunnel and starting an encapsulation loop.
         self.add_fwmark_unreachable_rule(
-            self.rule_priority_marked_fallback,
-            self.fwmark,
+            self.cfg.rule_priority_marked_fallback,
+            self.cfg.fwmark,
             &marked_fallback_name,
         )
         .await
@@ -352,7 +362,7 @@ impl PolicyRouting {
         // This prevents LAN traffic from being incorrectly routed into the tunnel.
         let suppress_name = format!("{TABLE_PREFIX}-suppress-default");
         self.add_suppress_default_rule(
-            self.rule_priority_suppress_default,
+            self.cfg.rule_priority_suppress_default,
             RT_TABLE_MAIN,
             &suppress_name,
         )
@@ -361,25 +371,25 @@ impl PolicyRouting {
 
         // Register the tunnel table name so that `ip rule show` displays
         // `from all lookup lightway-tunnel` instead of a bare table id.
-        if let Err(e) = register_rt_table(self.table as u32, &tunnel_name)
+        if let Err(e) = register_rt_table(self.cfg.table as u32, &tunnel_name)
             .with_context(|| format!("Failed to register '{tunnel_name}' in {RT_TABLES_PATH}"))
         {
             tracing::error!("Fail to register table name: {}", e);
         }
 
         self.add_rule(
-            self.rule_priority_tunnel,
+            self.cfg.rule_priority_tunnel,
             None,
-            self.table as u32,
+            self.cfg.table as u32,
             &tunnel_name,
         )
         .await
         .context("Failed to add tunnel table rule")?;
 
         tracing::info!(
-            fwmark = self.fwmark,
+            fwmark = self.cfg.fwmark,
             table = tunnel_name,
-            table_id = self.table,
+            table_id = self.cfg.table,
             "Installed policy routing rules"
         );
         Ok(())
@@ -393,7 +403,7 @@ impl PolicyRouting {
         rule_name: &str,
     ) -> Result<()> {
         let mut req = self
-            .handle
+            .netlink()
             .rule()
             .add()
             .v4()
@@ -422,7 +432,7 @@ impl PolicyRouting {
         rule_name: &str,
     ) -> Result<()> {
         let mut req = self
-            .handle
+            .netlink()
             .rule()
             .add()
             .v4()
@@ -450,7 +460,7 @@ impl PolicyRouting {
         rule_name: &str,
     ) -> Result<()> {
         let mut req = self
-            .handle
+            .netlink()
             .rule()
             .add()
             .v4()
@@ -485,7 +495,7 @@ impl PolicyRouting {
         rule_name: &str,
     ) -> Result<()> {
         let mut req = self
-            .handle
+            .netlink()
             .rule()
             .add()
             .v4()
@@ -511,25 +521,25 @@ impl PolicyRouting {
     /// crashes after rules are added but before cleanup() runs, the next start
     /// will clean them up before adding new ones. Failures are logged (stale rules
     /// are bad, but silently failing to start is worse).
-    async fn cleanup_old_rules(&self) {
+    async fn cleanup_old_rules(&mut self) {
         let priorities = [
-            self.rule_priority_marked,
-            self.rule_priority_server,
-            self.rule_priority_marked_fallback,
-            self.rule_priority_suppress_default,
-            self.rule_priority_tunnel,
+            self.cfg.rule_priority_marked,
+            self.cfg.rule_priority_server,
+            self.cfg.rule_priority_marked_fallback,
+            self.cfg.rule_priority_suppress_default,
+            self.cfg.rule_priority_tunnel,
         ];
 
         for priority in priorities {
             let mut req = self
-                .handle
+                .netlink()
                 .rule()
                 .add() // add() to get a builder, won't actually add
                 .v4()
                 .priority(priority);
             let msg = req.message_mut().clone();
 
-            if let Err(e) = self.handle.rule().del(msg).execute().await {
+            if let Err(e) = self.netlink().rule().del(msg).execute().await {
                 tracing::debug!(
                     priority,
                     "Stale rule cleanup at priority (expected if rule doesn't exist): {e}"
@@ -541,11 +551,18 @@ impl PolicyRouting {
     /// Removes every rule this instance installed and unregisters the table
     /// name from `/etc/iproute2/rt_tables`.
     ///
+    /// A no-op when [`Self::install`] never ran: no rules exist and no table
+    /// name was registered.
+    ///
     /// Failures are logged rather than propagated: leaving a stale rule behind
     /// is bad, but aborting cleanup half way through is worse.
     pub async fn cleanup(&mut self) {
-        for message in self.installed.drain(..).rev() {
-            if let Err(e) = self.handle.rule().del(message).execute().await {
+        if self.handle.is_none() {
+            return;
+        }
+        let installed = std::mem::take(&mut self.installed);
+        for message in installed.into_iter().rev() {
+            if let Err(e) = self.netlink().rule().del(message).execute().await {
                 tracing::warn!("Failed to delete ip rule during cleanup: {e}");
             }
         }
