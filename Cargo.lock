@@ -530,9 +530,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
+checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -911,9 +911,9 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly"
-version = "1.12.1"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e64c6955def7f25b8c3becad9e1762ff6abc3ea62704b0883284c771149b45a6"
+checksum = "f6debbbeb52f2c20f57ff5974f0c8de9e6d5f751c347446be3bdff51e652361e"
 dependencies = [
  "derive-deftly-macros",
  "heck",
@@ -921,9 +921,9 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly-macros"
-version = "1.12.1"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e10ac4bd47bf8d24a4852f001df23b7acbbca6e59d0adec0c2e2c4409dfe5b"
+checksum = "c5b750ecd2b841f45e77cdcc4f8423cb9503cdd579cfafaffebeb6accafbad87"
 dependencies = [
  "heck",
  "indexmap 2.14.2",
@@ -1252,9 +1252,9 @@ dependencies = [
 
 [[package]]
 name = "fs-err"
-version = "3.3.1"
+version = "3.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
 dependencies = [
  "autocfg",
 ]
@@ -1793,9 +1793,9 @@ dependencies = [
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lenient_semver"
@@ -1839,9 +1839,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libloading"
@@ -2170,9 +2170,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.3"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "wasi",
@@ -2438,9 +2438,9 @@ dependencies = [
 
 [[package]]
 name = "objc2"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
 dependencies = [
  "objc2-encode",
 ]
@@ -2716,9 +2716,9 @@ dependencies = [
 
 [[package]]
 name = "powerfmt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "ppp"
@@ -3785,9 +3785,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
  "libc",
@@ -4209,9 +4209,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -4738,18 +4738,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
 dependencies = [
  "proc-macro2",
  "quote",
