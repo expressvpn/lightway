@@ -268,15 +268,76 @@ script = '''
 script = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/scripts/ios-bindgen.sh -p tvos"
 
 [tasks.build-android]
-description = "Build android library (.aar)"
+description = "Build android library (.aar) with WolfSSL backend (default)"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
-run_task = { name = [ "build-android-uniffi-library", "bindgen-android", "bundle-aar" ] }
+run_task = { name = [ "build-android-wolfssl" ] }
+
+[tasks.build-android-wolfssl]
+description = "Build android library (.aar) with WolfSSL backend"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+run_task = { name = [ "build-android-uniffi-library-wolfssl", "bindgen-android-wolfssl", "bundle-aar-wolfssl" ] }
+
+[tasks.build-android-boringssl]
+description = "Build android library (.aar) with BoringSSL backend"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+run_task = { name = [ "build-android-uniffi-library-boringssl", "bindgen-android-boringssl", "bundle-aar-boringssl" ] }
 
 [tasks.build-android-uniffi-library]
 description = "Build native libraries for all Android architectures (x86_64, x86, armeabi-v7a, arm64-v8a)"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
 command = "cargo"
 args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}", "build", "--features", "mobile", "--release", "-p", "lightway-client", "--lib" ]
+
+[tasks.build-android-uniffi-library-wolfssl]
+description = "Build native libraries for all Android architectures with WolfSSL backend"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+command = "cargo"
+args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}-wolfssl", "build", "--features", "mobile,wolfssl", "--no-default-features", "--release", "-p", "lightway-client", "--lib" ]
+
+[tasks.build-android-uniffi-library-boringssl]
+description = "Build native libraries for all Android architectures with BoringSSL backend"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+script = '''
+# Build Rust native libraries for Android with BoringSSL
+cargo ndk --bindgen -t x86_64 -t x86 -t armeabi-v7a -t arm64-v8a -o ${ANDROID_UNIFFI_JNI_LIBS_DIR}-boringssl build --features mobile,boringssl --no-default-features --release -p lightway-client --lib
+
+# Copy NDK C++ runtime library to jniLibs for BoringSSL
+JNI_LIBS_DIR="${ANDROID_UNIFFI_JNI_LIBS_DIR}-boringssl"
+NDK_HOME="${ANDROID_NDK_HOME}"
+
+# Define architectures and their NDK paths
+declare -A arch_map=(
+    ["arm64-v8a"]="aarch64-linux-android"
+    ["armeabi-v7a"]="arm-linux-androideabi"
+    ["x86"]="i686-linux-android"
+    ["x86_64"]="x86_64-linux-android"
+)
+
+# Find the NDK prebuilt directory - should be linux-x86_64 or similar
+NDK_PREBUILT=$(find "${NDK_HOME}/toolchains/llvm/prebuilt" -maxdepth 1 -type d -name "linux-*" 2>/dev/null | head -1)
+
+if [ -z "$NDK_PREBUILT" ]; then
+    echo "ERROR: Could not find NDK prebuilt directory"
+    exit 1
+fi
+
+echo "Using NDK prebuilt: $NDK_PREBUILT"
+
+# Copy libc++_shared.so for each architecture
+for abi in "${!arch_map[@]}"; do
+    abi_path="${arch_map[$abi]}"
+    cpp_lib_path="${NDK_PREBUILT}/sysroot/usr/lib/${abi_path}/libc++_shared.so"
+
+    if [ -f "$cpp_lib_path" ]; then
+        mkdir -p "${JNI_LIBS_DIR}/${abi}"
+        cp -f "$cpp_lib_path" "${JNI_LIBS_DIR}/${abi}/"
+        chmod 755 "${JNI_LIBS_DIR}/${abi}/libc++_shared.so"
+        echo "Copied libc++_shared.so to ${abi}"
+    else
+        echo "WARNING: Could not find libc++_shared.so for ${abi} at $cpp_lib_path"
+    fi
+done
+'''
 
 [tasks.bindgen-android]
 description = "Generate bindgen kotlin classes"
@@ -292,11 +353,55 @@ cargo run --bin uniffi-bindgen generate --config lightway-client/uniffi.toml --l
 mv "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt" "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt"
 '''
 
+[tasks.bindgen-android-wolfssl]
+description = "Generate bindgen kotlin classes for WolfSSL backend"
+script = '''
+ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL="${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-wolfssl"
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/LightwayBridge.kt" ] \
+    && mv "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/LightwayBridge.kt" "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/lightway_client.kt"
+
+cargo run --bin uniffi-bindgen generate --config lightway-client/uniffi.toml --library target/aarch64-linux-android/release/liblightway_client.so --language kotlin --out-dir $ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL
+
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/lightway_client.kt" ] || { echo "Generated Kotlin file not found"; exit 1; }
+
+# Rename and follow the java convention
+mv "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/lightway_client.kt" "$ANDROID_UNIFFI_BINDINGS_DIR_WOLFSSL/lightway/LightwayBridge.kt"
+'''
+
+[tasks.bindgen-android-boringssl]
+description = "Generate bindgen kotlin classes for BoringSSL backend"
+script = '''
+ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL="${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-boringssl"
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/LightwayBridge.kt" ] \
+    && mv "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/LightwayBridge.kt" "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/lightway_client.kt"
+
+cargo run --bin uniffi-bindgen generate --config lightway-client/uniffi.toml --library target/aarch64-linux-android/release/liblightway_client.so --language kotlin --out-dir $ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL
+
+[ -f "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/lightway_client.kt" ] || { echo "Generated Kotlin file not found"; exit 1; }
+
+# Rename and follow the java convention
+mv "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/lightway_client.kt" "$ANDROID_UNIFFI_BINDINGS_DIR_BORINGSSL/lightway/LightwayBridge.kt"
+'''
+
 [tasks.bundle-aar]
 description = "Bundle and create AAR"
 cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
 command = "./gradlew"
 args = [ "build" ]
+
+[tasks.bundle-aar-wolfssl]
+description = "Bundle and create AAR for WolfSSL backend"
+env = { "ANDROID_UNIFFI_JNI_LIBS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs-wolfssl", "ANDROID_UNIFFI_BINDINGS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-wolfssl" }
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
+command = "./gradlew"
+args = [ "assembleWolfsslRelease" ]
+
+[tasks.bundle-aar-boringssl]
+description = "Bundle and create AAR for BoringSSL backend"
+env = { "ANDROID_UNIFFI_JNI_LIBS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs-boringssl", "ANDROID_UNIFFI_BINDINGS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-boringssl" }
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
+command = "./gradlew"
+args = [ "assembleBoringsslRelease" ]
 
 [tasks.clean-android]
 description = "clean artifacts for android"
