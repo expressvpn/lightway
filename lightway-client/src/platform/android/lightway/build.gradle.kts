@@ -24,13 +24,25 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+
+    flavorDimensions += "backend"
+    productFlavors {
+        create("wolfssl") {
+            dimension = "backend"
+        }
+        create("boringssl") {
+            dimension = "backend"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
 
     publishing {
-        singleVariant("release")
+        singleVariant("wolfsslRelease")
+        singleVariant("boringsslRelease")
     }
 
     lint {
