@@ -64,13 +64,14 @@ route_manager = { version = "0.2.6", features = ["async"] }
 schemars = "1.2.1"
 serde = "1.0.189"
 serde-env = "0.3"
+serde_json = "1.0.108"
 serde-saphyr = "1.3.0"
 serial_test = "4.0.1"
 socket2 = "0.6.0"
 # Pinned: 0.14.2 leaks `#[cfg(feature = "nesting")]` into the `Patch` derive
 # expansion, tripping `unexpected_cfgs` in consuming crates under `-D warnings`.
 # See https://github.com/yanganto/struct-patch/issues/185 - unpin once fixed.
-struct-patch = { version =  "=0.14.1", features= ["substrate"] }
+struct-patch = { version =  "=0.14.1", features= ["substrate", "nesting"] }
 test-case = "3.1.0"
 thiserror = "2.0.3"
 tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "signal"] }

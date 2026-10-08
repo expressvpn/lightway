@@ -79,3 +79,4 @@ async-channel = { version = "2.1.1" }
 pnet_packet.workspace = true
 test-case.workspace = true
 regex.workspace = true
+serde_json.workspace = true

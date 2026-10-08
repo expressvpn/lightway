@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         };
     }
 
-    let (mut config, startup_logs) = Config::load(None).await?;
+    let (config, startup_logs) = Config::load(None).await?;
 
     validate_configuration_file_path(&config.config_file, Validate::OwnerOnly).with_context(
         || {
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     // we need keep the PathBuf live outside
     let mut _root_ca_cert_path: Option<PathBuf> = None;
 
-    let level: tracing::level_filters::LevelFilter = config.log_level.into();
+    let level: tracing::level_filters::LevelFilter = config.log.level.into();
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(level.into())
         // https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.Builder.html#method.with_regex
@@ -123,7 +123,15 @@ async fn main() -> Result<()> {
 
     let config_reload_signal = spawn_reload_event_handler(&config, config.config_file.clone());
 
-    let servers = config.take_servers()?;
+    let servers = config.resolve_connections()?;
+
+    // Fail fast: a bad CA here would otherwise only surface as every connection
+    // failing to build, reported as "At least one server should be specified".
+    for server in servers.iter() {
+        server
+            .load_ca_content()
+            .with_context(|| format!("Invalid CA certificate for server {}", server.server))?;
+    }
 
     let client_config = lightway_client::ClientConfig::<()>::try_from_reload_sig_and_config(
         config_reload_signal,
@@ -171,9 +179,9 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
     /// Clone old, overwrite listed fields with new's values, then compare to new.
     /// Any remaining difference means a non-reloadable field changed.
     macro_rules! mask_reloadable {
-        ($old:expr, $new:expr, $($field:ident),+ $(,)?) => {{
+        ($old:expr, $new:expr, $($field:ident $(. $subfield:ident)*),+ $(,)?) => {{
             let mut masked = $old.clone();
-            $(masked.$field = $new.$field.clone();)+
+            $(masked.$field $(. $subfield)* = $new.$field $(. $subfield)* .clone();)+
             masked
         }};
     }
@@ -184,7 +192,7 @@ fn warn_non_reloadable_changes(old: &Config, new: &Config) {
 
     // List ONLY the fields that CAN be reloaded at runtime.
     // Everything else is automatically caught by the PartialEq check.
-    let masked = mask_reloadable!(old, new, log_level, enable_inside_pkt_encoding);
+    let masked = mask_reloadable!(old, new, log.level, codec.enabled);
 
     if masked != *new {
         tracing::warn!("Non-reloadable config fields changed (requires restart to take effect)");

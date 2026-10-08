@@ -1,30 +1,39 @@
 ---
-servers:
-  - server: server_udp:27690
-    mode: udp
-    server_dn: goaway.com
-    cipher: aes256
-  - server: server_tcp:27690
-    mode: tcp
-    server_dn: goaway.com
-    cipher: aes256
-ca_cert: "tests/certs/ca.crt"
-tun_name: lightway
-tun_local_ip: 100.64.0.6
-tun_peer_ip: 100.64.0.5
-tun_dns_ip: 100.64.0.1
-log_level: info
-user: user
-password: password
-outside_mtu: 1500
-enable_tun_iouring: false
-# iouring_sqpoll_idle_time: 100ms
-iouring_entry_count: 1024
-keepalive_interval: 10s
-keepalive_timeout: 60s
-enable_pmtud: false
-# sndbuf: 1.5 MiB
-# rcvbuf: 1.5 MiB
-route_mode: default
-dns_config_mode: noexec
-preferred_connection_wait_interval: 2s
+connect:
+  ca_cert: "tests/certs/ca.crt"
+  outside_mtu: 1500
+  preferred_wait_interval: 2s
+  servers:
+    - server: server_udp:27690
+      mode: udp
+      server_dn: goaway.com
+      cipher: aes256
+    - server: server_tcp:27690
+      mode: tcp
+      server_dn: goaway.com
+      cipher: aes256
+auth:
+  user: user
+  password: password
+tun:
+  name: lightway
+  local_ip: 100.64.0.6
+  peer_ip: 100.64.0.5
+  dns_ip: 100.64.0.1
+  iouring:
+    enabled: false
+    entry_count: 1024
+    # sqpoll_idle_time: 100ms
+log:
+  level: info
+keepalive:
+  interval: 10s
+  timeout: 60s
+pmtud:
+  enabled: false
+# socket:
+#   sndbuf: 1.5 MiB
+#   rcvbuf: 1.5 MiB
+network:
+  route_mode: default
+  dns_config_mode: noexec

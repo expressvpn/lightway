@@ -152,7 +152,7 @@ Use the example config from the repository:
 curl -L -o client_config.yaml https://raw.githubusercontent.com/expressvpn/lightway/main/tests/client/client_config.yaml
 ```
 
-Edit the config to update `server`, `ca_cert`, `user`, and `password` fields.
+Edit the config to update the `server` entry under `connect.servers`, plus `connect.ca_cert`, `auth.user`, and `auth.password`.
 
 ### 4. Start the Client
 
