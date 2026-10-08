@@ -161,8 +161,20 @@ fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
 /// macOS also keeps an interface-scoped default route (`RTF_IFSCOPE`) for
 /// every interface, utun included, which the kernel only uses for sockets
 /// bound to that interface. Unbound traffic never takes them.
+///
+/// Unlike the network monitor's `is_applicable_route`, no gateway is
+/// required: a point-to-point uplink (PPP, some cellular modems) has none,
+/// and on Windows `route_manager` reports an on-link next hop as an
+/// unspecified gateway. These are still working default routes, and
+/// `install_routes` already pins the server route without a gateway when
+/// the route it resolves has none. An interface is required, as at
+/// install: an entry without one (a multipath route, or an IPv4
+/// unreachable or blackhole route on Linux) cannot carry the server route.
 fn is_host_default_route(route: &Route) -> bool {
     if route.prefix() != 0 || !route.destination().is_unspecified() {
+        return false;
+    }
+    if route.if_index().is_none() {
         return false;
     }
     #[cfg(macos)]
@@ -1075,24 +1087,28 @@ mod tests {
 
     #[test]
     fn test_is_host_default_route() {
-        assert!(is_host_default_route(&Route::new(
+        assert!(is_host_default_route(
+            &Route::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+                .with_if_index(1)
+                .with_gateway(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        ));
+        // A point-to-point uplink has no gateway
+        assert!(is_host_default_route(
+            &Route::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0).with_if_index(1)
+        ));
+        // Nothing to pin the server route to (multipath, unreachable)
+        assert!(!is_host_default_route(&Route::new(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             0
         )));
-        assert!(is_host_default_route(&Route::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            0
-        )));
         // Not a default route
-        assert!(!is_host_default_route(&Route::new(
-            IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
-            1
-        )));
+        assert!(!is_host_default_route(
+            &Route::new(IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1).with_if_index(1)
+        ));
         // A netmask the route crate could not read leaves the destination behind
-        assert!(!is_host_default_route(&Route::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
-            0
-        )));
+        assert!(!is_host_default_route(
+            &Route::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 0).with_if_index(1)
+        ));
         // macOS: the interface-scoped copy of a default route only serves
         // sockets bound to that interface
         #[cfg(macos)]
