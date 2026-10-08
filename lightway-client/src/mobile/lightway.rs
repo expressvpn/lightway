@@ -553,7 +553,7 @@ struct LightwayConnection {
 struct LightwayClientConnectArgs {
     instance_id: usize,
     connect_conf: ConnectionConfig,
-    sni_header: String,
+    sni_header: Option<String>,
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
@@ -644,7 +644,7 @@ async fn lightway_client_connect(
         .when(server_dn.is_some(), |b| {
             b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
         })
-        .when(!sni_header.is_empty(), |b| b.with_sni_header(&sni_header))
+        .when_some(sni_header.as_deref(), |b, sni| b.with_sni_header(sni))
         .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
