@@ -344,14 +344,31 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
- "log",
- "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash",
  "shlex 1.3.0",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.73.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex 2.0.1",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -447,7 +464,7 @@ version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6993efa9d9f0ebf3b0c02c8e868cfe37d0854cd021d51204480a91ce23d6e444"
 dependencies = [
- "bindgen",
+ "bindgen 0.72.1",
  "cmake",
  "fs_extra",
  "fslock",
@@ -2766,12 +2783,12 @@ dependencies = [
 
 [[package]]
 name = "prettyplease"
-version = "0.2.37"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
 dependencies = [
  "proc-macro2",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -4684,9 +4701,8 @@ dependencies = [
 
 [[package]]
 name = "wolfssl"
-version = "7.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37615b1a3804f015511d20db2d7e93bae8c0b25df20742f911cd4649c045c30a"
+version = "8.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?rev=f61f262dda11466e5dc36f192e7581b6bdd4ad7f#f61f262dda11466e5dc36f192e7581b6bdd4ad7f"
 dependencies = [
  "bytes",
  "log",
@@ -4696,12 +4712,11 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "4.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee74667400bc07eb651930d58e51ee0012ea3cece1b475efc8fc498d9202bf0"
+version = "5.0.0"
+source = "git+https://github.com/expressvpn/wolfssl-rs?rev=f61f262dda11466e5dc36f192e7581b6bdd4ad7f#f61f262dda11466e5dc36f192e7581b6bdd4ad7f"
 dependencies = [
  "autotools",
- "bindgen",
+ "bindgen 0.73.2",
  "build-target",
  "cc",
  "msbuild",

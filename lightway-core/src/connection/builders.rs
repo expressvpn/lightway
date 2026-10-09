@@ -187,6 +187,17 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
+    /// Send the first ClientHello without a key share.
+    /// Currently no-op on the BoringSSL backend.
+    pub fn with_no_key_shares(self) -> Self {
+        Self {
+            session_config: self
+                .session_config
+                .with_key_share(crate::tls::KeyShareOffer::Empty),
+            ..self
+        }
+    }
+
     /// Sets SNI header of the session
     pub fn with_sni_header(self, server_hostname: &str) -> Self {
         Self {

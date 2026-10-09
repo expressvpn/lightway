@@ -1505,7 +1505,10 @@ pub async fn connect<
         .when(connection_type.is_datagram() && enable_pmtud, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
-        .with_pq_crypto(config.keyshare.into());
+        .with_pq_crypto(config.keyshare.into())
+        .when(outside_io.empty_first_key_share(), |b| {
+            b.with_no_key_shares()
+        });
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
 

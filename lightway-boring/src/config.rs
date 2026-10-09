@@ -6,6 +6,19 @@
 
 use super::{CurveGroup, SslVerifyMode};
 
+/// What a client offers in the `key_share` extension of its first ClientHello.
+///
+/// Mirrors the wolfSSL backend's type so callers can be backend-agnostic.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum KeyShareOffer {
+    /// A precomputed share for this group; see [`SessionConfig::keyshare_group`].
+    Group(CurveGroup),
+    /// No share in the first ClientHello. BoringSSL has no API for this, so
+    /// it is accepted and ignored: the ClientHello carries BoringSSL's default
+    /// share (or the one from [`SessionConfig::keyshare_group`]).
+    Empty,
+}
+
 /// Configuration for creating a session
 pub struct SessionConfig<IOCB> {
     pub io: IOCB,
@@ -87,6 +100,17 @@ impl<IOCB> SessionConfig<IOCB> {
     pub fn with_keyshare_group(mut self, group: CurveGroup) -> Self {
         self.keyshare_group = Some(group);
         self
+    }
+
+    /// Sets the first ClientHello's key share offer.
+    ///
+    /// [`KeyShareOffer::Group`] behaves like [`Self::with_keyshare_group`];
+    /// [`KeyShareOffer::Empty`] is a no-op for BoringSSL (see its docs).
+    pub fn with_key_share(self, offer: KeyShareOffer) -> Self {
+        match offer {
+            KeyShareOffer::Group(group) => self.with_keyshare_group(group),
+            KeyShareOffer::Empty => self,
+        }
     }
 
     /// Set the certificate verification mode for this session.
