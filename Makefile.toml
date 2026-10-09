@@ -297,47 +297,8 @@ args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "
 [tasks.build-android-uniffi-library-boringssl]
 description = "Build native libraries for all Android architectures with BoringSSL backend"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
-script = '''
-# Build Rust native libraries for Android with BoringSSL
-cargo ndk --bindgen -t x86_64 -t x86 -t armeabi-v7a -t arm64-v8a -o ${ANDROID_UNIFFI_JNI_LIBS_DIR}-boringssl build --features mobile,boringssl --no-default-features --release -p lightway-client --lib
-
-# Copy NDK C++ runtime library to jniLibs for BoringSSL
-JNI_LIBS_DIR="${ANDROID_UNIFFI_JNI_LIBS_DIR}-boringssl"
-NDK_HOME="${ANDROID_NDK_HOME}"
-
-# Define architectures and their NDK paths
-declare -A arch_map=(
-    ["arm64-v8a"]="aarch64-linux-android"
-    ["armeabi-v7a"]="arm-linux-androideabi"
-    ["x86"]="i686-linux-android"
-    ["x86_64"]="x86_64-linux-android"
-)
-
-# Find the NDK prebuilt directory - should be linux-x86_64 or similar
-NDK_PREBUILT=$(find "${NDK_HOME}/toolchains/llvm/prebuilt" -maxdepth 1 -type d -name "linux-*" 2>/dev/null | head -1)
-
-if [ -z "$NDK_PREBUILT" ]; then
-    echo "ERROR: Could not find NDK prebuilt directory"
-    exit 1
-fi
-
-echo "Using NDK prebuilt: $NDK_PREBUILT"
-
-# Copy libc++_shared.so for each architecture
-for abi in "${!arch_map[@]}"; do
-    abi_path="${arch_map[$abi]}"
-    cpp_lib_path="${NDK_PREBUILT}/sysroot/usr/lib/${abi_path}/libc++_shared.so"
-
-    if [ -f "$cpp_lib_path" ]; then
-        mkdir -p "${JNI_LIBS_DIR}/${abi}"
-        cp -f "$cpp_lib_path" "${JNI_LIBS_DIR}/${abi}/"
-        chmod 755 "${JNI_LIBS_DIR}/${abi}/libc++_shared.so"
-        echo "Copied libc++_shared.so to ${abi}"
-    else
-        echo "WARNING: Could not find libc++_shared.so for ${abi} at $cpp_lib_path"
-    fi
-done
-'''
+command = "cargo"
+args = [ "ndk", "--link-libcxx-shared", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}-boringssl", "build", "--features", "mobile,boringssl", "--no-default-features", "--release", "-p", "lightway-client", "--lib" ]
 
 [tasks.bindgen-android]
 description = "Generate bindgen kotlin classes"
