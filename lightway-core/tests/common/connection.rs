@@ -103,6 +103,7 @@ impl ServerIpPool<ConnectionTicker> for StaticIpPool {
             client_ip: "10.125.0.2".parse().unwrap(),
             server_ip: "10.125.0.1".parse().unwrap(),
             dns_ip: "10.125.0.1".parse().unwrap(),
+            mtu: None,
         })
     }
 
