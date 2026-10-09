@@ -367,7 +367,7 @@ pub struct Config {
     #[patch(attribute(
         doc = "SNI (Server Name Indication) header to send during the TLS handshake"
     ))]
-    pub sni_header: String,
+    pub sni_header: Option<String>,
 
     #[patch(attribute(clap(short, long)))]
     #[patch(empty_value = false)]
@@ -598,7 +598,7 @@ impl Default for Config {
             wintun_ring_capacity: ByteSize::mib(8),
             #[cfg(windows)]
             enable_dpapi: false,
-            sni_header: String::new(),
+            sni_header: None,
             accept_unknowns: false,
             unknowns: HashMap::new(),
         }
@@ -951,9 +951,9 @@ mod tests {
     }
 
     #[test]
-    fn sni_header_defaults_to_empty() {
+    fn sni_header_defaults_to_none() {
         let config = Config::default();
-        assert!(config.sni_header.is_empty());
+        assert!(config.sni_header.is_none());
     }
 
     #[test]
@@ -963,7 +963,7 @@ mod tests {
                 .unwrap();
         let mut config = Config::default();
         config.apply(matches);
-        assert_eq!(config.sni_header, "example.com");
+        assert_eq!(config.sni_header, Some("example.com".to_string()));
     }
 
     #[test]
