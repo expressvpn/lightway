@@ -5,15 +5,15 @@
 
 rustPlatform.buildRustPackage {
   pname = "cargo-ndk";
-  version = "3.5.4";
+  version = "4.1.0";
 
   src = fetchCrate {
     pname = "cargo-ndk";
-    version = "3.5.4";
-    hash = "sha256-QuuR4h17tiw32B1FOeQ2zCvhw0kbnza/B4Xr7lfcL8s=";
+    version = "4.1.0";
+    hash = "sha256-4R2JhL0XUF+MQfau06y+z8Vu3B6rqeW//5zOyNTGvis=";
   };
 
-  cargoHash = "sha256-/d0UlBFp2TmMax4bchmpVkQbixQm5QeNnpp/9X5f+9Y=";
+  cargoHash = "sha256-Irsp8/ImI+0wLfdsCcqUT8kB6aZ49rm3wPtblK8jMks=";
 
   meta.mainProgram = "cargo-ndk";
 }
