@@ -108,4 +108,9 @@ pub trait OutsideIO: Sync + Send {
     fn required_outside_mtu(&self) -> Option<usize> {
         None
     }
+
+    /// Whether the first ClientHello should go out without a key share.
+    fn empty_first_key_share(&self) -> bool {
+        false
+    }
 }
