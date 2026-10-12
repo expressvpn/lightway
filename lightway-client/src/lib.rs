@@ -707,7 +707,6 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
-    connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
@@ -741,14 +740,8 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             },
         };
 
-        let pkts = bufs
-            .iter_mut()
-            .take(count)
-            .map(|b| OutsidePacket::Wire(b, connection_type));
-        let frames_decoded = conn
-            .lock()
-            .unwrap()
-            .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
+        let pkts = bufs.iter_mut().take(count).map(OutsidePacket::Wire);
+        let frames_decoded = conn.lock().unwrap().multiple_outside_data_received(pkts)?;
 
         // The receives above go through tokio's manual readiness API
         // (`ready()` + `try_io`-style receives), which charges no
@@ -1325,7 +1318,7 @@ pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
         let mut conn = conn.lock().unwrap();
 
         if let Err(err) = conn.send_to_inside(decoded_packet) {
-            if err.is_fatal(conn.connection_type()) {
+            if conn.is_fatal(&err) {
                 return Err(err.into());
             }
             tracing::error!("Failed to process outside data: {err}");
@@ -1801,7 +1794,6 @@ pub async fn connect<
     let mut outside_io_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(outside_io_task(
         conn.clone(),
         outside_mtu,
-        connection_type,
         outside_io.clone(),
         keepalive.clone(),
         None,

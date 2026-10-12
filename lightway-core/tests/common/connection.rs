@@ -354,7 +354,7 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
                 // Inside packets can queue before the inside arm runs, so
                 // check the data traffic timestamp where they are delivered.
                 let backlog = inside_rx.len();
-                let pkt = OutsidePacket::Wire(&mut buf, connection_type);
+                let pkt = OutsidePacket::Wire(&mut buf);
                 let r = conn.outside_data_received(pkt);
 
                 assert_ge!(conn.activity().last_outside_data_received, now,
@@ -631,7 +631,7 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
 
                 let mut client = client.lock().unwrap();
 
-                let pkt = OutsidePacket::Wire(&mut buf, sock.connection_type());
+                let pkt = OutsidePacket::Wire(&mut buf);
                 if let Err(err) = client.outside_data_received(pkt) {
                     // TODO: fatal vs non-fatal;
                     panic!("{err}")

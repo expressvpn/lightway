@@ -166,13 +166,13 @@ fn handle_finalize_session_rotation(conn: &Weak<Connection>, old: SessionId, new
 fn handle_tls_keys_update_start(conn: &Weak<Connection>) {
     metrics::connection_key_update_start();
 
-    // For UDP connections begin a session ID rotation
+    // A session ID rotation only matters when packets carry the session ID
     let Some(conn) = conn.upgrade() else {
         info!("Connection has gone away");
         return;
     };
 
-    if conn.connection_type().is_datagram() {
+    if conn.transport_caps().wire_header {
         conn.begin_session_id_rotation();
     }
 }
@@ -570,7 +570,7 @@ impl ConnectionManager {
             }
         };
 
-        conn.connection_type().is_datagram().then_some(conn)
+        conn.transport_caps().wire_header.then_some(conn)
     }
 
     /// Adopt `addr` as the peer address for `session_id`, on the caller's

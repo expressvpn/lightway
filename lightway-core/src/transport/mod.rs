@@ -16,7 +16,51 @@ use crate::tls::{IOCallbackResult, Poll, ProtocolVersion};
 use crate::{OutsideIOSendCallbackArg, SessionId};
 
 /// Result of a transport operation that can need more outside I/O.
-pub type PollResult<T> = Result<Poll<T>, crate::tls::Error>;
+pub type PollResult<T> = Result<Poll<T>, TransportError>;
+
+/// An error from the transport. The transport decides whether the
+/// connection survives it.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct TransportError {
+    fatal: bool,
+    error: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl TransportError {
+    /// Wrap an error. Set `fatal` when the error ends the connection.
+    pub fn new(fatal: bool, error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self {
+            fatal,
+            error: error.into(),
+        }
+    }
+
+    /// Whether this error ends the connection.
+    pub fn is_fatal(&self) -> bool {
+        self.fatal
+    }
+}
+
+/// What a transport can and cannot do. The connection adapts its
+/// framing, queueing and error handling to these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportCaps {
+    /// Datagram framing: one Lightway frame travels per packet, and
+    /// packets are independent. A packet can be lost or reordered,
+    /// and nothing retransmits it.
+    pub lossy: bool,
+    /// Control frames are delivered in order and never lost, even when
+    /// `lossy` is set. When the outside path blocks, the connection
+    /// queues the frames that nothing above retransmits (control and
+    /// inner UDP), and does not drop them.
+    pub reliable_control: bool,
+    /// Every packet starts with a [`crate::Header`] that carries the
+    /// session id. Expresslane needs it: the header marks an
+    /// expresslane record and carries the session id that its
+    /// decryption uses.
+    pub wire_header: bool,
+}
 
 pub(crate) use tls::TlsTransport;
 
@@ -26,14 +70,25 @@ pub(crate) use tls::TlsTransport;
 /// reports `Pending*` and the caller retries after the next outside
 /// packet or tick.
 pub trait Transport: Send {
+    /// Capabilities of this transport. The connection reads them once,
+    /// when it is built.
+    fn caps(&self) -> TransportCaps;
+
+    /// Largest number of frame bytes one packet can carry. The
+    /// connection reads this only on a `lossy` transport. It stays
+    /// constant for the life of the transport.
+    fn max_frame_payload(&self) -> usize;
+
     /// Drive the handshake. `Ready` once the secure link is up.
     fn handshake(&mut self) -> PollResult<()>;
 
     /// Hand one received outside payload to the transport.
     fn feed(&mut self, buf: &[u8]);
 
-    /// Drop received bytes the transport did not consume.
-    fn discard_pending(&mut self);
+    /// The connection calls this after it processes the current packet.
+    /// A lossy transport drops what the session did not consume, because
+    /// a record never spans packets.
+    fn packet_done(&mut self);
 
     /// Read decrypted frame bytes into `into`.
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize>;
@@ -92,7 +147,8 @@ pub trait Transport: Send {
     fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr;
 
     /// Send an expresslane record, which the connection already
-    /// encrypted, beside the secure session.
+    /// encrypted, beside the secure session. The connection calls this
+    /// only on a `wire_header` transport.
     fn send_expresslane(&mut self, buf: &[u8]) -> IOCallbackResult<usize>;
 
     /// Open a batch: sends coalesce until [`Transport::batch_end`].

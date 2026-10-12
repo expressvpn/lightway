@@ -4,8 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_core::{
-    ConnectionType, Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsidePacket,
-    SessionId, Version,
+    Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsidePacket, SessionId, Version,
 };
 use std::sync::Arc;
 use tracing::warn;
@@ -31,7 +30,7 @@ impl DatagramServer {
     ///
     /// `None` means the packet was dropped and the reason was metered.
     fn parse<'pkt>(&self, buf: &'pkt mut BytesMut) -> Option<(OutsidePacket<'pkt>, Header)> {
-        let pkt = OutsidePacket::Wire(buf, ConnectionType::Datagram);
+        let pkt = OutsidePacket::Wire(buf);
         let pkt = match self.conn_manager.parse_raw_outside_packet(pkt) {
             Ok(pkt) => pkt,
             Err(e) => {
@@ -179,7 +178,7 @@ mod tests {
     use ipnet::Ipv4Net;
     use lightway_app_utils::connection_ticker_cb;
     use lightway_core::{
-        AuthMethod, IOCallbackResult, InsideIOSendCallback, InsideIpConfig,
+        AuthMethod, ConnectionType, IOCallbackResult, InsideIOSendCallback, InsideIpConfig,
         OutsideIOSendCallbackArg, Secret, ServerAuth, ServerAuthResult, ServerContextBuilder,
     };
     use std::collections::HashMap;

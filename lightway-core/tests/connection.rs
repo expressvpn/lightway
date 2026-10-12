@@ -233,7 +233,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
                         Err(e) => panic!("client recv: {e}"),
                     }
                     let mut c = client.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     c.outside_data_received(pkt).expect("outside data received");
                     if !matches!(c.state(), State::Online) {
                         continue;
@@ -390,8 +390,8 @@ async fn test_stream_connection_versioned_token() {
 
 #[test_case(None; "No server domain name")]
 #[test_case(Some(TestPki::SERVER_DOMAIN); "Valid server domain name")]
-#[cfg_attr(boringssl, test_case(Some("invalid") => panics "TLS Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
-#[cfg_attr(wolfssl, test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
+#[cfg_attr(boringssl, test_case(Some("invalid") => panics "Transport Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
+#[cfg_attr(wolfssl, test_case(Some("invalid") => panics "Transport Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
 #[tokio::test]
 async fn test_server_dn(server_dn: Option<&str>) {
     // Communicate over a local stream socket for simplicity
@@ -588,7 +588,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -784,7 +784,7 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
                     };
 
                     let mut server_conn = server_conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, server_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = server_conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -804,7 +804,7 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -996,7 +996,7 @@ async fn expresslane_health_probe(
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -1313,7 +1313,7 @@ async fn pmtud_reports_status_changes() {
                 Err(e) => panic!("client recv: {e}"),
             }
             let mut c = client.lock().unwrap();
-            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            let pkt = OutsidePacket::Wire(&mut buf);
             c.outside_data_received(pkt).expect("outside data received");
             if c.pmtud_status()
                 .is_some_and(|s| s.state == PmtudState::SearchComplete)

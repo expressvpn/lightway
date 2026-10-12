@@ -10,11 +10,13 @@ use crate::{
     PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
-    max_dtls_outside_mtu,
     plugin::PluginFactoryError,
     transport::{
         TlsTransport,
-        tls::io_adapter::{self, TlsIOAdapter},
+        tls::{
+            io_adapter::{self, TlsIOAdapter},
+            max_dtls_outside_mtu,
+        },
     },
     wire::SessionId,
 };
@@ -260,7 +262,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
-            connection_type: self.connection_type,
             protocol_version,
             outside_mtu: self.outside_mtu,
             transport,
@@ -399,7 +400,6 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
-            connection_type: self.connection_type,
             protocol_version: self.protocol_version,
             transport,
             session_id: self.session_id,

@@ -377,7 +377,10 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
         &self,
         pkt: OutsidePacket<'pkt>,
     ) -> Result<OutsidePacket<'pkt>, ContextError> {
-        Ok(pkt.apply_ingress_chain(&self.outside_plugins_instance)?)
+        Ok(pkt.apply_ingress_chain(
+            &self.outside_plugins_instance,
+            self.connection_type.is_datagram(),
+        )?)
     }
 
     /// Start accepting a server connection, creating a

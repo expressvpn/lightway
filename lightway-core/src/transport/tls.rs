@@ -8,12 +8,23 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 
-use super::Transport;
-use crate::tls::{IOCallbackResult, Poll, ProtocolVersion, Session};
+use super::{PollResult, Transport, TransportCaps, TransportError};
+use crate::tls::{ErrorKind, IOCallbackResult, Poll, ProtocolVersion, Session};
+use crate::{
+    ConnectionType, IPV4_HEADER_SIZE, MAX_DTLS_HEADER_SIZE, OutsideIOSendCallbackArg, SessionId,
+    UDP_HEADER_SIZE, wire,
+};
 use io_adapter::TlsIOAdapter;
 
-use super::PollResult;
-use crate::{ConnectionType, OutsideIOSendCallbackArg, SessionId};
+/// Default MTU size for DTLS on the outside path (max outside MTU less IP and UDP header size)
+pub(crate) const fn max_dtls_outside_mtu(outside_mtu: usize) -> usize {
+    outside_mtu - IPV4_HEADER_SIZE - UDP_HEADER_SIZE - wire::Header::WIRE_SIZE
+}
+
+/// Default MTU size for DTLS payload (max DTLS wire MTU less DTLS overheads)
+pub(crate) const fn max_dtls_mtu(outside_mtu: usize) -> usize {
+    max_dtls_outside_mtu(outside_mtu) - MAX_DTLS_HEADER_SIZE
+}
 
 /// D/TLS is a UDP based protocol and requires the application
 /// (rather than the OS as with TCP) to keep track of the need to do
@@ -51,35 +62,72 @@ impl TlsTransport {
             connection_type,
         }
     }
+
+    /// Every error ends a stream. On datagrams only these errors end
+    /// the connection.
+    fn error(&self, err: crate::tls::Error) -> TransportError {
+        use crate::tls::Error::Fatal;
+        let fatal = !self.connection_type.is_datagram()
+            || matches!(
+                err,
+                Fatal(ErrorKind::DomainNameMismatch)
+                    | Fatal(ErrorKind::DuplicateMessage)
+                    | Fatal(ErrorKind::PeerClosed)
+                    | Fatal(ErrorKind::CaCertNotAvailable)
+            );
+        #[cfg(wolfssl)]
+        let fatal = fatal || matches!(err, Fatal(ErrorKind::PeerFatalAlert));
+        TransportError::new(fatal, err)
+    }
 }
 
 impl Transport for TlsTransport {
+    fn caps(&self) -> TransportCaps {
+        let datagram = self.connection_type.is_datagram();
+        TransportCaps {
+            lossy: datagram,
+            reliable_control: !datagram,
+            wire_header: datagram,
+        }
+    }
+
+    fn max_frame_payload(&self) -> usize {
+        max_dtls_mtu(self.session.io_cb().outside_mtu)
+    }
+
     fn handshake(&mut self) -> PollResult<()> {
-        self.session.try_negotiate()
+        self.session.try_negotiate().map_err(|e| self.error(e))
     }
 
     fn feed(&mut self, buf: &[u8]) {
         self.session.io_cb_mut().recv_buf.extend_from_slice(buf);
     }
 
-    fn discard_pending(&mut self) {
-        self.session.io_cb_mut().recv_buf.clear();
+    fn packet_done(&mut self) {
+        // RFC6347 mandates each datagram should have full record and one TLS record cannot span
+        // over multiple datagrams
+        // https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+        if self.connection_type.is_datagram() {
+            self.session.io_cb_mut().recv_buf.clear();
+        }
     }
 
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize> {
-        self.session.try_read(into)
+        self.session.try_read(into).map_err(|e| self.error(e))
     }
 
     fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize> {
-        self.session.try_write(buf)
+        self.session.try_write(buf).map_err(|e| self.error(e))
     }
 
     fn shutdown(&mut self) -> PollResult<bool> {
-        self.session.try_shutdown()
+        self.session.try_shutdown().map_err(|e| self.error(e))
     }
 
     fn key_update(&mut self) -> PollResult<()> {
-        self.session.try_trigger_update_key()
+        self.session
+            .try_trigger_update_key()
+            .map_err(|e| self.error(e))
     }
 
     fn key_update_pending(&mut self) -> bool {
