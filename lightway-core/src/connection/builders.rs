@@ -13,6 +13,7 @@ use crate::{
     encapsulation::Encapsulation,
     max_dtls_outside_mtu,
     plugin::PluginFactoryError,
+    transport::{TlsTransport, tls::io_adapter::TlsIOAdapter},
     wire::SessionId,
 };
 
@@ -51,7 +52,7 @@ pub struct ClientConnectionBuilder<AppState> {
     outside_mtu: usize,
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
-    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
     encapsulation: Encapsulation,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
@@ -73,7 +74,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         let connection_type = ctx.connection_type;
         let outside_plugins = ctx.outside_plugins.build()?;
 
-        let io = super::TlsIOAdapter {
+        let io = TlsIOAdapter {
             aggressive_send: connection_type.is_datagram(),
             ..Default::default()
         };
@@ -248,6 +249,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             .ok_or(ConnectionBuilderError::AuthRequired)?;
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
+        let transport = Box::new(TlsTransport::new(session, self.connection_type));
 
         tracing::info!("New Connection");
 
@@ -255,7 +257,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             app_state,
             connection_type: self.connection_type,
             outside_mtu: self.outside_mtu,
-            session,
+            transport,
             encapsulation: self.encapsulation,
             session_id: SessionId::EMPTY,
             mode: ConnectionMode::Client {
@@ -290,7 +292,7 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     ctx: &'a ServerContext<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
-    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
     encapsulation: Encapsulation,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
@@ -314,7 +316,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let outside_mtu = MAX_OUTSIDE_MTU;
         let outside_plugins = ctx.outside_plugins.build()?;
 
-        let io = super::TlsIOAdapter::default();
+        let io = TlsIOAdapter::default();
         let encapsulation = Encapsulation::new(
             connection_type,
             true,
@@ -383,11 +385,12 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         }
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
+        let transport = Box::new(TlsTransport::new(session, self.connection_type));
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
-            session,
+            transport,
             encapsulation: self.encapsulation,
             session_id: self.session_id,
             mode: ConnectionMode::Server {
