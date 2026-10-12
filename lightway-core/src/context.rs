@@ -379,7 +379,7 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
         pkt: OutsidePacket<'pkt>,
     ) -> Result<OutsidePacket<'pkt>, ContextError> {
         match pkt {
-            OutsidePacket::Wire(buf, _) => {
+            OutsidePacket::Wire(buf) => {
                 let (buf, hdr) = parse_datagram(buf, &self.outside_plugins_instance)?;
                 Ok(OutsidePacket::Record(buf, hdr))
             }
