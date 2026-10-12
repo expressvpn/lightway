@@ -4,6 +4,8 @@
 //! records and records back into frames. It never touches the outside
 //! IO: the connection takes the records and sends them.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
 pub(crate) mod tls;
 
 use std::time::Duration;

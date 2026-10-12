@@ -63,6 +63,8 @@ pub use plugin::{
 };
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
+#[cfg(feature = "test-utils")]
+pub use transport::mock;
 pub use transport::{
     ClientKeyShare, ClientTransportArgs, ClientTransportFactory, Delivery, Poll, PollResult,
     ServerTransportBuilder, Transport, TransportArgs, TransportCaps, TransportError,
