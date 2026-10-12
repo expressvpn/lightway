@@ -18,6 +18,7 @@ mod packet;
 mod packet_codec;
 mod plugin;
 pub mod tls;
+mod transport;
 mod utils;
 mod version;
 mod wire;
@@ -60,6 +61,7 @@ pub use plugin::{
 };
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
+pub use transport::Transport;
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,

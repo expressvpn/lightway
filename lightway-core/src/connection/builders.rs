@@ -12,6 +12,10 @@ use crate::{
     context::ServerAuthArg,
     max_dtls_outside_mtu,
     plugin::PluginFactoryError,
+    transport::{
+        TlsTransport,
+        tls::io_adapter::{self, TlsIOAdapter},
+    },
     wire::SessionId,
 };
 
@@ -50,7 +54,7 @@ pub struct ClientConnectionBuilder<AppState> {
     outside_mtu: usize,
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
-    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
@@ -73,18 +77,18 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::TlsIOAdapter {
+        let io = TlsIOAdapter {
             connection_type,
             protocol_version: Version::MAXIMUM,
             aggressive_send: connection_type.is_datagram(),
             outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
+            send_buf: io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
             session_id: SessionId::EMPTY,
             outside_plugins: outside_plugins.clone(),
             #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
+            gso_buf: io_adapter::GsoBuffer::default(),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
@@ -248,6 +252,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             .ok_or(ConnectionBuilderError::AuthRequired)?;
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
+        let transport = Box::new(TlsTransport::new(session, self.connection_type));
 
         tracing::info!("New Connection");
 
@@ -258,7 +263,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             connection_type: self.connection_type,
             protocol_version,
             outside_mtu: self.outside_mtu,
-            session,
+            transport,
             session_id: SessionId::EMPTY,
             mode: ConnectionMode::Client {
                 auth_method,
@@ -293,7 +298,7 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     ctx: &'a ServerContext<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
-    session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
@@ -318,18 +323,18 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::TlsIOAdapter {
+        let io = TlsIOAdapter {
             connection_type,
             protocol_version,
             aggressive_send: false,
             outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
+            send_buf: io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
             session_id,
             outside_plugins: outside_plugins.clone(),
             #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
+            gso_buf: io_adapter::GsoBuffer::default(),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
@@ -390,12 +395,13 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         }
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
+        let transport = Box::new(TlsTransport::new(session, self.connection_type));
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
             protocol_version: self.protocol_version,
-            session,
+            transport,
             session_id: self.session_id,
             mode: ConnectionMode::Server {
                 auth: self.auth,
