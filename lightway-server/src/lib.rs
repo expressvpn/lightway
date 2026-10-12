@@ -365,7 +365,7 @@ pub(crate) fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionRe
             metrics::tun_rejected_packet_invalid_inside_packet();
         }
         Err(err) => {
-            let fatal = err.is_fatal(conn.connection_type());
+            let fatal = conn.is_fatal(&err);
             metrics::tun_rejected_packet_invalid_other(fatal);
             if fatal {
                 tracing::info!(session = ?conn.session_id(), ?err, "Inside IO error, disconnecting");
