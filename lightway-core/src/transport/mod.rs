@@ -5,6 +5,8 @@
 //! Lightway state machine and never touches the secure session or the
 //! socket.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
 pub(crate) mod tls;
 
 use std::net::SocketAddr;
