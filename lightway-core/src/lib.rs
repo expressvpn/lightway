@@ -56,12 +56,16 @@ pub use packet_codec::{
     PacketEncoderType,
 };
 pub use plugin::{
-    Plugin, PluginFactory, PluginFactoryError, PluginFactoryList, PluginFactoryType, PluginResult,
-    PluginType,
+    Plugin, PluginFactory, PluginFactoryError, PluginFactoryList, PluginFactoryType, PluginList,
+    PluginResult, PluginType,
 };
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
-pub use transport::{PollResult, Transport, TransportCaps, TransportError};
+pub use transport::{
+    ClientTransportArgs, ClientTransportFactory, PollResult, ServerTransportBuilder, Transport,
+    TransportArgs, TransportCaps, TransportError,
+    tls::{TlsClientFactory, TlsClientFactoryBuilder, TlsFactoryError, TlsServerFactory},
+};
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,

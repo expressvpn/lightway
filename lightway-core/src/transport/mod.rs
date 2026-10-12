@@ -8,12 +8,14 @@
 pub(crate) mod tls;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
 
-use crate::tls::{IOCallbackResult, Poll, ProtocolVersion};
-use crate::{OutsideIOSendCallbackArg, SessionId};
+use crate::plugin::PluginList;
+use crate::tls::{IOCallbackResult, KeyShareOffer, Poll, ProtocolVersion};
+use crate::{OutsideIOSendCallbackArg, SessionId, Version};
 
 /// Result of a transport operation that can need more outside I/O.
 pub type PollResult<T> = Result<Poll<T>, TransportError>;
@@ -61,8 +63,6 @@ pub struct TransportCaps {
     /// decryption uses.
     pub wire_header: bool,
 }
-
-pub(crate) use tls::TlsTransport;
 
 /// The transport under a connection.
 ///
@@ -159,3 +159,47 @@ pub trait Transport: Send {
     #[cfg(target_os = "linux")]
     fn batch_end(&mut self, send: bool) -> IOCallbackResult<usize>;
 }
+
+/// Handshake settings that only a client uses.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTransportArgs {
+    /// Domain name the peer's certificate must match.
+    pub domain_name: Option<String>,
+    /// Server name to announce in the handshake.
+    pub sni: Option<String>,
+    /// Key share to offer in the first handshake message. `None` keeps
+    /// the backend default.
+    pub key_share: Option<KeyShareOffer>,
+}
+
+/// Arguments that every factory needs to build one transport.
+pub struct TransportArgs {
+    /// The outside path.
+    pub outside_io: OutsideIOSendCallbackArg,
+    /// MTU of the outside path, as a whole IP packet.
+    pub outside_mtu: usize,
+    /// Lightway protocol version to stamp on the wire.
+    pub protocol_version: Version,
+    /// Session id to stamp on the wire.
+    pub session_id: SessionId,
+    /// Plugins to run on outside packets. Ingress hooks run before
+    /// the transport sees a packet. The transport runs only the egress
+    /// hooks, on every packet it sends.
+    pub outside_plugins: Arc<PluginList>,
+}
+
+/// Builds the transport for each client connection.
+pub trait ClientTransportFactory: Send + Sync {
+    /// Build a transport that connects to the peer behind `args.outside_io`.
+    fn connect(
+        &self,
+        args: TransportArgs,
+        client: ClientTransportArgs,
+    ) -> Result<Box<dyn Transport>, TransportError>;
+}
+
+/// Builds the transport for one accepted server connection, for the
+/// peer behind `args.outside_io`. A builder per connection lets a
+/// server hand over state that it created when it accepted the peer.
+pub type ServerTransportBuilder<'a> =
+    Box<dyn FnOnce(TransportArgs) -> Result<Box<dyn Transport>, TransportError> + 'a>;

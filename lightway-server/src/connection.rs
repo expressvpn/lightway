@@ -13,8 +13,8 @@ use crate::{
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
 use lightway_core::{
     ConnectionActivity, ConnectionError, ConnectionResult, OutsideIOSendCallbackArg, OutsidePacket,
-    PacketDecoderType, PacketEncoderType, ProtocolVersion, ServerContext, SessionId, State,
-    TickType, TransportCaps, Version,
+    PacketDecoderType, PacketEncoderType, ProtocolVersion, ServerTransportBuilder, SessionId,
+    State, TickType, TransportCaps, Version,
 };
 
 pub struct ConnectionState {
@@ -50,11 +50,11 @@ impl Tickable for Connection {
 
 impl Connection {
     pub fn new(
-        ctx: &ServerContext<ConnectionState>,
         manager: Arc<ConnectionManager>,
         protocol_version: Version,
         local_addr: SocketAddr,
         outside_io: OutsideIOSendCallbackArg,
+        transport: ServerTransportBuilder<'_>,
         inside_io_codec: Option<(PacketEncoderType, PacketDecoderType)>,
         event_cb: EventStreamCallback,
     ) -> Result<Arc<Self>, ConnectionManagerError> {
@@ -71,10 +71,12 @@ impl Connection {
         };
 
         let lw_conn = Mutex::new(
-            ctx.start_accept(protocol_version, outside_io)?
+            manager
+                .ctx
+                .start_accept(protocol_version, outside_io)?
                 .with_inside_pkt_codec(inside_io_codec)
                 .with_event_cb(Box::new(event_cb))
-                .accept(state)?,
+                .accept(state, transport)?,
         );
 
         let conn = Arc::new(Self {

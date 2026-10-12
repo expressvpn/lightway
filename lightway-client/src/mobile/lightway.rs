@@ -16,6 +16,7 @@ use lightway_app_utils::{
     ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
     connection_ticker_cb,
 };
+use lightway_core::TlsClientFactory;
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType, Event,
     EventCallback, IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
@@ -631,20 +632,22 @@ async fn lightway_client_connect(
         ..
     } = connect_conf;
 
+    let transport = TlsClientFactory::builder(connection_type, root_ca_cert)?
+        .with_cipher(cipher.into())?
+        .enable_pq_crypto()?
+        .build();
+
     let ctx_builder = ClientContextBuilder::new(
-        connection_type,
-        root_ca_cert,
+        Arc::new(transport),
         Some(inside_io),
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
+    )
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(connection_type.is_datagram() && enable_expresslane, |b| {
         b.with_expresslane(expresslane_keys_rotation_interval)
-    })
-    .enable_pq_crypto()?;
+    });
 
     let conn_builder = ctx_builder
         .build()

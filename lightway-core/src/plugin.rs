@@ -29,7 +29,7 @@ pub trait Plugin {
 
 /// Stores the list of plugins
 #[derive(Default)]
-pub(crate) struct PluginList {
+pub struct PluginList {
     plugins: Vec<PluginType>,
 }
 
@@ -68,7 +68,11 @@ impl PluginList {
         PluginResult::Accept
     }
 
-    pub(crate) fn do_egress(&self, data: &mut BytesMut) -> PluginResult {
+    /// Run every plugin's egress hook over `data`, in reverse order.
+    /// The run stops at the first result that is not
+    /// [`PluginResult::Accept`] and returns it. On any such result, the
+    /// caller must not send `data`.
+    pub fn do_egress(&self, data: &mut BytesMut) -> PluginResult {
         for plugin in self.plugins.iter().rev() {
             let res = plugin.egress(data);
             if !matches!(res, PluginResult::Accept) {

@@ -1,23 +1,17 @@
 use std::{num::NonZeroU16, sync::Arc};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
 use crate::{
-    AuthMethod, BuilderPredicates, ClientContext, Connection, ConnectionType, KeyShare,
+    AuthMethod, BuilderPredicates, ClientContext, ClientTransportArgs, Connection, KeyShare,
     MAX_OUTSIDE_MTU, MIN_OUTSIDE_MTU, OutsideIOSendCallbackArg, PacketDecoderType,
-    PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
+    PacketEncoderType, ServerContext, ServerIpPoolArg, ServerTransportBuilder, TransportArgs,
+    TransportError, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
     plugin::PluginFactoryError,
-    transport::{
-        TlsTransport,
-        tls::{
-            io_adapter::{self, TlsIOAdapter},
-            max_dtls_outside_mtu,
-        },
-    },
     wire::SessionId,
 };
 
@@ -36,9 +30,9 @@ pub enum ConnectionBuilderError {
     /// Invalid Outside MTU
     #[error("Unsupported Outside MTU: {0}")]
     UnsupportedOutsideMtu(usize),
-    /// Failed to create a new Session
-    #[error("TLS Error: {0}")]
-    FailedNew(#[from] crate::tls::NewSessionError),
+    /// Failed to build the transport
+    #[error("Transport Error: {0}")]
+    Transport(#[from] TransportError),
     /// Plugin factory error occurred
     #[error("PluginFactory Error: {0}")]
     PluginFactory(#[from] PluginFactoryError),
@@ -51,12 +45,12 @@ type ConnectionBuilderResult<T> = Result<T, ConnectionBuilderError>;
 
 /// Builder for a client  [`Connection`].
 pub struct ClientConnectionBuilder<AppState> {
-    connection_type: ConnectionType,
     ctx: ClientContext<AppState>,
+    outside_io: OutsideIOSendCallbackArg,
     outside_mtu: usize,
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
-    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
+    client: ClientTransportArgs,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
@@ -75,43 +69,15 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             return Err(ConnectionBuilderError::UnsupportedOutsideMtu(outside_mtu));
         }
 
-        let connection_type = ctx.connection_type;
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = TlsIOAdapter {
-            connection_type,
-            protocol_version: Version::MAXIMUM,
-            aggressive_send: connection_type.is_datagram(),
-            outside_mtu,
-            recv_buf: BytesMut::new(),
-            send_buf: io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id: SessionId::EMPTY,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: io_adapter::GsoBuffer::default(),
-        };
-        let session_config =
-            crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
-                s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
-                    .with_dtls_nonblocking(true)
-            });
-
-        // wolfSSL logs TLS secrets per session, so apply the context's key
-        // logger (if set) to this session.
-        #[cfg(all(feature = "debug", wolfssl))]
-        let session_config = match ctx.key_logger.clone() {
-            Some(k) => session_config.with_key_logger(k),
-            None => session_config,
-        };
-
         Ok(Self {
-            connection_type,
             ctx,
+            outside_io,
             outside_mtu,
-            session_config,
             auth_method: None,
+            client: ClientTransportArgs::default(),
             event_cb: None,
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
             pmtud_timer: None,
@@ -176,39 +142,29 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
     }
 
     /// Enable server domain name validation
-    pub fn with_server_domain_name_validation(self, server_dn: &str) -> Self {
-        Self {
-            session_config: self.session_config.with_checked_domain_name(server_dn),
-            ..self
-        }
+    pub fn with_server_domain_name_validation(mut self, server_dn: &str) -> Self {
+        self.client.domain_name = Some(server_dn.to_string());
+        self
     }
 
-    /// Enable Post Quantum Crypto
-    pub fn with_pq_crypto(self, keyshare: KeyShare) -> Self {
-        Self {
-            session_config: self
-                .session_config
-                .with_keyshare_group(keyshare.as_curve_group()),
-            ..self
-        }
+    /// Offer `keyshare` in the first ClientHello. On BoringSSL the group
+    /// must also be enabled with
+    /// [`crate::TlsClientFactoryBuilder::enable_pq_crypto`].
+    pub fn with_pq_crypto(mut self, keyshare: KeyShare) -> Self {
+        self.client.key_share = Some(crate::tls::KeyShareOffer::Group(keyshare.as_curve_group()));
+        self
     }
 
     /// Send the first ClientHello without a key share.
-    pub fn with_no_key_shares(self) -> Self {
-        Self {
-            session_config: self
-                .session_config
-                .with_key_share(crate::tls::KeyShareOffer::Empty),
-            ..self
-        }
+    pub fn with_no_key_shares(mut self) -> Self {
+        self.client.key_share = Some(crate::tls::KeyShareOffer::Empty);
+        self
     }
 
     /// Sets SNI header of the session
-    pub fn with_sni_header(self, server_hostname: &str) -> Self {
-        Self {
-            session_config: self.session_config.with_sni(server_hostname),
-            ..self
-        }
+    pub fn with_sni_header(mut self, server_hostname: &str) -> Self {
+        self.client.sni = Some(server_hostname.to_string());
+        self
     }
 
     /// Sets the maximum number of in-progress fragmented packets to support.
@@ -219,7 +175,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
-    /// Sets the timer to use for PMTU discovery ([`ConnectionType::Datagram`] only)
+    /// Sets the timer to use for PMTU discovery (lossy transports only)
     pub fn with_pmtud_timer(self, timer: dplpmtud::TimerArg<AppState>) -> Self {
         Self {
             pmtud_timer: Some(timer),
@@ -239,7 +195,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         }
     }
 
-    /// Sets the base mtu to use for PMTU discovery ([`ConnectionType::Datagram`] only)
+    /// Sets the base mtu to use for PMTU discovery (lossy transports only)
     pub fn with_pmtud_base_mtu(self, mtu: u16) -> Self {
         Self {
             pmtud_base_mtu: Some(mtu),
@@ -253,12 +209,20 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             .auth_method
             .ok_or(ConnectionBuilderError::AuthRequired)?;
 
-        let session = self.ctx.tls_ctx.new_session(self.session_config)?;
-        let transport = Box::new(TlsTransport::new(session, self.connection_type));
+        let protocol_version = Version::MAXIMUM;
+
+        let transport = self.ctx.transport.connect(
+            TransportArgs {
+                outside_io: self.outside_io,
+                outside_mtu: self.outside_mtu,
+                protocol_version,
+                session_id: SessionId::EMPTY,
+                outside_plugins: self.outside_plugins.clone(),
+            },
+            self.client,
+        )?;
 
         tracing::info!("New Connection");
-
-        let protocol_version = Version::MAXIMUM;
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
@@ -294,12 +258,11 @@ impl<AppState> BuilderPredicates for ClientConnectionBuilder<AppState> {
 
 /// Builder for a server  [`Connection`].
 pub struct ServerConnectionBuilder<'a, AppState> {
-    connection_type: ConnectionType,
     protocol_version: Version,
     ctx: &'a ServerContext<AppState>,
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
-    session_config: crate::tls::SessionConfig<TlsIOAdapter>,
+    outside_io: OutsideIOSendCallbackArg,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
@@ -314,41 +277,18 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         protocol_version: Version,
         outside_io: OutsideIOSendCallbackArg,
     ) -> ConnectionBuilderResult<Self> {
-        let connection_type = ctx.connection_type;
         let auth = ctx.auth.clone();
         let ip_pool = ctx.ip_pool.clone();
 
         let session_id = StandardUniform.sample(&mut *ctx.rng.lock().unwrap());
 
-        let outside_mtu = MAX_OUTSIDE_MTU;
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = TlsIOAdapter {
-            connection_type,
-            protocol_version,
-            aggressive_send: false,
-            outside_mtu,
-            recv_buf: BytesMut::new(),
-            send_buf: io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: io_adapter::GsoBuffer::default(),
-        };
-        let session_config =
-            crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
-                s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
-                    .with_dtls_nonblocking(true)
-                    .with_dtls13_allow_ch_frag(true)
-            });
-
         Ok(Self {
-            connection_type,
             protocol_version,
             ctx,
-            session_config,
+            outside_io,
             session_id,
             auth,
             ip_pool,
@@ -388,15 +328,24 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
     }
 
     /// Finalize the builder to accept [`Connection`] and begin the connection process.
-    pub fn accept(self, app_state: AppState) -> ConnectionBuilderResult<Connection<AppState>> {
+    pub fn accept(
+        self,
+        app_state: AppState,
+        transport: ServerTransportBuilder<'_>,
+    ) -> ConnectionBuilderResult<Connection<AppState>> {
         if !self.ctx.is_supported_version(self.protocol_version) {
             return Err(ConnectionBuilderError::UnsupportedProtocolVersion(
                 self.protocol_version,
             ));
         }
 
-        let session = self.ctx.tls_ctx.new_session(self.session_config)?;
-        let transport = Box::new(TlsTransport::new(session, self.connection_type));
+        let transport = transport(TransportArgs {
+            outside_io: self.outside_io,
+            outside_mtu: MAX_OUTSIDE_MTU,
+            protocol_version: self.protocol_version,
+            session_id: self.session_id,
+            outside_plugins: self.outside_plugins.clone(),
+        })?;
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,

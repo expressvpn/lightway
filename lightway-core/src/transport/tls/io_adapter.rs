@@ -10,7 +10,8 @@ use std::fmt;
 use crate::tls::IOCallbackResult;
 
 use crate::{
-    ConnectionType, OutsideIOSendCallbackArg, PluginResult, Version, plugin::PluginList, wire,
+    ConnectionType, OutsideIOSendCallbackArg, PluginResult, TransportArgs, Version,
+    plugin::PluginList, wire,
 };
 
 /// Per-connection UDP GSO coalescing buffer + batch state.
@@ -219,6 +220,26 @@ impl fmt::Debug for TlsIOAdapter {
 }
 
 impl TlsIOAdapter {
+    pub(crate) fn new(
+        connection_type: ConnectionType,
+        aggressive_send: bool,
+        args: &TransportArgs,
+    ) -> Self {
+        Self {
+            connection_type,
+            protocol_version: args.protocol_version,
+            aggressive_send,
+            outside_mtu: args.outside_mtu,
+            recv_buf: BytesMut::new(),
+            send_buf: SendBuffer::new(args.outside_mtu),
+            io: args.outside_io.clone(),
+            session_id: args.session_id,
+            outside_plugins: args.outside_plugins.clone(),
+            #[cfg(target_os = "linux")]
+            gso_buf: GsoBuffer::default(),
+        }
+    }
+
     pub(crate) fn set_session_id(&mut self, session_id: wire::SessionId) {
         self.session_id = session_id;
     }
