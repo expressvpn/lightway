@@ -3,7 +3,6 @@ pub(crate) mod dplpmtud;
 mod event;
 pub(crate) mod expresslane;
 mod fragment_map;
-mod io_adapter;
 mod key_update;
 
 use crate::tls::{ErrorKind, IOCallbackResult, ProtocolVersion};
@@ -41,6 +40,7 @@ use crate::{
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::encapsulation::{Encapsulation, OutsidePacket, OutsidePacketError};
+use crate::transport::Transport;
 use crate::utils::ipv4_is_valid_packet;
 use crate::wire::{
     AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
@@ -49,31 +49,6 @@ use crate::wire::{
 pub use builders::{ClientConnectionBuilder, ConnectionBuilderError, ServerConnectionBuilder};
 pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
-pub(crate) use io_adapter::TlsIOAdapter;
-
-/// D/TLS is a UDP based protocol and requires the application
-/// (rather than the OS as with TCP) to keep track of the need to do
-/// retransmits on packet loss.
-///
-/// Currently the TLS library has timeouts based in seconds. However this is not
-/// sufficient for our goal of sub-second connection times.
-///
-/// As the TLS library lacks millisecond timers we use its internal timers but
-/// change its definition to be in 100 millisecond intervals instead of
-/// seconds. So a TLS timeout of 1 second means 100 milliseconds.
-///
-/// By default the TLS library's DTLS max timeout is 64 seconds which translates to
-/// 6.4 seconds. Since it scales from 1 to 64 by a factor
-/// of 2 each timeout. The total timeout is 12.7 seconds with this scaling
-/// which for our purposes is plenty.
-///
-/// In lightway for simplicity we do not treat this as a strict
-/// timeout (firing after a period of inactivity) but instead treat it
-/// as a tick (albeit with an interval which may be adjusted over
-/// time). This tick runs until the connection reaches `State::Online`.
-const TLS_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
-
-const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 
 /// Maximum number of frames held in the pending send queue when the
 /// outside I/O would block ([`ConnectionType::Stream`] frames not
@@ -83,7 +58,7 @@ const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 /// Enough to absorb line-rate bursts while a saturating transfer
 /// ramps up without tail-drop, small enough to drain quickly and
 /// avoid bufferbloat.
-const MAX_TLS_PENDING_QUEUE_PACKETS: usize = 64;
+const MAX_PENDING_QUEUE_PACKETS: usize = 64;
 
 /// Maximum number of retransmissions attempts for lightway frames
 const MAX_RETRANSMISSION_ATTEMPTS: u8 = 5;
@@ -516,8 +491,8 @@ pub struct Connection<AppState: Send = ()> {
     /// Current state of the connection
     state: State,
 
-    /// The TLS connection/session
-    session: crate::tls::Session<TlsIOAdapter>,
+    /// The transport under this connection
+    transport: Box<dyn Transport>,
     encapsulation: Encapsulation,
 
     /// Client vs Server state.
@@ -558,11 +533,11 @@ pub struct Connection<AppState: Send = ()> {
     /// When is next tick due (independent of
     /// `is_tick_timer_running`, since application might be using
     /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
-    tls_tick_interval: Option<Duration>,
+    transport_tick_interval: Option<Duration>,
 
     /// Frames that wait while the outside IO blocks the encapsulation.
-    /// They have not yet been handed to the TLS library.
-    tls_pending_queue: VecDeque<BytesMut>,
+    /// They have not yet been handed to the transport.
+    pending_queue: VecDeque<BytesMut>,
 
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
@@ -597,7 +572,7 @@ pub struct Connection<AppState: Send = ()> {
 struct NewConnectionArgs<AppState> {
     app_state: AppState,
     connection_type: ConnectionType,
-    session: crate::tls::Session<TlsIOAdapter>,
+    transport: Box<dyn Transport>,
     encapsulation: Encapsulation,
     session_id: SessionId,
     mode: ConnectionMode<AppState>,
@@ -635,7 +610,7 @@ impl<AppState: Send> Connection<AppState> {
             connection_type: args.connection_type,
             app_state: args.app_state,
             state: State::Connecting,
-            session: args.session,
+            transport: args.transport,
             encapsulation: args.encapsulation,
             session_id: args.session_id,
             mode: args.mode,
@@ -652,8 +627,8 @@ impl<AppState: Send> Connection<AppState> {
                 last_outside_data_received: now,
                 last_data_delivered_to_inside: now,
             },
-            tls_tick_interval: None,
-            tls_pending_queue: VecDeque::new(),
+            transport_tick_interval: None,
+            pending_queue: VecDeque::new(),
             fragment_map: once_cell::unsync::Lazy::new(Box::new(move || {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
@@ -685,7 +660,7 @@ impl<AppState: Send> Connection<AppState> {
         // This will very likely fail since negotiation always needs
         // more data than will be available. It's just about possible
         // it might succeed under test conditions.
-        let res = conn.session.try_negotiate();
+        let res = conn.transport.handshake();
         match conn.send_records_after(res)? {
             crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {}
             crate::tls::Poll::Ready(_) => conn.set_state(State::LinkUp)?,
@@ -747,7 +722,7 @@ impl<AppState: Send> Connection<AppState> {
 
         if matches!(new_state, State::Online) {
             debug!(curve = ?self.current_curve(), cipher = ?self.current_cipher(), "ONLINE");
-            self.session.io_cb_mut().aggressive_send = false;
+            self.transport.online();
 
             // Set initial expresslane keys
             self.rotate_expresslane_key()?;
@@ -805,7 +780,7 @@ impl<AppState: Send> Connection<AppState> {
     /// Query the TLS protocol version of this connection, only valid
     /// after [`State::LinkUp`] has been reached.
     pub fn tls_protocol_version(&mut self) -> ProtocolVersion {
-        self.session.version()
+        self.transport.protocol_version()
     }
 
     /// Query the lightway protocol version of this connection.
@@ -870,21 +845,16 @@ impl<AppState: Send> Connection<AppState> {
     /// Get the negotiated cipher, only valid after [`State::LinkUp`]
     /// has been reached.
     pub fn current_cipher(&mut self) -> Option<String> {
-        self.session.get_current_cipher_name()
+        self.transport.current_cipher()
     }
 
     /// Get the negotiated curve, only valid after [`State::LinkUp`]
     /// has been reached.
     pub fn current_curve(&mut self) -> Option<String> {
-        self.session.get_current_curve_name()
+        self.transport.current_curve()
     }
 
     fn update_tick_interval(&mut self) {
-        // Only Datagram (DTLS) connections need ticks
-        if !self.connection_type.is_datagram() {
-            return;
-        }
-
         let key_update_pending = if let ConnectionMode::Server { key_update, .. } = &self.mode {
             key_update.is_pending()
         } else {
@@ -892,19 +862,14 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         if matches!(self.state, State::Online) && !key_update_pending {
-            self.tls_tick_interval = None;
+            self.transport_tick_interval = None;
             return;
         }
 
-        // Get and scale the tick interval
-        let mut interval = self.session.dtls_current_timeout() / TLS_TICK_INTERVAL_DIVISOR;
-
-        if matches!(self.tls_protocol_version(), ProtocolVersion::DtlsV1_3)
-            && self.session.dtls13_use_quick_timeout()
-        {
-            interval /= TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR;
-        }
-        self.tls_tick_interval = Some(interval);
+        self.transport_tick_interval = self.transport.tick_interval();
+        let Some(interval) = self.transport_tick_interval else {
+            return;
+        };
 
         // Trigger a callback if timer is not already running
         if !self.is_tick_timer_running {
@@ -933,7 +898,7 @@ impl<AppState: Send> Connection<AppState> {
     /// `Some(_)`, [`Connection::tick`] should be called that amount
     /// of time later.
     pub fn tick_interval(&self) -> Option<Duration> {
-        self.tls_tick_interval
+        self.transport_tick_interval
     }
 
     /// Inject a tick to the connection. See
@@ -964,9 +929,9 @@ impl<AppState: Send> Connection<AppState> {
             State::Disconnecting | State::Disconnected => {
                 return Err(ConnectionError::Disconnected);
             }
-            _ if self.connection_type.is_datagram() => match self.dtls_has_timed_out()? {
+            _ => match self.has_timed_out()? {
                 crate::tls::Poll::Ready(true) => {
-                    warn!(session_id = ?self.session_id, "DTLS timed out, disconnecting client");
+                    warn!(session_id = ?self.session_id, "transport timed out, disconnecting client");
                     let _ = self.disconnect();
                     return Err(ConnectionError::TimedOut);
                 }
@@ -975,7 +940,6 @@ impl<AppState: Send> Connection<AppState> {
                 | crate::tls::Poll::Ready(false) => {}
                 crate::tls::Poll::AppData(_) => metrics::tls_appdata(&self.tls_protocol_version()),
             },
-            _ => {}
         };
 
         self.update_tick_interval();
@@ -1213,13 +1177,9 @@ impl<AppState: Send> Connection<AppState> {
     /// Split a GSO superpacket into segments, encrypt each, and send
     /// the entire wire buffer as one `sendmsg` with `UDP_SEGMENT`.
     ///
-    /// For expresslane: encrypts with AES-GCM, frames via `udp_frame`,
-    /// collects into wire buffer.
-    ///
-    /// For DTLS: `send_frame_or_drop` triggers wolfssl `try_write` which
-    /// calls the IO callback `send()`. The IO callback detects the
-    /// open `GsoBuffer` batch and coalesces framed wire packets there
-    /// instead of sending.
+    /// `send_outside_data` sends each segment through
+    /// `send_expresslane_data` or `send_frame_or_queue`, and the
+    /// encapsulation coalesces it into the open batch.
     #[cfg(target_os = "linux")]
     fn send_to_outside_gso(
         &mut self,
@@ -1490,7 +1450,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // here, goodbye + shutdown are just a courtesy.
         let _ = self.send_frame_or_queue(msg);
-        let res = self.session.try_shutdown();
+        let res = self.transport.shutdown();
         let _ = self.send_records_after(res);
 
         self.set_state(State::Disconnected)?;
@@ -1498,7 +1458,7 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    /// Send the records that the TLS session wrote during its last
+    /// Send the records that the transport wrote during its last
     /// call. An error of that call comes before an error of the send.
     fn send_records_after<T>(&mut self, res: Result<T, crate::tls::Error>) -> ConnectionResult<T> {
         let sent = self.send_records();
@@ -1508,7 +1468,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn send_records(&mut self) -> ConnectionResult<()> {
-        while let Some(record) = self.session.io_cb_mut().records.pop_front() {
+        while let Some(record) = self.transport.poll_transmit() {
             self.encapsulation
                 .send(record)
                 .map_err(ConnectionError::OutsideIoWriteError)?;
@@ -1516,10 +1476,10 @@ impl<AppState: Send> Connection<AppState> {
         Ok(())
     }
 
-    /// Check for a DTLS timeout. The session sends its retransmits
-    /// here.
-    fn dtls_has_timed_out(&mut self) -> ConnectionResult<crate::tls::Poll<bool>> {
-        let poll = self.session.dtls_has_timed_out();
+    /// Check for a transport timeout. The transport writes its
+    /// retransmits here.
+    fn has_timed_out(&mut self) -> ConnectionResult<crate::tls::Poll<bool>> {
+        let poll = self.transport.has_timed_out();
         self.send_records()?;
         Ok(poll)
     }
@@ -1538,7 +1498,7 @@ impl<AppState: Send> Connection<AppState> {
     ///
     /// On [`ConnectionType::Stream`] (TCP), frames not carrying an
     /// inner TCP packet (inner UDP, control frames) are queued up to
-    /// [`MAX_TLS_PENDING_QUEUE_PACKETS`] — nothing retransmits these,
+    /// [`MAX_PENDING_QUEUE_PACKETS`] — nothing retransmits these,
     /// so dropping here would lose the frame.
     ///
     /// Everything else (frames carrying inner TCP packets) queues at
@@ -1549,7 +1509,7 @@ impl<AppState: Send> Connection<AppState> {
         let queue_limit = match self.connection_type {
             ConnectionType::Stream => match &frame {
                 wire::Frame::Data(d) if ipv4_is_tcp(d.data.as_ref()) => 1,
-                _ => MAX_TLS_PENDING_QUEUE_PACKETS,
+                _ => MAX_PENDING_QUEUE_PACKETS,
             },
             ConnectionType::Datagram => 1,
         };
@@ -1557,26 +1517,26 @@ impl<AppState: Send> Connection<AppState> {
             .flush()
             .map_err(ConnectionError::OutsideIoWriteError)?;
 
-        if self.tls_pending_queue.len() < queue_limit {
+        if self.pending_queue.len() < queue_limit {
             let mut buf = BytesMut::new();
             frame.append_to_wire(&mut buf);
-            self.tls_pending_queue.push_back(buf);
+            self.pending_queue.push_back(buf);
         }
 
         while !self.encapsulation.is_blocked()
-            && let Some(mut head) = self.tls_pending_queue.pop_front()
+            && let Some(mut head) = self.pending_queue.pop_front()
         {
-            let res = self.session.try_write(&mut head);
+            let res = self.transport.write(&mut head);
             match self.send_records_after(res)? {
                 crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
-                    self.tls_pending_queue.push_front(head);
+                    self.pending_queue.push_front(head);
                     return Ok(());
                 }
                 // try_write advances the buffer by the number of bytes
                 // written; keep any partially written remainder at the head.
                 crate::tls::Poll::Ready(_) => {
                     if !head.is_empty() {
-                        self.tls_pending_queue.push_front(head);
+                        self.pending_queue.push_front(head);
                         return Ok(());
                     }
                 }
@@ -1766,7 +1726,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // It's time to update keys!
         info!(session = ?self.session_id, "Update TLS keys");
-        let res = self.session.try_trigger_update_key();
+        let res = self.transport.key_update();
         match self.send_records_after(res)? {
             // If using non-blocking I/O and WANT_WRITE is returned,
             // calling try_write() again will have the message sent when ready.
@@ -1807,12 +1767,11 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(1);
         }
 
-        let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
-        outside_received_pending.extend_from_slice(&buf[..]);
+        self.transport.feed(&buf[..]);
 
         let frame_read_count_result = match self.state {
             State::Connecting => {
-                let res = self.session.try_negotiate();
+                let res = self.transport.handshake();
                 match self.send_records_after(res)? {
                     crate::tls::Poll::PendingWrite => {
                         self.update_tick_interval();
@@ -1843,8 +1802,7 @@ impl<AppState: Send> Connection<AppState> {
         // https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
         // So drop remaining buffer if any in case of UDP transport
         if self.connection_type.is_datagram() {
-            let outside_received_pending = &mut self.session.io_cb_mut().recv_buf;
-            outside_received_pending.clear();
+            self.transport.discard_pending();
         }
 
         frame_read_count_result
@@ -1865,7 +1823,7 @@ impl<AppState: Send> Connection<AppState> {
                     // Ensure we will have room for a whole new frame.
                     self.receive_buf.reserve(self.outside_mtu);
 
-                    let res = self.session.try_read(&mut self.receive_buf);
+                    let res = self.transport.read(&mut self.receive_buf);
                     match self.send_records_after(res)? {
                         crate::tls::Poll::PendingWrite => break,
                         crate::tls::Poll::PendingRead => break,
@@ -1906,7 +1864,7 @@ impl<AppState: Send> Connection<AppState> {
 
         self.maybe_update_tls_keys()?;
         if let ConnectionMode::Server { key_update, .. } = &mut self.mode {
-            let pending = self.session.is_update_keys_pending();
+            let pending = self.transport.key_update_pending();
             if !pending && key_update.complete() {
                 self.event(Event::TlsKeysUpdateCompleted);
                 self.update_tick_interval()
