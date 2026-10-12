@@ -31,6 +31,7 @@ use lightway_app_utils::{
     args::{Cipher, KeyShare},
     connection_ticker_cb,
 };
+use lightway_core::TlsClientFactory;
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
@@ -1942,14 +1943,30 @@ pub async fn connect<
             None => (None, None, None, None),
         };
 
-    let ctx_builder = ClientContextBuilder::new(
+    let transport = TlsClientFactory::builder(
         connection_type,
         RootCertificate::PemBuffer(cert_content.as_bytes()),
+    )?
+    .with_cipher(cipher.into())?
+    // Ensures any per-connection PQ key share is also offered in the TLS
+    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
+    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
+    // nothing, because wolfSSL configures PQ groups per session.
+    .enable_pq_crypto()?;
+
+    // Register the TLS key logger once on the factory; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let transport = transport.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
+    let ctx_builder = ClientContextBuilder::new(
+        Arc::new(transport.build()),
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
+    )
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(config.enable_expresslane, |b| {
@@ -1960,19 +1977,6 @@ pub async fn connect<
     })
     .when(config.expresslane_metrics.is_some(), |b| {
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
-    });
-
-    // Ensures any per-connection PQ key share is also offered in the context's
-    // supported_groups. The backend difference lives in enable_pq_crypto: it
-    // registers the groups on the SSL_CTX for BoringSSL and is a no-op on
-    // wolfSSL, which configures PQ groups per session.
-    let ctx_builder = ctx_builder.enable_pq_crypto()?;
-
-    // Register the TLS key logger once on the context; core applies it at the
-    // correct layer for the active TLS backend (SSL_CTX vs per session).
-    #[cfg(feature = "debug")]
-    let ctx_builder = ctx_builder.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
     });
 
     let conn_builder = ctx_builder
