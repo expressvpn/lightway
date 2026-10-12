@@ -27,7 +27,7 @@ use lightway_app_utils::{EventStream, EventStreamCallback, PacketCodecFactoryTyp
 use lightway_core::{
     ConnectionActivity, ConnectionBuilderError, ConnectionError, ContextError, Event,
     ExpresslaneState, MAX_IO_BATCH_SIZE, OutsideIOSendCallbackArg, OutsidePacket, ServerContext,
-    SessionId, State, Version,
+    ServerTransportBuilder, SessionId, State, Transport, TransportArgs, TransportError, Version,
 };
 
 use crate::handle_inside_io_error;
@@ -105,7 +105,7 @@ pub(crate) enum ConnectionManagerError {
 }
 
 pub(crate) struct ConnectionManager {
-    ctx: ServerContext<ConnectionState>,
+    pub(crate) ctx: ServerContext<ConnectionState>,
     connections: Mutex<ConnectionMap<Connection>>,
     pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
     /// Total number of sessions there have ever been
@@ -293,10 +293,10 @@ async fn handle_decoded_pkt_send(conn: Weak<Connection>, mut rx: UnboundedReceiv
 
 fn new_connection(
     manager: Arc<ConnectionManager>,
-    ctx: &ServerContext<ConnectionState>,
     protocol_version: Version,
     local_addr: SocketAddr,
     outside_io: OutsideIOSendCallbackArg,
+    transport: ServerTransportBuilder<'_>,
 ) -> Result<Arc<Connection>, ConnectionManagerError> {
     let (event_cb, event_stream) = EventStreamCallback::new();
     let server_event_cb = manager.event_cb.clone();
@@ -315,11 +315,11 @@ fn new_connection(
     };
 
     let conn = Connection::new(
-        ctx,
         manager,
         protocol_version,
         local_addr,
         outside_io,
+        transport,
         inside_io_codec,
         event_cb,
     )
@@ -427,13 +427,14 @@ impl ConnectionManager {
         protocol_version: Version,
         socket_addr: SocketAddr,
         outside_io: OutsideIOSendCallbackArg,
+        transport: ServerTransportBuilder<'_>,
     ) -> Result<Arc<Connection>, ConnectionManagerError> {
         let conn = new_connection(
             self.clone(),
-            &self.ctx,
             protocol_version,
             socket_addr,
             outside_io,
+            transport,
         )?;
         // TODO: what if addr was already present?
         self.connections.lock().insert(&conn)?;
@@ -458,16 +459,18 @@ impl ConnectionManager {
     /// successfully calling [`Connection::outside_data_received`] (or
     /// a variant). This will commit to the new client address, after
     /// the client is observed to have floated and we have successfully done .
-    pub(crate) fn find_or_create_datagram_connection_with<F>(
+    pub(crate) fn find_or_create_datagram_connection_with<F, T>(
         self: &Arc<Self>,
         addr: SocketAddr,
         protocol_version: Version,
         session_id: SessionId,
         local_addr: SocketAddr,
         create_io: F,
+        transport: T,
     ) -> Result<(Arc<Connection>, bool), ConnectionManagerError>
     where
         F: FnOnce() -> OutsideIOSendCallbackArg,
+        T: FnOnce(TransportArgs) -> Result<Box<dyn Transport>, TransportError>,
     {
         match self.connections.lock().lookup(addr, session_id) {
             connection_map::Entry::Occupied(c) => {
@@ -485,10 +488,10 @@ impl ConnectionManager {
                 let outside_io = create_io();
                 let c = new_connection(
                     self.clone(),
-                    &self.ctx,
                     protocol_version,
                     local_addr,
                     outside_io,
+                    Box::new(transport),
                 )?;
                 e.insert(&c)?;
                 Ok((c, false))

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 
+use crate::KeyShare;
 use crate::tls::ProtocolVersion;
 
 /// Progress of a transport operation.
@@ -89,8 +90,6 @@ impl TransportCaps {
     }
 }
 
-pub(crate) use tls::TlsTransport;
-
 /// The transport under a connection.
 ///
 /// Every method is synchronous. A method that needs the outside path
@@ -164,3 +163,50 @@ pub trait Transport: Send {
     /// [`crate::State::Online`], after auth.
     fn online(&mut self);
 }
+
+/// Handshake settings that only a client uses.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTransportArgs {
+    /// Domain name the peer's certificate must match.
+    pub domain_name: Option<String>,
+    /// Server name to announce in the handshake.
+    pub sni: Option<String>,
+    /// Key share to offer in the first handshake message.
+    pub key_share: ClientKeyShare,
+}
+
+/// What a client offers in the `key_share` extension of its first
+/// handshake message.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ClientKeyShare {
+    /// Let the transport choose.
+    #[default]
+    Default,
+    /// Offer a share for this post-quantum group.
+    Group(KeyShare),
+    /// Offer no share. The server picks the group in its reply.
+    Empty,
+}
+
+/// Arguments that every factory needs to build one transport.
+pub struct TransportArgs {
+    /// Largest record that one outside packet can carry, after the IP
+    /// and UDP headers and the wire header.
+    pub max_record_size: usize,
+}
+
+/// Builds the transport for each client connection.
+pub trait ClientTransportFactory: Send + Sync {
+    /// Build a transport for a new connection to the server.
+    fn connect(
+        &self,
+        args: TransportArgs,
+        client: ClientTransportArgs,
+    ) -> Result<Box<dyn Transport>, TransportError>;
+}
+
+/// Builds the transport for one accepted server connection. A builder
+/// per connection lets a server hand over state that it created when it
+/// accepted the peer.
+pub type ServerTransportBuilder<'a> =
+    Box<dyn FnOnce(TransportArgs) -> Result<Box<dyn Transport>, TransportError> + 'a>;
