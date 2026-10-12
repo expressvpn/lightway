@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 
-use crate::tls::ProtocolVersion;
+use crate::tls::{KeyShareOffer, ProtocolVersion};
 
 /// Progress of a transport operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +89,6 @@ impl TransportCaps {
     }
 }
 
-pub(crate) use tls::TlsTransport;
-
 /// The transport under a connection.
 ///
 /// Every method is synchronous. A method that needs the outside path
@@ -164,3 +162,38 @@ pub trait Transport: Send {
     /// [`crate::State::Online`], after auth.
     fn online(&mut self);
 }
+
+/// Handshake settings that only a client uses.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTransportArgs {
+    /// Domain name the peer's certificate must match.
+    pub domain_name: Option<String>,
+    /// Server name to announce in the handshake.
+    pub sni: Option<String>,
+    /// Key share to offer in the first handshake message. `None` keeps
+    /// the backend default.
+    pub key_share: Option<KeyShareOffer>,
+}
+
+/// Arguments that every factory needs to build one transport.
+pub struct TransportArgs {
+    /// Largest record that one outside packet can carry, after the IP
+    /// and UDP headers and the wire header.
+    pub max_record_size: usize,
+}
+
+/// Builds the transport for each client connection.
+pub trait ClientTransportFactory: Send + Sync {
+    /// Build a transport for a new connection to the server.
+    fn connect(
+        &self,
+        args: TransportArgs,
+        client: ClientTransportArgs,
+    ) -> Result<Box<dyn Transport>, TransportError>;
+}
+
+/// Builds the transport for one accepted server connection. A builder
+/// per connection lets a server hand over state that it created when it
+/// accepted the peer.
+pub type ServerTransportBuilder<'a> =
+    Box<dyn FnOnce(TransportArgs) -> Result<Box<dyn Transport>, TransportError> + 'a>;
