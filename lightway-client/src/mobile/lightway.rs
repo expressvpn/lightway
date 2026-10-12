@@ -440,7 +440,6 @@ pub(crate) async fn async_lightway_start(
 
 struct OutsideIOConfig {
     mtu: usize,
-    connection_type: ConnectionType,
     outside_io: Arc<dyn OutsideIO>,
 }
 
@@ -483,7 +482,7 @@ async fn restartable_outside_io_task(
         };
 
         tokio::select! {
-            result = outside_io_task(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), keepalive.clone(), ready_tx) => return result,
+            result = outside_io_task(conn.clone(), outside_io_config.mtu, current_outside_io.clone(), keepalive.clone(), ready_tx) => return result,
 
             new_outside_io_result = new_outside_io_receiver.recv() => {
                 match new_outside_io_result {
@@ -700,7 +699,6 @@ async fn lightway_client_connect(
             conn.clone(),
             OutsideIOConfig {
                 mtu: outside_mtu,
-                connection_type,
                 outside_io,
             },
             keepalive.clone(),

@@ -282,11 +282,11 @@ impl Encapsulation {
         pkt: OutsidePacket<'pkt>,
     ) -> ConnectionResult<(&'pkt mut BytesMut, Option<Header>)> {
         let (record, hdr) = match (pkt, self.connection_type) {
-            (OutsidePacket::Wire(buf, _), ConnectionType::Stream) => {
+            (OutsidePacket::Wire(buf), ConnectionType::Stream) => {
                 run_ingress(buf, &self.outside_plugins)?;
                 (buf, None)
             }
-            (OutsidePacket::Wire(buf, _), ConnectionType::Datagram) => {
+            (OutsidePacket::Wire(buf), ConnectionType::Datagram) => {
                 let (buf, hdr) = parse_datagram(buf, &self.outside_plugins)?;
                 (buf, Some(hdr))
             }
@@ -621,7 +621,7 @@ impl Encapsulation {
 /// [`crate::Connection::outside_data_received`].
 pub enum OutsidePacket<'pkt> {
     /// An outside packet as it came from the outside IO.
-    Wire(&'pkt mut BytesMut, ConnectionType),
+    Wire(&'pkt mut BytesMut),
     /// The record of an outside packet, and its header, after
     /// [`crate::ServerContext::parse_raw_outside_packet`] ran the
     /// ingress plugins.
@@ -994,9 +994,7 @@ mod tests {
         buf.extend_from_slice(b"abc");
         let e = receiver(ConnectionType::Datagram, true, Default::default());
 
-        let (record, got) = e
-            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Datagram))
-            .unwrap();
+        let (record, got) = e.receive(OutsidePacket::Wire(&mut buf)).unwrap();
         assert_eq!(&record[..], b"abc");
         assert_eq!(got, Some(hdr));
     }
@@ -1006,9 +1004,7 @@ mod tests {
         let mut buf = BytesMut::from(&b"abc"[..]);
         let e = receiver(ConnectionType::Stream, true, Default::default());
 
-        let (record, got) = e
-            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
-            .unwrap();
+        let (record, got) = e.receive(OutsidePacket::Wire(&mut buf)).unwrap();
         assert_eq!(&record[..], b"abc");
         assert_eq!(got, None);
     }
@@ -1034,8 +1030,7 @@ mod tests {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let mut buf = BytesMut::from(&b"abc"[..]);
         let e = receiver(ConnectionType::Stream, false, PluginList::from(plugins));
-        e.receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
-            .map(|_| ())
+        e.receive(OutsidePacket::Wire(&mut buf)).map(|_| ())
     }
 
     #[test]

@@ -7,12 +7,20 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 
-use super::{Poll, Transport};
-use crate::tls::{ProtocolVersion, Session};
+use super::{Delivery, Poll, PollResult, Transport, TransportCaps, TransportError};
+use crate::tls::{ErrorKind, ProtocolVersion, Session};
+use crate::{ConnectionType, IPV4_HEADER_SIZE, MAX_DTLS_HEADER_SIZE, UDP_HEADER_SIZE, wire};
 use io_adapter::TlsIOAdapter;
 
-use super::PollResult;
-use crate::ConnectionType;
+/// Default MTU size for DTLS on the outside path (max outside MTU less IP and UDP header size)
+pub(crate) const fn max_dtls_outside_mtu(outside_mtu: usize) -> usize {
+    outside_mtu - IPV4_HEADER_SIZE - UDP_HEADER_SIZE - wire::Header::WIRE_SIZE
+}
+
+/// Default MTU size for DTLS payload (max DTLS wire MTU less DTLS overheads)
+pub(crate) const fn max_dtls_mtu(outside_mtu: usize) -> usize {
+    max_dtls_outside_mtu(outside_mtu) - MAX_DTLS_HEADER_SIZE
+}
 
 /// D/TLS is a UDP based protocol and requires the application
 /// (rather than the OS as with TCP) to keep track of the need to do
@@ -41,18 +49,39 @@ const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
 pub(crate) struct TlsTransport {
     session: Session<TlsIOAdapter>,
     connection_type: ConnectionType,
+    outside_mtu: usize,
 }
 
 impl TlsTransport {
-    pub(crate) fn new(session: Session<TlsIOAdapter>, connection_type: ConnectionType) -> Self {
+    pub(crate) fn new(
+        session: Session<TlsIOAdapter>,
+        connection_type: ConnectionType,
+        outside_mtu: usize,
+    ) -> Self {
         Self {
             session,
             connection_type,
+            outside_mtu,
         }
     }
-}
 
-impl TlsTransport {
+    /// Every error ends a stream. On datagrams only these errors end
+    /// the connection.
+    fn error(&self, err: crate::tls::Error) -> TransportError {
+        use crate::tls::Error::Fatal;
+        let fatal = !self.connection_type.is_datagram()
+            || matches!(
+                err,
+                Fatal(ErrorKind::DomainNameMismatch)
+                    | Fatal(ErrorKind::DuplicateMessage)
+                    | Fatal(ErrorKind::PeerClosed)
+                    | Fatal(ErrorKind::CaCertNotAvailable)
+            );
+        #[cfg(wolfssl)]
+        let fatal = fatal || matches!(err, Fatal(ErrorKind::PeerFatalAlert));
+        TransportError::new(fatal, err)
+    }
+
     /// The backend can return application data outside a read, for
     /// example to a DTLS 1.3 client that waits for the ACK of its
     /// Finished. Count it and drop it, and report `Pending` so that the
@@ -72,8 +101,23 @@ impl TlsTransport {
 }
 
 impl Transport for TlsTransport {
+    fn caps(&self) -> TransportCaps {
+        let datagram = self.connection_type.is_datagram();
+        TransportCaps {
+            delivery: if datagram {
+                Delivery::Datagram { wire_header: true }
+            } else {
+                Delivery::Stream
+            },
+        }
+    }
+
+    fn max_frame_payload(&self) -> usize {
+        max_dtls_mtu(self.outside_mtu)
+    }
+
     fn handshake(&mut self) -> PollResult<()> {
-        let poll = self.session.try_negotiate()?;
+        let poll = self.session.try_negotiate().map_err(|e| self.error(e))?;
         Ok(self.poll(poll))
     }
 
@@ -81,12 +125,17 @@ impl Transport for TlsTransport {
         self.session.io_cb_mut().recv_buf.extend_from_slice(buf);
     }
 
-    fn discard_pending(&mut self) {
-        self.session.io_cb_mut().recv_buf.clear();
+    fn packet_done(&mut self) {
+        // RFC6347 mandates each datagram should have full record and one TLS record cannot span
+        // over multiple datagrams
+        // https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
+        if self.connection_type.is_datagram() {
+            self.session.io_cb_mut().recv_buf.clear();
+        }
     }
 
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize> {
-        match self.session.try_read(into)? {
+        match self.session.try_read(into).map_err(|e| self.error(e))? {
             // Here AppData is frame bytes. It must reach `into`, which
             // `poll` would not do.
             crate::tls::Poll::AppData(data) => {
@@ -99,7 +148,7 @@ impl Transport for TlsTransport {
     }
 
     fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize> {
-        let poll = self.session.try_write(buf)?;
+        let poll = self.session.try_write(buf).map_err(|e| self.error(e))?;
         Ok(self.poll(poll))
     }
 
@@ -112,7 +161,10 @@ impl Transport for TlsTransport {
     }
 
     fn key_update(&mut self) -> PollResult<()> {
-        let poll = self.session.try_trigger_update_key()?;
+        let poll = self
+            .session
+            .try_trigger_update_key()
+            .map_err(|e| self.error(e))?;
         Ok(self.poll(poll))
     }
 

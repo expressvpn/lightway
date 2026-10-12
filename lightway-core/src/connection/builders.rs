@@ -11,9 +11,11 @@ use crate::{
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
     encapsulation::Encapsulation,
-    max_dtls_outside_mtu,
     plugin::PluginFactoryError,
-    transport::{TlsTransport, tls::io_adapter::TlsIOAdapter},
+    transport::{
+        TlsTransport,
+        tls::{io_adapter::TlsIOAdapter, max_dtls_outside_mtu},
+    },
     wire::SessionId,
 };
 
@@ -249,13 +251,16 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             .ok_or(ConnectionBuilderError::AuthRequired)?;
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
-        let transport = Box::new(TlsTransport::new(session, self.connection_type));
+        let transport = Box::new(TlsTransport::new(
+            session,
+            self.connection_type,
+            self.outside_mtu,
+        ));
 
         tracing::info!("New Connection");
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
-            connection_type: self.connection_type,
             outside_mtu: self.outside_mtu,
             transport,
             encapsulation: self.encapsulation,
@@ -385,11 +390,14 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         }
 
         let session = self.ctx.tls_ctx.new_session(self.session_config)?;
-        let transport = Box::new(TlsTransport::new(session, self.connection_type));
+        let transport = Box::new(TlsTransport::new(
+            session,
+            self.connection_type,
+            MAX_OUTSIDE_MTU,
+        ));
 
         Ok(Connection::new(NewConnectionArgs {
             app_state,
-            connection_type: self.connection_type,
             transport,
             encapsulation: self.encapsulation,
             session_id: self.session_id,

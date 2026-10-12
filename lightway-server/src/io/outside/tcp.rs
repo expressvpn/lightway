@@ -4,8 +4,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_core::{
-    ConnectionType, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket, State,
-    Version,
+    IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket, State, Version,
 };
 use socket2::SockRef;
 use tokio::io::AsyncReadExt as _;
@@ -188,7 +187,7 @@ async fn handle_connection(
             Err(err) => break anyhow!(err).context("TCP read error"),
         };
 
-        let pkt = OutsidePacket::Wire(&mut buf, ConnectionType::Stream);
+        let pkt = OutsidePacket::Wire(&mut buf);
         if let Err(err) = conn.outside_data_received(pkt) {
             warn!("Failed to process outside data: {err}");
             if conn.handle_outside_data_error(&err).is_break() {

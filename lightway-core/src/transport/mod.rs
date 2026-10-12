@@ -23,7 +23,71 @@ pub enum Poll<T> {
 }
 
 /// Result of a transport operation that can need more outside I/O.
-pub type PollResult<T> = Result<Poll<T>, crate::tls::Error>;
+pub type PollResult<T> = Result<Poll<T>, TransportError>;
+
+/// An error from the transport. The transport decides whether the
+/// connection survives it.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct TransportError {
+    fatal: bool,
+    error: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl TransportError {
+    /// Wrap an error. Set `fatal` when the error ends the connection.
+    /// On a transport that is not lossy, every error ends the connection.
+    pub fn new(fatal: bool, error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self {
+            fatal,
+            error: error.into(),
+        }
+    }
+
+    /// Whether this error ends the connection.
+    pub fn is_fatal(&self) -> bool {
+        self.fatal
+    }
+}
+
+/// How a transport delivers records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// In order, and never lost. When the outside path blocks, the
+    /// connection queues the frames that nothing above retransmits
+    /// (control and inner UDP).
+    Stream,
+    /// One Lightway frame travels per packet, and packets are
+    /// independent. A packet can be lost or reordered, and nothing
+    /// retransmits it.
+    Datagram {
+        /// Every packet starts with a [`crate::Header`] that carries the
+        /// session id. Expresslane needs it: the header marks an
+        /// expresslane record and carries the session id that its
+        /// decryption uses.
+        wire_header: bool,
+    },
+}
+
+/// What a transport can and cannot do. The connection adapts its
+/// framing, queueing and error handling to these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportCaps {
+    /// How the transport delivers records.
+    pub delivery: Delivery,
+}
+
+impl TransportCaps {
+    /// Whether a record can be lost: [`Delivery::Datagram`].
+    pub fn is_lossy(&self) -> bool {
+        matches!(self.delivery, Delivery::Datagram { .. })
+    }
+
+    /// Whether every packet starts with a [`crate::Header`].
+    pub fn has_wire_header(&self) -> bool {
+        matches!(self.delivery, Delivery::Datagram { wire_header: true })
+    }
+}
 
 pub(crate) use tls::TlsTransport;
 
@@ -33,6 +97,15 @@ pub(crate) use tls::TlsTransport;
 /// reports [`Poll::Pending`]. After each call, the connection takes
 /// every record with [`Transport::poll_transmit`].
 pub trait Transport: Send {
+    /// Capabilities of this transport. The connection reads them once,
+    /// when it is built.
+    fn caps(&self) -> TransportCaps;
+
+    /// Largest number of frame bytes one packet can carry. The
+    /// connection reads this only on a datagram transport. It stays
+    /// constant for the life of the transport.
+    fn max_frame_payload(&self) -> usize;
+
     /// Drive the handshake. `Ready` once the secure link is up. On
     /// `Pending`, the connection calls it again after the next outside
     /// packet.
@@ -41,8 +114,10 @@ pub trait Transport: Send {
     /// Hand one received outside payload to the transport.
     fn feed(&mut self, buf: &[u8]);
 
-    /// Drop received bytes the transport did not consume.
-    fn discard_pending(&mut self);
+    /// The connection calls this after it processes the current packet.
+    /// A lossy transport drops what the session did not consume, because
+    /// a record never spans packets.
+    fn packet_done(&mut self);
 
     /// Read decrypted frame bytes into `into`. `Pending` once no bytes
     /// are left, until the next outside packet.
