@@ -61,7 +61,11 @@ pub use plugin::{
 };
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
-pub use transport::{Delivery, PollResult, Transport, TransportCaps, TransportError};
+pub use transport::{
+    ClientTransportArgs, ClientTransportFactory, Delivery, PollResult, ServerTransportBuilder,
+    Transport, TransportArgs, TransportCaps, TransportError,
+    tls::{TlsClientFactory, TlsClientFactoryBuilder, TlsFactoryError, TlsServerFactory},
+};
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
