@@ -5,7 +5,7 @@ pub(crate) mod expresslane;
 mod fragment_map;
 mod key_update;
 
-use crate::tls::{ErrorKind, IOCallbackResult, ProtocolVersion};
+use crate::tls::{IOCallbackResult, ProtocolVersion};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dplpmtud::BASE_PLPMTU;
 use rand::distr::{Distribution, StandardUniform};
@@ -34,8 +34,8 @@ use crate::{
     wire::{self, AuthMethod},
 };
 use crate::{
-    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType,
-    dtls_required_outside_mtu, max_dtls_mtu,
+    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType, TransportCaps,
+    TransportError,
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
@@ -51,8 +51,8 @@ pub use event::Event;
 use fragment_map::{FragmentMap, FragmentMapResult};
 
 /// Maximum number of frames held in the pending send queue when the
-/// outside I/O would block ([`ConnectionType::Stream`] frames not
-/// carrying inner TCP packets).
+/// outside I/O would block. It applies to frames without an inner TCP
+/// packet.
 ///
 /// ~96 KiB at a 1500 byte MTU, on top of the socket send buffer.
 /// Enough to absorb line-rate bursts while a saturating transfer
@@ -183,15 +183,15 @@ pub enum ConnectionError {
     #[error("Invalid inside packet: {0}")]
     InvalidInsidePacket(InvalidPacketError),
 
-    /// Invalid Outside MTU
+    /// The transport cannot carry the inside MTU in one packet
     #[error(
-        "PMTUD required: inside MTU {inside_mtu} needs at least {required_outside_mtu} outside MTU"
+        "PMTUD required: inside MTU {inside_mtu} exceeds the transport's maximum frame payload {max_frame_payload}"
     )]
     PathMtuDiscoveryRequired {
         /// The inside MTU
         inside_mtu: usize,
-        /// The required outside MTU to support the inside MTU without PMTUD
-        required_outside_mtu: usize,
+        /// The largest frame payload the transport carries without PMTUD
+        max_frame_payload: usize,
     },
 
     /// Plugin returns a reply packet
@@ -214,9 +214,9 @@ pub enum ConnectionError {
     #[error("Data Fragment Error: {0}")]
     DataFragmentError(#[from] fragment_map::FragmentMapError),
 
-    /// A TLS error occurred
-    #[error("TLS Error: {0}")]
-    Tls(#[from] crate::tls::Error),
+    /// The transport failed
+    #[error("Transport Error: {0}")]
+    Transport(#[from] TransportError),
 
     /// Expresslane version mismatch
     #[error("Expresslane version mismatch")]
@@ -240,60 +240,52 @@ pub enum ConnectionError {
 }
 
 impl ConnectionError {
-    /// Determine if a given error is fatal for this connection.
-    pub fn is_fatal(&self, connection_type: ConnectionType) -> bool {
-        match connection_type {
-            ConnectionType::Stream => {
-                // All errors are fatal for TCP/TLS
-                true
-            }
-            ConnectionType::Datagram => {
-                // For UDP/DTLS many errors can be ignored
-                use ConnectionError::*;
-                match self {
-                    TimedOut => true,
-                    Unauthorized => true,
-                    InvalidMode => true,
-                    InvalidConnectionType => true,
-                    NoAvailableClientIp => true,
-                    InvalidInsideIpConfig(_) => true,
-                    AccessDenied => true,
-                    Goodbye => true,
-                    PacketCodecDoesNotExist => true,
-                    PacketCodecError(_) => true,
-                    Disconnected => true,
-                    PathMtuDiscoveryRequired { .. } => true,
-                    Tls(crate::tls::Error::Fatal(ErrorKind::DomainNameMismatch)) => true,
-                    Tls(crate::tls::Error::Fatal(ErrorKind::DuplicateMessage)) => true,
-                    Tls(crate::tls::Error::Fatal(ErrorKind::PeerClosed)) => true,
-                    Tls(crate::tls::Error::Fatal(ErrorKind::CaCertNotAvailable)) => true,
-                    #[cfg(wolfssl)]
-                    Tls(crate::tls::Error::Fatal(ErrorKind::PeerFatalAlert)) => true,
+    /// Determine if a given error is fatal for a connection over a
+    /// transport with `caps`.
+    pub(crate) fn is_fatal(&self, caps: TransportCaps) -> bool {
+        use ConnectionError::*;
+        match self {
+            Transport(e) => e.is_fatal(),
+            // On a transport that is not lossy, every error ends the
+            // connection. On a byte stream a bad frame
+            // leaves the framing at an unknown position. A lossy
+            // transport carries one frame per packet, so a bad packet
+            // can be skipped.
+            _ if !caps.is_lossy() => true,
+            TimedOut => true,
+            Unauthorized => true,
+            InvalidMode => true,
+            InvalidConnectionType => true,
+            NoAvailableClientIp => true,
+            InvalidInsideIpConfig(_) => true,
+            AccessDenied => true,
+            Goodbye => true,
+            PacketCodecDoesNotExist => true,
+            PacketCodecError(_) => true,
+            Disconnected => true,
+            PathMtuDiscoveryRequired { .. } => true,
 
-                    WireError(wire::FromWireError::UnknownFrameType) => false,
-                    WireError(wire::FromWireError::InsufficientData) => false,
-                    WireError(wire::FromWireError::InvalidExpressData) => false,
-                    WireError(wire::FromWireError::ReplayedExpressData) => false,
-                    WireError(wire::FromWireError::InvalidProtocolVersion(..)) => false,
-                    WireError(_) => true,
+            WireError(wire::FromWireError::UnknownFrameType) => false,
+            WireError(wire::FromWireError::InsufficientData) => false,
+            WireError(wire::FromWireError::InvalidExpressData) => false,
+            WireError(wire::FromWireError::ReplayedExpressData) => false,
+            WireError(wire::FromWireError::InvalidProtocolVersion(..)) => false,
+            WireError(_) => true,
 
-                    InvalidProtocolVersion => false,
-                    InvalidState => false, // Can be due to out of order or repeated messages
-                    InvalidInsideIo => false, // Can be used for test only test control plane
-                    OutsideIoWriteError(_) => false,
-                    UnknownSessionID => false,
-                    InvalidInsidePacket(_) => false,
-                    RejectedSessionID => false,
-                    PluginDropWithReply(_) => false,
-                    PluginError(_) => false,
-                    PacketError(_) => false,
-                    DataFragmentError(_) => false,
-                    ExpresslaneVersionMismatch => false,
-                    ExpreslaneDegraded => false,
-                    ExpresslaneError(_) => false,
-                    Tls(_) => false,
-                }
-            }
+            InvalidProtocolVersion => false,
+            InvalidState => false, // Can be due to out of order or repeated messages
+            InvalidInsideIo => false, // Can be used for test only test control plane
+            OutsideIoWriteError(_) => false,
+            UnknownSessionID => false,
+            InvalidInsidePacket(_) => false,
+            RejectedSessionID => false,
+            PluginDropWithReply(_) => false,
+            PluginError(_) => false,
+            PacketError(_) => false,
+            DataFragmentError(_) => false,
+            ExpresslaneVersionMismatch => false,
+            ExpreslaneDegraded => false,
+            ExpresslaneError(_) => false,
         }
     }
 }
@@ -327,6 +319,10 @@ fn expresslane_decrypt_error(err: ExpresslaneError) -> wire::FromWireError {
 #[cfg(test)]
 mod expresslane_error_mapping_tests {
     use super::*;
+
+    const LOSSY: TransportCaps = TransportCaps {
+        delivery: crate::Delivery::Datagram { wire_header: true },
+    };
 
     /// Restates the classification independently of the code under test.
     /// Exhaustive on purpose: a new `ExpresslaneError` variant fails to compile
@@ -396,7 +392,7 @@ mod expresslane_error_mapping_tests {
             );
             let err = ConnectionError::WireError(got);
             assert!(
-                !err.is_fatal(ConnectionType::Datagram),
+                !err.is_fatal(LOSSY),
                 "{err:?} would tear down the connection"
             );
         }
@@ -411,9 +407,39 @@ mod expresslane_error_mapping_tests {
                 "unexpected variant: {err:?}"
             );
             assert!(
-                !err.is_fatal(ConnectionType::Datagram),
+                !err.is_fatal(LOSSY),
                 "{err:?} would tear down the connection"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod is_fatal_tests {
+    use super::*;
+
+    const LOSSY: TransportCaps = TransportCaps {
+        delivery: crate::Delivery::Datagram { wire_header: false },
+    };
+
+    const RELIABLE: TransportCaps = TransportCaps {
+        delivery: crate::Delivery::Stream,
+    };
+
+    #[test]
+    fn a_bad_frame_is_fatal_only_on_a_non_lossy_transport() {
+        let bad = ConnectionError::WireError(wire::FromWireError::UnknownFrameType);
+        assert!(!bad.is_fatal(LOSSY));
+        assert!(bad.is_fatal(RELIABLE));
+    }
+
+    #[test]
+    fn the_transport_decides_whether_its_error_is_fatal() {
+        let transient = ConnectionError::Transport(TransportError::new(false, "transient"));
+        let fatal = ConnectionError::Transport(TransportError::new(true, "fatal"));
+        for caps in [LOSSY, RELIABLE] {
+            assert!(!transient.is_fatal(caps), "{caps:?}");
+            assert!(fatal.is_fatal(caps), "{caps:?}");
         }
     }
 }
@@ -473,9 +499,6 @@ pub use expresslane::ExpresslaneState;
 
 /// A lightway connection
 pub struct Connection<AppState: Send = ()> {
-    /// Type of connection
-    connection_type: ConnectionType,
-
     /// App specific state.
     ///
     /// If you want to recover a Sync/Send handle to the
@@ -494,6 +517,9 @@ pub struct Connection<AppState: Send = ()> {
     /// The transport under this connection
     transport: Box<dyn Transport>,
     encapsulation: Encapsulation,
+
+    /// Capabilities of `transport`, read once at construction
+    caps: TransportCaps,
 
     /// Client vs Server state.
     mode: ConnectionMode<AppState>,
@@ -542,7 +568,7 @@ pub struct Connection<AppState: Send = ()> {
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
 
-    /// PMTU discovery state ([`ConnectionType::Datagram`] only)
+    /// PMTU discovery state (lossy transports only)
     pmtud: Option<dplpmtud::Dplpmtud<AppState>>,
 
     /// Counter to use for `wire::DataFrag`
@@ -571,7 +597,6 @@ pub struct Connection<AppState: Send = ()> {
 /// connection.
 struct NewConnectionArgs<AppState> {
     app_state: AppState,
-    connection_type: ConnectionType,
     transport: Box<dyn Transport>,
     encapsulation: Encapsulation,
     session_id: SessionId,
@@ -606,12 +631,23 @@ impl<AppState: Send> Connection<AppState> {
             (ConnectionMode::Server { .. }, true) => ExpresslaneState::WaitingForClient,
             (_, false) => ExpresslaneState::Disabled,
         };
+        let caps = args.transport.caps();
+        let pmtud = match caps.is_lossy() {
+            false => None,
+            true => args.pmtud_timer.map(|t| {
+                dplpmtud::Dplpmtud::new(
+                    args.pmtud_base_mtu.unwrap_or(BASE_PLPMTU),
+                    args.transport.max_frame_payload() as u16,
+                    t,
+                )
+            }),
+        };
         let mut conn = Connection {
-            connection_type: args.connection_type,
             app_state: args.app_state,
             state: State::Connecting,
             transport: args.transport,
             encapsulation: args.encapsulation,
+            caps,
             session_id: args.session_id,
             mode: args.mode,
             rng: args.rng,
@@ -633,16 +669,7 @@ impl<AppState: Send> Connection<AppState> {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
             })),
-            pmtud: match args.connection_type {
-                ConnectionType::Stream => None,
-                ConnectionType::Datagram => args.pmtud_timer.map(|t| {
-                    dplpmtud::Dplpmtud::new(
-                        args.pmtud_base_mtu.unwrap_or(BASE_PLPMTU),
-                        max_dtls_mtu(args.outside_mtu) as u16,
-                        t,
-                    )
-                }),
-            },
+            pmtud,
             fragment_counter: Wrapping(0),
             is_first_packet_received: false,
             inside_pkt_encoder,
@@ -687,9 +714,25 @@ impl<AppState: Send> Connection<AppState> {
         self.inside_io = Some(inside_io)
     }
 
-    /// Get the [`ConnectionType`] of this [`Connection`]
+    /// Get the [`ConnectionType`] of this [`Connection`]. It derives
+    /// from [`TransportCaps::is_lossy`] only, so it does not say whether
+    /// the transport roams or stamps a wire header.
     pub fn connection_type(&self) -> ConnectionType {
-        self.connection_type
+        if self.caps.is_lossy() {
+            ConnectionType::Datagram
+        } else {
+            ConnectionType::Stream
+        }
+    }
+
+    /// Capabilities of the transport under this connection.
+    pub fn transport_caps(&self) -> TransportCaps {
+        self.caps
+    }
+
+    /// Whether `err` ends this connection.
+    pub fn is_fatal(&self, err: &ConnectionError) -> bool {
+        err.is_fatal(self.caps)
     }
 
     /// Get the current session ID.
@@ -1016,20 +1059,19 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Process multiple outside packets.
     ///
-    /// `is_fatal` is invoked for every per-packet error encountered. If it
-    /// returns `true`, processing stops and the error is returned immediately.
-    /// If it returns `false`, the error is treated as transient
-    /// and processing continues with the next packet with a single error log for debugging.
+    /// After a fatal per-packet error (see [`Connection::is_fatal`]),
+    /// the function returns the error and processes no more packets.
+    /// After any other error, the function logs it once and continues
+    /// with the next packet.
     pub fn multiple_outside_data_received<'a>(
         &mut self,
         pkts: impl IntoIterator<Item = OutsidePacket<'a>>,
-        is_fatal: impl Fn(&ConnectionError) -> bool,
     ) -> ConnectionResult<usize> {
         let mut total = 0;
         for pkt in pkts {
             match self.outside_data_received(pkt) {
                 Ok(n) => total += n,
-                Err(e) if is_fatal(&e) => return Err(e),
+                Err(e) if self.is_fatal(&e) => return Err(e),
                 Err(e) => error!("Failed to process outside data: {e}"),
             }
         }
@@ -1342,7 +1384,7 @@ impl<AppState: Send> Connection<AppState> {
     fn send_outside_data(&mut self, data: &mut BytesMut, is_encoded: bool) -> ConnectionResult<()> {
         // If PMTUD is not active or the search has not completed then
         // we can only send up to the configured MTU.
-        if self.connection_type.is_datagram()
+        if self.caps.is_lossy()
             && data.len() > wire::Data::maximum_packet_size_for_plpmtu(self.outside_mtu)
         {
             return Err(ConnectionError::InvalidInsidePacket(
@@ -1460,7 +1502,7 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Send the records that the transport wrote during its last
     /// call. An error of that call comes before an error of the send.
-    fn send_records_after<T>(&mut self, res: Result<T, crate::tls::Error>) -> ConnectionResult<T> {
+    fn send_records_after<T>(&mut self, res: Result<T, TransportError>) -> ConnectionResult<T> {
         let sent = self.send_records();
         let t = res?;
         sent?;
@@ -1496,22 +1538,20 @@ impl<AppState: Send> Connection<AppState> {
     /// While the outside IO blocks the encapsulation, queue the frame
     /// inside `ConnectionState` and retry on the next call.
     ///
-    /// On [`ConnectionType::Stream`] (TCP), frames not carrying an
-    /// inner TCP packet (inner UDP, control frames) are queued up to
-    /// [`MAX_PENDING_QUEUE_PACKETS`] — nothing retransmits these,
-    /// so dropping here would lose the frame.
+    /// The queue holds up to [`MAX_PENDING_QUEUE_PACKETS`] frames without
+    /// an inner TCP packet (inner UDP, control frames). Nothing
+    /// retransmits these frames, so a drop here loses them.
     ///
-    /// Everything else (frames carrying inner TCP packets) queues at
-    /// most one frame; further frames are dropped — inner TCP
-    /// retransmits the payloads anyway. A datagram encapsulation never
-    /// blocks, so its frames never wait.
+    /// For frames with an inner TCP packet, the queue holds at most one
+    /// frame. It drops other frames, because inner TCP retransmits their
+    /// payloads. Only a [`crate::Delivery::Stream`] encapsulation blocks, so
+    /// only its frames wait.
     fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
-        let queue_limit = match self.connection_type {
-            ConnectionType::Stream => match &frame {
-                wire::Frame::Data(d) if ipv4_is_tcp(d.data.as_ref()) => 1,
-                _ => MAX_PENDING_QUEUE_PACKETS,
-            },
-            ConnectionType::Datagram => 1,
+        let inner_tcp = matches!(&frame, wire::Frame::Data(d) if ipv4_is_tcp(d.data.as_ref()));
+        let queue_limit = if !inner_tcp {
+            MAX_PENDING_QUEUE_PACKETS
+        } else {
+            1
         };
         self.encapsulation
             .flush()
@@ -1797,13 +1837,7 @@ impl<AppState: Send> Connection<AppState> {
             State::Disconnecting | State::Disconnected => Err(ConnectionError::InvalidState),
         };
 
-        // RFC6347 mandates each datagram should have full record and one TLS record cannot span
-        // over multiple datagrams
-        // https://datatracker.ietf.org/doc/html/rfc6347#section-4.1.2.6
-        // So drop remaining buffer if any in case of UDP transport
-        if self.connection_type.is_datagram() {
-            self.transport.discard_pending();
-        }
+        self.transport.packet_done();
 
         frame_read_count_result
     }
@@ -2152,7 +2186,7 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn expresslane_supported(&self) -> bool {
-        self.connection_type.is_datagram()
+        self.caps.has_wire_header()
             && self
                 .tunnel_protocol_version()
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
@@ -2558,13 +2592,13 @@ impl<AppState: Send> Connection<AppState> {
         }
 
         if let Ok(inside_mtu) = cfg.mtu.parse()
-            && self.connection_type.is_datagram()
-            && self.outside_mtu < dtls_required_outside_mtu(inside_mtu)
+            && self.caps.is_lossy()
             && self.pmtud.is_some()
+            && inside_mtu > self.transport.max_frame_payload()
         {
             return Err(ConnectionError::PathMtuDiscoveryRequired {
                 inside_mtu,
-                required_outside_mtu: dtls_required_outside_mtu(inside_mtu),
+                max_frame_payload: self.transport.max_frame_payload(),
             });
         }
 
@@ -2716,8 +2750,8 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
-        if !matches!(self.connection_type, ConnectionType::Datagram) {
-            warn!("Received EncodingRequest packet in TCP mode.");
+        if !self.caps.is_lossy() {
+            warn!("Received EncodingRequest packet on a transport that is not lossy.");
             metrics::received_encoding_req_with_tcp();
             return Err(ConnectionError::InvalidConnectionType);
         }
@@ -2776,8 +2810,8 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
-        if !matches!(self.connection_type, ConnectionType::Datagram) {
-            error!("Received Encoding response packet in TCP mode.");
+        if !self.caps.is_lossy() {
+            error!("Received Encoding response packet on a transport that is not lossy.");
             return Err(ConnectionError::InvalidConnectionType);
         }
 
@@ -2835,7 +2869,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
-        if !matches!(self.connection_type, ConnectionType::Datagram) {
+        if !self.caps.is_lossy() {
             return Err(ConnectionError::InvalidConnectionType);
         }
 
@@ -2910,7 +2944,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidState);
         }
 
-        if !matches!(self.connection_type, ConnectionType::Datagram) {
+        if !self.caps.is_lossy() {
             return Err(ConnectionError::InvalidConnectionType);
         }
 
