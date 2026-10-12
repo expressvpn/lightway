@@ -16,6 +16,8 @@ fuzzing_api = []
 wolfssl = ["dep:wolfssl", "wolfssl/system_ca_certs", "wolfssl/postquantum"]
 boringssl = ["dep:boringssl"]
 debug = ["wolfssl?/debug", "boringssl?/debug"]
+# Expose the in-memory mock transport to other crates' tests
+test-utils = []
 
 [lints]
 workspace = true
