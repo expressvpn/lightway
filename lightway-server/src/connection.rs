@@ -7,7 +7,7 @@ use std::{
 use tracing::{trace, warn};
 
 use crate::{
-    connection_manager::{ConnectionManager, ConnectionManagerError},
+    connection_manager::{ConnectionId, ConnectionManager, ConnectionManagerError},
     metrics,
 };
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
@@ -37,6 +37,7 @@ impl ConnectionTickerState for ConnectionState {
 }
 
 pub(crate) struct Connection {
+    pub(crate) id: ConnectionId,
     manager: Arc<ConnectionManager>,
     lw_conn: Mutex<lightway_core::Connection<ConnectionState>>,
     pub(crate) connection_started: std::time::Instant,
@@ -59,6 +60,7 @@ impl Connection {
         event_cb: EventStreamCallback,
     ) -> Result<Arc<Self>, ConnectionManagerError> {
         tracing::debug!(?local_addr, "New connection");
+        let id = manager.next_connection_id();
         let connection_started = std::time::Instant::now();
 
         let (ticker, ticker_task) = ConnectionTicker::new();
@@ -80,6 +82,7 @@ impl Connection {
         );
 
         let conn = Arc::new(Self {
+            id,
             manager,
             lw_conn,
             connection_started,
