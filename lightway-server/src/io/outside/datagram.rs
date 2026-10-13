@@ -463,4 +463,24 @@ pub(crate) mod tests {
             "the routing index must not have moved either"
         );
     }
+
+    #[tokio::test]
+    async fn an_ignored_peer_address_does_not_move_the_map() {
+        let manager = test_conn_manager();
+        let io = Arc::new(MockIo::default());
+        let server = server(&io, manager.clone());
+
+        let mut buf = wire_packet(Version::MINIMUM, SessionId::EMPTY);
+        server.dispatch(&mut buf, &meta(PEER_A));
+        let conn = manager
+            .find_datagram_connection_with(PEER_A)
+            .expect("connection created for PEER_A");
+
+        // `MockSend` keeps the default `set_peer_addr`, which ignores
+        // the address.
+        assert!(!manager.set_peer_addr(&conn, PEER_B));
+        assert_eq!(conn.peer_addr(), PEER_A);
+        assert!(manager.find_datagram_connection_with(PEER_A).is_some());
+        assert!(manager.find_datagram_connection_with(PEER_B).is_none());
+    }
 }
