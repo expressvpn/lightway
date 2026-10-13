@@ -318,6 +318,7 @@ impl Transport for TlsTransport {
             lossy: datagram,
             reliable_control: !datagram,
             wire_header: datagram,
+            supports_roaming: datagram,
         }
     }
 

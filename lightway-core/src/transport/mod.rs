@@ -62,6 +62,9 @@ pub struct TransportCaps {
     /// expresslane record and carries the session id that its
     /// decryption uses.
     pub wire_header: bool,
+    /// The connection survives a change of the local network, so a
+    /// client probes the new path and does not reconnect.
+    pub supports_roaming: bool,
 }
 
 /// The transport under a connection.

@@ -525,13 +525,13 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
             match event {
                 Event::StateChanged(State::Online) => {
                     let mut client = client.lock().unwrap();
-                    let conn_type = client.connection_type();
+                    let caps = client.transport_caps();
                     let session_id = client.session_id();
                     let protocol = client.tls_protocol_version();
                     let cipher = client.current_cipher().unwrap();
                     let curve = client.current_curve().unwrap();
                     eprintln!(
-                        "{conn_type:?} connection is Online with {session_id:?}, negotiated protocol {protocol:?}, {cipher} & {curve}"
+                        "{caps:?} connection is Online with {session_id:?}, negotiated protocol {protocol:?}, {cipher} & {curve}"
                     );
                 }
                 Event::StateChanged(state) => eprintln!("Connection change to {state:?}"),
