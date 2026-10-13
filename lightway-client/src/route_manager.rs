@@ -65,11 +65,37 @@ const TUNNEL_ROUTES: [(IpAddr, u8); 2] = [
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum RouteMode {
-    #[default]
+    #[cfg_attr(not(linux), default)]
     Default,
     Lan,
     NoExec,
+    /// Linux only: policy routing driven by a firewall mark.
+    ///
+    /// The tunnel's catch-all routes are installed in
+    /// [`FWMARK_ROUTE_TABLE`] instead of `main`, and no `/32` host route for
+    /// the server is created at all. The tunnel's own outbound packets are
+    /// steered by an `fwmark` rule (see [`crate::policy_routing`]) which
+    /// resolves via `main`, whose default route the kernel keeps current on its
+    /// own.
+    ///
+    /// This removes the window in which a network change can leave the server
+    /// unreachable except via the tunnel itself -- the condition that produces
+    /// an encapsulation loop.
+    ///
+    /// If `fwmark` is not set, a default mark (`0x4865_0000`) is used automatically.
+    #[cfg(linux)]
+    #[cfg_attr(linux, default)]
+    Fwmark,
 }
+
+/// Routing table holding the tunnel routes under [`RouteMode::Fwmark`].
+///
+/// Chosen as 2 — the atomic number of Helium — as a memorable low value that
+/// sits well below the reserved `main` (254), `default` (253) and `local` (255)
+/// tables. `route_manager` represents table ids as a `u8`, so this must be in
+/// `1..=252`.
+#[cfg(linux)]
+pub const FWMARK_ROUTE_TABLE: u8 = 2;
 
 #[derive(Error, Debug)]
 pub enum RoutingTableError {
@@ -97,6 +123,8 @@ pub enum RoutingTableError {
     RoutingManagerError(std::io::Error),
     #[error("Server route already exists, try modifying it instead")]
     ServerRouteAlreadyExists,
+    #[error("Policy routing error: {0}")]
+    PolicyRoutingError(anyhow::Error),
 }
 
 impl RoutingTableError {
@@ -130,6 +158,11 @@ fn same_ip_family(ip1: &IpAddr, ip2: &IpAddr) -> bool {
 pub struct RouteManager {
     inner: Option<RouteManagerInner>,
     task: Option<JoinHandle<()>>,
+    /// Linux fwmark policy rules (`RouteMode::Fwmark` only). Created in
+    /// [`Self::new`] (no netlink connection yet), installed by [`Self::start`],
+    /// removed by [`Self::stop`].
+    #[cfg(linux)]
+    policy: Option<policy_routing::PolicyRouting>,
 }
 
 struct RouteManagerInner {
@@ -144,6 +177,8 @@ struct RouteManagerInner {
     lan_routes: Vec<Route>,
     server_route: Option<Route>,
     repin_mode: RepinMode,
+    #[cfg(linux)]
+    fwmark_route_table: u8,
 }
 
 impl RouteManager {
@@ -153,6 +188,7 @@ impl RouteManager {
         tun_index: u32,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<Self, RoutingTableError> {
         let inner = Some(RouteManagerInner::new(
             routing_mode,
@@ -160,8 +196,16 @@ impl RouteManager {
             tun_index,
             tun_peer_ip,
             tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_config.table,
         )?);
-        Ok(Self { inner, task: None })
+        Ok(Self {
+            inner,
+            task: None,
+            #[cfg(linux)]
+            policy: (routing_mode == RouteMode::Fwmark)
+                .then(|| policy_routing::PolicyRouting::new(fwmark_config, server_ip)),
+        })
     }
 
     /// Install the routes required to use the tunnel (NoExec installs
@@ -173,7 +217,31 @@ impl RouteManager {
             return Err(RoutingTableError::InsufficientPermissions);
         };
 
-        inner.install_routes().await?;
+        // Under Fwmark mode the policy rules must exist *before* any tunnel
+        // route is installed. Installing the tunnel table first would leave a
+        // window where traffic can reach the tunnel table with no fwmark rule
+        // to keep the tunnel's own packets out of it.
+        #[cfg(linux)]
+        if let Some(pr) = self.policy.as_mut()
+            && let Err(e) = pr.install().await
+        {
+            pr.cleanup().await;
+            return Err(RoutingTableError::PolicyRoutingError(e));
+        }
+
+        let routes_result = inner.install_routes().await;
+
+        // start() leaves no system state behind on failure: the routes are
+        // gone when `inner` drops, so the policy rules steering traffic to
+        // them must go too.
+        #[cfg(linux)]
+        if routes_result.is_err()
+            && let Some(pr) = self.policy.as_mut()
+        {
+            pr.cleanup().await;
+        }
+
+        routes_result?;
         Ok(RouteUpdater { inner })
     }
 
@@ -189,6 +257,13 @@ impl RouteManager {
 
             // Wait till the task finishes to clear routes
             let _ = task.await;
+        }
+
+        // Rules come down after the routes they steer traffic to; the routes
+        // are gone once the aborted task above drops its RouteUpdater.
+        #[cfg(linux)]
+        if let Some(mut pr) = self.policy.take() {
+            pr.cleanup().await;
         }
 
         Ok(())
@@ -261,6 +336,7 @@ impl RouteManagerInner {
         tun_index: u32,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
+        #[cfg(linux)] fwmark_route_table: u8,
     ) -> Result<Self, RoutingTableError> {
         let route_manager =
             SyncRouteManager::new().map_err(RoutingTableError::RoutingManagerError)?;
@@ -281,6 +357,8 @@ impl RouteManagerInner {
                 apple => { RepinMode::Always }
                 _ =>     { RepinMode::OnRouteChange }
             },
+            #[cfg(linux)]
+            fwmark_route_table,
         })
     }
 
@@ -527,19 +605,32 @@ impl RouteManagerInner {
         let (default_interface_index, default_interface_gateway) =
             self.find_default_interface_index_and_gateway(&server_ip)?;
 
-        // Create server route with optional gateway - handles both direct routes (containers)
-        // and routed networks (host systems with gateways)
-        let prefix = host_prefix_len(&server_ip);
-        let server_route = Route::new(server_ip, prefix).with_if_index(default_interface_index);
-        let server_route = match default_interface_gateway {
-            Some(gateway) => server_route.with_gateway(gateway),
-            None => server_route,
-        };
+        // Under RouteMode::Fwmark the server is reached via the fwmark rule,
+        // which resolves through the `main` table. Installing a host route here
+        // would reintroduce the very dependency this mode exists to remove: a
+        // Lightway-managed route that can be transiently absent after a network
+        // change, during which server-bound traffic falls into the tunnel and
+        // loops.
+        #[cfg(linux)]
+        let skip_server_route = self.routing_mode == RouteMode::Fwmark;
+        #[cfg(not(target_os = "linux"))]
+        let skip_server_route = false;
 
-        #[cfg(windows)]
-        let server_route = server_route.with_metric(0);
+        if !skip_server_route {
+            // Create server route with optional gateway - handles both direct routes (containers)
+            // and routed networks (host systems with gateways)
+            let prefix = host_prefix_len(&server_ip);
+            let server_route = Route::new(server_ip, prefix).with_if_index(default_interface_index);
+            let server_route = match default_interface_gateway {
+                Some(gateway) => server_route.with_gateway(gateway),
+                None => server_route,
+            };
 
-        self.add_route_server(server_route).await?;
+            #[cfg(windows)]
+            let server_route = server_route.with_metric(0);
+
+            self.add_route_server(server_route).await?;
+        }
 
         if self.routing_mode == RouteMode::Lan {
             for (network, prefix) in LAN_NETWORKS {
@@ -566,6 +657,8 @@ impl RouteManagerInner {
             #[cfg(windows)]
             let tunnel_route = tunnel_route.with_metric(0);
 
+            let tunnel_route = self.apply_route_table(tunnel_route);
+
             self.add_route_vpn(tunnel_route).await?;
         }
 
@@ -576,8 +669,20 @@ impl RouteManagerInner {
         #[cfg(windows)]
         let dns_route = dns_route.with_metric(0);
 
+        let dns_route = self.apply_route_table(dns_route);
+
         self.add_route_vpn(dns_route).await?;
         Ok(())
+    }
+
+    /// Places tunnel-side routes in the dedicated table under
+    /// [`RouteMode::Fwmark`], and leaves them in `main` otherwise.
+    fn apply_route_table(&self, route: Route) -> Route {
+        #[cfg(linux)]
+        if self.routing_mode == RouteMode::Fwmark {
+            return route.with_table(self.fwmark_route_table);
+        }
+        route
     }
 
     /// Check if server route needs updating due to network changes. Returns
@@ -585,6 +690,16 @@ impl RouteManagerInner {
     /// fatal by [`RoutingTableError::is_fatal`] stop the VPN; the caller
     /// retries everything else with exponential back-off.
     async fn check_and_update_server_route(&mut self) -> Result<bool, RoutingTableError> {
+        // Under RouteMode::Fwmark there is no server host route to chase: the
+        // fwmark rule resolves via `main`, which the kernel updates itself when
+        // the default route changes. Doing nothing here is the correct and
+        // race-free behaviour.
+        #[cfg(linux)]
+        if self.routing_mode == RouteMode::Fwmark {
+            trace!("Fwmark mode: no server route to update");
+            return Ok(false);
+        }
+
         // The tracked server route is guaranteed Some by `install_routes()`
         // and preserved by `update_server_route()` (which fatals on a failed
         // add). None means the invariant is broken and there is no trusted
@@ -651,6 +766,30 @@ impl Drop for RouteManagerInner {
     }
 }
 
+/// Best-effort safety net: if [`RouteManager::stop`] was never called (e.g. an
+/// error return before teardown), detach a task to remove the policy rules.
+#[cfg(linux)]
+impl Drop for RouteManager {
+    fn drop(&mut self) {
+        if let Some(mut pr) = self.policy.take() {
+            // Netlink rule cleanup is async, so it cannot run inline in Drop.
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move { pr.cleanup().await });
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "RouteManager dropped without stop() outside a tokio runtime; fwmark policy rules may be left installed"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(linux)]
+pub mod policy_routing;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +810,19 @@ mod tests {
     const TUN_DNS_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4));
     const ROUTE_TEST_IP1: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
     const ROUTE_TEST_IP2: IpAddr = IpAddr::V4(Ipv4Addr::new(200, 1, 1, 1));
+
+    #[cfg(linux)]
+    fn test_fwmark_config() -> policy_routing::FWMarkConfig {
+        policy_routing::FWMarkConfig {
+            fwmark: policy_routing::DEFAULT_FWMARK,
+            table: FWMARK_ROUTE_TABLE,
+            rule_priority_marked: policy_routing::RULE_PRIORITY_MARKED,
+            rule_priority_server: policy_routing::RULE_PRIORITY_SERVER,
+            rule_priority_marked_fallback: policy_routing::RULE_PRIORITY_MARKED_FALLBACK,
+            rule_priority_suppress_default: policy_routing::RULE_PRIORITY_SUPPRESS_DEFAULT,
+            rule_priority_tunnel: policy_routing::RULE_PRIORITY_TUNNEL,
+        }
+    }
 
     /// Helper to create test routes with gateway lookup
     fn create_test_routes_with_gateway(
@@ -769,8 +921,15 @@ mod tests {
         }
 
         // Create RouteManagerInner directly for testing
-        let route_manager =
-            RouteManagerInner::new(route_mode, server_ip, tun_index, TUN_PEER_IP, TUN_DNS_IP)?;
+        let route_manager = RouteManagerInner::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
+        )?;
 
         // Return tuple - RouteManagerInner will be dropped first, then TUN device, RouteRestorer last
         Ok((restorer, tun_device, route_manager))
@@ -1062,8 +1221,16 @@ mod tests {
     #[serial_test::serial(route_manager)]
     #[ignore = "May falsely fail during development due to local route settings"]
     async fn test_route_manager_start_stop(route_mode: RouteMode) {
-        let mut route_manager =
-            RouteManager::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP).unwrap();
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            test_fwmark_config(),
+        )
+        .unwrap();
 
         // Test that we can start the route manager
         let start_result = route_manager.start().await;
@@ -1099,6 +1266,8 @@ mod tests {
             0,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            test_fwmark_config(),
         )
         .unwrap();
         let updater = route_manager.start().await.unwrap();
@@ -1122,8 +1291,15 @@ mod tests {
     #[tokio::test]
     async fn test_route_manager_inner_structure(route_mode: RouteMode) {
         // Test that RouteManagerInner can be created directly
-        let inner_result =
-            RouteManagerInner::new(route_mode, EXTERNAL_IP_V4, 0, TUN_PEER_IP, TUN_DNS_IP);
+        let inner_result = RouteManagerInner::new(
+            route_mode,
+            EXTERNAL_IP_V4,
+            0,
+            TUN_PEER_IP,
+            TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
+        );
         assert!(inner_result.is_ok());
 
         let inner = inner_result.unwrap();
@@ -1145,6 +1321,8 @@ mod tests {
             0,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            test_fwmark_config(),
         )
         .unwrap();
 
@@ -1201,6 +1379,8 @@ mod tests {
             1,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            test_fwmark_config(),
         )
         .unwrap();
 
@@ -1219,6 +1399,8 @@ mod tests {
             1,
             TUN_PEER_IP,
             TUN_DNS_IP,
+            #[cfg(linux)]
+            FWMARK_ROUTE_TABLE,
         );
         assert!(inner.is_ok());
 

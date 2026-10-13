@@ -84,6 +84,10 @@ run-udp-pqc-x25519mlkem768-test:
 run-udp-floating-ip-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="" --TEST_SCRIPT=./run-udp-floating-test.sh
 
+# run-wifi-switch-test runs e2e test of VPN reconnection on WiFi interface loss
+run-wifi-switch-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--route-mode fwmark" --COMPOSE_FILE="docker-compose.wifi-switch.yml" --TEST_SCRIPT=./run-wifi-switch-test.sh
+
 # run-udp-pmtud-test runs e2e test of UDP with PMTUD enabled
 run-udp-pmtud-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-pmtud"
@@ -264,6 +268,7 @@ run-all-tests-wolfssl:
     BUILD +run-udp-pqc-test
     BUILD +run-udp-pqc-x25519mlkem768-test
     BUILD +run-udp-floating-ip-test
+    BUILD +run-wifi-switch-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
     BUILD +run-udp-tun-offload-test
@@ -295,3 +300,4 @@ run-all-tests-boringssl:
     BUILD +run-udp-chacha20-test --BACKEND=boringssl
     BUILD +run-udp-pqc-test --BACKEND=boringssl
     BUILD +run-udp-expresslane-test --BACKEND=boringssl
+    BUILD +run-wifi-switch-test --BACKEND=boringssl

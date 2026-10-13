@@ -5,9 +5,11 @@ build-container:
     COPY \
         docker-compose.yml \
         docker-compose.parallel_connect.yml \
+        docker-compose.wifi-switch.yml \
         run-with-compose-stack.sh \
         run-simple-test.sh \
         run-udp-floating-test.sh \
         run-parallel-connect-test.sh \
+        run-wifi-switch-test.sh \
         .
 
