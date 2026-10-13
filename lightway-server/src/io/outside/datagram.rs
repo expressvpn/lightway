@@ -150,8 +150,22 @@ impl DatagramServer {
     }
 }
 
+/// The built-in [`Server`] for a datagram [`OutsideIO`].
+pub(crate) struct DatagramIoServer {
+    pub(crate) io: Box<dyn OutsideIO>,
+    pub(crate) transport: TlsServerFactory,
+}
+
 #[async_trait]
-impl Server for DatagramServer {
+impl Server for DatagramIoServer {
+    async fn run(self: Box<Self>, manager: Arc<ConnectionManager>) -> Result<()> {
+        DatagramServer::new(self.io, self.transport, manager)
+            .run()
+            .await
+    }
+}
+
+impl DatagramServer {
     async fn run(&mut self) -> Result<()> {
         let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
