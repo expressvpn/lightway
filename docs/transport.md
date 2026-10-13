@@ -41,3 +41,23 @@ does next.
   a packet. The transport runs only the egress hooks, on each packet that
   it sends. If a hook does not accept a packet, the transport does not
   send it.
+
+## Client
+
+To use a custom transport, set `ClientConnectionMode::Transport`. It
+contains two items:
+
+- `factory`: a `ClientTransportFactory`. For each connection attempt, the
+  client calls `connect` with the `TransportArgs` and the
+  `ClientTransportArgs`.
+- `connector`: a function that connects the outside IO when the
+  attempt starts.
+
+`TransportArgs` contains the outside path and the outside MTU. It also
+contains the protocol version, the session ID and the outside plugins.
+`ClientTransportArgs` contains the peer checks and the key share. A
+transport uses the items that apply to it.
+
+After a network change, a client on a `supports_roaming` transport keeps
+the connection and sends keepalives. On other transports, the client
+disconnects and returns `ClientResult::NetworkChange`.

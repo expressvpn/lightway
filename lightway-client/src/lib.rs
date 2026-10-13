@@ -10,6 +10,8 @@ pub mod route_manager;
 
 #[cfg(feature = "mobile")]
 pub mod mobile;
+#[cfg(test)]
+mod transport_mode_tests;
 
 #[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
@@ -31,10 +33,10 @@ use lightway_app_utils::{
 };
 use lightway_core::TlsClientFactory;
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType, State,
-    ipv4_update_destination, ipv4_update_source,
+    BuilderPredicates, ClientContextBuilder, ClientIpConfig, ClientTransportFactory, Connection,
+    ConnectionError, ConnectionType, Event, EventCallback, IOCallbackResult,
+    InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType,
+    State, ipv4_update_destination, ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -102,6 +104,22 @@ pub enum ClientConnectionMode {
     /// A datagram transport the application connects when the connection
     /// attempt starts; see [`OutsideIoConnector`].
     DatagramIoConnector(OutsideIoConnector),
+    /// A transport the application builds, over an outside IO that the
+    /// application connects when the connection attempt starts.
+    ///
+    /// The factory gets `server_dn`, `sni_header` and the key share offer
+    /// in [`lightway_core::ClientTransportArgs`]. The offer is `keyshare`, or no
+    /// key share when the outside IO sets `empty_first_key_share`. The TLS
+    /// context settings go unused: `cipher` and `cert_content` on
+    /// [`ClientConnectionConfig`], and `tls_debug` and `keylog` on
+    /// [`ClientConfig`]. The outside IO owns the peer address and the
+    /// socket, so `server` on [`ClientConnectionConfig`] only names the
+    /// peer in logs, and the socket settings on [`ClientConfig`] go
+    /// unused.
+    Transport {
+        factory: Arc<dyn ClientTransportFactory>,
+        connector: OutsideIoConnector,
+    },
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -110,6 +128,7 @@ impl std::fmt::Debug for ClientConnectionMode {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
             Self::DatagramIoConnector(_) => f.debug_tuple("DatagramIoConnector").finish(),
+            Self::Transport { .. } => f.debug_struct("Transport").finish_non_exhaustive(),
         }
     }
 }
@@ -1559,6 +1578,47 @@ fn effective_outside_io_settings(
     }
 }
 
+async fn connect_outside_io(
+    connector: OutsideIoConnector,
+) -> Result<Arc<dyn io::outside::OutsideIO>> {
+    connector()
+        .await
+        .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+        .context("Outside IO connector")
+}
+
+fn tls_client_factory<ExtAppState: Send + Sync>(
+    #[cfg_attr(not(feature = "debug"), allow(unused_variables))] config: &ClientConfig<ExtAppState>,
+    connection_type: ConnectionType,
+    cert_content: &str,
+    cipher: Cipher,
+) -> Result<Arc<dyn ClientTransportFactory>> {
+    #[cfg(feature = "debug")]
+    if config.tls_debug {
+        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
+    }
+
+    let transport = TlsClientFactory::builder(
+        connection_type,
+        RootCertificate::PemBuffer(cert_content.as_bytes()),
+    )?
+    .with_cipher(cipher.into())?
+    // Ensures any per-connection PQ key share is also offered in the TLS
+    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
+    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
+    // nothing, because wolfSSL configures PQ groups per session.
+    .enable_pq_crypto()?;
+
+    // Register the TLS key logger once on the factory; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let transport = transport.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
+    Ok(Arc::new(transport.build()))
+}
+
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -1590,74 +1650,76 @@ pub async fn connect<
         event_handler,
     } = server_config;
 
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match mode {
-            ClientConnectionMode::DatagramIoConnector(connector) => {
-                let io = connector()
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
-                    .context("Outside IO connector")?;
-                (ConnectionType::Datagram, io)
+    let tls_factory =
+        |connection_type| tls_client_factory(config, connection_type, &cert_content, cipher);
+
+    let (transport, outside_io): (_, Arc<dyn OutsideIO>) = match mode {
+        ClientConnectionMode::Transport { factory, connector } => {
+            (factory, connect_outside_io(connector).await?)
+        }
+        ClientConnectionMode::DatagramIoConnector(connector) => (
+            tls_factory(ConnectionType::Datagram)?,
+            connect_outside_io(connector).await?,
+        ),
+        ClientConnectionMode::Datagram(maybe_sock) => {
+            #[cfg_attr(not(batch_receive), allow(unused_mut))]
+            let mut sock = io::outside::Udp::new(
+                server,
+                maybe_sock,
+                #[cfg(all(linux, not(feature = "mobile")))]
+                config.fwmark,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
+            .context("Outside IO UDP")?;
+
+            #[cfg(batch_receive)]
+            if config.enable_batch_receive {
+                sock.enable_batch_receive();
             }
-            ClientConnectionMode::Datagram(maybe_sock) => {
-                #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(
-                    server,
-                    maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
-                )
-                .await
-                .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
-                .context("Outside IO UDP")?;
 
-                #[cfg(batch_receive)]
-                if config.enable_batch_receive {
-                    sock.enable_batch_receive();
-                }
+            sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+            sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
 
+            // On Apple platforms a connected UDP socket lets `send` skip
+            // the per-packet route lookup, improving throughput. Safe
+            // because a network change re-connects the socket: via the
+            // network-event coordinator on desktop (see
+            // `initialize_routes`), via the network-change signal
+            // forwarder elsewhere.
+            #[cfg(apple)]
+            if config.enable_connected_udp
+                && let Err(e) = sock.enable_connected_send()
+            {
+                tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
+            }
+
+            (tls_factory(ConnectionType::Datagram)?, Arc::new(sock))
+        }
+        ClientConnectionMode::Stream(maybe_sock) => {
+            let sock = io::outside::Tcp::new(
+                server,
+                maybe_sock,
+                #[cfg(all(linux, not(feature = "mobile")))]
+                config.fwmark,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
+            .context("Outside IO TCP")?;
+
+            // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
+            // autotuning, capping the bandwidth-delay product and throttling
+            // high-RTT links to single-digit Mbps. UDP has no autotuning so it
+            // still needs explicit sizing above.
+            // macOS benefits from explicit buffers in real-world testing.
+            #[cfg(target_os = "macos")]
+            {
                 sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
                 sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
-
-                // On Apple platforms a connected UDP socket lets `send` skip
-                // the per-packet route lookup, improving throughput. Safe
-                // because a network change re-connects the socket: via the
-                // network-event coordinator on desktop (see
-                // `initialize_routes`), via the network-change signal
-                // forwarder elsewhere.
-                #[cfg(apple)]
-                if config.enable_connected_udp
-                    && let Err(e) = sock.enable_connected_send()
-                {
-                    tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
-                }
-
-                (ConnectionType::Datagram, Arc::new(sock))
             }
-            ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(
-                    server,
-                    maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
-                )
-                .await
-                .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
-                .context("Outside IO TCP")?;
-
-                // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
-                // autotuning, capping the bandwidth-delay product and throttling
-                // high-RTT links to single-digit Mbps. UDP has no autotuning so it
-                // still needs explicit sizing above.
-                // macOS benefits from explicit buffers in real-world testing.
-                #[cfg(target_os = "macos")]
-                {
-                    sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
-                    sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
-                }
-                (ConnectionType::Stream, Arc::new(sock))
-            }
-        };
+            (tls_factory(ConnectionType::Stream)?, Arc::new(sock))
+        }
+    };
 
     let required_outside_mtu = outside_io.required_outside_mtu();
     let (outside_mtu, enable_pmtud) = effective_outside_io_settings(
@@ -1684,11 +1746,6 @@ pub async fn connect<
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 
-    #[cfg(feature = "debug")]
-    if config.tls_debug {
-        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
-    }
-
     let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver, codec_stats_handles) =
         match &inside_pkt_codec {
             Some(codec_factory) => {
@@ -1704,26 +1761,8 @@ pub async fn connect<
             None => (None, None, None, None),
         };
 
-    let transport = TlsClientFactory::builder(
-        connection_type,
-        RootCertificate::PemBuffer(cert_content.as_bytes()),
-    )?
-    .with_cipher(cipher.into())?
-    // Ensures any per-connection PQ key share is also offered in the TLS
-    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
-    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
-    // nothing, because wolfSSL configures PQ groups per session.
-    .enable_pq_crypto()?;
-
-    // Register the TLS key logger once on the factory; core applies it at the
-    // correct layer for the active TLS backend (SSL_CTX vs per session).
-    #[cfg(feature = "debug")]
-    let transport = transport.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
-    });
-
     let ctx_builder = ClientContextBuilder::new(
-        Arc::new(transport.build()),
+        transport,
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
