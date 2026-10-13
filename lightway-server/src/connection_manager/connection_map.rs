@@ -9,7 +9,8 @@ use thiserror::Error;
 use lightway_core::SessionId;
 
 #[derive(Error, Debug)]
-pub(crate) enum InsertError {
+#[non_exhaustive]
+pub enum InsertError {
     #[error("Insert with different SocketAddr to initial lookup")]
     InconsistentSocketAddr,
 

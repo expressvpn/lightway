@@ -145,7 +145,7 @@ async fn handle_connection(
     });
     // TCP has no version indication, default to the minimum
     // supported version.
-    let Ok(conn) = conn_manager.create_streaming_connection(
+    let Ok(conn) = conn_manager.create_connection(
         Version::MINIMUM,
         local_addr,
         outside_io,
