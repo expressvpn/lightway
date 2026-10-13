@@ -666,10 +666,12 @@ mod tests {
 
     const DATAGRAM: TransportCaps = TransportCaps {
         delivery: Delivery::Datagram { wire_header: true },
+        supports_roaming: true,
     };
 
     const STREAM: TransportCaps = TransportCaps {
         delivery: Delivery::Stream,
+        supports_roaming: false,
     };
 
     fn make_encapsulation(

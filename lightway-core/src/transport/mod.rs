@@ -64,6 +64,9 @@ pub enum Delivery {
 pub struct TransportCaps {
     /// How the transport delivers records.
     pub delivery: Delivery,
+    /// The connection survives a change of the local network, so a
+    /// client probes the new path and does not reconnect.
+    pub supports_roaming: bool,
 }
 
 impl TransportCaps {

@@ -331,6 +331,7 @@ impl Transport for TlsTransport {
             } else {
                 Delivery::Stream
             },
+            supports_roaming: datagram,
         }
     }
 
