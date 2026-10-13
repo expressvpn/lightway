@@ -1306,17 +1306,14 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         let Some(conn) = weak.upgrade() else {
             return ClientResult::UserDisconnect;
         };
-        let conn_type = conn.lock().unwrap().connection_type();
-        match conn_type {
-            ConnectionType::Datagram => {
-                info!("sending keepalives due to network change ..");
-                keepalive.network_changed().await;
-            }
-            ConnectionType::Stream => {
-                info!("client shutting down due to network change ..");
-                let _ = conn.lock().unwrap().disconnect();
-                return ClientResult::NetworkChange;
-            }
+        let roams = conn.lock().unwrap().transport_caps().supports_roaming;
+        if roams {
+            info!("sending keepalives due to network change ..");
+            keepalive.network_changed().await;
+        } else {
+            info!("client shutting down due to network change ..");
+            let _ = conn.lock().unwrap().disconnect();
+            return ClientResult::NetworkChange;
         }
     }
     ClientResult::UserDisconnect
@@ -1993,9 +1990,7 @@ pub async fn connect<
             config.sni_header.as_deref().filter(|s| !s.is_empty()),
             |b, sni| b.with_sni_header(sni),
         )
-        .when(connection_type.is_datagram() && enable_pmtud, |b| {
-            b.with_pmtud_timer(pmtud_timer)
-        })
+        .when(enable_pmtud, |b| b.with_pmtud_timer(pmtud_timer))
         .with_pq_crypto(config.keyshare.into())
         .when(outside_io.empty_first_key_share(), |b| {
             b.with_no_key_shares()
@@ -2628,15 +2623,17 @@ pub async fn client<
             }
         };
 
-        // Probe after a server-route replacement - Datagram only: the Stream
-        // handler treats a nudge as a teardown, which a route-only change
-        // does not warrant.
+        // Probe after a server-route replacement - roaming transports only:
+        // the handler treats a nudge to any other transport as a teardown,
+        // which a route-only change does not warrant.
         #[cfg(apple)]
         let nudge_on_route_update = !config.keepalive_interval.is_zero()
-            && matches!(
-                connection.conn.lock().unwrap().connection_type(),
-                ConnectionType::Datagram
-            );
+            && connection
+                .conn
+                .lock()
+                .unwrap()
+                .transport_caps()
+                .supports_roaming;
 
         let stop_signal = connection.stop_signal.take();
         connection
