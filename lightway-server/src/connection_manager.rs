@@ -9,7 +9,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Weak,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 use thiserror::Error;
@@ -22,6 +22,7 @@ use crate::{
     connection::{Connection, ConnectionState},
     metrics,
 };
+pub(crate) use connection_map::ConnectionId;
 use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback, PacketCodecFactoryType};
 use lightway_core::{
@@ -68,6 +69,10 @@ pub(crate) enum KeyRotation {
 }
 
 impl connection_map::Value for Connection {
+    fn id(&self) -> ConnectionId {
+        self.id
+    }
+
     fn socket_addr(&self) -> SocketAddr {
         self.peer_addr()
     }
@@ -109,7 +114,7 @@ pub(crate) struct ConnectionManager {
     connections: Mutex<ConnectionMap<Connection>>,
     pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
     /// Total number of sessions there have ever been
-    total_sessions: AtomicUsize,
+    total_sessions: AtomicU64,
     inside_io_codec_factory: Option<PacketCodecFactoryType>,
     /// Optional callback to forward per-connection events with session ID
     event_cb: Option<crate::ServerEventCbType>,
@@ -300,8 +305,6 @@ fn new_connection(
     let (event_cb, event_stream) = EventStreamCallback::new();
     let server_event_cb = manager.event_cb.clone();
 
-    manager.total_sessions.fetch_add(1, Ordering::Relaxed);
-
     let (inside_io_codec, pkt_receivers) = match &manager.inside_io_codec_factory {
         Some(codec_factory) => {
             let codec = codec_factory.build();
@@ -409,8 +412,13 @@ impl ConnectionManager {
         }
     }
 
-    pub(crate) fn total_sessions(&self) -> usize {
+    pub(crate) fn total_sessions(&self) -> u64 {
         self.total_sessions.load(Ordering::Relaxed)
+    }
+
+    /// The id of a new connection is the number of sessions before it.
+    pub(crate) fn next_connection_id(&self) -> ConnectionId {
+        ConnectionId(self.total_sessions.fetch_add(1, Ordering::Relaxed))
     }
 
     pub(crate) fn connection_age_expiration_interval(&self) -> Duration {
@@ -435,7 +443,6 @@ impl ConnectionManager {
             outside_io,
             transport,
         )?;
-        // TODO: what if addr was already present?
         self.connections.lock().insert(&conn)?;
         Ok(conn)
     }
@@ -527,16 +534,21 @@ impl ConnectionManager {
     /// datagram receive path, which routes an occupied address to its existing
     /// owner and never treats it as a roam.
     ///
-    /// The check and the swap share one lock on the connection map: `conn`'s
-    /// own address is only mutated once the map has agreed to take it, so the
-    /// two can never diverge.
+    /// Also refuses when the outside IO keeps the old address, because the
+    /// map finds the entry of a connection by its `peer_addr`.
+    ///
+    /// The check and the swap share one lock on the connection map, so the
+    /// key always equals the address of the connection.
     pub(crate) fn set_peer_addr(&self, conn: &Arc<Connection>, new_addr: SocketAddr) -> bool {
         let mut connections = self.connections.lock();
         if !connections.can_take_socketaddr(new_addr, conn) {
             return false;
         }
         let old_addr = conn.set_peer_addr(new_addr);
-        connections.update_socketaddr_for_connection(old_addr, new_addr);
+        if conn.peer_addr() != new_addr {
+            return false;
+        }
+        connections.update_socketaddr_for_connection(conn, old_addr, new_addr);
         true
     }
 
@@ -550,8 +562,8 @@ impl ConnectionManager {
     /// offload engine reporting against the new id would otherwise be ignored
     /// for exactly the period a roam makes reports most likely.
     ///
-    /// `by_session_id` holds streaming connections too, so the type is checked
-    /// here rather than left to each caller.
+    /// `by_session_id` holds every connection, so this method checks the
+    /// type for each caller.
     pub(crate) fn find_datagram_connection_by_session(
         self: &Arc<Self>,
         session_id: SessionId,

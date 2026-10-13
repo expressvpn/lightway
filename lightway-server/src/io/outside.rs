@@ -93,9 +93,10 @@ pub trait OutsideIO: Send {
     /// caused the connection to be created.
     ///
     /// When a peer roams, the server calls `set_peer_addr` on this
-    /// callback to redirect sends. A transport that routes internally
-    /// can keep the default no-op; the server keys its connection map
-    /// from its own record, not from this callback.
+    /// callback to redirect sends. The server moves the connection to
+    /// the new address only if `peer_addr` then returns it. With the
+    /// default no-op, the connection keeps its old address, and the
+    /// server finds it by its session id.
     fn send_callback(&self, meta: &RecvMeta) -> OutsideIOSendCallbackArg;
 
     /// Send an already-encoded frame to a peer that has no connection.

@@ -397,7 +397,7 @@ pub fn expresslane_offload_rx_bytes(sz: u64) {
 /// Current session statistics
 pub(crate) fn sessions_statistics(
     current_sessions: usize,
-    total_sessions: usize,
+    total_sessions: u64,
     pending_session_id_rotations: usize,
     active: ConnectionIntervalStats,
     standby: ConnectionIntervalStats,
