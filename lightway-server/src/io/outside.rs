@@ -2,7 +2,7 @@ pub(crate) mod datagram;
 pub(crate) mod tcp;
 pub(crate) mod udp;
 
-pub(crate) use datagram::DatagramServer;
+pub(crate) use datagram::DatagramIoServer;
 pub(crate) use tcp::TcpServer;
 pub(crate) use udp::UdpIo;
 
@@ -13,10 +13,18 @@ use lightway_core::{
     IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsideIOSendCallbackArg,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use crate::connection_manager::ConnectionManager;
+
+/// Receives outside traffic and feeds it to the connection manager.
 #[async_trait]
-pub(crate) trait Server {
-    async fn run(&mut self) -> Result<()>;
+pub(crate) trait Server: Send {
+    /// Serve the outside path. When `run` returns, with `Ok` or `Err`,
+    /// the [`server`](crate::server) function disconnects every
+    /// connection and returns. That function creates `manager` after it
+    /// selects the mode, so a `Server` cannot hold it from construction.
+    async fn run(self: Box<Self>, manager: Arc<ConnectionManager>) -> Result<()>;
 }
 
 /// Where one received wire packet came from.
