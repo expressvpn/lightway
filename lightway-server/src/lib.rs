@@ -12,7 +12,8 @@ mod statistics;
 pub use crate::connection_manager::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL;
 pub use crate::statistics::DEFAULT_STATISTICS_REPORTING_INTERVAL;
 use bytesize::ByteSize;
-use connection::Connection;
+pub use connection::Connection;
+pub use connection_manager::{ConnectionManager, ConnectionManagerError, InsertError};
 #[cfg(feature = "debug")]
 pub use lightway_core::enable_tls_debug;
 pub use lightway_core::{
@@ -52,13 +53,10 @@ pub use crate::connection::ConnectionState;
 #[cfg(linux)]
 pub use crate::io::inside::InsideIORecvGso;
 pub use crate::io::inside::{InsideIO, InsideIORecv, InsideIORecvBatch};
-pub use crate::io::outside::{OutsideIO, RecvMeta};
+pub use crate::io::outside::{OutsideIO, RecvMeta, Server};
 
 use crate::io::outside::udp::send_queue::for_each_in_batch;
 use crate::ip_manager::IpManager;
-
-use connection_manager::ConnectionManager;
-use io::outside::Server;
 
 fn debug_fmt_plugin_list(
     list: &PluginFactoryList,
@@ -127,6 +125,10 @@ pub enum ServerConnectionMode {
     /// batched inside loop needs the UDP send queue that only the built-in
     /// socket provides.
     DatagramIo(Box<dyn OutsideIO>),
+    /// A server supplied by the application. It builds the transport
+    /// of each connection that it creates. The certificate, the key,
+    /// `enable_pqc` and every socket option on `ServerConfig` go unused.
+    Custom(Box<dyn Server>),
 }
 
 impl std::fmt::Debug for ServerConnectionMode {
@@ -135,17 +137,7 @@ impl std::fmt::Debug for ServerConnectionMode {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
             Self::DatagramIo(_) => f.debug_tuple("DatagramIo").finish(),
-        }
-    }
-}
-
-impl From<&ServerConnectionMode> for ConnectionType {
-    fn from(value: &ServerConnectionMode) -> Self {
-        match value {
-            ServerConnectionMode::Stream(_) => ConnectionType::Stream,
-            ServerConnectionMode::Datagram(_) | ServerConnectionMode::DatagramIo(_) => {
-                ConnectionType::Datagram
-            }
+            Self::Custom(_) => f.debug_tuple("Custom").finish(),
         }
     }
 }
@@ -569,7 +561,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     );
     let ip_manager = Arc::new(ip_manager);
 
-    let connection_type = config.mode;
+    let mode = config.mode;
 
     let auth = Arc::new(AuthAdapter(config.auth));
 
@@ -603,12 +595,14 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         }
     };
 
-    let transport = TlsServerFactory::new(
-        (&connection_type).into(),
-        server_cert,
-        server_key,
-        config.enable_pqc,
-    )?;
+    let tls_factory = |connection_type| -> Result<TlsServerFactory> {
+        Ok(TlsServerFactory::new(
+            connection_type,
+            server_cert,
+            server_key,
+            config.enable_pqc,
+        )?)
+    };
 
     let ctx = ServerContextBuilder::new(
         auth,
@@ -657,7 +651,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         "enable_batch_send cannot be used with enable_tun_offload"
     );
 
-    let is_udp = matches!(connection_type, ServerConnectionMode::Datagram(_));
+    let is_udp = matches!(mode, ServerConnectionMode::Datagram(_));
 
     if let Some(provider) = config.expresslane_metrics.clone() {
         tokio::spawn(offload_stats::run(
@@ -671,7 +665,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         tokio::spawn(offload_events::run(conn_manager.clone(), events));
     }
 
-    let server: Box<dyn Server> = match connection_type {
+    let server: Box<dyn Server> = match mode {
         ServerConnectionMode::Datagram(may_be_sock) => {
             let udp_io = io::outside::UdpIo::new(
                 config.bind_address,
@@ -683,22 +677,23 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             .await?;
             Box::new(io::outside::DatagramIoServer {
                 io: Box::new(udp_io),
-                transport,
+                transport: tls_factory(ConnectionType::Datagram)?,
             })
         }
         ServerConnectionMode::DatagramIo(outside_io) => Box::new(io::outside::DatagramIoServer {
             io: outside_io,
-            transport,
+            transport: tls_factory(ConnectionType::Datagram)?,
         }),
         ServerConnectionMode::Stream(may_be_sock) => Box::new(
             io::outside::TcpServer::new(
                 config.bind_address,
-                transport,
+                tls_factory(ConnectionType::Stream)?,
                 config.proxy_protocol,
                 may_be_sock,
             )
             .await?,
         ),
+        ServerConnectionMode::Custom(server) => server,
     };
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
@@ -892,6 +887,181 @@ pub(crate) mod tests {
         assert!(
             batches_handle.batches.lock().unwrap().is_empty(),
             "loop must consume every scripted batch before the error"
+        );
+    }
+
+    struct IdleInsideIO;
+
+    #[async_trait::async_trait]
+    impl crate::io::inside::InsideIORecv for IdleInsideIO {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            std::future::pending().await
+        }
+
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            self
+        }
+    }
+
+    impl<S> lightway_core::InsideIOSendCallback<S> for IdleInsideIO {
+        fn send(&self, buf: BytesMut, _state: &mut S) -> IOCallbackResult<usize> {
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn mtu(&self) -> usize {
+            1350
+        }
+
+        fn if_index(&self) -> std::io::Result<u32> {
+            Ok(0)
+        }
+
+        fn name(&self) -> std::io::Result<String> {
+            Ok("idle".to_string())
+        }
+    }
+
+    impl crate::io::inside::InsideIO for IdleInsideIO {}
+
+    struct GrantAll;
+
+    impl<'a> ServerAuth<AuthState<'a>> for GrantAll {
+        fn authorize(&self, _method: &AuthMethod, _state: &mut AuthState<'a>) -> ServerAuthResult {
+            ServerAuthResult::Granted {
+                handle: None,
+                tunnel_protocol_version: None,
+            }
+        }
+    }
+
+    struct ClientIp;
+
+    impl lightway_core::ClientIpConfig<()> for ClientIp {
+        fn ip_config(&self, _state: &mut (), _config: InsideIpConfig) {}
+    }
+
+    fn tick(_d: Duration, _state: &mut (), _t: lightway_core::TickType) {}
+
+    /// Accepts one connection over a mock transport and relays it to an
+    /// in-process client until both ends are quiet.
+    struct OneConnection {
+        client: lightway_core::Connection<()>,
+        client_io: Arc<lightway_core::mock::MockOutsideIo>,
+        server_io: Arc<lightway_core::mock::MockOutsideIo>,
+        transport: lightway_core::mock::MockTransport,
+        /// Disconnect the connection before `run` returns.
+        disconnect: bool,
+        /// The connection that `run` creates.
+        created: Arc<std::sync::OnceLock<Arc<Connection>>>,
+    }
+
+    fn deliver(
+        inbox: &lightway_core::mock::Inbox,
+        mut to: impl FnMut(&mut BytesMut) -> lightway_core::ConnectionResult<usize>,
+    ) -> lightway_core::ConnectionResult<bool> {
+        let mut moved = false;
+        while let Some(mut pkt) = inbox.lock().unwrap().pop_front() {
+            to(&mut pkt)?;
+            moved = true;
+        }
+        Ok(moved)
+    }
+
+    #[async_trait::async_trait]
+    impl Server for OneConnection {
+        async fn run(self: Box<Self>, manager: Arc<ConnectionManager>) -> Result<()> {
+            let OneConnection {
+                mut client,
+                client_io,
+                server_io,
+                transport,
+                disconnect,
+                created,
+            } = *self;
+            let client_inbox = client_io.inbox();
+            let server_inbox = server_io.inbox();
+            let conn = manager.create_connection(
+                Version::MAXIMUM,
+                "198.51.100.1:443".parse().unwrap(),
+                server_io,
+                Box::new(|_| Ok(Box::new(transport))),
+            )?;
+            assert!(created.set(conn.clone()).is_ok());
+
+            loop {
+                let up = deliver(&server_inbox, |pkt| {
+                    conn.outside_data_received(lightway_core::OutsidePacket::Wire(pkt))
+                })?;
+                let down = deliver(&client_inbox, |pkt| {
+                    client.outside_data_received(lightway_core::OutsidePacket::Wire(pkt))
+                })?;
+                if !up && !down {
+                    break;
+                }
+            }
+
+            let online = manager.online_connections();
+            anyhow::ensure!(online.len() == 1, "{} connections online", online.len());
+            anyhow::ensure!(
+                Arc::ptr_eq(&online[0], &conn),
+                "another connection is online"
+            );
+
+            if disconnect {
+                conn.disconnect()?;
+                anyhow::ensure!(
+                    manager.connection_count() == 0,
+                    "the connection is still in the map"
+                );
+            }
+            Ok(())
+        }
+    }
+
+    #[test_case::test_case(true; "disconnected by the custom server")]
+    #[test_case::test_case(false; "disconnected when run returns")]
+    #[tokio::test]
+    async fn custom_server_connection_goes_online_then_disconnects(disconnect: bool) {
+        const CAPS: lightway_core::TransportCaps = lightway_core::TransportCaps {
+            delivery: lightway_core::Delivery::Stream,
+            supports_roaming: false,
+        };
+        let (client_io, server_io) = lightway_core::mock::MockOutsideIo::pair();
+        let client = lightway_core::ClientContextBuilder::new(
+            Arc::new(lightway_core::mock::MockFactory::new(
+                lightway_core::mock::MockTransport::new(CAPS),
+            )),
+            None,
+            Arc::new(ClientIp),
+            tick,
+        )
+        .build()
+        .start_connect(client_io.clone(), lightway_core::MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("token")
+        .connect(())
+        .unwrap();
+
+        let mut config =
+            ServerConfig::try_from_auth_and_config(GrantAll, config::Config::default()).unwrap();
+        config.inside_io = Some(Arc::new(IdleInsideIO));
+        let created = Arc::new(std::sync::OnceLock::new());
+        config.mode = ServerConnectionMode::Custom(Box::new(OneConnection {
+            client,
+            client_io,
+            server_io,
+            transport: lightway_core::mock::MockTransport::new(CAPS),
+            disconnect,
+            created: created.clone(),
+        }));
+
+        tokio::time::timeout(Duration::from_secs(5), server(config))
+            .await
+            .expect("custom server did not finish")
+            .unwrap();
+        assert_eq!(
+            created.get().unwrap().state(),
+            lightway_core::State::Disconnected
         );
     }
 }

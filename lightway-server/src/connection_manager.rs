@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::StreamExt;
 use tracing::{info, instrument, warn};
 
-use crate::connection_manager::connection_map::InsertError;
+pub use crate::connection_manager::connection_map::InsertError;
 use crate::{
     connection::{Connection, ConnectionState},
     metrics,
@@ -83,7 +83,8 @@ impl connection_map::Value for Connection {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ConnectionManagerError {
+#[non_exhaustive]
+pub enum ConnectionManagerError {
     /// Client session id and connection session id mismatch
     #[error("Client session id and connection session id mismatch")]
     SessionIdMismatch,
@@ -109,7 +110,8 @@ pub(crate) enum ConnectionManagerError {
     LwContextError(#[from] ContextError),
 }
 
-pub(crate) struct ConnectionManager {
+/// Owns every connection of a server.
+pub struct ConnectionManager {
     pub(crate) ctx: ServerContext<ConnectionState>,
     connections: Mutex<ConnectionMap<Connection>>,
     pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
@@ -430,17 +432,27 @@ impl ConnectionManager {
         self.pending_session_id_rotations.lock().len()
     }
 
-    pub(crate) fn create_streaming_connection(
+    #[cfg(test)]
+    pub(crate) fn connection_count(&self) -> usize {
+        self.connections.lock().iter_connections().count()
+    }
+
+    /// Create a connection whose outside data the caller delivers.
+    ///
+    /// `transport` builds the transport of the connection. The manager
+    /// tracks the connection by id and session id. It does not route by
+    /// peer address.
+    pub fn create_connection(
         self: &Arc<Self>,
         protocol_version: Version,
-        socket_addr: SocketAddr,
+        local_addr: SocketAddr,
         outside_io: OutsideIOSendCallbackArg,
         transport: ServerTransportBuilder<'_>,
     ) -> Result<Arc<Connection>, ConnectionManagerError> {
         let conn = new_connection(
             self.clone(),
             protocol_version,
-            socket_addr,
+            local_addr,
             outside_io,
             transport,
         )?;
@@ -633,6 +645,7 @@ impl ConnectionManager {
         }
     }
 
+    /// Forget `conn`. [`Connection::disconnect`] calls this.
     pub(crate) fn remove_connection(&self, conn: &Connection) {
         self.connections.lock().remove(conn)
     }
