@@ -52,3 +52,22 @@ If the outside IO blocks, a datagram encapsulation drops the packet. A
 stream encapsulation keeps its packets in order, and the connection writes
 no new frame until they leave. Meanwhile the connection queues the frames
 that nothing above retransmits: control frames and inner UDP.
+
+## Client
+
+To use a custom transport, set `ClientConnectionMode::Transport`. It
+contains two items:
+
+- `factory`: a `ClientTransportFactory`. For each connection attempt, the
+  client calls `connect` with the `TransportArgs` and the
+  `ClientTransportArgs`.
+- `connector`: a function that connects the outside IO when the
+  attempt starts.
+
+`TransportArgs` contains the largest record that one outside packet can
+carry. `ClientTransportArgs` contains the peer checks and the key share.
+A transport uses the items that apply to it.
+
+After a network change, a client on a `supports_roaming` transport keeps
+the connection and sends keepalives. On other transports, the client
+disconnects and returns `ClientResult::NetworkChange`.
