@@ -15,11 +15,14 @@ use lightway_core::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::connection_manager::ConnectionManager;
+use crate::ConnectionManager;
 
 /// Receives outside traffic and feeds it to the connection manager.
+///
+/// Pass a custom implementation as `ServerConnectionMode::Custom`. The
+/// built-in UDP and TCP servers implement it too.
 #[async_trait]
-pub(crate) trait Server: Send {
+pub trait Server: Send {
     /// Serve the outside path. When `run` returns, with `Ok` or `Err`,
     /// the [`server`](crate::server) function disconnects every
     /// connection and returns. That function creates `manager` after it
