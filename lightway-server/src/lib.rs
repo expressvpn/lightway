@@ -675,37 +675,35 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         tokio::spawn(offload_events::run(conn_manager.clone(), events));
     }
 
-    let mut server: Box<dyn Server> =
-        match connection_type {
-            ServerConnectionMode::Datagram(may_be_sock) => {
-                let udp_io = io::outside::UdpIo::new(
-                    config.bind_address,
-                    config.udp_buffer_size,
-                    config.enable_batch_receive,
-                    config.enable_batch_send,
-                    may_be_sock,
-                )
-                .await?;
-                Box::new(io::outside::DatagramServer::new(
-                    Box::new(udp_io),
-                    transport,
-                    conn_manager.clone(),
-                ))
-            }
-            ServerConnectionMode::DatagramIo(outside_io) => Box::new(
-                io::outside::DatagramServer::new(outside_io, transport, conn_manager.clone()),
-            ),
-            ServerConnectionMode::Stream(may_be_sock) => Box::new(
-                io::outside::TcpServer::new(
-                    conn_manager.clone(),
-                    config.bind_address,
-                    transport,
-                    config.proxy_protocol,
-                    may_be_sock,
-                )
-                .await?,
-            ),
-        };
+    let server: Box<dyn Server> = match connection_type {
+        ServerConnectionMode::Datagram(may_be_sock) => {
+            let udp_io = io::outside::UdpIo::new(
+                config.bind_address,
+                config.udp_buffer_size,
+                config.enable_batch_receive,
+                config.enable_batch_send,
+                may_be_sock,
+            )
+            .await?;
+            Box::new(io::outside::DatagramIoServer {
+                io: Box::new(udp_io),
+                transport,
+            })
+        }
+        ServerConnectionMode::DatagramIo(outside_io) => Box::new(io::outside::DatagramIoServer {
+            io: outside_io,
+            transport,
+        }),
+        ServerConnectionMode::Stream(may_be_sock) => Box::new(
+            io::outside::TcpServer::new(
+                config.bind_address,
+                transport,
+                config.proxy_protocol,
+                may_be_sock,
+            )
+            .await?,
+        ),
+    };
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
         if gso {
@@ -771,15 +769,18 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         })?;
     }
 
-    tokio::select! {
-        err = server.run() => err.context("Outside IO loop exited"),
-        io = inside_io_loop => io.map_err(|e| anyhow!(e).context("Inside IO loop panicked"))?.context("Inside IO loop exited"),
+    let result = tokio::select! {
+        err = server.run(conn_manager.clone()) => err.context("Outside IO loop exited"),
+        io = inside_io_loop => io.map_err(|e| anyhow!(e).context("Inside IO loop panicked")).and_then(|io| io.context("Inside IO loop exited")),
         _ = ctrlc_rx => {
             info!("Sigterm or Sigint received");
-            conn_manager.shutdown();
             Ok(())
         }
-    }
+    };
+    // Each connection holds the manager, so without this the connections
+    // and the manager stay alive after `server` returns.
+    conn_manager.shutdown();
+    result
 }
 
 #[cfg(test)]
