@@ -60,6 +60,7 @@ ctrlc.workspace = true
 cfg_aliases.workspace = true
 
 [dev-dependencies]
+lightway-core = { workspace = true, default-features = false, features = ["test-utils"] }
 more-asserts.workspace = true
 test-case.workspace = true
 serial_test.workspace = true
