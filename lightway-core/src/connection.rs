@@ -23,8 +23,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::context::ExpresslaneTickData;
 use crate::{
-    ConnectionType, IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId,
-    TCP_HEADER_SIZE, Version,
+    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType, TransportCaps,
+    TransportError,
+};
+use crate::{
+    IPV4_HEADER_SIZE, InsideIOSendCallbackArg, PluginResult, SessionId, TCP_HEADER_SIZE, Version,
     context::{ScheduleTickCb, ServerAuthArg, ServerAuthHandle, ServerAuthResult},
     encoding_request_states::EncodingRequestStates,
     metrics,
@@ -32,10 +35,6 @@ use crate::{
     plugin::PluginList,
     utils::{ipv4_is_tcp, tcp_clamp_mss},
     wire::{self, AuthMethod},
-};
-use crate::{
-    ExpresslaneCbData, Header, LightwayFeature, OutsideIOSendCallbackArg, TickType, TransportCaps,
-    TransportError,
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
@@ -322,6 +321,7 @@ mod expresslane_error_mapping_tests {
 
     const LOSSY: TransportCaps = TransportCaps {
         delivery: crate::Delivery::Datagram { wire_header: true },
+        supports_roaming: true,
     };
 
     /// Restates the classification independently of the code under test.
@@ -420,10 +420,12 @@ mod is_fatal_tests {
 
     const LOSSY: TransportCaps = TransportCaps {
         delivery: crate::Delivery::Datagram { wire_header: false },
+        supports_roaming: false,
     };
 
     const RELIABLE: TransportCaps = TransportCaps {
         delivery: crate::Delivery::Stream,
+        supports_roaming: false,
     };
 
     #[test]
@@ -721,17 +723,6 @@ impl<AppState: Send> Connection<AppState> {
     /// Sets inside_io
     pub fn inside_io(&mut self, inside_io: InsideIOSendCallbackArg<AppState>) {
         self.inside_io = Some(inside_io)
-    }
-
-    /// Get the [`ConnectionType`] of this [`Connection`]. It derives
-    /// from [`TransportCaps::is_lossy`] only, so it does not say whether
-    /// the transport roams or stamps a wire header.
-    pub fn connection_type(&self) -> ConnectionType {
-        if self.caps.is_lossy() {
-            ConnectionType::Datagram
-        } else {
-            ConnectionType::Stream
-        }
     }
 
     /// Capabilities of the transport under this connection.
