@@ -1,3 +1,4 @@
+//! Please refer [General Config Design Rationale](/docs/general_config.md)
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},

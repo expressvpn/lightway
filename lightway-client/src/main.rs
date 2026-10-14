@@ -88,6 +88,8 @@ async fn main() -> Result<()> {
 
     LogFormat::Full.init_with_env_filter(fmt);
 
+    config.validate()?;
+
     for log in startup_logs {
         tracing::debug!("{log}");
     }
