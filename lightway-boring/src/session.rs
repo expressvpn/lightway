@@ -15,7 +15,7 @@ use boring::x509::verify::X509VerifyFlags;
 use bytes::{Buf, BytesMut};
 use foreign_types::ForeignTypeRef;
 
-use super::config::SessionConfig;
+use super::config::{KeyShareOffer, SessionConfig};
 use super::context::Context;
 use std::time::Duration;
 
@@ -138,29 +138,26 @@ where
             ssl.set_verify(mode.into());
         }
 
-        // Configure key share group if specified
-        if let Some(group) = config.keyshare_group {
-            let group_id = group.to_ssl_group()?;
-            // SAFETY: `ssl.as_ptr()` is the SSL owned by `ssl`, valid for this
-            // call. `key_shares` is a stack array valid for its length;
-            // SSL_set1_client_key_shares copies the group ids and does not
-            // retain the pointer.
-            unsafe {
-                let ssl_ptr = ssl.as_ptr();
+        // Configure the first ClientHello's key share offer if specified
+        match config.key_share {
+            Some(KeyShareOffer::Group(group)) => {
+                let group_id = group.to_ssl_group()?;
                 if is_client && group.is_pq() {
                     let key_shares: [u16; 1] = [group_id];
-                    let ret = boring_sys::SSL_set1_client_key_shares(
-                        ssl_ptr,
-                        key_shares.as_ptr(),
-                        key_shares.len(),
-                    );
-                    if ret != 1 {
-                        return Err(super::TlsError::InvalidParameter(
-                            "Failed to set client key shares".into(),
-                        ));
-                    }
+                    Self::set_client_key_shares(&mut ssl, &key_shares)?;
                 }
             }
+            Some(KeyShareOffer::Empty) => {
+                // Match wolfSSL, whose wolfSSL_NoKeyShares fails with
+                // SIDE_ERROR on a server.
+                if !is_client {
+                    return Err(super::TlsError::InvalidParameter(
+                        "An empty key share is only valid on client sessions".into(),
+                    ));
+                }
+                Self::set_client_key_shares(&mut ssl, &[])?;
+            }
+            None => {}
         }
 
         // No per-session keylog hook: BoringSSL only exposes keylog at the
@@ -176,6 +173,28 @@ where
             is_dtls,
             pending_key_update: false,
         })
+    }
+
+    /// Set exactly which groups the first ClientHello carries a key share for.
+    /// An empty list sends no key share.
+    fn set_client_key_shares(ssl: &mut Ssl, group_ids: &[u16]) -> Result<(), TlsError> {
+        // SAFETY: `ssl.as_ptr()` is the SSL owned by `ssl`, valid for this
+        // call. `group_ids` is a slice valid for its length (possibly zero);
+        // SSL_set1_client_key_shares copies the group ids and does not retain
+        // the pointer.
+        let ret = unsafe {
+            boring_sys::SSL_set1_client_key_shares(
+                ssl.as_ptr(),
+                group_ids.as_ptr(),
+                group_ids.len(),
+            )
+        };
+        if ret != 1 {
+            return Err(TlsError::InvalidParameter(
+                "Failed to set client key shares".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Poll the session to drive the handshake or check for events
@@ -488,12 +507,14 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
+    use super::Session;
     use crate::test_utils::mock::{
         MockIOAdapter, TcpIOCallbacks, UdpIOCallbacks, make_connected_dtls_pair,
-        make_connected_tls_pair,
+        make_connected_tls_pair, make_connected_tls_pair_with,
     };
     use crate::{
-        ContextBuilder, CurveGroup, IOCallbackResult, IOCallbacks, Method, Poll, SessionConfig,
+        ContextBuilder, CurveGroup, IOCallbackResult, IOCallbacks, KeyShareOffer, Method, Poll,
+        SessionConfig,
     };
     use std::time::Duration;
 
@@ -812,6 +833,59 @@ mod tests {
                     .unwrap_or_else(|e| panic!("Session creation failed for {:?}: {}", group, e));
             }
         }
+    }
+
+    #[test]
+    fn test_session_with_empty_key_share_on_client() {
+        let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
+        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::Empty);
+        ctx.new_session(config).unwrap();
+    }
+
+    #[test]
+    fn test_session_with_empty_key_share_rejected_on_server() {
+        let ctx = ContextBuilder::new(Method::TlsServerV1_3).unwrap().build();
+        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::Empty);
+        let err = ctx
+            .new_session(config)
+            .expect_err("server side must reject an empty key share");
+        assert!(
+            err.to_string().contains("only valid on client sessions"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// An empty first key share must still complete the handshake, via a
+    /// HelloRetryRequest; a default client must not need one.
+    #[test]
+    fn test_empty_key_share_forces_hello_retry_request() {
+        use foreign_types::ForeignTypeRef;
+
+        let used_hrr = |client: &Session<TcpIOCallbacks>| {
+            // SAFETY: the pointer is the live SSL owned by `client`; the call
+            // only reads handshake state.
+            unsafe { boring_sys::SSL_used_hello_retry_request(client.ssl_stream.ssl().as_ptr()) }
+        };
+
+        let (client, _server) = make_connected_tls_pair();
+        assert_eq!(
+            used_hrr(&client),
+            0,
+            "default client should not need an HRR"
+        );
+
+        let (client, server) =
+            make_connected_tls_pair_with(|c| c.with_key_share(KeyShareOffer::Empty));
+        assert_eq!(
+            used_hrr(&client),
+            1,
+            "empty key share must go through an HRR"
+        );
+        assert_eq!(
+            client.get_current_curve_name(),
+            server.get_current_curve_name(),
+            "both sides must agree on the group chosen in the HRR"
+        );
     }
 
     /// Check that the SNI should remain empty even if domain name is given.
