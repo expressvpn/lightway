@@ -657,6 +657,7 @@ async fn lightway_client_connect(
         timeout: Duration::new(6, 0),
         continuous: enable_keepalive,
         tracer_trigger_timeout: Some(Duration::from_secs(10)),
+        network_change_timeout: None,
     };
     let (keepalive, keepalive_task) =
         Keepalive::new(keepalive_config.clone(), Arc::downgrade(&conn));
