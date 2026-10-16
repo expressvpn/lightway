@@ -272,6 +272,14 @@ pub(crate) mod mock {
     // -----------------------------------------------------------------------
 
     pub(crate) fn make_connected_tls_pair() -> (Session<TcpIOCallbacks>, Session<TcpIOCallbacks>) {
+        make_connected_tls_pair_with(|c| c)
+    }
+
+    /// Like [`make_connected_tls_pair`], with `client_config` applied to the
+    /// client's [`SessionConfig`] before the session is created.
+    pub(crate) fn make_connected_tls_pair_with(
+        client_config: impl FnOnce(SessionConfig<TcpIOCallbacks>) -> SessionConfig<TcpIOCallbacks>,
+    ) -> (Session<TcpIOCallbacks>, Session<TcpIOCallbacks>) {
         let client_ctx = ContextBuilder::new(Method::TlsClientV1_3)
             .unwrap()
             .with_root_certificate(RootCertificate::Asn1Buffer(root_cert()))
@@ -289,7 +297,9 @@ pub(crate) mod mock {
         let (client_io, server_io) = TcpIOCallbacks::pair();
 
         let mut client = client_ctx
-            .new_session(SessionConfig::new(client_io).with_checked_domain_name("example.com"))
+            .new_session(client_config(
+                SessionConfig::new(client_io).with_checked_domain_name("example.com"),
+            ))
             .unwrap();
         let mut server = server_ctx
             .new_session(SessionConfig::new(server_io))
