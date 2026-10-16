@@ -29,17 +29,30 @@ jobs:
         working-directory: ./lightway-client
         run: nix develop -c cargo test --features=mobile-test
 
-      - name: Build Android AAR
-        id: build-android-aar
+      - name: Build Android AAR (WolfSSL)
+        id: build-android-aar-wolfssl
         run: |
-          nix develop .#android -c build
-          AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-release.aar
+          nix develop .#android -c cargo make build-android-wolfssl
+          AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-wolfssl-release.aar
           echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
-      - name: Upload AAR artifact
+      - name: Upload AAR artifact (WolfSSL)
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: lightway-android-aar
-          path: ${{ steps.build-android-aar.outputs.path }}
+          name: lightway-android-aar-wolfssl
+          path: ${{ steps.build-android-aar-wolfssl.outputs.path }}
+          if-no-files-found: error
+
+      - name: Build Android AAR (BoringSSL)
+        id: build-android-aar-boringssl
+        run: |
+          nix develop .#android -c cargo make build-android-boringssl
+          AAR_PATH=lightway-client/src/platform/android/lightway/build/outputs/aar/lightway-boringssl-release.aar
+          echo "path=$AAR_PATH" >> "$GITHUB_OUTPUT"
+      - name: Upload AAR artifact (BoringSSL)
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lightway-android-aar-boringssl
+          path: ${{ steps.build-android-aar-boringssl.outputs.path }}
           if-no-files-found: error
       - name: Build JsonSchema
         run: nix develop -c cargo run --features=mobile,wolfssl -p lightway-client -- -c client.schema.json -g jsonschema

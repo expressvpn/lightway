@@ -94,7 +94,12 @@ runner = "qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64"
 ```
 
 ## Mobile
-The android mobile library(.aar) can build by `cargo make build-android` or `nix develop .#android -c build` under project root.
+The android mobile library(.aar) can be built with two TLS backends:
+- **WolfSSL** (default): `cargo make build-android` or `cargo make build-android-wolfssl` produces `lightway-wolfssl-release.aar`
+- **BoringSSL**: `cargo make build-android-boringssl` produces `lightway-boringssl-release.aar`
+
+Both `nix develop .#android -c build` and `cargo make build-android` build the default WolfSSL variant. Run these commands under project root.
+
 We rely on cargo and **gradlew**, so the `cargo clean` is not enough to clean all the artifacts, the extra `gradlew clean` is needed.
 All the artifacts (including desktop) can be clean by `cargo make clean` or `nix develop .#android -c clean`.
 If you want to set up the environment not from nix, you can set up cargo-make, Java, Android SDK and NDK on any Linux distro.

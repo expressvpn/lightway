@@ -9,12 +9,8 @@ FEATURES_LINUX = "default,debug,io-uring"
 # Avoid the long message in CI jobs, the "Compiling XXX ..." messages are swallowed
 CARGO_TERM_QUIET = "true"
 
-# NOTE
-# We put most android artifacts under "/target/", which follow the rust convention
-# so it will be easy for you to clean up 
-# And also some artifacts will base on gradle, and the envar naming is follow the gradle requirement
-ANDROID_UNIFFI_JNI_LIBS_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs"
-ANDROID_UNIFFI_BINDINGS_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java"
+# Android build backend (wolfssl or boringssl)
+BACKEND = "wolfssl"
 
 # NOTE
 # The tasks related apple products might not work in a pre-release status, 
@@ -268,19 +264,35 @@ script = '''
 script = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/scripts/ios-bindgen.sh -p tvos"
 
 [tasks.build-android]
-description = "Build android library (.aar)"
+alias = "build-android-wolfssl"
+
+[tasks.build-android-wolfssl]
+description = "Build android library (.aar) with WolfSSL backend"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+env = { "BACKEND" = "wolfssl" }
+run_task = { name = [ "build-android-uniffi-library", "bindgen-android", "bundle-aar" ] }
+
+[tasks.build-android-boringssl]
+description = "Build android library (.aar) with BoringSSL backend"
+condition = { env_set = [ "ANDROID_NDK_HOME" ] }
+env = { "BACKEND" = "boringssl" }
 run_task = { name = [ "build-android-uniffi-library", "bindgen-android", "bundle-aar" ] }
 
 [tasks.build-android-uniffi-library]
-description = "Build native libraries for all Android architectures (x86_64, x86, armeabi-v7a, arm64-v8a)"
+description = "Build native libraries for all Android architectures for a TLS backend"
 condition = { env_set = [ "ANDROID_NDK_HOME" ] }
-command = "cargo"
-args = [ "ndk", "--bindgen", "-t", "x86_64", "-t", "x86", "-t", "armeabi-v7a", "-t", "arm64-v8a", "-o", "${ANDROID_UNIFFI_JNI_LIBS_DIR}", "build", "--features", "mobile", "--release", "-p", "lightway-client", "--lib" ]
+env = { "CARGO_PROFILE_RELEASE_STRIP" = "debuginfo" }
+script = '''
+LIBS_DIR="${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs-${BACKEND}"
+SHARED_FLAG=""
+[ "$BACKEND" = "boringssl" ] && SHARED_FLAG="--link-libcxx-shared"
+cargo ndk ${SHARED_FLAG} -t x86_64 -t x86 -t armeabi-v7a -t arm64-v8a -o "$LIBS_DIR" build --features "mobile,${BACKEND}" --no-default-features --release -p lightway-client --lib
+'''
 
 [tasks.bindgen-android]
-description = "Generate bindgen kotlin classes"
+description = "Generate bindgen kotlin classes for a TLS backend"
 script = '''
+ANDROID_UNIFFI_BINDINGS_DIR="${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-${BACKEND}"
 [ -f "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt" ] \
     && mv "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt" "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt"
 
@@ -288,15 +300,27 @@ cargo run --bin uniffi-bindgen generate --config lightway-client/uniffi.toml --l
 
 [ -f "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt" ] || { echo "Generated Kotlin file not found"; exit 1; }
 
-# Rename and follow the java convention
 mv "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/lightway_client.kt" "$ANDROID_UNIFFI_BINDINGS_DIR/lightway/LightwayBridge.kt"
 '''
 
 [tasks.bundle-aar]
-description = "Bundle and create AAR"
+description = "Bundle and create AAR for a TLS backend"
+env = { "ANDROID_UNIFFI_JNI_LIBS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/jniLibs-${BACKEND}", "ANDROID_UNIFFI_BINDINGS_DIR" = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/target/release/java-${BACKEND}" }
 cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android"
-command = "./gradlew"
-args = [ "build" ]
+script = '''
+case "$BACKEND" in
+  wolfssl)   GRADLE_TASK_NAME="Wolfssl" ;;
+  boringssl) GRADLE_TASK_NAME="Boringssl" ;;
+  *) echo "unknown BACKEND=$BACKEND"; exit 1 ;;
+esac
+./gradlew "lint${GRADLE_TASK_NAME}Release" "assemble${GRADLE_TASK_NAME}Release"
+if [ "$BACKEND" = "wolfssl" ]; then
+  AAR_DIR="${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/lightway-client/src/platform/android/lightway/build/outputs/aar"
+  cd "$AAR_DIR"
+  rm -f lightway-release.aar
+  ln -s lightway-wolfssl-release.aar lightway-release.aar
+fi
+'''
 
 [tasks.clean-android]
 description = "clean artifacts for android"
