@@ -23,6 +23,11 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
     /// MTU of the underlying interface.
     fn mtu(&self) -> usize;
 
+    /// Change the MTU of the underlying interface.
+    fn set_mtu(&self, _mtu: u16) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
     /// Extra capacity a [`Self::recv_buf`] buffer needs beyond [`Self::mtu`].
     ///
     /// Non-zero only for a TUN opened with offload, where the kernel
