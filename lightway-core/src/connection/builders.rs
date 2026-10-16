@@ -192,7 +192,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         Self {
             session_config: self
                 .session_config
-                .with_key_share(crate::tls::KeyShareOffer::Empty),
+                .with_key_share(crate::tls::KeyShareOffer::EmptyKeyList),
             ..self
         }
     }

@@ -10,11 +10,13 @@ use super::{CurveGroup, SslVerifyMode};
 /// Mirrors the wolfSSL backend's type so callers can be backend-agnostic.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum KeyShareOffer {
+    /// lightway does not touch the backend. wolfSSL and BoringSSL each send their own default share in the first ClientHello
+    BackendDefault,
     /// A precomputed share for this group; see [`SessionConfig::with_keyshare_group`].
     Group(CurveGroup),
-    /// No share in the first ClientHello.
+    /// No share key in the first ClientHello.
     /// Only valid on client sessions; `Session::new` rejects it on a server.
-    Empty,
+    EmptyKeyList,
 }
 
 /// Configuration for creating a session
@@ -28,7 +30,7 @@ pub struct SessionConfig<IOCB> {
     /// SNI (Server Name Indication) sent to server.
     pub server_name_indication: Option<String>,
     /// What the first ClientHello offers in its `key_share` extension.
-    pub key_share: Option<KeyShareOffer>,
+    pub key_share: KeyShareOffer,
     /// Per-session certificate verification mode. When set, overrides the
     /// context-level mode for this session via `SSL_set_verify`.
     pub ssl_verify_mode: Option<SslVerifyMode>,
@@ -42,7 +44,7 @@ impl<IOCB> SessionConfig<IOCB> {
             dtls_mtu: None,
             checked_domain_name: None,
             server_name_indication: None,
-            key_share: None,
+            key_share: KeyShareOffer::BackendDefault,
             ssl_verify_mode: None,
         }
     }
@@ -97,7 +99,7 @@ impl<IOCB> SessionConfig<IOCB> {
     /// Sets what the first ClientHello offers in its `key_share` extension.
     /// Replaces any earlier [`Self::with_keyshare_group`] or `with_key_share`.
     pub fn with_key_share(mut self, offer: KeyShareOffer) -> Self {
-        self.key_share = Some(offer);
+        self.key_share = offer;
         self
     }
 
@@ -187,7 +189,7 @@ mod tests {
 
         assert_eq!(
             config.key_share,
-            Some(KeyShareOffer::Group(CurveGroup::X25519MLKEM768))
+            KeyShareOffer::Group(CurveGroup::X25519MLKEM768)
         );
     }
 
@@ -195,15 +197,15 @@ mod tests {
     fn test_session_config_key_share_last_setter_wins() {
         let config = SessionConfig::new(MockIOAdapter::new())
             .with_keyshare_group(CurveGroup::X25519MLKEM768)
-            .with_key_share(KeyShareOffer::Empty);
-        assert_eq!(config.key_share, Some(KeyShareOffer::Empty));
+            .with_key_share(KeyShareOffer::EmptyKeyList);
+        assert_eq!(config.key_share, KeyShareOffer::EmptyKeyList);
 
         let config = SessionConfig::new(MockIOAdapter::new())
-            .with_key_share(KeyShareOffer::Empty)
+            .with_key_share(KeyShareOffer::EmptyKeyList)
             .with_keyshare_group(CurveGroup::EccX25519);
         assert_eq!(
             config.key_share,
-            Some(KeyShareOffer::Group(CurveGroup::EccX25519))
+            KeyShareOffer::Group(CurveGroup::EccX25519)
         );
     }
 

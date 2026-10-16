@@ -140,14 +140,15 @@ where
 
         // Configure the first ClientHello's key share offer if specified
         match config.key_share {
-            Some(KeyShareOffer::Group(group)) => {
+            KeyShareOffer::BackendDefault => {}
+            KeyShareOffer::Group(group) => {
                 let group_id = group.to_ssl_group()?;
                 if is_client && group.is_pq() {
                     let key_shares: [u16; 1] = [group_id];
                     Self::set_client_key_shares(&mut ssl, &key_shares)?;
                 }
             }
-            Some(KeyShareOffer::Empty) => {
+            KeyShareOffer::EmptyKeyList => {
                 // Match wolfSSL, whose wolfSSL_NoKeyShares fails with
                 // SIDE_ERROR on a server.
                 if !is_client {
@@ -157,7 +158,6 @@ where
                 }
                 Self::set_client_key_shares(&mut ssl, &[])?;
             }
-            None => {}
         }
 
         // No per-session keylog hook: BoringSSL only exposes keylog at the
@@ -838,14 +838,14 @@ mod tests {
     #[test]
     fn test_session_with_empty_key_share_on_client() {
         let ctx = ContextBuilder::new(Method::TlsClientV1_3).unwrap().build();
-        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::Empty);
+        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::EmptyKeyList);
         ctx.new_session(config).unwrap();
     }
 
     #[test]
     fn test_session_with_empty_key_share_rejected_on_server() {
         let ctx = ContextBuilder::new(Method::TlsServerV1_3).unwrap().build();
-        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::Empty);
+        let config = SessionConfig::new(MockIOAdapter::new()).with_key_share(KeyShareOffer::EmptyKeyList);
         let err = ctx
             .new_session(config)
             .expect_err("server side must reject an empty key share");
@@ -875,7 +875,7 @@ mod tests {
         );
 
         let (client, server) =
-            make_connected_tls_pair_with(|c| c.with_key_share(KeyShareOffer::Empty));
+            make_connected_tls_pair_with(|c| c.with_key_share(KeyShareOffer::EmptyKeyList));
         assert_eq!(
             used_hrr(&client),
             1,
