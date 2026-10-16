@@ -642,6 +642,236 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         .expect("server nudge did not cascade into a client rotation");
 }
 
+/// Pins the forcing gate through a real connection pair: a second
+/// `rotate_expresslane_key_now()` while the first is still outstanding must
+/// not push a second key, and a third call after the first is acked must.
+///
+/// Counts the client's own promoted self keys (as `server_nudge_...` does)
+/// cannot tell a suppressed second call apart from an accepted one - the
+/// client's own reflexive counter-rotation only ever fires once regardless,
+/// which collapses both cases to the same final count. Distinct peer keys
+/// the client observes (i.e. distinct keys the server actually advertised)
+/// does not have that blind spot, so that is the observable here. The
+/// server side is built manually, like the client below, so it can carry
+/// its own callback - the shared `server()` helper has no way to attach one.
+#[tokio::test]
+async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
+    // Larger than this test's runtime, so neither side's periodic reflexive
+    // rotation ever fires on its own - only the explicit
+    // rotate_expresslane_key_now() calls below produce any wire traffic.
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    // Records every distinct self/peer key an endpoint has held.
+    struct KeyObserver {
+        self_keys: Mutex<HashSet<Vec<u8>>>,
+        peer_keys: Mutex<HashSet<Vec<u8>>>,
+    }
+    impl KeyObserver {
+        fn new() -> Self {
+            Self {
+                self_keys: Mutex::new(HashSet::new()),
+                peer_keys: Mutex::new(HashSet::new()),
+            }
+        }
+    }
+    impl<T> ExpresslaneCb<T> for KeyObserver {
+        fn update(&self, _sid: SessionId, data: ExpresslaneCbData, _s: &T) {
+            if !data.self_key.is_invalid() {
+                self.self_keys
+                    .lock()
+                    .unwrap()
+                    .insert(data.self_key.0.to_vec());
+            }
+            if !data.peer_key.is_invalid() {
+                self.peer_keys
+                    .lock()
+                    .unwrap()
+                    .insert(data.peer_key.0.to_vec());
+            }
+        }
+    }
+    let client_obs = Arc::new(KeyObserver::new());
+    let server_obs = Arc::new(KeyObserver::new());
+
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (server_cert, server_key) = pki.server_secrets();
+
+    let test = async move {
+        let ip_pool = Arc::new(StaticIpPool);
+        let (server_tun, _server_inside_rx) = ChannelTun::new();
+        let auth = Arc::new(TestAuth::default());
+
+        let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
+            server_sock.connection_type(),
+            server_cert,
+            server_key,
+            auth,
+            ip_pool,
+            Arc::new(server_tun),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_minimum_protocol_version(Version::MINIMUM)
+        .unwrap()
+        .with_maximum_protocol_version(Version::MAXIMUM)
+        .unwrap()
+        .with_expresslane(INTERVAL)
+        .with_expresslane_cb(server_obs.clone())
+        .build()
+        .unwrap();
+
+        let (server_ticker, server_ticker_task) = ConnectionTicker::new();
+        let server_conn = Arc::new(Mutex::new(
+            server_ctx
+                .start_accept(
+                    Version::MAXIMUM,
+                    server_sock.clone().into_io_send_callback(),
+                )
+                .unwrap()
+                .accept(server_ticker)
+                .unwrap(),
+        ));
+
+        let ca_cert = pki.root_ca();
+        let (client_tun, _client_inside_rx) = ChannelTun::new();
+        let (client_ticker, client_ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState {
+            ticker: client_ticker,
+        };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(client_tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(INTERVAL)
+        .with_expresslane_cb(client_obs.clone())
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        server_ticker_task.spawn_in(Arc::downgrade(&server_conn), &mut join_set);
+        client_ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut phase = 1u8;
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = server_sock.readable() => {
+                    is_readable.expect("server socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match server_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for server sock {err}"),
+                    };
+
+                    let mut server_conn = server_conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, server_sock.connection_type());
+                    if let Err(err) = server_conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for client sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    let server_self_keys = server_obs.self_keys.lock().unwrap().len();
+                    let client_peer_keys = client_obs.peer_keys.lock().unwrap().len();
+
+                    match phase {
+                        1 => {
+                            // Initial handshake key exchange acked on both ends -
+                            // nothing outstanding yet.
+                            if server_self_keys >= 1 && client_peer_keys >= 1 {
+                                phase = 2;
+                            }
+                        }
+                        2 => {
+                            let mut server_conn = server_conn.lock().unwrap();
+                            server_conn
+                                .rotate_expresslane_key_now()
+                                .expect("first forced rotation must start");
+                            // Immediately after, with no await in between: the
+                            // exchange above is still outstanding.
+                            server_conn
+                                .rotate_expresslane_key_now()
+                                .expect("a suppressed call still returns Ok, it just does nothing");
+                            phase = 3;
+                        }
+                        3 => {
+                            if server_self_keys >= 2 {
+                                assert_eq!(
+                                    client_peer_keys, 2,
+                                    "second immediate call must not push a second key while the first is outstanding"
+                                );
+                                phase = 4;
+                            }
+                        }
+                        4 => {
+                            server_conn
+                                .lock()
+                                .unwrap()
+                                .rotate_expresslane_key_now()
+                                .expect("a call after the first exchange acked must be allowed again");
+                            phase = 5;
+                        }
+                        5 => {
+                            if server_self_keys >= 3 {
+                                assert_eq!(
+                                    client_peer_keys, 3,
+                                    "the gate must reopen once the outstanding exchange resolves"
+                                );
+                                return;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), test)
+        .await
+        .expect("forced rotation gate did not behave as expected");
+}
+
 /// Drives a client/server pair through repeated keepalive windows and
 /// reports how the client's expresslane health check reacted: the final
 /// state, which window (if any) first saw it go Degraded, and how many
