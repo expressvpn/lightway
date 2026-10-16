@@ -14,8 +14,10 @@ use std::{
 
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
-#[cfg(feature = "io-uring")]
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tun_rs::AsyncDevice;
 #[cfg(desktop)]
 use tun_rs::DeviceBuilder;
@@ -459,6 +461,15 @@ impl Tun {
         }
     }
 
+    /// Change the MTU of `Tun` interface
+    pub fn set_mtu(&self, mtu: u16) -> std::io::Result<()> {
+        match self {
+            Tun::Direct(t) => t.set_mtu(mtu),
+            #[cfg(feature = "io-uring")]
+            Tun::IoUring(t) => t.set_mtu(mtu),
+        }
+    }
+
     /// Extra bytes a [`Tun::recv_buf`] buffer needs on top of [`Tun::mtu`].
     ///
     /// When the device negotiated `IFF_VNET_HDR` the kernel prepends a
@@ -511,7 +522,7 @@ impl AsRawFd for Tun {
 /// Tun struct
 pub struct TunDirect {
     tun: Option<AsyncDevice>,
-    mtu: u16,
+    mtu: Arc<AtomicUsize>,
     #[cfg(unix)]
     fd: RawFd,
     #[cfg(unix)]
@@ -533,12 +544,12 @@ impl TunDirect {
         let mtu = tun_device.mtu()?;
         // This currently is not supported for Android and IOS
         #[cfg(mobile)]
-        let mtu = 1350;
+        let mtu: u16 = 1350;
         let tun = Some(tun_device);
 
         Ok(TunDirect {
             tun,
-            mtu,
+            mtu: Arc::new(AtomicUsize::new(mtu.into())),
             #[cfg(unix)]
             fd,
             #[cfg(unix)]
@@ -749,7 +760,24 @@ impl TunDirect {
 
     /// MTU of Tun
     pub fn mtu(&self) -> usize {
-        self.mtu as usize
+        self.mtu.load(Ordering::Relaxed)
+    }
+
+    /// Change the MTU of the Tun interface. Receive buffers are sized
+    /// from [`Self::mtu`] on each refill, so they follow the new value.
+    pub fn set_mtu(&self, mtu: u16) -> std::io::Result<()> {
+        #[cfg(desktop)]
+        {
+            self.tun.as_ref().unwrap().set_mtu(mtu)?;
+            self.mtu.store(mtu.into(), Ordering::Relaxed);
+            Ok(())
+        }
+        // The platform owns the device on mobile
+        #[cfg(mobile)]
+        {
+            let _ = mtu;
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
     }
 
     /// Whether this device was opened with offload (`IFF_VNET_HDR`), so
@@ -844,7 +872,7 @@ impl TunIoUring {
         sqpoll_idle_time: Duration,
     ) -> Result<Self> {
         let tun = TunDirect::new(config)?;
-        let mtu = tun.mtu();
+        let mtu = tun.mtu.clone();
         let tun_io_uring =
             IOUring::new(Arc::new(tun), ring_size, ring_size, mtu, sqpoll_idle_time).await?;
 
@@ -883,6 +911,11 @@ impl TunIoUring {
     /// MTU of tun
     pub fn mtu(&self) -> usize {
         self.tun_io_uring.owned_fd().mtu()
+    }
+
+    /// Change the MTU of the Tun interface
+    pub fn set_mtu(&self, mtu: u16) -> std::io::Result<()> {
+        self.tun_io_uring.owned_fd().set_mtu(mtu)
     }
 
     /// Interface index of tun

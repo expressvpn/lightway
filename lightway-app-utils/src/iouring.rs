@@ -10,7 +10,10 @@ use io_uring::{
 };
 use std::{
     os::fd::{AsRawFd, RawFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -51,7 +54,7 @@ impl<T: AsRawFd> IOUring<T> {
         owned_fd: Arc<T>,
         ring_size: usize,
         channel_size: usize,
-        mtu: usize,
+        mtu: Arc<AtomicUsize>,
         sqpoll_idle_time: Duration,
     ) -> Result<Self> {
         let fd = owned_fd.as_raw_fd();
@@ -276,7 +279,7 @@ fn push_rx_events_to(
 async fn iouring_task(
     fd: RawFd,
     ring_size: usize,
-    mtu: usize,
+    mtu: Arc<AtomicUsize>,
     sqpoll_idle_time: Duration,
     mut tx_queue: mpsc::Receiver<Bytes>,
     rx_queue: mpsc::Sender<BytesMut>,
@@ -316,7 +319,7 @@ async fn iouring_task(
         .iter()
         .map(|_| RxState {
             sender: None,
-            buf: BytesMut::with_capacity(mtu),
+            buf: BytesMut::with_capacity(mtu.load(Ordering::Relaxed)),
         })
         .collect();
     for state in rx_state.iter_mut() {
@@ -402,7 +405,11 @@ async fn iouring_task(
                             buf,
                         } = unsafe { rx_state.get_unchecked_mut(slot.idx()) };
 
-                        let mut buf = std::mem::replace(buf, BytesMut::with_capacity(mtu));
+                        // Slots in flight keep the old size until they complete
+                        let mut buf = std::mem::replace(
+                            buf,
+                            BytesMut::with_capacity(mtu.load(Ordering::Relaxed)),
+                        );
 
                         // SAFETY: We trust that the read operation
                         // returns the correct number of bytes received.

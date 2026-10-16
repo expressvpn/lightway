@@ -194,6 +194,7 @@ mod iouring {
     use lightway_app_utils::IOUring;
     use lightway_core::IOCallbackResult;
     use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     struct WrappedTun(Tun);
@@ -214,7 +215,7 @@ mod iouring {
                 Arc::new(WrappedTun(tun)),
                 ring_size,
                 channel_size,
-                TUN_MTU,
+                Arc::new(AtomicUsize::new(TUN_MTU)),
                 Duration::from_millis(100),
             )
             .await?;
