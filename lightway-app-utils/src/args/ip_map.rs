@@ -43,7 +43,7 @@ pub enum TryFromError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Format error: {0}")]
-    Format(#[from] serde_yaml::Error),
+    Format(#[from] serde_saphyr::Error),
 }
 
 impl TryFrom<IpMap> for HashMap<IpAddr, Ipv4Net> {
@@ -53,7 +53,7 @@ impl TryFrom<IpMap> for HashMap<IpAddr, Ipv4Net> {
         match value {
             IpMap::Path(p) => {
                 let f = std::fs::File::open(&p)?;
-                Ok(serde_yaml::from_reader(f)?)
+                Ok(serde_saphyr::from_reader(f)?)
             }
             IpMap::Inline(m) => Ok(m),
         }
