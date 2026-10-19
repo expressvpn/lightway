@@ -4,15 +4,13 @@ use super::dns_manager::DnsConfigMode;
 use super::route_manager::RouteMode;
 use bytesize::ByteSize;
 use clap::Parser;
-use lightway_app_utils::args::{
-    Cipher, ConfigFormat, ConnectionType, Duration, KeyShare, LogLevel, NonZeroDuration,
-};
+use lightway_app_utils::args::{Cipher, ConfigFormat, ConnectionType, KeyShare, LogLevel};
 use lightway_core::{AuthMethod, MAX_OUTSIDE_MTU, Version};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Duration as StdDuration;
+use std::time::Duration;
 use std::{net::Ipv4Addr, path::PathBuf};
 use struct_patch::{Patch, Substrate};
 
@@ -144,17 +142,27 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "desktop"))]
     pub keyshare: KeyShare,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "Interval between keepalives"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     /// ex: 10s
-    pub keepalive_interval: NonZeroDuration,
+    pub keepalive_interval: Duration,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "Keepalive timeout"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     /// ex: 60s
-    pub keepalive_timeout: NonZeroDuration,
+    pub keepalive_timeout: Duration,
 
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
@@ -162,21 +170,31 @@ pub struct Config {
     #[patch(attribute(doc = "Enable continuous Keepalive"))]
     pub keepalive_continuous: bool,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = r#"Time it takes to trigger a tracer packet
     when we haven't received an outside packet"#))]
     #[schemars(extend("x-cfg" = "desktop"))]
-    #[schemars(schema_with = "lightway_app_utils::args::nonzero_duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     /// ex: 10s
-    pub tracer_packet_timeout: NonZeroDuration,
+    pub tracer_packet_timeout: Duration,
 
     // NOTE: also "Defer timeout" in mobile device
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(
         attribute(doc = r#"How long to wait before selecting the best connection.
     If the preferred connection connects before the timeout, it will be used immediately."#)
     )]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     /// ex: 2000ms
     pub preferred_connection_wait_interval: Duration,
 
@@ -279,9 +297,14 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "apple"))]
     pub enable_connected_udp: bool,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     pub expresslane_keys_rotation_interval: Duration,
 
     #[patch(attribute(clap(long)))]
@@ -310,12 +333,17 @@ pub struct Config {
     #[schemars(extend("x-cfg" = "linux"))]
     pub iouring_entry_count: usize,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[serde(serialize_with = "lightway_app_utils::serde_humantime::serialize")]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
     If non-zero use a kernel thread to perform submission queue polling.
     After the given idle time the thread will go to sleep."#))]
     #[schemars(extend("x-cfg" = "linux"))]
-    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    #[schemars(schema_with = "lightway_app_utils::serde_humantime::custom_schema")]
     /// ex: 100ms
     pub iouring_sqpoll_idle_time: Duration,
 
@@ -464,6 +492,19 @@ impl Config {
             }
         }
 
+        anyhow::ensure!(
+            !self.keepalive_interval.is_zero(),
+            "keepalive_interval must not be zero"
+        );
+        anyhow::ensure!(
+            !self.keepalive_timeout.is_zero(),
+            "keepalive_timeout must not be zero"
+        );
+        anyhow::ensure!(
+            !self.tracer_packet_timeout.is_zero(),
+            "tracer_packet_timeout must not be zero"
+        );
+
         let mut all_servers: Vec<(&str, ConnectionType)> = self
             .servers
             .iter()
@@ -562,13 +603,11 @@ impl Default for Config {
             tun_peer_ip: Ipv4Addr::new(100, 64, 0, 5),
             tun_dns_ip: Ipv4Addr::new(100, 64, 0, 1),
             keyshare: KeyShare::default(),
-            keepalive_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
-            keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
+            keepalive_interval: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(60),
             keepalive_continuous: true,
-            tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
-            preferred_connection_wait_interval: Duration::from_std_duration(
-                StdDuration::from_secs(0),
-            ),
+            tracer_packet_timeout: Duration::from_secs(10),
+            preferred_connection_wait_interval: Duration::from_secs(0),
             sndbuf: DEFAULT_SNDBUF,
             rcvbuf: DEFAULT_RCVBUF,
             #[cfg(batch_receive)]
@@ -585,14 +624,13 @@ impl Default for Config {
             enable_expresslane: false,
             #[cfg(apple)]
             enable_connected_udp: false,
-            expresslane_keys_rotation_interval: Duration::from_std_duration(
+            expresslane_keys_rotation_interval:
                 lightway_core::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
-            ),
             enable_pmtud: false,
             pmtud_base_mtu: None,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
-            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+            iouring_sqpoll_idle_time: Duration::from_millis(100),
             enable_inside_pkt_encoding: false,
             #[cfg(feature = "debug")]
             keylog: None,

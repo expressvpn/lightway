@@ -216,9 +216,7 @@ pub(crate) async fn async_lightway_start(
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
-                    expresslane_keys_rotation_interval: config
-                        .expresslane_keys_rotation_interval
-                        .into(),
+                    expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval,
                     online_signal_sender: online_signal_sender.clone(),
                     event_stream_handler: event_handler.clone(),
                     external_event_handler: external_event_handler.clone(),
@@ -230,7 +228,7 @@ pub(crate) async fn async_lightway_start(
         .unzip();
 
     let mut wait_timer_task = tokio::spawn(tokio::time::sleep(
-        config.preferred_connection_wait_interval.into(),
+        config.preferred_connection_wait_interval,
     ));
 
     debug!(

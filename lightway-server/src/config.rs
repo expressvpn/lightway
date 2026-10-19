@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -9,12 +10,11 @@ use bytesize::ByteSize;
 use clap::Parser;
 use ipnet::Ipv4Net;
 use serde::Deserialize;
-use std::time::Duration as StdDuration;
 use struct_patch::{Patch, Substrate};
 
 use lightway_app_utils::{
     Validate,
-    args::{ConnectionType, Duration, IpMap, LogFormat, LogLevel, NonZeroDuration},
+    args::{ConnectionType, IpMap, LogFormat, LogLevel},
     validate_configuration_file_path,
 };
 
@@ -92,15 +92,27 @@ pub struct Config {
     #[patch(attribute(doc = "Enable Expresslane for [`ConnectionType::Udp`] connections"))]
     pub enable_expresslane: bool,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "Interval between Expresslane key rotations"))]
     pub expresslane_keys_rotation_interval: Duration,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "How often to check for aged connections to expire"))]
     pub connection_age_expiration_interval: Duration,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "Interval between session statistics reports"))]
     pub statistics_reporting_interval: Duration,
 
@@ -128,7 +140,11 @@ pub struct Config {
     Only applicable when `enable_tun_iouring` is `true`"#))]
     pub iouring_entry_count: usize,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = r#"IO-uring sqpoll idle time.
     If non-zero use a kernel thread to perform submission queue polling.
     After the given idle time the thread will go to sleep."#))]
@@ -142,9 +158,13 @@ pub struct Config {
     #[patch(attribute(doc = "Log level to use"))]
     pub log_level: LogLevel,
 
-    #[patch(attribute(clap(long)))]
+    #[patch(attribute(serde(
+        default,
+        deserialize_with = "lightway_app_utils::serde_humantime::deserialize"
+    )))]
+    #[patch(attribute(clap(long, value_parser = humantime::parse_duration)))]
     #[patch(attribute(doc = "The key update interval for DTLS/TLS 1.3 connections"))]
-    pub key_update_interval: NonZeroDuration,
+    pub key_update_interval: Duration,
 
     #[patch(attribute(clap(long)))]
     #[patch(attribute(doc = "Address to listen to"))]
@@ -226,26 +246,17 @@ impl Default for Config {
             lightway_client_ip: Ipv4Addr::new(10, 125, 0, 5),
             lightway_dns_ip: Ipv4Addr::new(10, 125, 0, 1),
             enable_expresslane: false,
-            expresslane_keys_rotation_interval: Duration::from_std_duration(
-                crate::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
-            ),
-            connection_age_expiration_interval: Duration::from_std_duration(
-                crate::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
-            ),
-            statistics_reporting_interval: Duration::from_std_duration(
-                crate::DEFAULT_STATISTICS_REPORTING_INTERVAL,
-            ),
+            expresslane_keys_rotation_interval: crate::DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL,
+            connection_age_expiration_interval: crate::DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL,
+            statistics_reporting_interval: crate::DEFAULT_STATISTICS_REPORTING_INTERVAL,
             enable_pqc: false,
             enable_tun_offload: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
-            iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),
+            iouring_sqpoll_idle_time: Duration::from_millis(100),
             log_format: LogFormat::Full,
             log_level: LogLevel::Info,
-            // TODO: use from_mins, if MSRV > 1.91
-            key_update_interval: NonZeroDuration::from_std_duration(StdDuration::from_secs(
-                15 * 60,
-            )),
+            key_update_interval: Duration::from_secs(15 * 60),
             bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 27690),
             proxy_protocol: false,
             udp_buffer_size: ByteSize::mib(15),
@@ -290,6 +301,11 @@ impl Config {
                 "Batch send cannot be used with tun offload"
             )
         }
+
+        anyhow::ensure!(
+            !self.key_update_interval.is_zero(),
+            "key_update_interval must not be zero"
+        );
 
         #[cfg(linux)]
         {

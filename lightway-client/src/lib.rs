@@ -397,14 +397,14 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_expresslane: config.enable_expresslane,
             #[cfg(apple)]
             enable_connected_udp: config.enable_connected_udp,
-            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval,
             expresslane_cb: None,
             expresslane_metrics: None,
-            keepalive_interval: config.keepalive_interval.into(),
-            keepalive_timeout: config.keepalive_timeout.into(),
+            keepalive_interval: config.keepalive_interval,
+            keepalive_timeout: config.keepalive_timeout,
             continuous_keepalive: config.keepalive_continuous,
-            tracer_packet_timeout: config.tracer_packet_timeout.into(),
-            preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
+            tracer_packet_timeout: config.tracer_packet_timeout,
+            preferred_connection_wait_interval: config.preferred_connection_wait_interval,
             sndbuf: config.sndbuf,
             rcvbuf: config.rcvbuf,
             #[cfg(batch_receive)]
@@ -425,7 +425,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             #[cfg(feature = "io-uring")]
             iouring_entry_count: config.iouring_entry_count,
             #[cfg(feature = "io-uring")]
-            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
+            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time,
             inside_pkt_codec_config: None,
             inside_pkt_codec_stall_timeout: Duration::ZERO,
             inside_pkt_codec_stats_interval: Duration::ZERO,

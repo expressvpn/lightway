@@ -26,6 +26,7 @@ bytesize.workspace = true
 clap.workspace = true
 delegate.workspace = true
 educe.workspace = true
+humantime.workspace = true
 ipnet.workspace = true
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 libc.workspace = true
