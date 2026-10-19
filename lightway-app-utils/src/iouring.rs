@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use bytes::{BufMut, Bytes, BytesMut};
-use lightway_core::IOCallbackResult;
+use lightway_core::{IOCallbackResult, MAX_INSIDE_MTU};
 use thiserror::Error;
 
 use crate::metrics;
@@ -24,6 +24,13 @@ use tokio::{
 use tokio_eventfd::EventFd;
 
 const REGISTERED_FD_INDEX: u32 = 0;
+
+/// At least the current MTU, so a full packet always fits. Never below
+/// `MAX_INSIDE_MTU` either: reads already queued keep their buffer until
+/// they complete, and the client may raise the MTU up to that meanwhile.
+fn rx_buf_capacity(mtu: &AtomicUsize) -> usize {
+    mtu.load(Ordering::Relaxed).max(MAX_INSIDE_MTU)
+}
 
 /// IO-uring Struct
 pub struct IOUring<T: AsRawFd> {
@@ -319,7 +326,7 @@ async fn iouring_task(
         .iter()
         .map(|_| RxState {
             sender: None,
-            buf: BytesMut::with_capacity(mtu.load(Ordering::Relaxed)),
+            buf: BytesMut::with_capacity(rx_buf_capacity(&mtu)),
         })
         .collect();
     for state in rx_state.iter_mut() {
@@ -405,11 +412,8 @@ async fn iouring_task(
                             buf,
                         } = unsafe { rx_state.get_unchecked_mut(slot.idx()) };
 
-                        // Slots in flight keep the old size until they complete
-                        let mut buf = std::mem::replace(
-                            buf,
-                            BytesMut::with_capacity(mtu.load(Ordering::Relaxed)),
-                        );
+                        let mut buf =
+                            std::mem::replace(buf, BytesMut::with_capacity(rx_buf_capacity(&mtu)));
 
                         // SAFETY: We trust that the read operation
                         // returns the correct number of bytes received.

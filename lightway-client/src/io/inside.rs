@@ -7,7 +7,7 @@ pub use tun::Tun;
 
 use async_trait::async_trait;
 use lightway_core::{
-    IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, InsideIpConfig,
+    IOCallbackResult, InsideIOSendCallback, InsideIOSendCallbackArg, InsideIpConfig, MAX_INSIDE_MTU,
 };
 
 use crate::ConnectionState;
@@ -32,10 +32,19 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
     ///
     /// Non-zero only for a TUN opened with offload, where the kernel
     /// prepends a `virtio_net_hdr` to every read and silently truncates
-    /// if the buffer has no room for it. Callers size their buffer
-    /// `mtu() + vnet_headroom()`.
+    /// if the buffer has no room for it. Included in [`Self::recv_buf_size`].
     fn vnet_headroom(&self) -> usize {
         0
+    }
+
+    /// Size of the buffer a [`Self::recv_buf`] read needs.
+    ///
+    /// At least the current MTU, so a full packet always fits. Never below
+    /// `MAX_INSIDE_MTU` either: the client may raise the MTU up to that
+    /// while a read is already waiting, and a smaller buffer would truncate
+    /// the first larger packet.
+    fn recv_buf_size(&self) -> usize {
+        self.mtu().max(MAX_INSIDE_MTU) + self.vnet_headroom()
     }
 
     fn into_io_send_callback(

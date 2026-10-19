@@ -831,13 +831,10 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     inside_pkt_codec_stall_timeout: Duration,
 ) -> Result<()> {
     let mut tracer = TracerTrigger::new(&keepalive_config);
-    // `mtu + vnet_headroom` so a read from a TUN opened with offload is
-    // not truncated by the length of the virtio header the kernel
-    // prepends. Zero extra unless offload is in use.
     let mut buf = BytesMut::new();
     loop {
         // Re-read every time, since the MTU can change after connecting
-        let cap = inside_io.mtu() + inside_io.vnet_headroom();
+        let cap = inside_io.recv_buf_size();
         buf.clear();
         buf.resize(cap, 0);
         match inside_io.recv_buf(&mut buf).await {
