@@ -77,12 +77,12 @@ impl Aes256Gcm {
         plain_text: &[u8],
         auth_vec: &[u8],
     ) -> Result<(BytesMut, [u8; Self::AUTHTAG_SIZE]), Aes256GcmError> {
-        let ctx = self.ctx.as_ref().ok_or(Aes256GcmError::KeyNotSet)?;
+        let ctx = self.ctx.as_mut().ok_or(Aes256GcmError::KeyNotSet)?;
 
         let mut out = BytesMut::from(plain_text);
         let mut tag = [0u8; Self::AUTHTAG_SIZE];
 
-        ctx.seal_in_place(&iv, &mut out, &mut tag, auth_vec)?;
+        ctx.seal_in_place_mut(&iv, &mut out, &mut tag, auth_vec)?;
 
         Ok((out, tag))
     }
@@ -97,11 +97,11 @@ impl Aes256Gcm {
         auth_vec: &[u8],
         auth_tag: &[u8; Self::AUTHTAG_SIZE],
     ) -> Result<BytesMut, Aes256GcmError> {
-        let ctx = self.ctx.as_ref().ok_or(Aes256GcmError::KeyNotSet)?;
+        let ctx = self.ctx.as_mut().ok_or(Aes256GcmError::KeyNotSet)?;
 
         let mut out = BytesMut::from(cipher_text);
 
-        ctx.open_in_place(&iv, &mut out, auth_tag, auth_vec)
+        ctx.open_in_place_mut(&iv, &mut out, auth_tag, auth_vec)
             .map_err(|_| Aes256GcmError::AuthTagMismatch)?;
 
         Ok(out)

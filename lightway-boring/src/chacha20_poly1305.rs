@@ -32,19 +32,19 @@ impl Chacha20Poly1305Aead {
     ///
     /// The nonce must be unique for every call made with the same key.
     pub fn encrypt(
-        &self,
+        &mut self,
         iv: [u8; Self::IV_SIZE],
         plain_text: &[u8],
     ) -> Result<(BytesMut, [u8; Self::AUTHTAG_SIZE]), String> {
         let ctx = self
             .ctx
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| String::from("Encrypt failed"))?;
 
         let mut out = BytesMut::from(plain_text);
         let mut tag = [0u8; Self::AUTHTAG_SIZE];
 
-        ctx.seal_in_place(&iv, &mut out, &mut tag, &[])
+        ctx.seal_in_place_mut(&iv, &mut out, &mut tag, &[])
             .map_err(|_| String::from("Encrypt failed"))?;
 
         Ok((out, tag))
@@ -55,19 +55,19 @@ impl Chacha20Poly1305Aead {
     /// Verifies the authentication tag before returning the plaintext; on
     /// tag mismatch no plaintext is returned (BoringSSL zeroes the buffer).
     pub fn decrypt(
-        &self,
+        &mut self,
         iv: [u8; Self::IV_SIZE],
         cipher_text: &[u8],
         auth_tag: [u8; Self::AUTHTAG_SIZE],
     ) -> Result<BytesMut, String> {
         let ctx = self
             .ctx
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| String::from("Decrypt failed"))?;
 
         let mut out = BytesMut::from(cipher_text);
 
-        ctx.open_in_place(&iv, &mut out, &auth_tag, &[])
+        ctx.open_in_place_mut(&iv, &mut out, &auth_tag, &[])
             .map_err(|_| String::from("Decrypt failed"))?;
 
         Ok(out)
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_encrypt() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let (cipher_text, auth_tag) = cipher.encrypt(IV, &PLAIN_TEXT).unwrap();
         assert_eq!(&cipher_text[..], &CIPHER_TEXT);
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_decrypt() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let plain_text = cipher.decrypt(IV, &CIPHER_TEXT, AUTH_TAG).unwrap();
         assert_eq!(&plain_text[..], &PLAIN_TEXT);
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_roundtrip() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let data = b"hello testing content";
 
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_tampered_tag() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let (encrypted, mut tag) = cipher.encrypt(IV, &PLAIN_TEXT).unwrap();
         tag[0] ^= 0xff; // try tampering with tag
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_tampered_ciphertext() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let (mut encrypted, tag) = cipher.encrypt(IV, &PLAIN_TEXT).unwrap();
         encrypted[0] ^= 0xff; // try tampering with ciphertext
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_chacha20_decrypt_wrong_iv() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let (encrypted, tag) = cipher.encrypt(IV, &PLAIN_TEXT).unwrap();
         let mut wrong_iv = IV;
@@ -176,12 +176,12 @@ mod tests {
 
     #[test]
     fn test_chacha20_decrypt_wrong_key() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let (encrypted, tag) = cipher.encrypt(IV, &PLAIN_TEXT).unwrap();
         let mut wrong_key = KEY;
         wrong_key[0] ^= 0xff;
-        let other = Chacha20Poly1305Aead::new(wrong_key);
+        let mut other = Chacha20Poly1305Aead::new(wrong_key);
         let res = other.decrypt(IV, &encrypted, tag);
         assert_eq!(res.unwrap_err(), "Decrypt failed");
     }
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_reuse_after_multiple_encrypts() {
-        let cipher = Chacha20Poly1305Aead::new(KEY);
+        let mut cipher = Chacha20Poly1305Aead::new(KEY);
 
         let iv2 = [0x01u8; Chacha20Poly1305Aead::IV_SIZE];
 
