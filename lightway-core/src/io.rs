@@ -66,6 +66,16 @@ pub trait OutsideIOSendCallback {
     /// `sendmsg`, which the kernel splits into `gso_size`-byte
     /// segments. The trailing segment may be shorter than `gso_size`.
     fn send_gso(&self, bufs: &[IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize>;
+
+    /// Whether kernel UDP GSO (`UDP_SEGMENT`) is usable on this socket.
+    /// Starts `true`; an implementation may latch it `false` once a send
+    /// is rejected with a capability error (typically `EIO` on an egress
+    /// device without TX checksum offload, which UDP GSO requires). When
+    /// `false` the connection sends one datagram per segment instead of
+    /// coalescing. Transports that never call `send_gso` keep the default.
+    fn gso_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// Convenience type to use as function arguments
