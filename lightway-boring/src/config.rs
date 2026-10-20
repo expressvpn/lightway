@@ -6,6 +6,21 @@
 
 use super::{CurveGroup, SslVerifyMode};
 
+/// What a client offers in the `key_share` extension of its first ClientHello.
+/// Mirrors the wolfSSL backend's type so callers can be backend-agnostic.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum KeyShareOffer {
+    /// Use BoringSSL's default behavior:
+    /// outputs key shares for up to two supported groups, at most one of which is
+    /// post-quantum.
+    BackendDefault,
+    /// A precomputed share for this group; see [`SessionConfig::with_keyshare_group`].
+    Group(CurveGroup),
+    /// No share key in the first ClientHello.
+    /// Only valid on client sessions; `Session::new` rejects it on a server.
+    Empty,
+}
+
 /// Configuration for creating a session
 pub struct SessionConfig<IOCB> {
     pub io: IOCB,
@@ -16,13 +31,8 @@ pub struct SessionConfig<IOCB> {
     pub checked_domain_name: Option<String>,
     /// SNI (Server Name Indication) sent to server.
     pub server_name_indication: Option<String>,
-    /// Per-session client key share group preference. If set on a client
-    /// session and the group is post-quantum, registers a precomputed key
-    /// share for that group via BoringSSL's SSL_set1_client_key_shares so
-    /// the ClientHello offers it up front. No effect on server sessions
-    /// or classical groups, which negotiate normally through the
-    /// supported_groups extension.
-    pub keyshare_group: Option<CurveGroup>,
+    /// What the first ClientHello offers in its `key_share` extension.
+    pub key_share: KeyShareOffer,
     /// Per-session certificate verification mode. When set, overrides the
     /// context-level mode for this session via `SSL_set_verify`.
     pub ssl_verify_mode: Option<SslVerifyMode>,
@@ -36,7 +46,7 @@ impl<IOCB> SessionConfig<IOCB> {
             dtls_mtu: None,
             checked_domain_name: None,
             server_name_indication: None,
-            keyshare_group: None,
+            key_share: KeyShareOffer::BackendDefault,
             ssl_verify_mode: None,
         }
     }
@@ -84,8 +94,14 @@ impl<IOCB> SessionConfig<IOCB> {
     /// calls `SSL_set1_client_key_shares` so the ClientHello carries that share
     /// up front (skipping a HelloRetryRequest round trip). Server sessions and
     /// classical groups are a no-op here; they negotiate via `supported_groups`.
-    pub fn with_keyshare_group(mut self, group: CurveGroup) -> Self {
-        self.keyshare_group = Some(group);
+    pub fn with_keyshare_group(self, group: CurveGroup) -> Self {
+        self.with_key_share(KeyShareOffer::Group(group))
+    }
+
+    /// Sets what the first ClientHello offers in its `key_share` extension.
+    /// Replaces any earlier [`Self::with_keyshare_group`] or `with_key_share`.
+    pub fn with_key_share(mut self, offer: KeyShareOffer) -> Self {
+        self.key_share = offer;
         self
     }
 
@@ -173,7 +189,26 @@ mod tests {
 
         let config = SessionConfig::new(mock_io).with_keyshare_group(CurveGroup::X25519MLKEM768);
 
-        assert_eq!(config.keyshare_group, Some(CurveGroup::X25519MLKEM768));
+        assert_eq!(
+            config.key_share,
+            KeyShareOffer::Group(CurveGroup::X25519MLKEM768)
+        );
+    }
+
+    #[test]
+    fn test_session_config_key_share_last_setter_wins() {
+        let config = SessionConfig::new(MockIOAdapter::new())
+            .with_keyshare_group(CurveGroup::X25519MLKEM768)
+            .with_key_share(KeyShareOffer::Empty);
+        assert_eq!(config.key_share, KeyShareOffer::Empty);
+
+        let config = SessionConfig::new(MockIOAdapter::new())
+            .with_key_share(KeyShareOffer::Empty)
+            .with_keyshare_group(CurveGroup::EccX25519);
+        assert_eq!(
+            config.key_share,
+            KeyShareOffer::Group(CurveGroup::EccX25519)
+        );
     }
 
     #[test]
