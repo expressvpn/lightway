@@ -373,12 +373,16 @@ pub struct Config {
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = r#"Accept unknown inputs with error message without quiting"#))]
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub accept_unknowns: bool,
 
     /// The unknown options from config file
     #[patch(attribute(clap(skip)))]
     #[patch(attribute(serde(flatten)))]
     #[patch(skip_wrap, apply_by(std::collections::HashMap::extend))]
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub unknowns: HashMap<String, serde_json::Value>,
 }
 
