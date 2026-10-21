@@ -94,7 +94,7 @@ rustPlatform.buildRustPackage {
       [
         "--target=${stdenv.hostPlatform.config}"
         "-isystem ${lib.getDev stdenv.cc.libc}/include"
-        "-I${buildPackages.llvmPackages.clang}/resource-root/include"
+        "-I${lib.getLib buildPackages.llvmPackages.libclang}/lib/clang/${lib.versions.major buildPackages.llvmPackages.libclang.version}/include"
       ]
       ++ lib.optionals (stdenv.cc ? nix-support) [
         "$(< ${stdenv.cc}/nix-support/libc-cflags)"
