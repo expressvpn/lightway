@@ -9,5 +9,6 @@ build-container:
         run-simple-test.sh \
         run-udp-floating-test.sh \
         run-parallel-connect-test.sh \
+        run-mtu-test.sh \
         .
 

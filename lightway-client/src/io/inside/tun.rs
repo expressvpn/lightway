@@ -78,6 +78,10 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         self.tun.mtu()
     }
 
+    fn set_mtu(&self, mtu: u16) -> std::io::Result<()> {
+        self.tun.set_mtu(mtu)
+    }
+
     fn vnet_headroom(&self) -> usize {
         self.tun.vnet_headroom()
     }

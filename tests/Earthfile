@@ -20,6 +20,7 @@ TEST:
     ARG MODE
     ARG SERVER_PORT
     ARG SERVER_EXTRA_ARGS=""
+    ARG SERVER_TUN_MTU=1350
     ARG CLIENT_EXTRA_ARGS=""
     ARG CLIENT_CONFIG_FILE="client_config.yaml"
     ARG COMPOSE_FILE="./docker-compose.yml"
@@ -87,6 +88,19 @@ run-udp-floating-ip-test:
 # run-udp-pmtud-test runs e2e test of UDP with PMTUD enabled
 run-udp-pmtud-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-pmtud"
+
+# run-tcp-server-mtu-test checks the client grows its TUN to the server MTU
+run-tcp-server-mtu-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --SERVER_TUN_MTU=1500 --TEST_SCRIPT="./run-mtu-test.sh 1500"
+
+# run-udp-server-mtu-test checks the client grows its TUN to the server MTU.
+# 1400 keeps DTLS records within the 1500 outside MTU.
+run-udp-server-mtu-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TUN_MTU=1400 --TEST_SCRIPT="./run-mtu-test.sh 1400"
+
+# run-udp-iouring-server-mtu-test is run-udp-server-mtu-test with io-uring enabled
+run-udp-iouring-server-mtu-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --SERVER_TUN_MTU=1400 --SERVER_EXTRA_ARGS="--enable-tun-iouring" --CLIENT_EXTRA_ARGS="--enable-tun-iouring" --TEST_SCRIPT="./run-mtu-test.sh 1400"
 
 # run-udp-iouring-test runs e2e test using UDP and default cipher with io-uring enabled
 run-udp-iouring-test:
@@ -266,6 +280,9 @@ run-all-tests-wolfssl:
     BUILD +run-udp-floating-ip-test
     BUILD +run-udp-pmtud-test
     BUILD +run-udp-iouring-test
+    BUILD +run-tcp-server-mtu-test
+    BUILD +run-udp-server-mtu-test
+    BUILD +run-udp-iouring-server-mtu-test
     BUILD +run-udp-tun-offload-test
     BUILD +run-udp-client-batch-receive-test
     BUILD +run-udp-server-batch-receive-test

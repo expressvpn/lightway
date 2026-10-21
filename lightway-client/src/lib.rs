@@ -379,9 +379,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             tun_config.device_guid(parsed.as_u128());
         }
 
-        // TODO: Fix in future PR
         tun_config
-            .mtu(1350)
+            .mtu(1350) // will be updated to server-recommended MTU, once connected
             .address(config.tun_local_ip.into())
             .destination(config.tun_peer_ip)
             .up();
@@ -832,12 +831,10 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
     inside_pkt_codec_stall_timeout: Duration,
 ) -> Result<()> {
     let mut tracer = TracerTrigger::new(&keepalive_config);
-    // `mtu + vnet_headroom` so a read from a TUN opened with offload is
-    // not truncated by the length of the virtio header the kernel
-    // prepends. Zero extra unless offload is in use.
-    let cap = inside_io.mtu() + inside_io.vnet_headroom();
-    let mut buf = BytesMut::with_capacity(cap);
+    let mut buf = BytesMut::new();
     loop {
+        // Re-read every time, since the MTU can change after connecting
+        let cap = inside_io.recv_buf_size();
         buf.clear();
         buf.resize(cap, 0);
         match inside_io.recv_buf(&mut buf).await {
@@ -1829,6 +1826,29 @@ fn validate_client_config<
     Ok(())
 }
 
+/// Set the inside interface MTU to the one recommended by the server.
+/// Failure is not fatal: the interface keeps its current MTU.
+#[cfg(desktop)]
+fn apply_server_mtu<ExtAppState: Send + Sync>(
+    inside_io: &dyn io::inside::InsideIORecv<ExtAppState>,
+    mtu: u16,
+) {
+    if !(lightway_core::MIN_INSIDE_MTU..=MAX_INSIDE_MTU).contains(&mtu.into()) {
+        tracing::warn!(mtu, "Ignoring out of range server MTU");
+        return;
+    }
+    if inside_io.mtu() == usize::from(mtu) {
+        return;
+    }
+    match inside_io.set_mtu(mtu) {
+        Ok(()) => tracing::info!(mtu, "Set inside MTU from server"),
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+            tracing::debug!(mtu, "Inside IO does not support changing MTU")
+        }
+        Err(e) => tracing::warn!(mtu, "Failed to set inside MTU from server: {e}"),
+    }
+}
+
 /// Launches connections concurrently and waits for the first one to complete.
 /// If `config.preferred_connection_wait_interval` is set, it will wait that
 /// duration after the first connection completes before returning the highest
@@ -1922,24 +1942,28 @@ pub async fn client<
         .unwrap();
     let (_, mut connection) = connections.swap_remove(pos);
 
-    if let Some(signal) = config.best_connection_selected_signal.take() {
-        let ip_config = connection
-            .conn
-            .lock()
-            .unwrap()
-            .app_state()
-            .ip_config
-            .expect("selected connection is Online, so ip_config is set");
-        if signal
+    let ip_config = connection
+        .conn
+        .lock()
+        .unwrap()
+        .app_state()
+        .ip_config
+        .expect("selected connection is Online, so ip_config is set");
+
+    if let Some(mtu) = ip_config.mtu {
+        apply_server_mtu(inside_io.as_ref(), mtu);
+    }
+
+    if let Some(signal) = config.best_connection_selected_signal.take()
+        && signal
             .send(BestConnectionInfo {
                 index: best_connection_index,
                 connection: connection.outside_connection_info(),
                 ip_config,
             })
             .is_err()
-        {
-            tracing::error!("Failed to send best_connection_selected_signal");
-        }
+    {
+        tracing::error!("Failed to send best_connection_selected_signal");
     }
 
     for (_, conn) in connections.iter_mut() {
@@ -2500,6 +2524,46 @@ mod tests {
         config_pmtud: bool,
     ) -> (usize, bool) {
         effective_outside_io_settings(required, config_mtu, config_pmtud)
+    }
+
+    #[cfg(desktop)]
+    struct MtuInsideIo(std::sync::atomic::AtomicUsize);
+
+    #[cfg(desktop)]
+    #[async_trait::async_trait]
+    impl io::inside::InsideIORecv<()> for MtuInsideIo {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            unimplemented!()
+        }
+
+        fn try_send(&self, _pkt: BytesMut, _ip_config: Option<InsideIpConfig>) -> Result<usize> {
+            unimplemented!()
+        }
+
+        fn mtu(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn set_mtu(&self, mtu: u16) -> std::io::Result<()> {
+            self.0
+                .store(mtu.into(), std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState<()>> {
+            unimplemented!()
+        }
+    }
+
+    #[cfg(desktop)]
+    #[test_case(1350, 1500 => 1500 ; "grows to server mtu")]
+    #[test_case(1500, 1350 => 1350 ; "shrinks to server mtu")]
+    #[test_case(1350, 1000 => 1350 ; "ignores mtu below range")]
+    #[test_case(1350, 9000 => 1350 ; "ignores mtu above range")]
+    fn test_apply_server_mtu(current: usize, server: u16) -> usize {
+        let inside_io = MtuInsideIo(current.into());
+        apply_server_mtu(&inside_io, server);
+        inside_io.mtu()
     }
 
     struct StubEncoder(Option<&'static str>);

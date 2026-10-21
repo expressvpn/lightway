@@ -20,6 +20,8 @@ services:
   server:
     image: lightway-test-server:latest
     command: ${SERVER_ARGS}
+    environment:
+      TUN_MTU: ${SERVER_TUN_MTU:-1350}
     stop_signal: SIGTERM
     stop_grace_period: 10s
     cap_add:

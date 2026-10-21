@@ -6,14 +6,15 @@ server_ip_pool=10.128.0.0/16
 
 tunname=lightway
 tun_local_ip=10.128.0.42
+tun_mtu=${TUN_MTU:-1350}
 
 echo ""
 echo "====================================================================="
-echo "Setup Server TUN device $tunname $tun_local_ip"
+echo "Setup Server TUN device $tunname $tun_local_ip mtu $tun_mtu"
 echo "====================================================================="
 
 ip tuntap add mode tun dev "${tunname}"
-ip link set dev "${tunname}" mtu 1350
+ip link set dev "${tunname}" mtu "${tun_mtu}"
 # Cap GSO superpacket intake. The default 65536 plus Lightway + TLS/expresslane
 # headers per segment can exceed what sendmsg(UDP_SEGMENT) accepts, causing the
 # kernel to return EMSGSIZE ("Message too long") on the outside socket.
