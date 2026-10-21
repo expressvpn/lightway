@@ -757,14 +757,17 @@ mod tests {
                     .and_then(|r| r.if_index())
                     .unwrap_or(1); // Default to 1 if not found (standard loopback index)
 
-                // Add a mock IPv6 default route via loopback interface
-                // Use ::1 (IPv6 loopback) as the gateway
-                // This will be cleaned up by RouteRestorer
-                let mock_ipv6_default = Route::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-                    .with_if_index(loopback_index)
-                    .with_gateway(IpAddr::V6(Ipv6Addr::LOCALHOST));
+                // Add a mock IPv6 default route on the loopback interface,
+                // without a gateway: kernels reject `via ::1` as a local
+                // address. This will be cleaned up by RouteRestorer
+                let mock_ipv6_default =
+                    Route::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0).with_if_index(loopback_index);
 
-                let _ = route_manager.add(&mock_ipv6_default);
+                if let Err(e) = route_manager.add(&mock_ipv6_default)
+                    && e.kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(format!("Failed to add mock IPv6 default route: {e}").into());
+                }
             }
         }
 
