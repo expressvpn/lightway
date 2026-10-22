@@ -14,8 +14,18 @@ use std::time::Duration;
 use bytes::BytesMut;
 
 use crate::plugin::PluginList;
-use crate::tls::{IOCallbackResult, KeyShareOffer, Poll, ProtocolVersion};
+use crate::tls::{IOCallbackResult, KeyShareOffer, ProtocolVersion};
 use crate::{OutsideIOSendCallbackArg, SessionId, Version};
+
+/// Progress of a transport operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poll<T> {
+    /// The operation finished.
+    Ready(T),
+    /// The operation needs more outside I/O. Each method states what
+    /// the connection does next.
+    Pending,
+}
 
 /// Result of a transport operation that can need more outside I/O.
 pub type PollResult<T> = Result<Poll<T>, TransportError>;
@@ -70,8 +80,7 @@ pub struct TransportCaps {
 /// The transport under a connection.
 ///
 /// Every method is synchronous. A method that needs the outside path
-/// reports `Pending*` and the caller retries after the next outside
-/// packet or tick.
+/// reports [`Poll::Pending`].
 pub trait Transport: Send {
     /// Capabilities of this transport. The connection reads them once,
     /// when it is built.
@@ -82,7 +91,9 @@ pub trait Transport: Send {
     /// constant for the life of the transport.
     fn max_frame_payload(&self) -> usize;
 
-    /// Drive the handshake. `Ready` once the secure link is up.
+    /// Drive the handshake. `Ready` once the secure link is up. On
+    /// `Pending`, the connection calls it again after the next outside
+    /// packet.
     fn handshake(&mut self) -> PollResult<()>;
 
     /// Hand one received outside payload to the transport.
@@ -93,7 +104,8 @@ pub trait Transport: Send {
     /// a record never spans packets.
     fn packet_done(&mut self);
 
-    /// Read decrypted frame bytes into `into`.
+    /// Read decrypted frame bytes into `into`. `Pending` once no bytes
+    /// are left, until the next outside packet.
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize>;
 
     /// Encrypt and send frame bytes. `buf` holds exactly one Lightway
@@ -102,9 +114,10 @@ pub trait Transport: Send {
     fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize>;
 
     /// Close the secure session.
-    fn shutdown(&mut self) -> PollResult<bool>;
+    fn shutdown(&mut self);
 
-    /// Start a key update.
+    /// Start a key update. [`Poll::Pending`] still counts as started:
+    /// the backend sends it on a later write.
     fn key_update(&mut self) -> PollResult<()>;
 
     /// Whether a key update is in flight.
@@ -118,7 +131,7 @@ pub trait Transport: Send {
     /// The connection calls this on each tick, except while the client
     /// authenticates. Retransmit here if necessary, and return true
     /// when the peer is lost.
-    fn has_timed_out(&mut self) -> Poll<bool>;
+    fn has_timed_out(&mut self) -> bool;
 
     /// Negotiated secure protocol version.
     fn protocol_version(&mut self) -> ProtocolVersion;

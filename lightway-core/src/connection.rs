@@ -39,7 +39,7 @@ use crate::{
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
 use crate::packet::{OutsidePacket, OutsidePacketError};
-use crate::transport::Transport;
+use crate::transport::{Poll, Transport};
 use crate::utils::ipv4_is_valid_packet;
 use crate::wire::{
     AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
@@ -705,9 +705,8 @@ impl<AppState: Send> Connection<AppState> {
         // more data than will be available. It's just about possible
         // it might succeed under test conditions.
         match conn.transport.handshake()? {
-            crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {}
-            crate::tls::Poll::Ready(_) => conn.set_state(State::LinkUp)?,
-            crate::tls::Poll::AppData(_) => metrics::tls_appdata(&ProtocolVersion::Unknown),
+            Poll::Pending => {}
+            Poll::Ready(_) => conn.set_state(State::LinkUp)?,
         }
 
         conn.update_tick_interval();
@@ -972,17 +971,13 @@ impl<AppState: Send> Connection<AppState> {
             State::Disconnecting | State::Disconnected => {
                 return Err(ConnectionError::Disconnected);
             }
-            _ => match self.transport.has_timed_out() {
-                crate::tls::Poll::Ready(true) => {
+            _ => {
+                if self.transport.has_timed_out() {
                     warn!(session_id = ?self.session_id, "transport timed out, disconnecting client");
                     let _ = self.disconnect();
                     return Err(ConnectionError::TimedOut);
                 }
-                crate::tls::Poll::PendingWrite
-                | crate::tls::Poll::PendingRead
-                | crate::tls::Poll::Ready(false) => {}
-                crate::tls::Poll::AppData(_) => metrics::tls_appdata(&self.tls_protocol_version()),
-            },
+            }
         };
 
         self.update_tick_interval();
@@ -1517,7 +1512,7 @@ impl<AppState: Send> Connection<AppState> {
 
         // here, goodbye + shutdown are just a courtesy.
         let _ = self.send_frame_or_queue(msg);
-        let _ = self.transport.shutdown();
+        self.transport.shutdown();
 
         self.set_state(State::Disconnected)?;
 
@@ -1560,20 +1555,17 @@ impl<AppState: Send> Connection<AppState> {
 
         while let Some(mut head) = self.pending_queue.pop_front() {
             match self.transport.write(&mut head)? {
-                crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
+                Poll::Pending => {
                     self.pending_queue.push_front(head);
                     return Ok(());
                 }
-                // try_write advances the buffer by the number of bytes
+                // `write` advances the buffer by the number of bytes
                 // written; keep any partially written remainder at the head.
-                crate::tls::Poll::Ready(_) => {
+                Poll::Ready(_) => {
                     if !head.is_empty() {
                         self.pending_queue.push_front(head);
                         return Ok(());
                     }
-                }
-                crate::tls::Poll::AppData(_) => {
-                    metrics::tls_appdata(&self.tls_protocol_version());
                 }
             }
         }
@@ -1758,24 +1750,10 @@ impl<AppState: Send> Connection<AppState> {
 
         // It's time to update keys!
         info!(session = ?self.session_id, "Update TLS keys");
-        match self.transport.key_update()? {
-            // If using non-blocking I/O and WANT_WRITE is returned,
-            // calling try_write() again will have the message sent when ready.
-            //
-            // So we need not worry about `PendingWrite` here -- the
-            // actual update will happen at some future `try_write`.
-            crate::tls::Poll::PendingWrite
-            | crate::tls::Poll::PendingRead
-            | crate::tls::Poll::Ready(_) => {
-                self.event(Event::TlsKeysUpdateStart);
-                self.update_tick_interval();
-                Ok(())
-            }
-            crate::tls::Poll::AppData(_) => {
-                metrics::tls_appdata(&self.tls_protocol_version());
-                Ok(())
-            }
-        }
+        self.transport.key_update()?;
+        self.event(Event::TlsKeysUpdateStart);
+        self.update_tick_interval();
+        Ok(())
     }
 
     fn process_new_outside_data(
@@ -1802,21 +1780,13 @@ impl<AppState: Send> Connection<AppState> {
 
         let frame_read_count_result = match self.state {
             State::Connecting => match self.transport.handshake()? {
-                crate::tls::Poll::PendingWrite => {
+                Poll::Pending => {
                     self.update_tick_interval();
                     Ok(0)
                 }
-                crate::tls::Poll::PendingRead => {
-                    self.update_tick_interval();
-                    Ok(0)
-                }
-                crate::tls::Poll::Ready(_) => {
+                Poll::Ready(_) => {
                     self.set_state(State::LinkUp)?;
                     self.handle_messages()
-                }
-                crate::tls::Poll::AppData(_) => {
-                    metrics::tls_appdata(&self.tls_protocol_version());
-                    Ok(0)
                 }
             },
 
@@ -1846,14 +1816,8 @@ impl<AppState: Send> Connection<AppState> {
                     self.receive_buf.reserve(self.outside_mtu);
 
                     match self.transport.read(&mut self.receive_buf)? {
-                        crate::tls::Poll::PendingWrite => break,
-                        crate::tls::Poll::PendingRead => break,
-                        crate::tls::Poll::Ready(_) => continue,
-                        crate::tls::Poll::AppData(data) => {
-                            self.receive_buf.extend_from_slice(&data[..]);
-                            metrics::tls_appdata(&self.tls_protocol_version());
-                            continue;
-                        }
+                        Poll::Pending => break,
+                        Poll::Ready(_) => continue,
                     }
                 }
                 Err(e) => return Err(e.into()),
