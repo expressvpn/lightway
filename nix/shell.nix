@@ -1,5 +1,7 @@
 {
   lib,
+  stdenv,
+  buildPackages,
   mkShell,
   rustPlatform,
   autoconf,
@@ -21,6 +23,10 @@
   extraShellHook ? "",
 }:
 
+let
+  isCross = stdenv.hostPlatform.config != stdenv.buildPlatform.config;
+  libclang = buildPackages.llvmPackages.libclang;
+in
 mkShell (
   {
     shellHook = ''
@@ -44,8 +50,10 @@ mkShell (
       libtool
       cmake
       git
-      rustPlatform.bindgenHook
-
+    ]
+    # For cross shells, bindgen env is set below (same as nix/default.nix)
+    ++ lib.optionals (!isCross) [ rustPlatform.bindgenHook ]
+    ++ [
       # Development tools
       cargo-deny
       cargo-make
@@ -58,6 +66,14 @@ mkShell (
       rustc
     ]
     ++ extraBuildPkgs;
+  }
+  // lib.optionalAttrs isCross {
+    LIBCLANG_PATH = "${lib.getLib libclang}/lib";
+    BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " [
+      "--target=${stdenv.hostPlatform.config}"
+      "-isystem ${lib.getDev stdenv.cc.libc}/include"
+      "-I${lib.getLib libclang}/lib/clang/${lib.versions.major libclang.version}/include"
+    ];
   }
   // shellEnvVar
 )
