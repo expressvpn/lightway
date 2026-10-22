@@ -2,13 +2,14 @@
 //!
 //! While a batch window ([`SendBatchGuard`]) is open, per-connection send
 //! callbacks enqueue datagrams here instead of issuing one `sendmsg` each.
-//! Dropping the guard flushes the queue — with `sendmmsg` on Linux, or a
+//! Closing the window flushes the queue — with `sendmmsg` on Linux, or a
 //! `sendmsg` loop on other platforms.
 
 use bytes::Bytes;
 use lightway_core::MAX_IO_BATCH_SIZE;
 use socket2::SockAddr;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::metrics;
 
@@ -20,106 +21,153 @@ struct QueuedDatagram {
     data: Bytes,
 }
 
-/// Shared queue for batching outgoing datagrams on the server socket.
-///
-/// `None` means no batch window is open: senders take the direct
-/// `sendmsg` path. `Some` means a window is open: senders push and the
-/// guard flushes on drop. The mutex makes check-and-push atomic against
-/// take-and-flush so a datagram can never be stranded in a queue nobody
-/// will flush, even on a multi-threaded runtime.
-pub(crate) struct SendQueue {
-    sock: Arc<tokio::net::UdpSocket>,
-    queue: Mutex<Option<Vec<QueuedDatagram>>>,
+/// The datagrams in a batch window. `owner` is the queue of the first
+/// datagram. Sends for any other queue take the direct path.
+struct Batch {
+    owner: Arc<BatchSendSocket>,
+    msgs: Vec<QueuedDatagram>,
 }
 
-impl SendQueue {
+/// The batch window of one thread.
+enum Window {
+    Closed,
+    /// Open with no datagram yet, so the window allocates nothing.
+    Open,
+    /// Open and bound to the queue of its first datagram.
+    Bound(Batch),
+}
+
+thread_local! {
+    static WINDOW: RefCell<Window> = const { RefCell::new(Window::Closed) };
+}
+
+fn take_window() -> Window {
+    WINDOW.replace(Window::Closed)
+}
+
+/// The server socket, with batch send on.
+///
+/// When no batch window is open on the calling thread, senders take the
+/// direct `sendmsg` path. When a window is open, senders push and the
+/// guard flushes. Only the thread that opens a window pushes to it or
+/// flushes it. Thus no window keeps a datagram that no thread flushes.
+pub(crate) struct BatchSendSocket {
+    sock: Arc<tokio::net::UdpSocket>,
+}
+
+impl BatchSendSocket {
     pub(crate) fn new(sock: Arc<tokio::net::UdpSocket>) -> Arc<Self> {
-        Arc::new(Self {
-            sock,
-            queue: Mutex::new(None),
-        })
+        Arc::new(Self { sock })
     }
 
     /// Push a datagram if a batch window is open. Returns false if no
     /// window is open — the caller must send directly.
     pub(crate) fn try_enqueue(
-        &self,
+        self: &Arc<Self>,
         peer: SockAddr,
         pktinfo: Option<libc::in_pktinfo>,
         data: &[u8],
     ) -> bool {
-        let mut queue = self.queue.lock().unwrap();
-        match queue.as_mut() {
-            Some(q) => {
-                q.push(QueuedDatagram {
-                    peer,
-                    pktinfo,
-                    data: Bytes::copy_from_slice(data),
+        WINDOW.with_borrow_mut(|window| {
+            if let Window::Open = window {
+                *window = Window::Bound(Batch {
+                    owner: Arc::clone(self),
+                    msgs: Vec::with_capacity(MAX_IO_BATCH_SIZE),
                 });
-                true
             }
-            None => false,
-        }
-    }
-
-    /// Open a batch window. Sends arriving via [`Self::try_enqueue`] are
-    /// queued until the batch is flushed via [`SendBatchGuard::flush`]
-    /// (or the guard is dropped, which flushes best-effort).
-    ///
-    /// Only one window may be open at a time (there is a single inside-IO
-    /// loop); opening a second discards the first window's queue reference,
-    /// so callers must not nest.
-    pub(crate) fn begin_batch(self: &Arc<Self>) -> SendBatchGuard {
-        let mut queue = self.queue.lock().unwrap();
-        debug_assert!(queue.is_none(), "nested send batch windows");
-        *queue = Some(Vec::with_capacity(MAX_IO_BATCH_SIZE));
-        SendBatchGuard {
-            queue: Arc::clone(self),
-        }
+            let Window::Bound(batch) = window else {
+                return false;
+            };
+            if !Arc::ptr_eq(&batch.owner, self) {
+                return false;
+            }
+            batch.msgs.push(QueuedDatagram {
+                peer,
+                pktinfo,
+                data: Bytes::copy_from_slice(data),
+            });
+            true
+        })
     }
 }
 
-/// Closes the batch window opened by [`SendQueue::begin_batch`].
+/// Call `f` for each item inside one batch window on this thread, then
+/// flush the window. `f` is synchronous, so no caller can hold the window
+/// across an await point. `f` drops before the flush, so the values that
+/// it owns do not live while the flush waits for the socket.
+pub(crate) async fn for_each_in_batch<T>(items: impl IntoIterator<Item = T>, f: impl FnMut(T)) {
+    let guard = begin_batch();
+    items.into_iter().for_each(f);
+    // Windows that queued nothing are not recorded: zero-size samples
+    // would drag down the batch-size histogram that the batching A/B
+    // comparison reads.
+    if let Some(batch) = guard.close() {
+        batch.flush().await;
+    }
+}
+
+/// Open a batch window. Sends arriving via
+/// [`BatchSendSocket::try_enqueue`] are queued until the window is
+/// closed via [`SendBatchGuard::close`] (or the guard is dropped, which
+/// flushes best-effort).
+///
+/// Only one window may be open at a time on a thread; opening a second
+/// discards the first window, so callers must not nest.
+fn begin_batch() -> SendBatchGuard {
+    let previous = WINDOW.replace(Window::Open);
+    debug_assert!(
+        matches!(previous, Window::Closed),
+        "nested send batch windows"
+    );
+    SendBatchGuard
+}
+
+/// Closes the batch window opened by [`begin_batch`].
 ///
 /// The window contains no await points, so the guard is short-lived by
-/// construction. The batched loop consumes it with [`Self::flush`],
-/// which waits for socket writability instead of dropping when the
-/// send buffer fills; dropping the guard without flushing falls back
-/// to a synchronous best-effort flush so queued datagrams can never
-/// be stranded.
-pub(crate) struct SendBatchGuard {
-    queue: Arc<SendQueue>,
-}
+/// construction. [`for_each_in_batch`] consumes it with [`Self::close`]
+/// on the thread that opened it, and only then awaits the flush;
+/// dropping the guard without closing falls back to a synchronous
+/// best-effort flush so queued datagrams can never be stranded.
+struct SendBatchGuard;
 
 impl SendBatchGuard {
-    /// Close the window and send everything queued while it was open,
-    /// treating a full socket buffer as backpressure: wait until the
-    /// socket is writable again and continue where the previous
-    /// attempt stopped. Only hard IO errors drop the remainder. Sends
-    /// arriving while the flush is in progress take the direct path.
-    pub(crate) async fn flush(self) {
-        let msgs = self.queue.queue.lock().unwrap().take();
-        let Some(msgs) = msgs else { return };
-        // Windows that queued nothing are not recorded: zero-size
-        // samples would drag down the batch-size histogram that the
-        // batching A/B comparison reads.
-        if !msgs.is_empty() {
-            metrics::udp_send_batch_flush(msgs.len());
-            flush_retrying(&self.queue.sock, &msgs).await;
+    /// Close the window and return its batch, or `None` if it queued
+    /// nothing. This is synchronous, so the window closes on the thread
+    /// that opened it.
+    fn close(self) -> Option<Batch> {
+        std::mem::forget(self);
+        match take_window() {
+            Window::Bound(batch) => Some(batch),
+            _ => None,
         }
+    }
+}
+
+impl Batch {
+    /// Send everything in the batch, treating a full socket buffer as
+    /// backpressure: wait until the socket is writable again and
+    /// continue where the previous attempt stopped. Only hard IO errors
+    /// drop the remainder. Sends arriving while the flush is in progress
+    /// take the direct path.
+    async fn flush(self) {
+        metrics::udp_send_batch_flush(self.msgs.len());
+        flush_retrying(&self.owner.sock, &self.msgs).await;
     }
 }
 
 impl Drop for SendBatchGuard {
     fn drop(&mut self) {
-        // Fallback for paths that exit without calling flush(), which
-        // takes the queue and leaves None here.
-        let msgs = self.queue.queue.lock().unwrap().take();
-        let Some(msgs) = msgs else { return };
+        // Fallback for paths that exit without calling close(), which
+        // forgets the guard.
+        let window = take_window();
+        if let Window::Closed = window {
+            return;
+        }
         metrics::udp_send_batch_missed_flush();
-        if !msgs.is_empty() {
+        if let Window::Bound(Batch { owner, msgs }) = window {
             metrics::udp_send_batch_flush(msgs.len());
-            flush_best_effort(&self.queue.sock, &msgs);
+            flush_best_effort(&owner.sock, &msgs);
         }
     }
 }
@@ -314,7 +362,9 @@ fn flush_best_effort(sock: &Arc<tokio::net::UdpSocket>, msgs: &[QueuedDatagram])
 mod tests {
     use super::*;
     use lightway_core::MAX_IO_BATCH_SIZE;
+    use std::cell::Cell;
     use std::net::SocketAddr;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -340,6 +390,46 @@ mod tests {
         buf
     }
 
+    /// Records whether it drops while the batch window is open.
+    struct WindowProbe {
+        queue: Arc<BatchSendSocket>,
+        peer: SocketAddr,
+        dropped_in_window: Rc<Cell<bool>>,
+    }
+
+    impl Drop for WindowProbe {
+        fn drop(&mut self) {
+            let in_window = self.queue.try_enqueue(self.peer.into(), None, b"probe");
+            self.dropped_in_window.set(in_window);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn for_each_in_batch_drops_f_before_the_flush() {
+        let (sender, _receiver, receiver_addr) = socket_pair().await;
+        let dropped_in_window = Rc::new(Cell::new(false));
+        let probe = WindowProbe {
+            queue: BatchSendSocket::new(sender),
+            peer: receiver_addr,
+            dropped_in_window: dropped_in_window.clone(),
+        };
+
+        for_each_in_batch([b"pkt".as_slice()], move |payload| {
+            assert!(probe.queue.try_enqueue(probe.peer.into(), None, payload));
+        })
+        .await;
+
+        assert!(
+            dropped_in_window.get(),
+            "f must drop before the flush closes the window"
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     #[cfg_attr(
@@ -348,7 +438,7 @@ mod tests {
     )]
     async fn enqueue_without_open_window_returns_false() {
         let (sender, _receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender);
+        let queue = BatchSendSocket::new(sender);
         assert!(!queue.try_enqueue(receiver_addr.into(), None, b"direct"));
     }
 
@@ -360,9 +450,9 @@ mod tests {
     )]
     async fn guard_drop_flushes_queued_datagrams_in_order() {
         let (sender, receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender);
+        let queue = BatchSendSocket::new(sender);
 
-        let guard = queue.begin_batch();
+        let guard = begin_batch();
         for payload in [b"one".as_slice(), b"two", b"three"] {
             assert!(queue.try_enqueue(receiver_addr.into(), None, payload));
         }
@@ -381,9 +471,9 @@ mod tests {
     )]
     async fn window_closes_after_flush() {
         let (sender, _receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender);
+        let queue = BatchSendSocket::new(sender);
 
-        queue.begin_batch().flush().await;
+        assert!(begin_batch().close().is_none());
         assert!(!queue.try_enqueue(receiver_addr.into(), None, b"late"));
     }
 
@@ -395,15 +485,15 @@ mod tests {
     )]
     async fn flush_sends_batches_larger_than_max_io_batch_size() {
         let (sender, receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender);
+        let queue = BatchSendSocket::new(sender);
 
         let total = MAX_IO_BATCH_SIZE + 5;
-        let guard = queue.begin_batch();
+        let guard = begin_batch();
         for i in 0..total {
             let payload = format!("pkt-{i}");
             assert!(queue.try_enqueue(receiver_addr.into(), None, payload.as_bytes()));
         }
-        guard.flush().await;
+        guard.close().unwrap().flush().await;
 
         for i in 0..total {
             assert_eq!(recv_one(&receiver).await, format!("pkt-{i}").into_bytes());
@@ -421,7 +511,7 @@ mod tests {
     )]
     async fn flush_carries_per_message_pktinfo() {
         let (sender, receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender);
+        let queue = BatchSendSocket::new(sender);
 
         let pktinfo = libc::in_pktinfo {
             ipi_ifindex: 0,
@@ -431,9 +521,9 @@ mod tests {
             ipi_addr: libc::in_addr { s_addr: 0 },
         };
 
-        let guard = queue.begin_batch();
+        let guard = begin_batch();
         assert!(queue.try_enqueue(receiver_addr.into(), Some(pktinfo), b"with-pktinfo"));
-        guard.flush().await;
+        guard.close().unwrap().flush().await;
 
         assert_eq!(recv_one(&receiver).await, b"with-pktinfo");
     }
@@ -450,13 +540,13 @@ mod tests {
         use std::sync::RwLock;
 
         let (sender, receiver, receiver_addr) = socket_pair().await;
-        let queue = SendQueue::new(sender.clone());
+        let queue = BatchSendSocket::new(sender.clone());
 
         let cb = UdpSocket {
             sock: sender,
             peer_addr: RwLock::new((receiver_addr, receiver_addr.into())),
             reply_pktinfo: None,
-            send_queue: Some(queue.clone()),
+            batch_send_socket: Some(queue.clone()),
         };
 
         // Outside a window: direct send, arrives immediately.
@@ -464,7 +554,7 @@ mod tests {
         assert_eq!(recv_one(&receiver).await, b"direct");
 
         // Inside a window: held until the guard flushes.
-        let guard = queue.begin_batch();
+        let guard = begin_batch();
         cb.send(b"queued");
         let mut probe = vec![0u8; 64];
         assert!(
@@ -473,5 +563,44 @@ mod tests {
         );
         drop(guard);
         assert_eq!(recv_one(&receiver).await, b"queued");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn window_queues_only_sends_from_its_own_thread() {
+        let (sender, _receiver, receiver_addr) = socket_pair().await;
+        let queue = BatchSendSocket::new(sender);
+
+        let guard = begin_batch();
+        let other = queue.clone();
+        let queued_by_other_thread =
+            std::thread::spawn(move || other.try_enqueue(receiver_addr.into(), None, b"other"))
+                .join()
+                .unwrap();
+        assert!(!queued_by_other_thread);
+        assert!(queue.try_enqueue(receiver_addr.into(), None, b"own"));
+        guard.close().unwrap().flush().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg_attr(
+        miri,
+        ignore = "binds a real UDP socket, unsupported under miri isolation"
+    )]
+    async fn window_queues_only_sends_for_the_first_queue() {
+        let (first, _first_receiver, receiver_addr) = socket_pair().await;
+        let (second, _second_receiver, _) = socket_pair().await;
+        let first = BatchSendSocket::new(first);
+        let second = BatchSendSocket::new(second);
+
+        let guard = begin_batch();
+        assert!(first.try_enqueue(receiver_addr.into(), None, b"first"));
+        assert!(!second.try_enqueue(receiver_addr.into(), None, b"second"));
+        guard.close().unwrap().flush().await;
     }
 }
