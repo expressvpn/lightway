@@ -387,9 +387,18 @@ impl Transport for TlsTransport {
         }
     }
 
-    fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize> {
-        let poll = self.session.try_write(buf).map_err(|e| self.error(e))?;
-        Ok(self.poll(poll))
+    /// The I/O callback takes every record, so the session never waits
+    /// for the outside path and writes the whole frame. After the
+    /// handshake it never waits for a read either.
+    fn write(&mut self, frame: &mut BytesMut) -> Result<(), TransportError> {
+        let poll = self.session.try_write(frame).map_err(|e| self.error(e))?;
+        match self.poll(poll) {
+            Poll::Ready(_) => {
+                debug_assert!(frame.is_empty(), "a write consumes the whole frame");
+                Ok(())
+            }
+            Poll::Pending => Err(TransportError::new(false, "frame write did not complete")),
+        }
     }
 
     fn poll_transmit(&mut self) -> Option<BytesMut> {

@@ -124,10 +124,9 @@ pub trait Transport: Send {
     /// are left, until the next outside packet.
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize>;
 
-    /// Encrypt frame bytes into records. `buf` holds exactly one
-    /// Lightway frame. Advances `buf` by the bytes consumed. After a
-    /// blocked write, the connection retries with the same buffer.
-    fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize>;
+    /// Encrypt one Lightway frame into records and consume it. The
+    /// connection calls this only after the handshake is `Ready`.
+    fn write(&mut self, frame: &mut BytesMut) -> Result<(), TransportError>;
 
     /// Take the next record to send, if any.
     fn poll_transmit(&mut self) -> Option<BytesMut>;
