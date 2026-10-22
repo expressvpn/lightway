@@ -10,11 +10,14 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use lightway_core::LightwayFeature;
 use pwhash::unix;
 
-use lightway_server::{ServerAuth, ServerAuthHandle, ServerAuthResult};
+use lightway_server::{AuthState, ServerAuth, ServerAuthHandle, ServerAuthResult};
 
 pub struct Auth {
     user_db: Option<HashMap<String, String>>,
     token: Option<(DecodingKey, Validation)>,
+    /// Grant the tunnel protocol version from a versioned token. Stream
+    /// connections need this since they have no wire header carrying it.
+    send_tunnel_version: bool,
 }
 
 fn user_db_from_reader(r: impl Read) -> Result<HashMap<String, String>> {
@@ -61,7 +64,11 @@ fn token_from_reader(mut r: impl Read) -> Result<(DecodingKey, Validation)> {
 }
 
 impl Auth {
-    pub fn new(user_db: Option<&Path>, token_rsa_pub_key_pem: Option<&Path>) -> Result<Self> {
+    pub fn new(
+        user_db: Option<&Path>,
+        token_rsa_pub_key_pem: Option<&Path>,
+        send_tunnel_version: bool,
+    ) -> Result<Self> {
         let user_db = user_db
             .map(|path| -> Result<_> {
                 user_db_from_reader(File::open(path)?)
@@ -80,7 +87,11 @@ impl Auth {
             return Err(anyhow!("Neither user db nor token public key provided"));
         }
 
-        Ok(Self { user_db, token })
+        Ok(Self {
+            user_db,
+            token,
+            send_tunnel_version,
+        })
     }
 }
 
@@ -97,12 +108,12 @@ impl ServerAuthHandle for AuthHandle {
     }
 }
 
-impl<AS> ServerAuth<AS> for Auth {
+impl<'a> ServerAuth<AuthState<'a>> for Auth {
     fn authorize_user_password(
         &self,
         user: &str,
         password: &str,
-        _app_state: &mut AS,
+        _app_state: &mut AuthState<'a>,
     ) -> ServerAuthResult {
         let Some(user_db) = self.user_db.as_ref() else {
             return ServerAuthResult::Denied;
@@ -124,7 +135,7 @@ impl<AS> ServerAuth<AS> for Auth {
         }
     }
 
-    fn authorize_token(&self, token: &str, _app_state: &mut AS) -> ServerAuthResult {
+    fn authorize_token(&self, token: &str, app_state: &mut AuthState<'a>) -> ServerAuthResult {
         let Some((decoding_key, token_validation)) = self.token.as_ref() else {
             return ServerAuthResult::Denied;
         };
@@ -132,7 +143,9 @@ impl<AS> ServerAuth<AS> for Auth {
         match jsonwebtoken::decode::<serde_json::Value>(token, decoding_key, token_validation) {
             Ok(_) => ServerAuthResult::Granted {
                 handle: Some(Box::new(AuthHandle)),
-                tunnel_protocol_version: None,
+                tunnel_protocol_version: app_state
+                    .tunnel_protocol_version
+                    .filter(|_| self.send_tunnel_version),
             },
             Err(err) => {
                 tracing::info!(?err, "Invalid token");
@@ -146,14 +159,26 @@ impl<AS> ServerAuth<AS> for Auth {
 mod tests {
     use std::{
         io::Cursor,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
         ops::{Add, Sub},
     };
 
-    use lightway_core::LightwayFeature;
+    use lightway_core::{LightwayFeature, Version};
     use serde_json::json;
     use test_case::test_case;
 
     use super::*;
+
+    const MOCK_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 27690);
+
+    fn mock_state(tunnel_protocol_version: Option<Version>) -> AuthState<'static> {
+        AuthState {
+            local_addr: &MOCK_ADDR,
+            peer_addr: &MOCK_ADDR,
+            internal_ip: &None,
+            tunnel_protocol_version,
+        }
+    }
 
     #[test_case(b"" => panics "No users found in user db")]
     #[test_case(b"xxx" => panics "Failed to parse line 1")]
@@ -191,8 +216,9 @@ apachemd5_user:$apr1$dzIISjZV$itIp3R9OU32h.vQ0tm9rm/";
         let auth = Auth {
             user_db: Some(db),
             token: None,
+            send_tunnel_version: false,
         };
-        auth.authorize_user_password(user, pass, &mut ())
+        auth.authorize_user_password(user, pass, &mut mock_state(None))
     }
 
     #[test_case("bcrypt_user", "bcrypt_password")]
@@ -202,8 +228,9 @@ apachemd5_user:$apr1$dzIISjZV$itIp3R9OU32h.vQ0tm9rm/";
         let auth = Auth {
             user_db: Some(db),
             token: None,
+            send_tunnel_version: false,
         };
-        let r = auth.authorize_user_password(user, pass, &mut ());
+        let r = auth.authorize_user_password(user, pass, &mut mock_state(None));
         assert!(
             matches!(r, ServerAuthResult::Granted { handle: Some(ref handle), .. } if handle
                 .features()
@@ -216,8 +243,9 @@ apachemd5_user:$apr1$dzIISjZV$itIp3R9OU32h.vQ0tm9rm/";
         let auth = Auth {
             user_db: None,
             token: None,
+            send_tunnel_version: false,
         };
-        let r = auth.authorize_user_password("user", "pass", &mut ());
+        let r = auth.authorize_user_password("user", "pass", &mut mock_state(None));
         assert!(matches!(r, ServerAuthResult::Denied));
     }
 
@@ -307,8 +335,31 @@ wwIDAQAB
         let auth = Auth {
             user_db: None,
             token: Some(token_from_reader(Cursor::new(pubkey)).unwrap()),
+            send_tunnel_version: false,
         };
-        auth.authorize_token(token, &mut ())
+        auth.authorize_token(token, &mut mock_state(None))
+    }
+
+    #[test_case(true, Version::try_new(1, 3) => Version::try_new(1, 3); "versioned token over tcp")]
+    #[test_case(true, None => None; "token over tcp")]
+    #[test_case(false, Version::try_new(1, 3) => None; "versioned token over udp")]
+    fn token_auth_tunnel_protocol_version(
+        send_tunnel_version: bool,
+        client_version: Option<Version>,
+    ) -> Option<Version> {
+        let auth = Auth {
+            user_db: None,
+            token: Some(token_from_reader(Cursor::new(RSA_PUB)).unwrap()),
+            send_tunnel_version,
+        };
+        let token = &make_token(Algorithm::RS256, json!({"exp": future_timestamp()}));
+        match auth.authorize_token(token, &mut mock_state(client_version)) {
+            ServerAuthResult::Granted {
+                tunnel_protocol_version,
+                ..
+            } => tunnel_protocol_version,
+            ServerAuthResult::Denied => panic!("token denied"),
+        }
     }
 
     #[test]
@@ -316,9 +367,10 @@ wwIDAQAB
         let auth = Auth {
             user_db: None,
             token: Some(token_from_reader(Cursor::new(RSA_PUB)).unwrap()),
+            send_tunnel_version: false,
         };
         let token = &make_token(Algorithm::RS256, json!({"exp": future_timestamp()}));
-        let r = auth.authorize_token(token, &mut ());
+        let r = auth.authorize_token(token, &mut mock_state(None));
         assert!(
             matches!(r, ServerAuthResult::Granted { handle: Some(ref handle), .. } if handle
                 .features()
@@ -331,8 +383,12 @@ wwIDAQAB
         let auth = Auth {
             user_db: None,
             token: None,
+            send_tunnel_version: false,
         };
-        let r = auth.authorize_token(&make_token(Algorithm::RS256, json!({})), &mut ());
+        let r = auth.authorize_token(
+            &make_token(Algorithm::RS256, json!({})),
+            &mut mock_state(None),
+        );
         assert!(matches!(r, ServerAuthResult::Denied));
     }
 }
