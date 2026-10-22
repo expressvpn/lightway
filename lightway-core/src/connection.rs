@@ -1575,20 +1575,7 @@ impl<AppState: Send> Connection<AppState> {
             && let Some(mut head) = self.pending_queue.pop_front()
         {
             let res = self.transport.write(&mut head);
-            match self.send_records_after(res)? {
-                Poll::Pending => {
-                    self.pending_queue.push_front(head);
-                    return Ok(());
-                }
-                // A write advances the buffer by the bytes it consumed;
-                // keep any partially written remainder at the head.
-                Poll::Ready(_) => {
-                    if !head.is_empty() {
-                        self.pending_queue.push_front(head);
-                        return Ok(());
-                    }
-                }
-            }
+            self.send_records_after(res)?;
         }
         Ok(())
     }
