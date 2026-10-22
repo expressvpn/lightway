@@ -8,10 +8,10 @@ use std::time::Duration;
 use bytes::BytesMut;
 
 use super::{
-    ClientTransportArgs, ClientTransportFactory, Delivery, PollResult, Transport, TransportArgs,
-    TransportCaps, TransportError,
+    ClientTransportArgs, ClientTransportFactory, Delivery, Poll, PollResult, Transport,
+    TransportArgs, TransportCaps, TransportError,
 };
-use crate::tls::{ErrorKind, Poll, ProtocolVersion, Session};
+use crate::tls::{ErrorKind, ProtocolVersion, Session};
 use crate::{
     BuilderPredicates, Cipher, ConnectionType, MAX_DTLS_HEADER_SIZE, RootCertificate, Secret,
 };
@@ -320,6 +320,23 @@ impl TlsTransport {
         let fatal = fatal || matches!(err, Fatal(ErrorKind::PeerFatalAlert));
         TransportError::new(fatal, err)
     }
+
+    /// The backend can return application data outside a read, for
+    /// example to a DTLS 1.3 client that waits for the ACK of its
+    /// Finished. Count it and drop it, and report `Pending` so that the
+    /// connection retries the operation. During the handshake no frame
+    /// is lost: the server sends none before the auth request, and the
+    /// client sends that only when the handshake is `Ready`.
+    fn poll<T>(&mut self, poll: crate::tls::Poll<T>) -> Poll<T> {
+        match poll {
+            crate::tls::Poll::Ready(t) => Poll::Ready(t),
+            crate::tls::Poll::PendingRead | crate::tls::Poll::PendingWrite => Poll::Pending,
+            crate::tls::Poll::AppData(_) => {
+                crate::metrics::tls_appdata(&self.session.version());
+                Poll::Pending
+            }
+        }
+    }
 }
 
 impl Transport for TlsTransport {
@@ -340,7 +357,8 @@ impl Transport for TlsTransport {
     }
 
     fn handshake(&mut self) -> PollResult<()> {
-        self.session.try_negotiate().map_err(|e| self.error(e))
+        let poll = self.session.try_negotiate().map_err(|e| self.error(e))?;
+        Ok(self.poll(poll))
     }
 
     fn feed(&mut self, buf: &[u8]) {
@@ -357,25 +375,46 @@ impl Transport for TlsTransport {
     }
 
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize> {
-        self.session.try_read(into).map_err(|e| self.error(e))
+        match self.session.try_read(into).map_err(|e| self.error(e))? {
+            // Here AppData is frame bytes. It must reach `into`, which
+            // `poll` would not do.
+            crate::tls::Poll::AppData(data) => {
+                crate::metrics::tls_appdata(&self.session.version());
+                into.extend_from_slice(&data);
+                Ok(Poll::Ready(data.len()))
+            }
+            poll => Ok(self.poll(poll)),
+        }
     }
 
-    fn write(&mut self, buf: &mut BytesMut) -> PollResult<usize> {
-        self.session.try_write(buf).map_err(|e| self.error(e))
+    /// The I/O callback takes every record, so the session never waits
+    /// for the outside path and writes the whole frame. After the
+    /// handshake it never waits for a read either.
+    fn write(&mut self, frame: &mut BytesMut) -> Result<(), TransportError> {
+        let poll = self.session.try_write(frame).map_err(|e| self.error(e))?;
+        match self.poll(poll) {
+            Poll::Ready(_) => {
+                debug_assert!(frame.is_empty(), "a write consumes the whole frame");
+                Ok(())
+            }
+            Poll::Pending => Err(TransportError::new(false, "frame write did not complete")),
+        }
     }
 
     fn poll_transmit(&mut self) -> Option<BytesMut> {
         self.session.io_cb_mut().records.pop_front()
     }
 
-    fn shutdown(&mut self) -> PollResult<bool> {
-        self.session.try_shutdown().map_err(|e| self.error(e))
+    fn shutdown(&mut self) {
+        let _ = self.session.try_shutdown();
     }
 
     fn key_update(&mut self) -> PollResult<()> {
-        self.session
+        let poll = self
+            .session
             .try_trigger_update_key()
-            .map_err(|e| self.error(e))
+            .map_err(|e| self.error(e))?;
+        Ok(self.poll(poll))
     }
 
     fn key_update_pending(&mut self) -> bool {
@@ -395,11 +434,12 @@ impl Transport for TlsTransport {
         Some(interval)
     }
 
-    fn has_timed_out(&mut self) -> Poll<bool> {
-        if !self.connection_type.is_datagram() {
-            return Poll::Ready(false);
-        }
-        self.session.dtls_has_timed_out()
+    fn has_timed_out(&mut self) -> bool {
+        self.connection_type.is_datagram()
+            && matches!(
+                self.session.dtls_has_timed_out(),
+                crate::tls::Poll::Ready(true)
+            )
     }
 
     fn protocol_version(&mut self) -> ProtocolVersion {

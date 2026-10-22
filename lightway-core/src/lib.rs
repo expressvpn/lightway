@@ -62,8 +62,8 @@ pub use plugin::{
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
 pub use transport::{
-    ClientTransportArgs, ClientTransportFactory, Delivery, PollResult, ServerTransportBuilder,
-    Transport, TransportArgs, TransportCaps, TransportError,
+    ClientTransportArgs, ClientTransportFactory, Delivery, Poll, PollResult,
+    ServerTransportBuilder, Transport, TransportArgs, TransportCaps, TransportError,
     tls::{TlsClientFactory, TlsClientFactoryBuilder, TlsFactoryError, TlsServerFactory},
 };
 pub use utils::{
