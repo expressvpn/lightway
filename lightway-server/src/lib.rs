@@ -316,7 +316,7 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             lightway_dns_ip: config.lightway_dns_ip,
             use_dynamic_client_ip: false,
             enable_expresslane: config.enable_expresslane,
-            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval.into(),
+            expresslane_keys_rotation_interval: config.expresslane_keys_rotation_interval,
             expresslane_cb: None,
             expresslane_metrics: None,
             event_cb: None,
@@ -328,10 +328,10 @@ impl<SA: for<'a> ServerAuth<AuthState<'a>>> ServerConfig<SA> {
             #[cfg(feature = "io-uring")]
             iouring_entry_count: config.iouring_entry_count,
             #[cfg(feature = "io-uring")]
-            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time.into(),
-            key_update_interval: config.key_update_interval.into(),
-            connection_age_expiration_interval: config.connection_age_expiration_interval.into(),
-            statistics_reporting_interval: config.statistics_reporting_interval.into(),
+            iouring_sqpoll_idle_time: config.iouring_sqpoll_idle_time,
+            key_update_interval: config.key_update_interval,
+            connection_age_expiration_interval: config.connection_age_expiration_interval,
+            statistics_reporting_interval: config.statistics_reporting_interval,
             inside_plugins: Default::default(),
             outside_plugins: Default::default(),
             inside_pkt_codec: None,
