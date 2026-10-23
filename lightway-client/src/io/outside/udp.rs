@@ -99,7 +99,7 @@ impl Udp {
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
             .context("Failed to get IP MTU Discovery sockopt")?;
         // Check for the socket's writable ready status, so that it can be used
-        // successfuly in TLS's `OutsideIOSendCallback` callback
+        // successfully in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
 
         Ok(Self {
@@ -430,7 +430,7 @@ impl OutsideIOSendCallback for Udp {
                 // Possibly the server isn't listening (yet).
                 //
                 // Swallow the error so the TLS socket does not
-                // enter the error state, and DTLS would handles the retransmission as well.
+                // enter the error state, and DTLS would handle the retransmission as well.
                 //
                 // This way we can continue if/when the server shows up.
                 //
