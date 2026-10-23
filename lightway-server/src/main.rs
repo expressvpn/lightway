@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
         crate::auth::Auth::new(
             config.user_db.as_ref().map(AsRef::as_ref),
             config.token_rsa_pub_key_pem.as_ref().map(AsRef::as_ref),
+            matches!(config.mode, lightway_app_utils::args::ConnectionType::Tcp),
         )?,
         config,
     )?;

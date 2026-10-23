@@ -100,6 +100,7 @@ impl Connection {
     delegate! {
         to self.lw_conn.lock().unwrap() {
             pub fn tls_protocol_version(&self) -> ProtocolVersion;
+            pub fn tunnel_protocol_version(&self) -> Version;
             pub fn connection_type(&self) -> ConnectionType;
             pub fn session_id(&self) -> SessionId;
             pub fn mark_offload_activity(&self, rx: bool, tx: bool);

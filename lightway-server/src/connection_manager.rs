@@ -104,7 +104,19 @@ async fn handle_state_change(state: State, conn: &Weak<Connection>) {
         return;
     };
 
-    info!(session = ?conn.session_id(), ?state, "State changed for {:?}", conn.peer_addr());
+    // TCP only learns the tunnel protocol version during auth, so it
+    // is only final once online.
+    if matches!(state, State::Online) {
+        info!(
+            session = ?conn.session_id(),
+            ?state,
+            tunnel_protocol_version = %conn.tunnel_protocol_version(),
+            "State changed for {:?}",
+            conn.peer_addr()
+        );
+    } else {
+        info!(session = ?conn.session_id(), ?state, "State changed for {:?}", conn.peer_addr());
+    }
 
     match state {
         State::Connecting => {}

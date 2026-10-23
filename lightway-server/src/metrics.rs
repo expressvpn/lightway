@@ -194,6 +194,7 @@ pub(crate) fn connection_online(conn: &Connection) {
                        CIPHER_LABEL => cipher,
                        CURVE_LABEL => curve,
                        TLS_PROTOCOL_VERSION_LABEL => tls_protocol_version.as_str(),
+                       LIGHTWAY_PROTOCOL_VERSION_LABEL => conn.tunnel_protocol_version().to_string(),
     )
     .increment(1);
     METRIC_TO_ONLINE_TIME.record(to_online);
