@@ -1,3 +1,4 @@
+//! Please refer [General Config Design Rationale](/docs/general_config.md)
 #[cfg(desktop)]
 use super::dns_manager::DnsConfigMode;
 #[cfg(desktop)]
