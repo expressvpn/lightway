@@ -147,7 +147,7 @@ pub fn ipv4_adjust_packet_checksum(mut packet: MutableIpv4Packet, updates: Check
 }
 
 /// Utility function to update source ip address in ipv4 packet buffer
-/// Nop if buf is not a valid IPv4 packet
+/// Nop if buf is not a valid IPv4 packet or the IP source address is the same.
 pub fn ipv4_update_source(buf: &mut [u8], ip: Ipv4Addr) {
     let packet = MutableIpv4Packet::new(buf);
     let Some(mut packet) = packet else {
@@ -156,6 +156,9 @@ pub fn ipv4_update_source(buf: &mut [u8], ip: Ipv4Addr) {
     };
 
     let old = packet.get_source();
+    if old == ip {
+        return;
+    }
     // Set new source only after getting old source ip address
     packet.set_source(ip);
 
@@ -163,7 +166,7 @@ pub fn ipv4_update_source(buf: &mut [u8], ip: Ipv4Addr) {
 }
 
 /// Utility function to update destination ip address in ipv4 packet buffer
-/// Nop if buf is not a valid IPv4 packet
+/// Nop if buf is not a valid IPv4 packet or the IP destination address is the same.
 pub fn ipv4_update_destination(buf: &mut [u8], ip: Ipv4Addr) {
     let packet = MutableIpv4Packet::new(buf);
     let Some(mut packet) = packet else {
@@ -172,6 +175,9 @@ pub fn ipv4_update_destination(buf: &mut [u8], ip: Ipv4Addr) {
     };
 
     let old = packet.get_destination();
+    if old == ip {
+        return;
+    }
     // Set new destination only after getting old destination ip address
     packet.set_destination(ip);
 
