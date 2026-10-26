@@ -170,6 +170,13 @@ pub struct Config {
     /// ex: 10s
     pub tracer_packet_timeout: NonZeroDuration,
 
+    #[patch(attribute(clap(long)))]
+    #[patch(attribute(doc = r#"Tear the connection down when the TUN device stops
+    passing packets while the outside path is still healthy. 0 disables the check"#))]
+    #[schemars(schema_with = "lightway_app_utils::args::duration_schema")]
+    /// ex: 30s
+    pub tun_liveness_timeout: Duration,
+
     // NOTE: also "Defer timeout" in mobile device
     #[patch(attribute(clap(long)))]
     #[patch(
@@ -566,6 +573,7 @@ impl Default for Config {
             keepalive_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(60)),
             keepalive_continuous: true,
             tracer_packet_timeout: NonZeroDuration::from_std_duration(StdDuration::from_secs(10)),
+            tun_liveness_timeout: Duration::from_std_duration(StdDuration::ZERO),
             preferred_connection_wait_interval: Duration::from_std_duration(
                 StdDuration::from_secs(0),
             ),
