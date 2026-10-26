@@ -548,10 +548,10 @@ impl Default for Config {
             password: None,
             ca_cert: "./ca_cert.crt".to_string(),
             outside_mtu: MAX_OUTSIDE_MTU,
-            #[cfg(macos)]
-            tun_name: None,
-            #[cfg(not(macos))]
-            tun_name: Some("lightway".to_string()),
+            tun_name: cfg_select! {
+                macos => None,
+                _ => Some("lightway".to_string()),
+            },
             #[cfg(linux)]
             tun_txqueuelen: 1000,
             #[cfg(windows)]
@@ -755,27 +755,24 @@ impl Config {
                 .ok_or_else(|| anyhow::anyhow!("Config file not specified"))?,
         };
 
-        #[cfg(windows)]
-        let file_patch = {
-            use crate::platform::windows::crypto::decrypt_dpapi_config_file;
-            use windows_dpapi::Scope::User;
+        let content = cfg_select! {
+            windows => {
+                if cli_options.enable_dpapi {
+                    use crate::platform::windows::crypto::decrypt_dpapi_config_file;
+                    use windows_dpapi::Scope::User;
 
-            let content = if cli_options.enable_dpapi {
-                tracing::info!("DPAPI decryption enabled for config file");
-                decrypt_dpapi_config_file(path, User).map_err(|e| {
-                    anyhow::anyhow!("Failed to decrypt DPAPI-protected config file: {e}")
-                })?
-            } else {
-                tracing::debug!("Loading config file directly (no DPAPI)");
-                tokio::fs::read_to_string(path).await?
-            };
-            serde_saphyr::from_str::<ConfigPatch>(&content)?
+                    tracing::info!("DPAPI decryption enabled for config file");
+                    decrypt_dpapi_config_file(path, User).map_err(|e| {
+                        anyhow::anyhow!("Failed to decrypt DPAPI-protected config file: {e}")
+                    })?
+                } else {
+                    tracing::debug!("Loading config file directly (no DPAPI)");
+                    tokio::fs::read_to_string(path).await?
+                }
+            }
+            _ => tokio::fs::read_to_string(path).await?,
         };
-        #[cfg(not(windows))]
-        let file_patch = {
-            let content = tokio::fs::read_to_string(path).await?;
-            serde_saphyr::from_str::<ConfigPatch>(&content)?
-        };
+        let file_patch = serde_saphyr::from_str::<ConfigPatch>(&content)?;
 
         let env_patch: ConfigPatch = serde_env::from_env_with_prefix("LW_CLIENT")?;
         let mut cli_patch = cli_options.clone();

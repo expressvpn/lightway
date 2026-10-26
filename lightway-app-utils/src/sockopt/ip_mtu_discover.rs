@@ -163,19 +163,21 @@ mod internal {
     }
 }
 
-#[cfg(apple)]
-const LEVEL_AND_OPTNAME_V4: (i32, i32) = (libc::IPPROTO_IP, libc::IP_DONTFRAG);
-#[cfg(apple)]
-const LEVEL_AND_OPTNAME_V6: (i32, i32) = (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG);
-
-#[cfg(all(not(apple), unix))]
-const LEVEL_AND_OPTNAME: (i32, i32) = (libc::SOL_IP, libc::IP_MTU_DISCOVER);
-
-#[cfg(windows)]
-const LEVEL_AND_OPTNAME: (i32, i32) = (
-    windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
-    windows_sys::Win32::Networking::WinSock::IP_MTU_DISCOVER,
-);
+cfg_select! {
+    apple => {
+        const LEVEL_AND_OPTNAME_V4: (i32, i32) = (libc::IPPROTO_IP, libc::IP_DONTFRAG);
+        const LEVEL_AND_OPTNAME_V6: (i32, i32) = (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG);
+    }
+    unix => {
+        const LEVEL_AND_OPTNAME: (i32, i32) = (libc::SOL_IP, libc::IP_MTU_DISCOVER);
+    }
+    windows => {
+        const LEVEL_AND_OPTNAME: (i32, i32) = (
+            windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
+            windows_sys::Win32::Networking::WinSock::IP_MTU_DISCOVER,
+        );
+    }
+}
 
 /// On Apple platforms the don't-fragment option lives at a different
 /// level/name for IPv4 and IPv6 sockets, so inspect the socket's

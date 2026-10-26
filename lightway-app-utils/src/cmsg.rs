@@ -136,12 +136,12 @@ impl<'a> Iterator for Iter<'a> {
             // `CMSG_NXTHDR`.
             self.cursor = unsafe { libc::CMSG_NXTHDR(&self.msghdr, self.cursor) };
 
-            #[cfg(target_vendor = "apple")]
-            let (cmsg_level, cmsg_type) = (libc::IPPROTO_IP, libc::IP_PKTINFO);
-            #[cfg(not(target_vendor = "apple"))]
-            let (cmsg_level, cmsg_type) = (libc::SOL_IP, libc::IP_PKTINFO);
+            let cmsg_level = cfg_select! {
+                apple => libc::IPPROTO_IP,
+                _ => libc::SOL_IP,
+            };
 
-            if item.cmsg_level == cmsg_level && item.cmsg_type == cmsg_type {
+            if item.cmsg_level == cmsg_level && item.cmsg_type == libc::IP_PKTINFO {
                 // SAFETY: `item` is a valid `cmsghdr` from a
                 // prior call to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.
                 let data = unsafe { libc::CMSG_DATA(item) as *const libc::in_pktinfo };

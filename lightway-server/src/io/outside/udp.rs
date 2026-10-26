@@ -57,10 +57,10 @@ fn send_to_socket(
     pktinfo: Option<libc::in_pktinfo>,
     gso_size: Option<u16>,
 ) -> IOCallbackResult<usize> {
-    #[cfg(target_vendor = "apple")]
-    const IP_PKTINFO_LEVEL: libc::c_int = libc::IPPROTO_IP;
-    #[cfg(not(target_vendor = "apple"))]
-    const IP_PKTINFO_LEVEL: libc::c_int = libc::SOL_IP;
+    const IP_PKTINFO_LEVEL: libc::c_int = cfg_select! {
+        target_vendor = "apple" => libc::IPPROTO_IP,
+        _ => libc::SOL_IP,
+    };
 
     const CMSG_SIZE: usize =
         cmsg::Message::space::<libc::in_pktinfo>() + cmsg::Message::space::<u16>();

@@ -840,17 +840,19 @@ async fn handle_network_change(
                 match conn_type {
                     ConnectionType::Datagram => {
                         // We only need to use reset new socket on iOS but not on Android
-                        #[cfg(apple)]
-                        {
-                            // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
-                            // via the new network path and avoid using mobile data unnecessarily.
-                            info!("resetting udp transport due to network change ..");
-                            reset_outside_io_tx.send(()).await?;
+                        cfg_select! {
+                            apple => {
+                                // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
+                                // via the new network path and avoid using mobile data unnecessarily.
+                                info!("resetting udp transport due to network change ..");
+                                reset_outside_io_tx.send(()).await?;
+                            }
+                            _ => {
+                                // Trigger a new keepalive on the new socket (keepalive will
+                                // be triggered after the socket has been updated on iOS)
+                                keepalive.network_changed().await;
+                            }
                         }
-                        #[cfg(not(apple))]
-                        // Trigger a new keepalive on the new socket (keepalive will
-                        // be triggered after the socket has been updated on iOS)
-                        keepalive.network_changed().await;
                     }
                     ConnectionType::Stream => {
                         info!("client shutting down due to network change ..");

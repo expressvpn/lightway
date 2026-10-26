@@ -665,10 +665,10 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
-    #[cfg(batch_receive)]
-    const BUF_COUNT: usize = MAX_IO_BATCH_SIZE;
-    #[cfg(not(batch_receive))]
-    const BUF_COUNT: usize = 1;
+    const BUF_COUNT: usize = cfg_select! {
+        batch_receive => MAX_IO_BATCH_SIZE,
+        _ => 1,
+    };
 
     let mut bufs: [BytesMut; BUF_COUNT] = std::array::from_fn(|_| BytesMut::with_capacity(mtu));
 
@@ -681,18 +681,17 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             let _ = tx.send(());
         }
 
-        #[cfg(batch_receive)]
-        let count = match outside_io.recv_bufs(&mut bufs) {
-            IOCallbackResult::Ok(n) => n,
-            IOCallbackResult::WouldBlock => continue,
-            IOCallbackResult::Err(err) => return Err(err.into()),
-        };
-
-        #[cfg(not(batch_receive))]
-        let count = match outside_io.recv_buf(&mut bufs[0]) {
-            IOCallbackResult::Ok(_) => 1,
-            IOCallbackResult::WouldBlock => continue,
-            IOCallbackResult::Err(err) => return Err(err.into()),
+        let count = cfg_select! {
+            batch_receive => match outside_io.recv_bufs(&mut bufs) {
+                IOCallbackResult::Ok(n) => n,
+                IOCallbackResult::WouldBlock => continue,
+                IOCallbackResult::Err(err) => return Err(err.into()),
+            },
+            _ => match outside_io.recv_buf(&mut bufs[0]) {
+                IOCallbackResult::Ok(_) => 1,
+                IOCallbackResult::WouldBlock => continue,
+                IOCallbackResult::Err(err) => return Err(err.into()),
+            },
         };
 
         let pkts = bufs
@@ -2042,11 +2041,11 @@ pub async fn client<
                 // Network transitions drive the connection-level handler
                 // (keepalive burst); macOS only. Gated on keepalives being
                 // enabled, mirroring the embedder-signal validation.
-                #[cfg(macos)]
-                let transition_rx =
-                    (!config.keepalive_interval.is_zero()).then(|| monitor.subscribe_transitions());
-                #[cfg(not(macos))]
-                let transition_rx: Option<watch::Receiver<()>> = None;
+                let transition_rx: Option<watch::Receiver<()>> = cfg_select! {
+                    macos => (!config.keepalive_interval.is_zero())
+                        .then(|| monitor.subscribe_transitions()),
+                    _ => None,
+                };
 
                 network_change_monitor = Some(monitor);
                 (route_rx, transition_rx)
