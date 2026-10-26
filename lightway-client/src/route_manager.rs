@@ -557,8 +557,9 @@ impl RouteManagerInner {
             }
             Err(e) => {
                 if self.is_route_exists_error(&e) {
-                    // Ignore error if route already exists and
-                    // keep the existing route
+                    // Keep the existing route. It may be left over from a
+                    // run that did not clean up, so leave a trace.
+                    tracing::info!("Kept an existing route in place of {route}");
                     Ok(())
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
                     Err(RoutingTableError::InsufficientPermissions)
