@@ -19,6 +19,12 @@ use tokio::net::UdpSocket;
 #[cfg(batch_receive)]
 mod batch_receive;
 
+// Winsock reports WSAENOBUFS (10055), not the CRT's ENOBUFS (119).
+const ENOBUFS: i32 = cfg_select! {
+    windows => { windows_sys::Win32::Networking::WinSock::WSAENOBUFS }
+    _ => { libc::ENOBUFS }
+};
+
 pub struct Udp {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: SocketAddr,
@@ -442,7 +448,7 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
-            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
+            Err(err) if matches!(err.raw_os_error(), Some(ENOBUFS)) => {
                 // No buffer space available
                 // UDP sockets may have this error when the system is overloaded.
                 self.note_swallowed_send(&err);
