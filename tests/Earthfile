@@ -187,6 +187,22 @@ run-token-auth-test:
 run-udp-fwmark-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--fwmark=1698916352"
 
+# run-udp-tun-liveness-*-test run e2e tests of the client TUN liveness check:
+# a dead TUN device must be detected and a healthy one must not trip the check
+run-udp-tun-liveness-read-stall-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--tun-liveness-timeout=5s" --TEST_SCRIPT="./run-tun-liveness-test.sh read-stall"
+
+run-udp-tun-liveness-link-down-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--tun-liveness-timeout=5s" --TEST_SCRIPT="./run-tun-liveness-test.sh link-down"
+
+run-udp-tun-liveness-healthy-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--tun-liveness-timeout=5s" --TEST_SCRIPT="./run-tun-liveness-test.sh healthy"
+
+# run-udp-tun-liveness-udp-oneway-test documents the known false positive of
+# the TUN liveness check on one-way traffic. Not part of run-all-tests.
+run-udp-tun-liveness-udp-oneway-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--tun-liveness-timeout=5s" --TEST_SCRIPT="./run-tun-liveness-test.sh udp-oneway"
+
 # CROSS_COMPAT_TEST runs the full cross-compat matrix for a given backend pair:
 # classical TCP/UDP/UDP+expresslane, plus TCP+PQC and UDP+PQC handshakes.
 #
@@ -302,6 +318,9 @@ run-all-tests-wolfssl:
     BUILD +run-tcp-then-udp-parallel-connect-test
     BUILD +run-udp-then-tcp-parallel-connect-test
     BUILD +run-udp-fwmark-test
+    BUILD +run-udp-tun-liveness-read-stall-test
+    BUILD +run-udp-tun-liveness-link-down-test
+    BUILD +run-udp-tun-liveness-healthy-test
 
 # run-all-tests-boringssl runs core e2e tests with the boringssl backend.
 run-all-tests-boringssl:
