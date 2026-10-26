@@ -248,7 +248,6 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
     let ip_pool = Arc::new(StaticIpPool);
 
     let (tun, mut inside_rx) = ChannelTun::new();
-    let mut last_inside_rx = std::time::Instant::now();
 
     let packet_codec = TestPacketCodecFactory::default().build();
     let (packet_codec, mut encoded_pkt_receiver, mut decoded_pkt_receiver) = (
@@ -311,13 +310,6 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
                 // Reflect back to the client
                 let mut reply: BytesMut = BytesMut::from(&buf[..]);
 
-                assert_ge!(
-                    conn.activity().last_data_traffic_from_peer,
-                    last_inside_rx,
-                    "ConnectionActivity.last_data_traffic_from_peer should be updated"
-                );
-                last_inside_rx = std::time::Instant::now();
-
                 conn.inside_data_received(&mut reply).expect("Reflect data");
 
                 // https://github.com/wolfSSL/wolfssl/pull/6771 means
@@ -359,11 +351,18 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
                 assert_le!(conn.activity().last_outside_data_received, now,
                            "ConnectionActivity.last_outside_data_received should be in the past");
 
+                // Inside packets can queue before the inside arm runs, so
+                // check the data traffic timestamp where they are delivered.
+                let backlog = inside_rx.len();
                 let pkt = OutsidePacket::Wire(&mut buf, connection_type);
                 let r = conn.outside_data_received(pkt);
 
                 assert_ge!(conn.activity().last_outside_data_received, now,
                            "ConnectionActivity.last_outside_data_received should be updated");
+                if inside_rx.len() > backlog {
+                    assert_ge!(conn.activity().last_data_traffic_from_peer, now,
+                               "ConnectionActivity.last_data_traffic_from_peer should be updated");
+                }
 
                 match r {
                     Err(ConnectionError::Goodbye) => {
@@ -377,8 +376,14 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
 
             // Decoded packet received (outside -> inside)
             Some(decoded_packet) = decoded_pkt_receiver.recv() => {
+                let now = std::time::Instant::now();
                 let mut conn = conn.lock().unwrap();
+                let backlog = inside_rx.len();
                 conn.send_to_inside(decoded_packet).expect("server decoded pkt outside to inside");
+                if inside_rx.len() > backlog {
+                    assert_ge!(conn.activity().last_data_traffic_from_peer, now,
+                               "ConnectionActivity.last_data_traffic_from_peer should be updated");
+                }
             }
         }
     }
