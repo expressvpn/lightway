@@ -42,7 +42,7 @@ async fn metrics_debug() {
                     trace!("metric: {} {labels:?} = Counter({value:?})", name.as_str())
                 }
                 metrics_util::debugging::DebugValue::Gauge(value) => {
-                    trace!("metric: {} {labels:?} = Guage({value:?})", name.as_str())
+                    trace!("metric: {} {labels:?} = Gauge({value:?})", name.as_str())
                 }
                 metrics_util::debugging::DebugValue::Histogram(values) if !values.is_empty() => {
                     let (sum, maximum, minimum) = values.iter().fold(
