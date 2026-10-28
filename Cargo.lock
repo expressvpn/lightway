@@ -4746,9 +4746,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wolfssl"
-version = "8.1.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5faadb00eb2b48802e52bd382102d129d2bf9a75dc90f3377dd76bbf5623eb3d"
+checksum = "4580c7da4d1db0699b6d878a287168cbdd3c85e67c91862087cc57ffe311935d"
 dependencies = [
  "bytes",
  "log",
@@ -4758,9 +4758,9 @@ dependencies = [
 
 [[package]]
 name = "wolfssl-sys"
-version = "5.2.0"
+version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de5f9d678153b1b5208667ba302a116bbaedf55a0b234e4687ce5212c99d560b"
+checksum = "e04fb531435ec8ba1852ee9df66ab351cdb1e3aec1da4013787ae93efa3adac6"
 dependencies = [
  "autotools",
  "bindgen 0.73.2",
