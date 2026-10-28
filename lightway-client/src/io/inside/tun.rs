@@ -112,7 +112,9 @@ impl<ExtAppState: Send + Sync> InsideIOSendCallback<ConnectionState<ExtAppState>
             };
         }
 
-        self.tun.try_send(buf)
+        let result = self.tun.try_send(buf);
+        state.tun_activity.record_write(&result);
+        result
     }
 
     fn mtu(&self) -> usize {

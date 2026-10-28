@@ -5,7 +5,7 @@ use crate::mobile::EventHandlers;
 use crate::mobile::{DeviceNetworkState, ExpresslaneState};
 use crate::{
     ClientIpConfigCb, ClientResult, ConnectionState, inside_io_task, io,
-    keepalive::Config as KeepaliveConfig, outside_io_task,
+    keepalive::Config as KeepaliveConfig, outside_io_task, tun_liveness_task,
 };
 use anyhow::{Context, anyhow, bail};
 use bytes::BytesMut;
@@ -396,8 +396,12 @@ pub(crate) async fn async_lightway_start(
         keepalive_config,
         Duration::ZERO,
     ));
+    let mut tun_liveness_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(tun_liveness_task(
+        Arc::downgrade(&conn),
+        config.tun_liveness_timeout.into(),
+    ));
 
-    tokio::select! {
+    let result = tokio::select! {
         // Use biased selection to prioritize management commands and prevent race conditions
         // where network_change_task exits early due to network change, dropping its mpsc sender and
         // causing outside_io_task to throw channel errors and return wrong result to the app.
@@ -425,7 +429,13 @@ pub(crate) async fn async_lightway_start(
                 _ => Err(anyhow!("Outside IO loop exited: {io:?}"))
         },
         io = inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
-    }
+        res = &mut tun_liveness_loop => Err(anyhow!("TUN liveness task exited: {res:?}")),
+    };
+
+    // Unlike the IO loops, this task never ends on its own when the
+    // liveness check is disabled.
+    tun_liveness_loop.abort();
+    result
 }
 
 struct OutsideIOConfig {
@@ -611,6 +621,7 @@ async fn lightway_client_connect(
         ticker,
         ip_config: None,
         extended: None,
+        tun_activity: Default::default(),
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 

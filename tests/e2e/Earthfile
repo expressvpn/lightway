@@ -10,5 +10,6 @@ build-container:
         run-udp-floating-test.sh \
         run-parallel-connect-test.sh \
         run-mtu-test.sh \
+        run-tun-liveness-test.sh \
         .
 

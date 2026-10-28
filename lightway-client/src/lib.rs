@@ -227,6 +227,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// when we haven't received an outside packet
     pub tracer_packet_timeout: Duration,
 
+    /// Tear the connection down when the TUN device stops passing packets
+    /// while the outside path is still healthy. `Duration::ZERO` disables
+    /// the check
+    pub tun_liveness_timeout: Duration,
+
     /// Enables keepalives to be sent constantly instead
     /// of only during network change events
     pub continuous_keepalive: bool,
@@ -403,6 +408,7 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             keepalive_timeout: config.keepalive_timeout.into(),
             continuous_keepalive: config.keepalive_continuous,
             tracer_packet_timeout: config.tracer_packet_timeout.into(),
+            tun_liveness_timeout: config.tun_liveness_timeout.into(),
             preferred_connection_wait_interval: config.preferred_connection_wait_interval.into(),
             sndbuf: config.sndbuf,
             rcvbuf: config.rcvbuf,
@@ -585,6 +591,41 @@ pub struct ConnectionState<ExtAppState: Send + Sync = ()> {
     pub ip_config: Option<InsideIpConfig>,
     /// Other extended state
     pub extended: ExtAppState,
+    /// TUN device read/write activity, used by the TUN liveness check
+    pub tun_activity: TunActivity,
+}
+
+/// Tracks when the TUN device last moved packets in each direction.
+#[derive(Copy, Clone, Debug)]
+pub struct TunActivity {
+    /// Last time a packet was read from the TUN device.
+    pub last_read: Instant,
+    /// Last time a packet was successfully written to the TUN device.
+    pub last_write_ok: Instant,
+    /// Last time a write to the TUN device failed.
+    pub last_write_err: Option<Instant>,
+}
+
+impl Default for TunActivity {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            last_read: now,
+            last_write_ok: now,
+            last_write_err: None,
+        }
+    }
+}
+
+impl TunActivity {
+    /// Record the outcome of a write to the TUN device.
+    pub fn record_write<T>(&mut self, result: &IOCallbackResult<T>) {
+        match result {
+            IOCallbackResult::Ok(_) => self.last_write_ok = Instant::now(),
+            IOCallbackResult::Err(_) => self.last_write_err = Some(Instant::now()),
+            IOCallbackResult::WouldBlock => {}
+        }
+    }
 }
 
 impl<ExtAppState: Send + Sync> ConnectionTickerState for ConnectionState<ExtAppState> {
@@ -755,26 +796,188 @@ impl TracerTrigger {
         }
     }
 
-    async fn tick(&mut self, keepalive: &Keepalive, last_outside_data_received: Instant) {
+    async fn tick(
+        &mut self,
+        keepalive: &Keepalive,
+        last_outside_data_received: Instant,
+        tun_activity: TunActivity,
+    ) {
         if self.timeout.is_zero() {
             return;
         }
-        let stale_for = Instant::now().duration_since(last_outside_data_received);
+        let now = Instant::now();
+        let stale_for = now.duration_since(last_outside_data_received);
         if stale_for > self.timeout
             && self
                 .last_fired_for
                 .is_none_or(|x| x != last_outside_data_received)
         {
             self.last_fired_for = Some(last_outside_data_received);
+            // Log the TUN side as well, so a stale server can be told apart
+            // from a dead TUN device in the field.
+            info!(
+                outside_stale_ms = stale_for.as_millis() as u64,
+                tun_last_write_ok_ms =
+                    now.duration_since(tun_activity.last_write_ok).as_millis() as u64,
+                tun_last_write_err_ms = tun_activity
+                    .last_write_err
+                    .map(|t| now.duration_since(t).as_millis() as u64),
+                "tracer delta exceeded"
+            );
             keepalive.tracer_delta_exceeded().await;
+        }
+    }
+}
+
+/// Why the TUN device is considered dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunDead {
+    /// The peer keeps delivering data, but nothing has been read from the
+    /// TUN device in response.
+    ReadStall {
+        since_read: Duration,
+        since_peer_data: Duration,
+    },
+    /// Every write to the TUN device has failed for longer than the timeout.
+    WriteStall { since_write_ok: Duration },
+}
+
+impl std::fmt::Display for TunDead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunDead::ReadStall {
+                since_read,
+                since_peer_data,
+            } => write!(
+                f,
+                "read stall: no TUN read for {since_read:?} while peer data arrived {since_peer_data:?} ago"
+            ),
+            TunDead::WriteStall { since_write_ok } => write!(
+                f,
+                "write stall: every TUN write failed, last success {since_write_ok:?} ago"
+            ),
+        }
+    }
+}
+
+/// Decide whether the TUN device has stopped passing packets while the
+/// outside path still works. `timeout == ZERO` disables the check.
+///
+/// An idle tunnel never trips the read check: it requires data from the
+/// peer to have arrived more than `timeout` after the last TUN read.
+fn tun_liveness_check(
+    now: Instant,
+    timeout: Duration,
+    last_data_traffic_from_peer: Instant,
+    tun: &TunActivity,
+) -> Option<TunDead> {
+    if timeout.is_zero() {
+        return None;
+    }
+    if last_data_traffic_from_peer.saturating_duration_since(tun.last_read) > timeout {
+        return Some(TunDead::ReadStall {
+            since_read: now.saturating_duration_since(tun.last_read),
+            since_peer_data: now.saturating_duration_since(last_data_traffic_from_peer),
+        });
+    }
+    if tun
+        .last_write_err
+        .is_some_and(|err| err.saturating_duration_since(tun.last_write_ok) > timeout)
+    {
+        return Some(TunDead::WriteStall {
+            since_write_ok: now.saturating_duration_since(tun.last_write_ok),
+        });
+    }
+    None
+}
+
+const MIN_TUN_LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Only reports a TUN stall once it has persisted for a full timeout with
+/// no TUN progress in between. This filters out one-off conditions, such as
+/// a burst of buffered peer data processed after the client was paused,
+/// before the TUN device had a chance to be read again.
+#[derive(Default)]
+struct TunStallConfirmer {
+    /// When the current stall was first seen, and the TUN progress at that
+    /// point: last read for a read stall, last successful write for a
+    /// write stall.
+    suspect: Option<(Instant, Instant)>,
+}
+
+impl TunStallConfirmer {
+    fn update(
+        &mut self,
+        now: Instant,
+        timeout: Duration,
+        tun: &TunActivity,
+        stall: Option<TunDead>,
+    ) -> Option<TunDead> {
+        let Some(stall) = stall else {
+            self.suspect = None;
+            return None;
+        };
+        let progress = match stall {
+            TunDead::ReadStall { .. } => tun.last_read,
+            TunDead::WriteStall { .. } => tun.last_write_ok,
+        };
+        match self.suspect {
+            Some((first_seen, seen_progress)) if seen_progress == progress => {
+                (now.saturating_duration_since(first_seen) >= timeout).then_some(stall)
+            }
+            _ => {
+                info!("TUN device stall suspected ({stall}); confirming");
+                self.suspect = Some((now, progress));
+                None
+            }
+        }
+    }
+}
+
+/// Periodically check TUN device liveness, independently of TUN reads
+/// (the tracer only runs when a packet is read, so it cannot see a TUN
+/// device that has stopped producing packets). Returns `Err` when the TUN
+/// device stays dead for a further `timeout` after a stall is first seen,
+/// so the caller tears the connection down the same way as on a keepalive
+/// timeout. Never returns when `timeout` is zero.
+pub async fn tun_liveness_task<ExtAppState: Send + Sync>(
+    weak: Weak<Mutex<Connection<ConnectionState<ExtAppState>>>>,
+    timeout: Duration,
+) -> Result<()> {
+    if timeout.is_zero() {
+        std::future::pending::<()>().await;
+    }
+    let mut interval = tokio::time::interval((timeout / 2).max(MIN_TUN_LIVENESS_CHECK_INTERVAL));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut confirmer = TunStallConfirmer::default();
+    loop {
+        interval.tick().await;
+        let Some(conn) = weak.upgrade() else {
+            return Ok(());
+        };
+        let conn = conn.lock().unwrap();
+        if conn.state() != State::Online {
+            continue;
+        }
+        let now = Instant::now();
+        let tun = &conn.app_state().tun_activity;
+        let stall = tun_liveness_check(
+            now,
+            timeout,
+            conn.activity().last_data_traffic_from_peer,
+            tun,
+        );
+        if let Some(dead) = confirmer.update(now, timeout, tun, stall) {
+            tracing::warn!("TUN device appears dead ({dead}); tearing down connection");
+            return Err(anyhow!("TUN liveness check failed: {dead}"));
         }
     }
 }
 
 /// Shared body of the inside IO loops: rewrite the source/DNS
 /// addresses, dispatch the packet into the connection and map the
-/// recoverable errors. Returns `Ok(Some(last_outside_data_received))`
-/// when the packet entered the pipeline, `Ok(None)` when it was
+/// recoverable errors. Returns `Ok(Some((last_outside_data_received,
+/// tun_activity)))` when the packet entered the pipeline, `Ok(None)` when it was
 /// dropped and the loop should just continue.
 fn process_inside_packet<ExtAppState: Send + Sync>(
     conn: &Mutex<Connection<ConnectionState<ExtAppState>>>,
@@ -785,8 +988,9 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
         &mut Connection<ConnectionState<ExtAppState>>,
         &mut BytesMut,
     ) -> std::result::Result<(), ConnectionError>,
-) -> Result<Option<Instant>> {
+) -> Result<Option<(Instant, TunActivity)>> {
     let mut conn = conn.lock().unwrap();
+    conn.app_state_mut().tun_activity.last_read = Instant::now();
 
     // Update source IP address to server assigned IP address
     let ip_config = conn.app_state().ip_config;
@@ -803,7 +1007,10 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
     }
 
     match dispatch(&mut conn, buf) {
-        Ok(()) => Ok(Some(conn.activity().last_outside_data_received)),
+        Ok(()) => Ok(Some((
+            conn.activity().last_outside_data_received,
+            conn.app_state().tun_activity,
+        ))),
         Err(ConnectionError::PluginDropWithReply(reply)) => {
             // Send the reply packet to inside path
             let _ = inside_io.try_send(reply, ip_config);
@@ -845,7 +1052,7 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             }
         };
 
-        let Some(last_outside_data_received) = process_inside_packet(
+        let Some((last_outside_data_received, tun_activity)) = process_inside_packet(
             &conn,
             inside_io.as_ref(),
             tun_dns_ip,
@@ -872,7 +1079,9 @@ pub async fn inside_io_task<ExtAppState: Send + Sync>(
             continue;
         };
 
-        tracer.tick(&keepalive, last_outside_data_received).await;
+        tracer
+            .tick(&keepalive, last_outside_data_received, tun_activity)
+            .await;
     }
 }
 
@@ -1437,6 +1646,7 @@ pub async fn connect<
         ticker,
         ip_config: None,
         extended: Default::default(),
+        tun_activity: TunActivity::default(),
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 
@@ -1563,6 +1773,11 @@ pub async fn connect<
         config.inside_pkt_codec_stall_timeout,
     ));
 
+    let mut tun_liveness_loop: JoinHandle<anyhow::Result<()>> = tokio::spawn(tun_liveness_task(
+        Arc::downgrade(&conn),
+        config.tun_liveness_timeout,
+    ));
+
     let (network_change_tx, network_change_rx) = tokio::sync::mpsc::channel(1);
     let mut network_change_task = tokio::spawn(handle_network_change(
         keepalive,
@@ -1608,6 +1823,7 @@ pub async fn connect<
             Some(_) = keepalive_task => Err(anyhow!("Keepalive timeout")),
             io = &mut outside_io_loop => Err(anyhow!("Outside IO loop exited: {io:?}")),
             io = &mut inside_io_loop => Err(anyhow!("Inside IO loop exited: {io:?}")),
+            res = &mut tun_liveness_loop => Err(anyhow!("TUN liveness task exited: {res:?}")),
             io = &mut encoded_pkt_send_task, if inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Encoded packet send task) exited: {io:?}")),
             io = &mut decoded_pkt_send_task, if inside_pkt_codec.is_some() => Err(anyhow!("Inside IO (Decoded packet send task) exited: {io:?}")),
             _ = &mut ticker_task => Err(anyhow!("Ticker task stopped")),
@@ -1643,6 +1859,7 @@ pub async fn connect<
 
         outside_io_loop.abort();
         inside_io_loop.abort();
+        tun_liveness_loop.abort();
         encoded_pkt_send_task.abort();
         decoded_pkt_send_task.abort();
         if let Some(codec_stats_join_handle) = codec_stats_join_handle {
@@ -2659,5 +2876,209 @@ mod tests {
         codec_stats_task(encoder, decoder, Duration::ZERO).await;
 
         assert!(!logs_contain("Inside packet codec statistics"));
+    }
+
+    const TUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn secs_ago(now: Instant, secs: u64) -> Instant {
+        now.checked_sub(Duration::from_secs(secs)).unwrap()
+    }
+
+    fn tun_activity(now: Instant, read: u64, write_ok: u64, write_err: Option<u64>) -> TunActivity {
+        TunActivity {
+            last_read: secs_ago(now, read),
+            last_write_ok: secs_ago(now, write_ok),
+            last_write_err: write_err.map(|s| secs_ago(now, s)),
+        }
+    }
+
+    #[test]
+    fn tun_liveness_idle_tunnel_is_alive() {
+        let now = Instant::now();
+        // No peer data since long before the last read, nothing read for ages
+        let tun = tun_activity(now, 600, 600, None);
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 700), &tun),
+            None
+        );
+    }
+
+    #[test]
+    fn tun_liveness_detects_read_stall() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 60, 1, None);
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 1), &tun),
+            Some(TunDead::ReadStall {
+                since_read: Duration::from_secs(60),
+                since_peer_data: Duration::from_secs(1),
+            })
+        );
+    }
+
+    #[test]
+    fn tun_liveness_peer_data_within_timeout_of_last_read_is_alive() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 20, 1, None);
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 1), &tun),
+            None
+        );
+    }
+
+    #[test]
+    fn tun_liveness_recent_reads_are_alive() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 0, 0, None);
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 0), &tun),
+            None
+        );
+    }
+
+    #[test]
+    fn tun_liveness_detects_write_stall() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 0, 60, Some(1));
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 0), &tun),
+            Some(TunDead::WriteStall {
+                since_write_ok: Duration::from_secs(60),
+            })
+        );
+    }
+
+    #[test]
+    fn tun_liveness_write_error_followed_by_success_is_alive() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 0, 1, Some(60));
+        assert_eq!(
+            tun_liveness_check(now, TUN_TIMEOUT, secs_ago(now, 0), &tun),
+            None
+        );
+    }
+
+    #[test]
+    fn tun_liveness_zero_timeout_disables_check() {
+        let now = Instant::now();
+        let tun = tun_activity(now, 60, 60, Some(1));
+        assert_eq!(
+            tun_liveness_check(now, Duration::ZERO, secs_ago(now, 1), &tun),
+            None
+        );
+    }
+
+    #[test]
+    fn tun_activity_records_write_results() {
+        let mut tun = TunActivity::default();
+        let before = Instant::now();
+
+        tun.record_write(&IOCallbackResult::<usize>::WouldBlock);
+        assert!(tun.last_write_ok <= before);
+        assert!(tun.last_write_err.is_none());
+
+        tun.record_write(&IOCallbackResult::<usize>::Err(std::io::Error::other(
+            "dead",
+        )));
+        assert!(tun.last_write_err.is_some_and(|t| t >= before));
+
+        tun.record_write(&IOCallbackResult::Ok(1));
+        assert!(tun.last_write_ok >= before);
+    }
+
+    #[tokio::test]
+    async fn tun_liveness_task_disabled_never_returns() {
+        let weak: Weak<Mutex<Connection<ConnectionState>>> = Weak::new();
+        let res = tokio::time::timeout(
+            Duration::from_millis(50),
+            tun_liveness_task(weak, Duration::ZERO),
+        )
+        .await;
+        assert!(res.is_err(), "disabled task must not complete");
+    }
+
+    #[tokio::test]
+    async fn tun_liveness_task_exits_when_connection_dropped() {
+        let weak: Weak<Mutex<Connection<ConnectionState>>> = Weak::new();
+        tun_liveness_task(weak, TUN_TIMEOUT).await.unwrap();
+    }
+
+    #[test]
+    fn tun_liveness_timeout_defaults_to_disabled() {
+        let client_config: ClientConfig<()> =
+            ClientConfig::try_from_reload_sig_and_config(None, config::Config::default()).unwrap();
+        assert!(client_config.tun_liveness_timeout.is_zero());
+    }
+
+    fn read_stall() -> TunDead {
+        TunDead::ReadStall {
+            since_read: Duration::from_secs(60),
+            since_peer_data: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn tun_stall_confirmer_requires_stall_to_persist() {
+        let start = Instant::now();
+        let tun = tun_activity(start, 60, 0, None);
+        let mut confirmer = TunStallConfirmer::default();
+
+        assert_eq!(
+            confirmer.update(start, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
+        let later = start + TUN_TIMEOUT / 2;
+        assert_eq!(
+            confirmer.update(later, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
+        let later = start + TUN_TIMEOUT;
+        assert_eq!(
+            confirmer.update(later, TUN_TIMEOUT, &tun, Some(read_stall())),
+            Some(read_stall())
+        );
+    }
+
+    #[test]
+    fn tun_stall_confirmer_resets_on_tun_progress() {
+        let start = Instant::now();
+        let mut tun = tun_activity(start, 60, 0, None);
+        let mut confirmer = TunStallConfirmer::default();
+
+        assert_eq!(
+            confirmer.update(start, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
+        // A TUN read in between restarts confirmation, even if the stall
+        // condition is met again by the next check.
+        tun.last_read = start + Duration::from_secs(1);
+        let later = start + TUN_TIMEOUT;
+        assert_eq!(
+            confirmer.update(later, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
+        let later = later + TUN_TIMEOUT;
+        assert_eq!(
+            confirmer.update(later, TUN_TIMEOUT, &tun, Some(read_stall())),
+            Some(read_stall())
+        );
+    }
+
+    #[test]
+    fn tun_stall_confirmer_resets_when_stall_clears() {
+        let start = Instant::now();
+        let tun = tun_activity(start, 60, 0, None);
+        let mut confirmer = TunStallConfirmer::default();
+
+        assert_eq!(
+            confirmer.update(start, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
+        assert_eq!(confirmer.update(start, TUN_TIMEOUT, &tun, None), None);
+        let later = start + TUN_TIMEOUT;
+        assert_eq!(
+            confirmer.update(later, TUN_TIMEOUT, &tun, Some(read_stall())),
+            None
+        );
     }
 }
