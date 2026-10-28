@@ -118,13 +118,13 @@ pub(crate) fn set_default_guard_subscriber(logger_callback: Arc<dyn RustLogger>)
 fn setup_logging_subscriber(logger_callback: Arc<dyn RustLogger>) -> impl Subscriber {
     let diagnostic_layer = DiagnosticLayer::new(logger_callback);
 
-    #[cfg(android)]
-    return tracing_android::layer("lightway_rust")
-        .unwrap()
-        .and_then(diagnostic_layer)
-        .with_subscriber(Registry::default());
-    #[cfg(not(android))]
-    diagnostic_layer.with_subscriber(Registry::default())
+    cfg_select! {
+        android => tracing_android::layer("lightway_rust")
+            .unwrap()
+            .and_then(diagnostic_layer)
+            .with_subscriber(Registry::default()),
+        _ => diagnostic_layer.with_subscriber(Registry::default()),
+    }
 }
 
 pub struct DiagnosticLayer {

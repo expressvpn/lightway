@@ -4,20 +4,11 @@ use std::os::fd::AsRawFd;
 
 /// Enable IP_PKTINFO sockopt.
 pub fn socket_enable_pktinfo(sock: &impl AsRawFd) -> std::io::Result<()> {
-    let level: i32;
-    let optname: i32;
-
-    #[cfg(target_vendor = "apple")]
-    {
-        level = libc::IPPROTO_IP;
-        optname = libc::IP_PKTINFO;
-    }
-
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        level = libc::SOL_IP;
-        optname = libc::IP_PKTINFO;
-    }
+    let level = cfg_select! {
+        apple => libc::IPPROTO_IP,
+        _ => libc::SOL_IP,
+    };
+    let optname = libc::IP_PKTINFO;
 
     // SAFETY: `setsockopt` requires a valid fd and a valid buffer of `c_int` size
     let res = unsafe {

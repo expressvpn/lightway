@@ -339,39 +339,39 @@ impl RouteManagerInner {
                 Self::get_route_metric(&route),
             );
 
-            // For windows, linux, use metric to choose best default route
-            #[cfg(any(linux, windows))]
-            {
-                let route_metric = Self::get_route_metric(&route);
-                let best_metric = best_route
-                    .as_ref()
-                    .map(Self::get_route_metric)
-                    .unwrap_or(u32::MAX);
+            cfg_select! {
+                // For windows, linux, use metric to choose best default route
+                any(linux, windows) => {
+                    let route_metric = Self::get_route_metric(&route);
+                    let best_metric = best_route
+                        .as_ref()
+                        .map(Self::get_route_metric)
+                        .unwrap_or(u32::MAX);
 
-                match route_metric.cmp(&best_metric) {
-                    std::cmp::Ordering::Less => {
-                        tracing::trace!("New best route found with better route metric");
-                        best_route = Some(route);
-                    }
-                    std::cmp::Ordering::Equal => {
-                        if let Some(server_route) = self.server_route.as_ref()
-                            && *server_route == route
-                        {
-                            tracing::trace!("Same route metric, but choosing previous best route");
+                    match route_metric.cmp(&best_metric) {
+                        std::cmp::Ordering::Less => {
+                            tracing::trace!("New best route found with better route metric");
                             best_route = Some(route);
                         }
-                    }
-                    std::cmp::Ordering::Greater => {
-                        tracing::trace!("Route route metric is not better than current best");
-                    }
-                };
-            }
-            // For other platforms, choose the first route available
-            #[cfg(not(any(linux, windows)))]
-            {
-                tracing::trace!("Using first available default route");
-                best_route = Some(route);
-                break;
+                        std::cmp::Ordering::Equal => {
+                            if let Some(server_route) = self.server_route.as_ref()
+                                && *server_route == route
+                            {
+                                tracing::trace!("Same route metric, but choosing previous best route");
+                                best_route = Some(route);
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            tracing::trace!("Route route metric is not better than current best");
+                        }
+                    };
+                }
+                // For other platforms, choose the first route available
+                _ => {
+                    tracing::trace!("Using first available default route");
+                    best_route = Some(route);
+                    break;
+                }
             }
         }
 

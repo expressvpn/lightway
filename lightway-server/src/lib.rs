@@ -550,10 +550,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         .into_iter()
         .chain(config.tun_ip)
         .chain(std::iter::once(config.lightway_dns_ip));
-    #[cfg(feature = "debug")]
-    let randomize_ippool = config.randomize_ippool;
-    #[cfg(not(feature = "debug"))]
-    let randomize_ippool = true;
+    let randomize_ippool = cfg_select! {
+        feature = "debug" => config.randomize_ippool,
+        _ => true,
+    };
 
     let ip_manager = IpManager::new(
         config.ip_pool,
@@ -577,18 +577,20 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
             if config.enable_tun_offload {
                 config.tun_config.offload = true;
             }
-            #[cfg(not(feature = "io-uring"))]
-            let tun = Tun::new(&config.tun_config).await;
-            #[cfg(feature = "io-uring")]
-            let tun = if config.enable_tun_iouring {
-                Tun::new_with_iouring(
-                    &config.tun_config,
-                    config.iouring_entry_count,
-                    config.iouring_sqpoll_idle_time,
-                )
-                .await
-            } else {
-                Tun::new(&config.tun_config).await
+            let tun = cfg_select! {
+                feature = "io-uring" => {
+                    if config.enable_tun_iouring {
+                        Tun::new_with_iouring(
+                            &config.tun_config,
+                            config.iouring_entry_count,
+                            config.iouring_sqpoll_idle_time,
+                        )
+                        .await
+                    } else {
+                        Tun::new(&config.tun_config).await
+                    }
+                }
+                _ => Tun::new(&config.tun_config).await,
             };
 
             let tun = tun.context("Tun creation")?;
@@ -634,10 +636,10 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         config.statistics_reporting_interval,
     ));
 
-    #[cfg(linux)]
-    let gso = config.enable_tun_offload;
-    #[cfg(not(linux))]
-    let gso = false;
+    let gso = cfg_select! {
+        linux => config.enable_tun_offload,
+        _ => false,
+    };
 
     // Also enforced by config::Config::validate; repeated here to cover
     // ServerConfig built directly by library consumers. With offload on,
@@ -691,19 +693,19 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
         if gso {
-            #[cfg(target_os = "linux")]
-            {
-                let gso_io = inside_io.clone().as_gso().context(
-                    "enable_tun_offload is set but the inside IO backend does not support GSO offload",
-                )?;
-                tokio::spawn(inside_io_loop_gso(
-                    gso_io,
-                    ip_manager.clone(),
-                    config.lightway_client_ip,
-                ))
+            cfg_select! {
+                linux => {
+                    let gso_io = inside_io.clone().as_gso().context(
+                        "enable_tun_offload is set but the inside IO backend does not support GSO offload",
+                    )?;
+                    tokio::spawn(inside_io_loop_gso(
+                        gso_io,
+                        ip_manager.clone(),
+                        config.lightway_client_ip,
+                    ))
+                }
+                _ => unreachable!(),
             }
-            #[cfg(not(target_os = "linux"))]
-            unreachable!()
         } else if config.enable_batch_send
             && let Some(send_queue) = send_queue
         {
