@@ -33,7 +33,7 @@ use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
     InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType, State,
-    ipv4_update_destination, ipv4_update_source,
+    ipv4_update_destination, ipv4_update_source, ipv6_is_valid_packet,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -62,7 +62,7 @@ use std::time::Instant;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, Once, Weak},
     time::Duration,
 };
 use tokio::{
@@ -252,6 +252,11 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
+    /// Block all IPv6 traffic so it cannot bypass the tunnel (route modes
+    /// Default and Lan)
+    #[cfg(desktop)]
+    pub block_ipv6: bool,
+
     /// Firewall mark applied to the outside socket (Linux only).
     #[cfg(linux)]
     pub fwmark: u32,
@@ -416,6 +421,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
             route_mode: config.route_mode,
+            #[cfg(desktop)]
+            block_ipv6: config.block_ipv6,
             #[cfg(linux)]
             fwmark: config.fwmark,
             #[cfg(windows)]
@@ -974,6 +981,9 @@ pub async fn tun_liveness_task<ExtAppState: Send + Sync>(
     }
 }
 
+/// Guards the one-time IPv6 drop warning.
+static IPV6_DROP_WARNING: Once = Once::new();
+
 /// Shared body of the inside IO loops: rewrite the source/DNS
 /// addresses, dispatch the packet into the connection and map the
 /// recoverable errors. Returns `Ok(Some((last_outside_data_received,
@@ -989,6 +999,16 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
         &mut BytesMut,
     ) -> std::result::Result<(), ConnectionError>,
 ) -> Result<Option<(Instant, TunActivity)>> {
+    // Pre-emptively drop IPv6 packets, so that we don't hold the connection lock
+    if ipv6_is_valid_packet(buf) {
+        IPV6_DROP_WARNING.call_once(|| {
+            tracing::warn!(
+                "dropping IPv6 traffic from the tunnel interface; the tunnel carries IPv4 only"
+            );
+        });
+        return Ok(None);
+    }
+
     let mut conn = conn.lock().unwrap();
     conn.app_state_mut().tun_activity.last_read = Instant::now();
 
@@ -1016,11 +1036,10 @@ fn process_inside_packet<ExtAppState: Send + Sync>(
             let _ = inside_io.try_send(reply, ip_config);
             Ok(None)
         }
-        // Ignore the packet till the connection is online, and ignore
-        // invalid inside packets
-        Err(ConnectionError::InvalidState) | Err(ConnectionError::InvalidInsidePacket(_)) => {
-            Ok(None)
-        }
+        // Ignore the packet till the connection is online
+        Err(ConnectionError::InvalidState) => Ok(None),
+        // Ignore other invalid inside packets
+        Err(ConnectionError::InvalidInsidePacket(_)) => Ok(None),
         Err(err) => {
             // Fatal error
             Err(err.into())
@@ -1438,6 +1457,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
     pub async fn initialize_routes(
         &mut self,
         route_mode: RouteMode,
+        block_ipv6: bool,
         tun_peer_ip: IpAddr,
         tun_dns_ip: IpAddr,
         route_rx: watch::Receiver<()>,
@@ -1450,15 +1470,22 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         let tun_index = self.inside_io.if_index()?;
 
         tracing::trace!(
-            "Starting route manager: mode: {:?}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
+            "Starting route manager: mode: {:?}, block_ipv6: {}, server: {:?}, tun_index: {:?}, tun_peer_ip: {:?}, tun_dns_ip: {:?}",
             route_mode,
+            block_ipv6,
             server_ip,
             tun_index,
             tun_peer_ip,
             tun_dns_ip
         );
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            block_ipv6,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+        )?;
         let route_updater = route_manager.start().await?;
 
         // A weak ref keeps the coordinator task from extending the outside
@@ -2283,6 +2310,7 @@ pub async fn client<
         connection
             .initialize_routes(
                 config.route_mode,
+                config.block_ipv6,
                 config.tun_peer_ip.into(),
                 config.tun_dns_ip.into(),
                 route_rx,
