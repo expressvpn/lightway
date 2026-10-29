@@ -47,6 +47,24 @@ const CONNECTION_MAX_IDLE_AGE: Duration = Duration::from_hours(24);
 /// If connection is not online by this time, it will be closed to save resources
 const CONNECTION_STALE_AGE: Duration = Duration::from_mins(1);
 
+/// What an offload-requested key rotation actually did.
+///
+/// A suppressed rotation is routine, not a failure: an offload engine that has
+/// not yet seen the counter reset keeps asking on every drain until the key
+/// actually changes, so most requests during an exchange land on `Suppressed`.
+/// Reporting those as performed rotations buried the real ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyRotation {
+    /// A key exchange was started.
+    Started,
+    /// An exchange from an earlier request is still outstanding.
+    Suppressed,
+    /// No connection holds that session id.
+    UnknownSession,
+    /// The attempt returned an error.
+    Failed,
+}
+
 impl connection_map::Value for Connection {
     fn socket_addr(&self) -> SocketAddr {
         self.peer_addr()
@@ -494,11 +512,104 @@ impl ConnectionManager {
         self.connections.lock().find_by(addr)
     }
 
-    pub(crate) fn set_peer_addr(&self, conn: &Arc<Connection>, new_addr: SocketAddr) {
+    /// Move `conn` to `new_addr`, returning whether it moved.
+    ///
+    /// Refuses when another connection already holds `new_addr`, mirroring the
+    /// datagram receive path, which routes an occupied address to its existing
+    /// owner and never treats it as a roam.
+    ///
+    /// The check and the swap share one lock on the connection map: `conn`'s
+    /// own address is only mutated once the map has agreed to take it, so the
+    /// two can never diverge.
+    pub(crate) fn set_peer_addr(&self, conn: &Arc<Connection>, new_addr: SocketAddr) -> bool {
+        let mut connections = self.connections.lock();
+        if !connections.can_take_socketaddr(new_addr, conn) {
+            return false;
+        }
         let old_addr = conn.set_peer_addr(new_addr);
-        self.connections
-            .lock()
-            .update_socketaddr_for_connection(old_addr, new_addr);
+        connections.update_socketaddr_for_connection(old_addr, new_addr);
+        true
+    }
+
+    /// Resolve a session id to its datagram connection, falling back to the
+    /// pending-rotation alias when the id is one the connection is still
+    /// rotating to.
+    ///
+    /// The datagram receive path does the same fallback, and it has to: a roam
+    /// starts a rotation, so for the whole window between starting one and the
+    /// peer acknowledging it, the new id resolves only through the alias. An
+    /// offload engine reporting against the new id would otherwise be ignored
+    /// for exactly the period a roam makes reports most likely.
+    ///
+    /// `by_session_id` holds streaming connections too, so the type is checked
+    /// here rather than left to each caller.
+    pub(crate) fn find_datagram_connection_by_session(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Option<Arc<Connection>> {
+        // Take the two locks in sequence, never nested: the create path holds
+        // the connection map while reaching for the alias table.
+        let found = self.connections.lock().find_by_session(session_id);
+        let conn = match found {
+            Some(conn) => conn,
+            None => {
+                let mut pending = self.pending_session_id_rotations.lock();
+                match pending.get(&session_id)?.upgrade() {
+                    Some(conn) => conn,
+                    None => {
+                        pending.remove(&session_id);
+                        return None;
+                    }
+                }
+            }
+        };
+
+        conn.connection_type().is_datagram().then_some(conn)
+    }
+
+    /// Adopt `addr` as the peer address for `session_id`, on the caller's
+    /// authority that the change is authenticated.
+    ///
+    /// Applies the same two steps, in the same order, as the datagram receive
+    /// path: the address first, then the rotation announce, which has to go to
+    /// the address the client moved to. No-op for an unknown session or one
+    /// already at `addr`. Returns whether the address was actually changed.
+    pub(crate) fn update_peer_addr(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        addr: SocketAddr,
+    ) -> bool {
+        let Some(conn) = self.find_datagram_connection_by_session(session_id) else {
+            return false;
+        };
+        if conn.peer_addr() == addr {
+            return false;
+        }
+        if !self.set_peer_addr(&conn, addr) {
+            return false;
+        }
+        conn.begin_session_id_rotation();
+        metrics::udp_conn_recovered_via_session(session_id);
+        true
+    }
+
+    /// Rotate `session_id`'s expresslane key now, bypassing the periodic
+    /// interval.
+    pub(crate) fn rotate_expresslane_key_now(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> KeyRotation {
+        let Some(conn) = self.find_datagram_connection_by_session(session_id) else {
+            return KeyRotation::UnknownSession;
+        };
+        match conn.rotate_expresslane_key_now() {
+            Ok(true) => KeyRotation::Started,
+            Ok(false) => KeyRotation::Suppressed,
+            Err(err) => {
+                warn!(?err, ?session_id, "offload-requested key rotation failed");
+                KeyRotation::Failed
+            }
+        }
     }
 
     pub(crate) fn remove_connection(&self, conn: &Connection) {
