@@ -26,10 +26,12 @@ use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback, PacketCodecFactoryType};
 use lightway_core::{
     ConnectionActivity, ConnectionBuilderError, ConnectionError, ContextError, Event,
-    OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State, Version,
+    MAX_IO_BATCH_SIZE, OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State,
+    Version,
 };
 
 use crate::handle_inside_io_error;
+use crate::io::outside::udp::send_queue::for_each_in_batch;
 
 /// Default interval to check for connections to expire aged connections
 pub const DEFAULT_CONNECTION_AGE_EXPIRATION_INTERVAL: Duration = Duration::from_mins(1);
@@ -232,19 +234,23 @@ async fn handle_stale(conn: Weak<Connection>) {
 
 #[instrument(level = "trace", skip_all)]
 async fn handle_encoded_pkt_send(conn: Weak<Connection>, mut rx: UnboundedReceiver<BytesMut>) {
+    let mut encoded_packets = Vec::with_capacity(MAX_IO_BATCH_SIZE);
     loop {
-        let Some(encoded_packet) = rx.recv().await else {
+        if rx.recv_many(&mut encoded_packets, MAX_IO_BATCH_SIZE).await == 0 {
             break; // Channel is closed
-        };
+        }
 
         let Some(conn) = conn.upgrade() else {
             // Connection is dropped.
             break;
         };
 
-        if let Err(err) = conn.send_to_outside(encoded_packet, true) {
-            handle_inside_io_error(conn, Err(err));
-        }
+        for_each_in_batch(encoded_packets.drain(..), move |encoded_packet| {
+            if let Err(err) = conn.send_to_outside(encoded_packet, true) {
+                handle_inside_io_error(conn.clone(), Err(err));
+            }
+        })
+        .await;
     }
 }
 

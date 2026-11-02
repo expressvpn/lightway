@@ -25,7 +25,7 @@ use tracing::info;
 
 use super::{OutsideIO, RecvMeta};
 use crate::io::outside::udp::batch_receive::{BatchRecvSlot, recv_multiple_with_metadata};
-use crate::io::outside::udp::send_queue::SendQueue;
+use crate::io::outside::udp::send_queue::BatchSendSocket;
 use crate::metrics;
 
 enum BindMode {
@@ -111,13 +111,13 @@ struct UdpSocket {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: RwLock<(SocketAddr, SockAddr)>,
     reply_pktinfo: Option<libc::in_pktinfo>,
-    send_queue: Option<Arc<SendQueue>>,
+    batch_send_socket: Option<Arc<BatchSendSocket>>,
 }
 
 impl OutsideIOSendCallback for UdpSocket {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         let peer_addr = self.peer_addr.read().unwrap();
-        if let Some(queue) = &self.send_queue
+        if let Some(queue) = &self.batch_send_socket
             && queue.try_enqueue(peer_addr.1.clone(), self.reply_pktinfo, buf)
         {
             return IOCallbackResult::Ok(buf.len());
@@ -162,7 +162,7 @@ pub(crate) struct UdpIo {
     sock: Arc<tokio::net::UdpSocket>,
     bind_mode: BindMode,
     batch_receive_enabled: bool,
-    send_queue: Option<Arc<SendQueue>>,
+    batch_send_socket: Option<Arc<BatchSendSocket>>,
     /// Scratch for the batch receive path: per-packet control buffers and
     /// source-address storage, reused across calls. The payload buffers
     /// come from the caller.
@@ -193,7 +193,7 @@ impl UdpIo {
         sock.writable().await?;
         let sock = Arc::new(sock);
 
-        let send_queue = enable_batch_send.then(|| SendQueue::new(sock.clone()));
+        let batch_send_socket = enable_batch_send.then(|| BatchSendSocket::new(sock.clone()));
 
         let bind_mode = if bind_address.ip().is_unspecified() {
             BindMode::UnspecifiedAddress {
@@ -236,15 +236,9 @@ impl UdpIo {
             sock,
             bind_mode,
             batch_receive_enabled,
-            send_queue,
+            batch_send_socket,
             batch_slots: std::array::from_fn(|_| BatchRecvSlot::new()),
         })
-    }
-
-    /// Handle for the inside loop to open send-batch windows. `Some`
-    /// only when inside-IO batching was enabled at construction.
-    pub(crate) fn send_queue(&self) -> Option<Arc<SendQueue>> {
-        self.send_queue.clone()
     }
 
     /// The `IP_PKTINFO` to echo on replies to a packet that arrived on
@@ -336,7 +330,7 @@ impl OutsideIO for UdpIo {
             sock: self.sock.clone(),
             peer_addr: RwLock::new((meta.peer, meta.peer.into())),
             reply_pktinfo: self.reply_pktinfo(meta.local),
-            send_queue: self.send_queue.clone(),
+            batch_send_socket: self.batch_send_socket.clone(),
         })
     }
 

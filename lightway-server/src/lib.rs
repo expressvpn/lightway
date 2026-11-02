@@ -52,7 +52,7 @@ pub use crate::io::inside::InsideIORecvGso;
 pub use crate::io::inside::{InsideIO, InsideIORecv, InsideIORecvBatch};
 pub use crate::io::outside::{OutsideIO, RecvMeta};
 
-use crate::io::outside::udp::send_queue::SendQueue;
+use crate::io::outside::udp::send_queue::for_each_in_batch;
 use crate::ip_manager::IpManager;
 
 use connection_manager::ConnectionManager;
@@ -418,7 +418,6 @@ async fn inside_io_loop_batched(
     inside_io: Arc<dyn InsideIORecvBatch>,
     ip_manager: Arc<IpManager<Arc<Connection>>>,
     lightway_client_ip: Ipv4Addr,
-    send_queue: Arc<SendQueue>,
 ) -> anyhow::Result<()> {
     let mut pkts: Vec<BytesMut> = Vec::with_capacity(MAX_IO_BATCH_SIZE);
     loop {
@@ -434,17 +433,15 @@ async fn inside_io_loop_batched(
         metrics::tun_recv_batch(pkts.len());
 
         // Sends triggered by inside_data_received (which is synchronous)
-        // are queued while this guard is live and flushed together once
+        // are queued in the batch window and flushed together once
         // the batch has been processed. There are no await points inside
         // the window; the flush itself may wait for socket writability,
         // which backpressures this loop.
-        let batch_guard = send_queue.begin_batch();
-
-        for mut buf in pkts.drain(..) {
+        for_each_in_batch(pkts.drain(..), |mut buf| {
             let packet = Ipv4Packet::new(buf.as_ref());
             let Some(packet) = packet else {
                 eprintln!("Invalid inside packet size (less than Ipv4 header)!");
-                continue;
+                return;
             };
             let conn = ip_manager.find_connection(packet.get_destination());
 
@@ -456,9 +453,8 @@ async fn inside_io_loop_batched(
             } else {
                 metrics::tun_rejected_packet_no_connection();
             }
-        }
-
-        batch_guard.flush().await;
+        })
+        .await;
     }
 }
 
@@ -650,7 +646,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         "enable_batch_send cannot be used with enable_tun_offload"
     );
 
-    let mut send_queue: Option<Arc<SendQueue>> = None;
+    let is_udp = matches!(connection_type, ServerConnectionMode::Datagram(_));
 
     if let Some(provider) = config.expresslane_metrics.clone() {
         tokio::spawn(offload_stats::run(
@@ -670,7 +666,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 may_be_sock,
             )
             .await?;
-            send_queue = udp_io.send_queue();
             Box::new(io::outside::DatagramServer::new(
                 Box::new(udp_io),
                 conn_manager.clone(),
@@ -706,12 +701,9 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 }
                 _ => unreachable!(),
             }
-        } else if config.enable_batch_send
-            && let Some(send_queue) = send_queue
-        {
-            // send_queue exists only for UDP servers; on stream
-            // transports there is no batched send path, so the flag is
-            // a no-op and the default loop runs below.
+        } else if config.enable_batch_send && is_udp {
+            // On stream transports there is no batched send path, so the
+            // flag is a no-op and the default loop runs below.
             let batch_io = inside_io.clone().as_batch().context(
                 "enable_batch_send is set but the inside IO backend does not support batched receive",
             )?;
@@ -719,7 +711,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
                 batch_io,
                 ip_manager.clone(),
                 config.lightway_client_ip,
-                send_queue,
             ))
         } else {
             tokio::spawn(inside_io_loop_default(
@@ -876,16 +867,8 @@ mod tests {
         });
         let batches_handle = Arc::clone(&io);
 
-        let sock = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let send_queue = SendQueue::new(sock);
-
-        let result = inside_io_loop_batched(
-            io,
-            test_ip_manager(),
-            Ipv4Addr::new(10, 125, 0, 5),
-            send_queue,
-        )
-        .await;
+        let result =
+            inside_io_loop_batched(io, test_ip_manager(), Ipv4Addr::new(10, 125, 0, 5)).await;
 
         assert!(result.is_err(), "loop must terminate on recv error");
         assert!(
