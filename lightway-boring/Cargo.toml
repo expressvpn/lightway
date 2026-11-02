@@ -19,5 +19,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 zeroize = "1.9.0"
 
+[build-dependencies]
+built = { version = "0.8", default-features = false }
+
 [dev-dependencies]
 rcgen = { workspace = true }

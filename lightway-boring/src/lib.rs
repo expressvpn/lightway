@@ -15,6 +15,7 @@
 //! ```
 
 mod aes256;
+mod build_info;
 mod cert;
 mod chacha20_poly1305;
 mod config;
@@ -30,6 +31,7 @@ mod types;
 // Re-export all public types at crate root (drop-in replacement for wolfssl crate)
 pub use aes256::{Aes256Gcm, Aes256GcmError};
 pub use boring::version::version as get_version_string;
+pub use build_info::{BuildInfo, build_info};
 pub use cert::{RootCertificate, Secret};
 pub use chacha20_poly1305::Chacha20Poly1305Aead;
 pub use config::{KeyShareOffer, SessionConfig};
