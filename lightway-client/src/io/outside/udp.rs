@@ -62,6 +62,10 @@ pub struct Udp {
     swallowed_sends: AtomicU64,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    /// Consecutive batch receives that truncated a datagram, reset by one
+    /// that did not; rate-limits the truncation warning.
+    #[cfg(batch_receive)]
+    truncated_recvs: AtomicU64,
     #[cfg(linux)]
     gro_enabled: bool,
     /// Latched `true` (for the socket's lifetime) once a `UDP_SEGMENT`
@@ -128,6 +132,8 @@ impl Udp {
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            #[cfg(batch_receive)]
+            truncated_recvs: AtomicU64::new(0),
             #[cfg(linux)]
             gro_enabled: false,
             #[cfg(linux)]
@@ -433,7 +439,12 @@ impl OutsideIO for Udp {
         let fd = self.sock.as_raw_fd();
 
         self.try_readable_io(|| {
-            batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
+            batch_receive::recv_multiple(
+                fd,
+                bufs,
+                lightway_core::MAX_IO_BATCH_SIZE,
+                &self.truncated_recvs,
+            )
         })
     }
 
@@ -533,7 +544,9 @@ impl OutsideIORecvGro for Udp {
     ) -> IOCallbackResult<usize> {
         use std::os::fd::AsRawFd;
         let fd = self.sock.as_raw_fd();
-        self.try_readable_io(|| batch_receive::recv_multiple_gro(fd, bufs, gro_sizes))
+        self.try_readable_io(|| {
+            batch_receive::recv_multiple_gro(fd, bufs, gro_sizes, &self.truncated_recvs)
+        })
     }
 }
 

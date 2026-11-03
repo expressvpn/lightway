@@ -3,6 +3,7 @@
 use bytes::BytesMut;
 use lightway_core::MAX_IO_BATCH_SIZE;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Platform-specific batch receive syscall.
 trait BatchRecvSyscall {
@@ -12,6 +13,7 @@ trait BatchRecvSyscall {
         fd: libc::c_int,
         recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
         msg_count: usize,
+        truncated_runs: &AtomicU64,
     ) -> io::Result<usize>;
 }
 
@@ -25,9 +27,31 @@ pub(crate) fn recv_multiple(
     fd: libc::c_int,
     recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
     max_batch_size: usize,
+    truncated_runs: &AtomicU64,
 ) -> io::Result<usize> {
     let max_batch_size = max_batch_size.min(MAX_IO_BATCH_SIZE);
-    PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size)
+    PlatformBatchRecv::recv_multiple(fd, recv_bufs, max_batch_size, truncated_runs)
+}
+
+/// Log datagrams the kernel truncated to the receive buffer capacity. A
+/// persistent cause (e.g. a too-small `outside_mtu`) truncates every batch,
+/// so only the 1st, 2nd, 4th, ... truncating batch of each consecutive run
+/// is logged; a batch without truncation resets the run. `truncated_runs`
+/// is owned by the receiving socket.
+fn note_truncated(truncated_runs: &AtomicU64, truncated: usize) {
+    if truncated == 0 {
+        if truncated_runs.load(Ordering::Relaxed) != 0 {
+            truncated_runs.store(0, Ordering::Relaxed);
+        }
+        return;
+    }
+    let count = truncated_runs.fetch_add(1, Ordering::Relaxed) + 1;
+    if count.is_power_of_two() {
+        tracing::warn!(
+            "{truncated} datagram(s) truncated to receive buffer capacity \
+             ({count} consecutive batches); the configured outside_mtu may be too small"
+        );
+    }
 }
 
 /// Batched GRO receive (Linux): one `recvmmsg` fills up to
@@ -48,6 +72,7 @@ mod apple {
     use bytes::BytesMut;
     use lightway_app_utils::recvmsg_x::{msghdr_x, recvmsg_x};
     use lightway_core::MAX_IO_BATCH_SIZE;
+    use std::sync::atomic::AtomicU64;
     use std::{io, mem};
 
     pub(crate) struct RecvmsgX;
@@ -60,6 +85,7 @@ mod apple {
             fd: libc::c_int,
             recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
             msg_count: usize,
+            truncated_runs: &AtomicU64,
         ) -> io::Result<usize> {
             // SAFETY: zeroed iovec is valid (null pointer + zero length).
             let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
@@ -113,12 +139,7 @@ mod apple {
                     truncated += 1;
                 }
             }
-            if truncated > 0 {
-                tracing::warn!(
-                    "{truncated} datagram(s) truncated to receive buffer capacity; \
-                     the configured outside_mtu may be too small"
-                );
-            }
+            super::note_truncated(truncated_runs, truncated);
 
             Ok(count)
         }
@@ -129,6 +150,7 @@ mod apple {
 mod linux {
     use bytes::BytesMut;
     use lightway_core::MAX_IO_BATCH_SIZE;
+    use std::sync::atomic::AtomicU64;
     use std::{io, mem};
 
     /// Control buffer space for one `UDP_GRO` cmsg.
@@ -151,6 +173,7 @@ mod linux {
         fd: libc::c_int,
         recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
         gro_sizes: &mut [Option<u16>; MAX_IO_BATCH_SIZE],
+        truncated_runs: &AtomicU64,
     ) -> io::Result<usize> {
         use lightway_app_utils::cmsg;
 
@@ -218,12 +241,7 @@ mod linux {
                 truncated += 1;
             }
         }
-        if truncated > 0 {
-            tracing::warn!(
-                "{truncated} datagram(s) truncated to receive buffer capacity; \
-                 the configured outside_mtu may be too small"
-            );
-        }
+        super::note_truncated(truncated_runs, truncated);
 
         Ok(count)
     }
@@ -238,6 +256,7 @@ mod linux {
             fd: libc::c_int,
             recv_bufs: &mut [BytesMut; MAX_IO_BATCH_SIZE],
             msg_count: usize,
+            truncated_runs: &AtomicU64,
         ) -> io::Result<usize> {
             // SAFETY: zeroed iovec is valid (null pointer + zero length).
             let mut iovecs = unsafe { mem::zeroed::<[libc::iovec; MAX_IO_BATCH_SIZE]>() };
@@ -295,12 +314,7 @@ mod linux {
                     truncated += 1;
                 }
             }
-            if truncated > 0 {
-                tracing::warn!(
-                    "{truncated} datagram(s) truncated to receive buffer capacity; \
-                     the configured outside_mtu may be too small"
-                );
-            }
+            super::note_truncated(truncated_runs, truncated);
 
             Ok(count)
         }
@@ -340,7 +354,9 @@ mod tests {
             .unwrap();
 
         let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        let count =
+            PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE, &AtomicU64::new(0))
+                .unwrap();
         assert!(count >= 1);
         assert_eq!(&bufs[0][..], b"hello");
     }
@@ -366,7 +382,9 @@ mod tests {
             .unwrap();
 
         let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        let count =
+            PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE, &AtomicU64::new(0))
+                .unwrap();
         assert_eq!(count, 1);
         assert_eq!(bufs[0].len(), capacity);
         assert_eq!(&bufs[0][..], &payload[..capacity]);
@@ -394,7 +412,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        let count =
+            PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE, &AtomicU64::new(0))
+                .unwrap();
         assert_eq!(count, 1);
         assert!(
             !logs_contain("truncated"),
@@ -417,7 +437,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        let count =
+            PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE, &AtomicU64::new(0))
+                .unwrap();
         assert_eq!(count, 1);
         logs_assert(|lines: &[&str]| {
             match lines
@@ -452,7 +474,9 @@ mod tests {
             .unwrap();
 
         let fd = std::os::fd::AsRawFd::as_raw_fd(&receiver);
-        let count = PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE).unwrap();
+        let count =
+            PlatformBatchRecv::recv_multiple(fd, &mut bufs, MAX_IO_BATCH_SIZE, &AtomicU64::new(0))
+                .unwrap();
         assert!(count >= 1);
         // Verify received packets are in order.
         for (i, b) in bufs.iter().enumerate().take(count) {
