@@ -9,7 +9,9 @@
 //! ends the batch, where the kernel flushes.
 
 use bytes::BytesMut;
-use pnet_packet::tcp::TcpFlags;
+use pnet_packet::ip::IpNextHeaderProtocols;
+use pnet_packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
+use pnet_packet::tcp::{MutableTcpPacket, TcpFlags, TcpPacket};
 
 use crate::gso::{
     IPPROTO_TCP, MAX_GSO_SEGS, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_TCPV4, VirtioNetHdr,
@@ -21,6 +23,9 @@ use crate::{IP_MAX_DATAGRAM_SIZE, IPV4_HEADER_SIZE, TCP_HEADER_SIZE};
 const TCP_PSH_FIN: u8 = TcpFlags::PSH | TcpFlags::FIN;
 /// TCP flags that make a segment non-coalescable outright.
 const TCP_NO_COALESCE_FLAGS: u8 = TcpFlags::SYN | TcpFlags::RST | TcpFlags::URG | TcpFlags::CWR;
+/// Largest header a coalescable segment carries: the fixed IPv4 header
+/// (options are rejected) plus the maximum TCP header (Data Offset 15 × 4).
+const MAX_HDR_LEN: usize = IPV4_HEADER_SIZE + 60;
 
 /// Outcome of offering a packet to [`TcpGroBatch::append`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,24 +58,21 @@ struct SegInfo {
 /// the fields the batch logic needs. Returns `None` for anything we
 /// must not coalesce: non-IPv4, IP options, length mismatch,
 /// fragments, non-TCP, truncated/short TCP header, empty payload
-/// (pure ACKs), or SYN/RST/URG/CWR flags.
+/// (pure ACKs), or SYN/RST/URG/CWR flags. Checksums are not verified
+/// here; [`TcpGroBatch::append`] does that last, see [`checksums_valid`].
 fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
-    use pnet_packet::ip::IpNextHeaderProtocols;
-    use pnet_packet::ipv4::{Ipv4Flags, Ipv4Packet};
-    use pnet_packet::tcp::TcpPacket;
+    use pnet_packet::ipv4::Ipv4Flags;
 
     if pkt.len() < IPV4_HEADER_SIZE + TCP_HEADER_SIZE {
         return None;
     }
-    // Version 4 with IHL == 5 in a single byte; IHL > 5 (IP options)
-    // is rejected to keep all header offsets fixed. Raw bytes here
-    // (as in `gso::calc_hdr_len`): the version has to be known before
-    // an `Ipv4Packet` may be constructed.
-    if pkt[0] != 0x45 {
+    // `Ipv4Packet::new` checks only the buffer length, so the view is
+    // built first and the version validated through it. IHL > 5 (IP
+    // options) is rejected to keep all header offsets fixed.
+    let ip = Ipv4Packet::new(pkt)?;
+    if ip.get_version() != 4 || ip.get_header_length() != 5 {
         return None;
     }
-    // The length check above guarantees both views can be built.
-    let ip = Ipv4Packet::new(pkt)?;
     if ip.get_total_length() as usize != pkt.len() {
         return None;
     }
@@ -96,12 +98,6 @@ fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
     if flags & TCP_NO_COALESCE_FLAGS != 0 {
         return None;
     }
-    // Most expensive check last: a segment with a bad TCP checksum must not
-    // coalesce, or `take` would reseed a valid checksum over corrupt bytes.
-    // See [`tcp_checksum_valid`].
-    if !tcp_checksum_valid(pkt) {
-        return None;
-    }
     let seq = tcp.get_sequence();
     Some(SegInfo {
         tcp_hdr_len,
@@ -111,15 +107,27 @@ fn parse_coalescable(pkt: &[u8]) -> Option<SegInfo> {
     })
 }
 
+/// Verify a segment's IPv4 header and TCP checksums before it may join a
+/// batch. Kernel GRO validates both (`inet_gro_receive`'s `ip_fast_csum`,
+/// then `tcp4_gro_receive`) so a corrupt segment cannot be laundered:
+/// [`TcpGroBatch::take`] recomputes the IP header checksum and reseeds
+/// `NEEDS_CSUM`, which makes the kernel *complete* the TCP checksum rather
+/// than check it, so a bad segment merged here would reach the app with
+/// freshly-valid checksums over corrupt bytes. The TCP checksum covers the
+/// pseudo-header but not TTL/TOS/id/flags, hence the separate IP check;
+/// later segments' IP headers are also covered by the header identity
+/// compare against the first. A segment that fails is left for the caller
+/// to write directly, where a plain (non-`NEEDS_CSUM`) write lets the
+/// kernel validate and drop it and TCP retransmits. `pkt` is a full
+/// IHL==5 IPv4 TCP frame that passed [`parse_coalescable`]. The most
+/// expensive check, so run last.
+fn checksums_valid(pkt: &[u8]) -> bool {
+    let ip = Ipv4Packet::new(pkt).expect("parse_coalescable checked the length");
+    pnet_packet::ipv4::checksum(&ip) == ip.get_checksum() && tcp_checksum_valid(pkt)
+}
+
 /// Verify a segment's TCP checksum (pseudo-header + TCP header + payload).
-/// Kernel GRO validates before coalescing so a corrupt segment cannot be
-/// laundered: [`TcpGroBatch::take`] reseeds `NEEDS_CSUM`, which makes the
-/// kernel *complete* the checksum rather than check it, so a bad segment
-/// merged here would reach the app with a freshly-valid checksum over
-/// corrupt bytes. A segment that fails is left for the caller to write
-/// directly, where a plain (non-`NEEDS_CSUM`) write lets the kernel
-/// validate and drop it and TCP retransmits. `pkt` is a full IHL==5 IPv4
-/// TCP frame.
+/// See [`checksums_valid`].
 fn tcp_checksum_valid(pkt: &[u8]) -> bool {
     let tcp_len = (pkt.len() - IPV4_HEADER_SIZE) as u16;
     let mut c = internet_checksum::Checksum::new();
@@ -129,6 +137,35 @@ fn tcp_checksum_valid(pkt: &[u8]) -> bool {
     // A valid segment folds to 0xFFFF, whose complement (what `checksum`
     // returns) is zero.
     c.checksum() == [0, 0]
+}
+
+/// `pkt`'s IPv4 + TCP header (`hdr_len` bytes) with every field that may
+/// differ between segments of one train zeroed: IP total length, id and
+/// checksum, TCP sequence and checksum, and the PSH/FIN bits. Bytes past
+/// `hdr_len` are zero. Two segments with equal `hdr_len` belong to the
+/// same train iff their normalized headers are equal.
+///
+/// Deliberately an exclusion list over the whole header, not a field
+/// comparison: every byte except the named exclusions is compared, so any
+/// unanticipated field forces a safe flush (a list of compared fields
+/// would splice two TCP states on a forgotten one), and the variable-length
+/// TCP options region is covered, as the kernel also compares it byte-wise.
+fn normalized_hdr(pkt: &[u8], hdr_len: usize) -> [u8; MAX_HDR_LEN] {
+    let mut out = [0u8; MAX_HDR_LEN];
+    out[..hdr_len].copy_from_slice(&pkt[..hdr_len]);
+    {
+        let mut ip = MutableIpv4Packet::new(&mut out[..IPV4_HEADER_SIZE])
+            .expect("buffer holds a full IPv4 header");
+        ip.set_total_length(0);
+        ip.set_identification(0);
+        ip.set_checksum(0);
+    }
+    let mut tcp = MutableTcpPacket::new(&mut out[IPV4_HEADER_SIZE..hdr_len])
+        .expect("buffer holds a full TCP header");
+    tcp.set_sequence(0);
+    tcp.set_checksum(0);
+    tcp.set_flags(tcp.get_flags() & !TCP_PSH_FIN);
+    out
 }
 
 /// Folded one's-complement sum of the TCP pseudo header, *not*
@@ -164,6 +201,9 @@ pub struct TcpGroBatch {
     /// PSH/FIN bits accumulated from absorbed segments, OR'd into the
     /// superpacket's flags by [`Self::take`].
     psh_fin: u8,
+    /// First segment's [`normalized_hdr`], cached at seed time so each
+    /// later segment normalizes only its own header.
+    norm_hdr: [u8; MAX_HDR_LEN],
 }
 
 impl TcpGroBatch {
@@ -176,6 +216,7 @@ impl TcpGroBatch {
             tcp_hdr_len: 0,
             next_seq: 0,
             psh_fin: 0,
+            norm_hdr: [0; MAX_HDR_LEN],
         }
     }
 
@@ -204,7 +245,7 @@ impl TcpGroBatch {
             // immediately with its bytes untouched, so absorbing it
             // would copy the packet just to hand it straight back.
             // Reject it and let the caller write it directly.
-            if info.psh_fin != 0 {
+            if info.psh_fin != 0 || !checksums_valid(pkt) {
                 return GroAppend::Incompatible;
             }
             debug_assert!(self.buf.is_empty());
@@ -217,6 +258,7 @@ impl TcpGroBatch {
             self.tcp_hdr_len = info.tcp_hdr_len;
             self.next_seq = info.seq.wrapping_add(info.payload_len as u32);
             self.psh_fin = 0;
+            self.norm_hdr = normalized_hdr(pkt, IPV4_HEADER_SIZE + info.tcp_hdr_len);
             return GroAppend::Coalesced;
         }
 
@@ -226,34 +268,9 @@ impl TcpGroBatch {
             return GroAppend::Incompatible;
         }
         let hdr_len = IPV4_HEADER_SIZE + self.tcp_hdr_len;
-        // The two comparisons below are deliberately raw byte ranges — a
-        // whitelist of *exclusions*, not field accessors — and must stay
-        // that way: they are exhaustive by construction (every byte except
-        // the few excluded is compared, so any unanticipated field forces a
-        // safe flush; a blacklist of accessors would splice two TCP states
-        // on a forgotten field), and they cover the variable-length TCP
-        // options region, which the kernel also compares byte-wise.
-        //
-        // IPv4 bytes must match except total_length (2..4), id (4..6) and
-        // checksum (10..12): same addresses, TOS, TTL, DF and flow.
-        let b = &self.buf;
-        if pkt[0..2] != b[0..2] || pkt[6..10] != b[6..10] || pkt[12..20] != b[12..20] {
-            return GroAppend::Incompatible;
-        }
-        // TCP header bytes must match except seq (4..8), checksum
-        // (16..18) and the PSH/FIN bits of the flags byte — same
-        // ports, ack, window, urgent pointer and options, or the
-        // kernel would have flushed.
-        let (p, q) = (
-            &pkt[IPV4_HEADER_SIZE..hdr_len],
-            &b[IPV4_HEADER_SIZE..hdr_len],
-        );
-        if p[0..4] != q[0..4]
-            || p[8..13] != q[8..13]
-            || (p[13] & !TCP_PSH_FIN) != (q[13] & !TCP_PSH_FIN)
-            || p[14..16] != q[14..16]
-            || p[18..] != q[18..]
-        {
+        // Same addresses, TOS, TTL, DF, ports, ack, window, urgent pointer
+        // and options, or the kernel would have flushed.
+        if normalized_hdr(pkt, hdr_len) != self.norm_hdr {
             return GroAppend::Incompatible;
         }
 
@@ -270,6 +287,12 @@ impl TcpGroBatch {
         }
         // The superpacket's IP total_length is a u16.
         if self.buf.len() + info.payload_len > IP_MAX_DATAGRAM_SIZE {
+            return GroAppend::Incompatible;
+        }
+        // Last, after every cheap check, so a segment rejected above does
+        // not pay a payload pass (and is not checksummed twice when the
+        // table re-offers it as a fresh seed).
+        if !checksums_valid(pkt) {
             return GroAppend::Incompatible;
         }
 
@@ -290,18 +313,32 @@ impl TcpGroBatch {
     }
 
     /// True iff the batch holds segments and `pkt` belongs to the same
-    /// flow as its first segment: IPv4 with IHL 5, protocol TCP, long
-    /// enough to carry the ports, and src/dst addresses (bytes 12..20)
-    /// plus TCP ports (bytes 20..24) byte-equal to the batch's.
+    /// flow as its first segment: IPv4 with IHL 5, protocol TCP, a full
+    /// TCP header, and src/dst addresses plus TCP ports equal to the
+    /// batch's.
     ///
     /// A cheap identity test only — [`Self::append`] still performs
     /// the full coalescability checks.
     fn matches_flow(&self, pkt: &[u8]) -> bool {
-        self.segs != 0
-            && pkt.len() >= IPV4_HEADER_SIZE + 4
-            && pkt[0] == 0x45
-            && pkt[9] == IPPROTO_TCP
-            && pkt[12..IPV4_HEADER_SIZE + 4] == self.buf[12..IPV4_HEADER_SIZE + 4]
+        if self.segs == 0 {
+            return false;
+        }
+        let (Some(ip), Some(tcp)) = (
+            Ipv4Packet::new(pkt),
+            pkt.get(IPV4_HEADER_SIZE..).and_then(TcpPacket::new),
+        ) else {
+            return false;
+        };
+        let first = Ipv4Packet::new(&self.buf).expect("batch holds a full IPv4 header");
+        let first_tcp =
+            TcpPacket::new(&self.buf[IPV4_HEADER_SIZE..]).expect("batch holds a full TCP header");
+        ip.get_version() == 4
+            && ip.get_header_length() == 5
+            && ip.get_next_level_protocol() == IpNextHeaderProtocols::Tcp
+            && ip.get_source() == first.get_source()
+            && ip.get_destination() == first.get_destination()
+            && tcp.get_source() == first_tcp.get_source()
+            && tcp.get_destination() == first_tcp.get_destination()
     }
 
     /// Take the assembled superpacket and its virtio header, resetting
@@ -336,7 +373,6 @@ impl TcpGroBatch {
         // IP-layer fixups: total length over the whole aggregate,
         // first segment's id kept, header checksum recomputed.
         {
-            use pnet_packet::ipv4::MutableIpv4Packet;
             let total_len = buf.len() as u16;
             let mut ip = MutableIpv4Packet::new(&mut buf[..IPV4_HEADER_SIZE])
                 .expect("batch buffer always holds a full IPv4 header");
@@ -356,7 +392,6 @@ impl TcpGroBatch {
         // which the fixups below touch.
         let partial = pseudo_header_partial(&buf);
         {
-            use pnet_packet::tcp::MutableTcpPacket;
             let mut tcp = MutableTcpPacket::new(&mut buf[IPV4_HEADER_SIZE..])
                 .expect("batch buffer always holds a full TCP header");
             tcp.set_flags(tcp.get_flags() | psh_fin);
@@ -751,6 +786,32 @@ mod tests {
         *corrupt2.last_mut().unwrap() ^= 0xFF;
         assert_eq!(batch.append(&corrupt2), GroAppend::Incompatible);
         // Only the one good segment is in the batch.
+        let (sp, _) = batch.take().unwrap();
+        assert_eq!(sp.len(), IPV4_HEADER_SIZE + TCP_HEADER_SIZE + p);
+    }
+
+    /// A bad IPv4 header checksum blocks coalescing even though the TCP
+    /// checksum (which does not cover TTL or the IP checksum field) is
+    /// valid: `take` would otherwise recompute a valid IP checksum.
+    #[test]
+    fn bad_ip_checksum_not_coalesced() {
+        let p = 400usize;
+        let seq0 = 0x9000_0000u32;
+
+        // As the opening segment: a corrupt TTL, rejected.
+        let mut corrupt = Seg::new(seq0, 1, p).build();
+        corrupt[8] ^= 0xFF;
+        let mut batch = TcpGroBatch::new();
+        assert_eq!(batch.append(&corrupt), GroAppend::Incompatible);
+        assert!(batch.is_empty(), "corrupt opener must not start a batch");
+
+        // Mid-train: the IP checksum field is excluded from the header
+        // identity compare, so only the checksum check rejects it.
+        let good = Seg::new(seq0, 1, p).build();
+        assert_eq!(batch.append(&good), GroAppend::Coalesced);
+        let mut corrupt2 = Seg::new(seq0 + p as u32, 2, p).build();
+        corrupt2[10] ^= 0xFF;
+        assert_eq!(batch.append(&corrupt2), GroAppend::Incompatible);
         let (sp, _) = batch.take().unwrap();
         assert_eq!(sp.len(), IPV4_HEADER_SIZE + TCP_HEADER_SIZE + p);
     }
