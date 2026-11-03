@@ -845,6 +845,8 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
         // flush must run even on error, so capture the result and propagate
         // it after the lock is dropped.
         inside_io.gro_open();
+        let mut wire_pkts = 0usize;
+        let mut frames_decoded = 0usize;
         let result = {
             let mut conn = conn.lock().unwrap();
             let mut acc = Ok(());
@@ -860,14 +862,17 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                 };
                 segments.clear();
                 split_gro_segments(&mut bufs[i], seg_size, &mut segments);
+                wire_pkts += segments.len();
                 let pkts = segments
                     .iter_mut()
                     .map(|b| OutsidePacket::Wire(b, connection_type));
-                let r =
-                    conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
-                if let Err(e) = r {
-                    acc = Err(e);
-                    break;
+                match conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))
+                {
+                    Ok(n) => frames_decoded += n,
+                    Err(e) => {
+                        acc = Err(e);
+                        break;
+                    }
                 }
             }
             // Flush while the conn lock is still held. `send()` only runs
@@ -881,6 +886,14 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
         };
         result?;
 
+        // As in `outside_io_task`: `recv_gro_batch` charges no cooperative
+        // budget, so charge one unit per wire datagram (each GRO segment
+        // is one) or a sustained download starves the inside loop and the
+        // ticker. Runs after the conn lock is dropped.
+        for _ in 0..wire_pkts {
+            tokio::task::coop::consume_budget().await;
+        }
+
         // Reset the buffers consumed this round. Drop the split-off
         // views first so the last buffer's slab can be reused.
         segments.clear();
@@ -889,7 +902,11 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
             b.reserve(RECV_CAP);
         }
 
-        keepalive.outside_activity().await
+        // Only traffic that decoded proves the peer alive; junk or
+        // undecryptable datagrams must not hold off the keepalive timeout.
+        if frames_decoded > 0 {
+            keepalive.outside_activity().await
+        }
     }
 }
 
