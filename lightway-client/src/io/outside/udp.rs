@@ -286,37 +286,56 @@ impl Udp {
         }
     }
 
-    /// Map the result of the GSO `sendmsg` into an [`IOCallbackResult`],
-    /// swallowing the same transient errors the per-datagram `send` path
-    /// does so the TLS socket does not enter the error state. `len` is the
-    /// batch's total byte count, reported as "sent" for the swallowed
-    /// cases — the aggregate is treated as delivered and DTLS
-    /// retransmission covers it rather than live-locking the TLS record.
-    #[cfg(linux)]
-    fn map_send_result(res: std::io::Result<usize>, len: usize) -> IOCallbackResult<usize> {
+    /// Map a send result into an [`IOCallbackResult`], applying the error
+    /// policy shared by the per-datagram [`OutsideIOSendCallback::send`]
+    /// and GSO [`OutsideIOSendCallback::send_gso`] paths. `len` is the
+    /// requested byte count, reported as "sent" for the swallowed transient
+    /// errors so TLS does not live-lock resending the same record; DTLS
+    /// retransmission covers the loss. Platform-specific swallow cases are
+    /// matched by `send` before delegating here.
+    fn map_send_result(&self, res: std::io::Result<usize>, len: usize) -> IOCallbackResult<usize> {
         match res {
-            Ok(nr) => IOCallbackResult::Ok(nr),
+            Ok(nr) => {
+                self.swallowed_sends.store(0, Ordering::Relaxed);
+                IOCallbackResult::Ok(nr)
+            }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
                 IOCallbackResult::WouldBlock
             }
-            // Server may not be listening yet; swallow so DTLS retransmits
-            // rather than live-locking the TLS record on repeated resends.
             Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
+                // Possibly the server isn't listening (yet).
+                //
+                // Swallow the error so the TLS socket does not
+                // enter the error state, and DTLS would handle the retransmission as well.
+                //
+                // This way we can continue if/when the server shows up.
+                //
+                // Returning the number of bytes requested to be sent to mock
+                // that the send is successful.
+                // Otherwise, TLS perceives that no data is sent and try
+                // to send the same data again, creating a live-lock until
+                // the network is reachable.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(len)
             }
-            // Transient around a network change.
             Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
+                // This case indicates network unreachable error.
+                // Possibly there is a network change at the moment.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(len)
             }
-            // Send buffer momentarily full under load.
-            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS)) => {
+            Err(err) if matches!(err.raw_os_error(), Some(ENOBUFS)) => {
+                // No buffer space available
+                // UDP sockets may have this error when the system is overloaded.
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(len)
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(len)
             }
             Err(err) => {
-                tracing::warn!("Outside IO GSO send failed: {err:?}");
+                tracing::warn!("Outside IO Send failed: {err:?}");
                 IOCallbackResult::Err(err)
             }
         }
@@ -537,45 +556,6 @@ impl OutsideIOSendCallback for Udp {
         let result = self.sock.try_send_to(buf, self.peer_addr);
 
         match result {
-            Ok(nr) => {
-                self.swallowed_sends.store(0, Ordering::Relaxed);
-                IOCallbackResult::Ok(nr)
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                IOCallbackResult::WouldBlock
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
-                // Possibly the server isn't listening (yet).
-                //
-                // Swallow the error so the TLS socket does not
-                // enter the error state, and DTLS would handle the retransmission as well.
-                //
-                // This way we can continue if/when the server shows up.
-                //
-                // Returning the number of bytes requested to be sent to mock
-                // that the send is successful.
-                // Otherwise, TLS perceives that no data is sent and try
-                // to send the same data again, creating a live-lock until
-                // the network is reachable.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
-                // This case indicates network unreachable error.
-                // Possibly there is a network change at the moment.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.raw_os_error(), Some(ENOBUFS)) => {
-                // No buffer space available
-                // UDP sockets may have this error when the system is overloaded.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
             #[cfg(apple)]
             Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
                 // The source address is no longer valid (e.g. Switched WiFi hotspots)
@@ -661,10 +641,7 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
-            Err(err) => {
-                tracing::warn!("Outside IO Send failed: {err:?}");
-                IOCallbackResult::Err(err)
-            }
+            result => self.map_send_result(result, buf.len()),
         }
     }
 
@@ -706,8 +683,9 @@ impl OutsideIOSendCallback for Udp {
         // Note `map_send_result` swallows several transient errors as
         // `Ok(len)` so TLS does not live-lock resending the same record.
         // That contract was written for a single datagram; applied here
-        // it reports an entire discarded batch as fully sent.
-        Self::map_send_result(res, total_len)
+        // it reports an entire discarded batch as fully sent, so the
+        // swallow is logged (rate-limited) like a per-datagram one.
+        self.map_send_result(res, total_len)
     }
 
     #[cfg(not(linux))]
