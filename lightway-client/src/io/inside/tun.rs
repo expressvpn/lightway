@@ -1,7 +1,7 @@
 #[cfg(linux)]
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 #[cfg(feature = "io-uring")]
 use std::time::Duration;
@@ -131,6 +131,9 @@ struct Gro {
     /// ordering suffices.
     open: AtomicBool,
     table: Mutex<TcpGroTable>,
+    /// Consecutive dropped superpacket writes, reset by a successful one;
+    /// rate-limits the drop log (see [`Gro::write_super`]).
+    dropped_supers: AtomicU64,
 }
 
 #[cfg(linux)]
@@ -139,6 +142,7 @@ impl Gro {
         Self {
             open: AtomicBool::new(false),
             table: Mutex::new(TcpGroTable::new()),
+            dropped_supers: AtomicU64::new(0),
         }
     }
 
@@ -158,7 +162,7 @@ impl Gro {
         self.open.store(false, Ordering::Relaxed);
         let mut table = self.table.lock().unwrap();
         for (pkt, hdr) in table.drain() {
-            write_super(tun, pkt, hdr);
+            self.write_super(tun, pkt, hdr);
         }
     }
 
@@ -169,13 +173,14 @@ impl Gro {
             return tun.try_send(buf);
         }
         let mut table = self.table.lock().unwrap();
-        Self::coalesce_send(tun, &mut table, buf)
+        self.coalesce_send(tun, &mut table, buf)
     }
 
     /// Route a packet through the GRO coalescer. Returns `Ok(len)`
     /// whenever the table consumed the packet — core treats that as
     /// sent.
     fn coalesce_send(
+        &self,
         tun: &impl TunSend,
         table: &mut TcpGroTable,
         buf: BytesMut,
@@ -186,7 +191,7 @@ impl Gro {
         // packet to preserve within-flow delivery order. Pinned by
         // `flushed_superpackets_are_written_before_the_direct_write`.
         for (pkt, hdr) in result.flushes {
-            write_super(tun, pkt, hdr);
+            self.write_super(tun, pkt, hdr);
         }
         if result.consumed {
             IOCallbackResult::Ok(len)
@@ -194,24 +199,30 @@ impl Gro {
             tun.try_send(buf)
         }
     }
-}
 
-/// Write one coalesced superpacket to the TUN. Failures are logged and
-/// dropped (datagram semantics — the absorbed sends already reported
-/// success). The log carries the segment count (one dropped superpacket is
-/// up to 64 segments), so the loss amplification is visible. A
-/// single-segment batch carries a default header, which `try_send_gso`
-/// writes as the usual zeroed prefix.
-#[cfg(linux)]
-fn write_super(tun: &impl TunSend, pkt: BytesMut, hdr: VirtioNetHdr) {
-    let segments = superpacket_segments(pkt.len(), &hdr);
-    match tun.try_send_gso(pkt, &hdr) {
-        IOCallbackResult::Ok(_) => {}
-        IOCallbackResult::WouldBlock => {
-            tracing::warn!("Dropping coalesced GRO batch of {segments} segments: TUN would block");
-        }
-        IOCallbackResult::Err(err) => {
-            tracing::warn!("Dropping coalesced GRO batch of {segments} segments: {err}");
+    /// Write one coalesced superpacket to the TUN. Failures are logged and
+    /// dropped (datagram semantics — the absorbed sends already reported
+    /// success). The log carries the segment count (one dropped superpacket
+    /// is up to 64 segments), so the loss amplification is visible. A TUN
+    /// that keeps blocking under load would otherwise warn on every batch,
+    /// so only the 1st, 2nd, 4th, ... drop of each consecutive run is
+    /// logged. A single-segment batch carries a default header, which
+    /// `try_send_gso` writes as the usual zeroed prefix.
+    fn write_super(&self, tun: &impl TunSend, pkt: BytesMut, hdr: VirtioNetHdr) {
+        let segments = superpacket_segments(pkt.len(), &hdr);
+        let err = match tun.try_send_gso(pkt, &hdr) {
+            IOCallbackResult::Ok(_) => {
+                self.dropped_supers.store(0, Ordering::Relaxed);
+                return;
+            }
+            IOCallbackResult::WouldBlock => "TUN would block".to_string(),
+            IOCallbackResult::Err(err) => err.to_string(),
+        };
+        let count = self.dropped_supers.fetch_add(1, Ordering::Relaxed) + 1;
+        if count.is_power_of_two() {
+            tracing::warn!(
+                "Dropping coalesced GRO batch of {segments} segments ({count} consecutive): {err}"
+            );
         }
     }
 }
@@ -515,13 +526,14 @@ mod tests {
     #[test]
     fn flushed_superpackets_are_written_before_the_direct_write() {
         let tun = FakeTun::new();
+        let gro = Gro::new();
         let mut table = TcpGroTable::new();
 
         // Two in-order full-MSS segments coalesce and stay pending.
         for seq in [0, MSS as u32] {
             let pkt = data(1234, seq);
             let len = pkt.len();
-            let r = Gro::coalesce_send(&tun, &mut table, pkt);
+            let r = gro.coalesce_send(&tun, &mut table, pkt);
             assert!(matches!(r, IOCallbackResult::Ok(n) if n == len));
         }
         assert!(
@@ -533,7 +545,7 @@ mod tests {
         // flushed and the ACK written directly.
         let ack = pure_ack(1234, 2 * MSS as u32);
         let ack_bytes = ack.to_vec();
-        let r = Gro::coalesce_send(&tun, &mut table, ack);
+        let r = gro.coalesce_send(&tun, &mut table, ack);
         assert!(matches!(r, IOCallbackResult::Ok(n) if n == ack_bytes.len()));
 
         assert_eq!(
