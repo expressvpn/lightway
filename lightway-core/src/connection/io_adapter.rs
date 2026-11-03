@@ -105,7 +105,11 @@ impl GsoBuffer {
 /// byte budget alone does not bound segments — stride 256 packs 255. Chunks
 /// split on segment boundaries so `UDP_SEGMENT`'s uniform stride holds per
 /// call. A mid-batch failure is surfaced for the caller's log and the
-/// remainder dropped; the peer's transport recovers the loss.
+/// remainder dropped; the peer's transport recovers the loss — except when
+/// that failure just latched GSO off on the socket
+/// ([`crate::OutsideIOSendCallback::gso_enabled`] now false), where the failed
+/// chunk and the rest are resent one datagram at a time so the switch to
+/// the fallback path loses nothing.
 #[cfg(target_os = "linux")]
 fn send_gso_chunked(
     io: &OutsideIOSendCallbackArg,
@@ -118,10 +122,44 @@ fn send_gso_chunked(
     let entries_per_send = segs_per_send * entries_per_seg;
 
     // Note a failure at chunk index > 0 means the earlier chunks already
-    // reached the wire and the remainder never will.
-    for chunk in iovs.chunks(entries_per_send) {
+    // reached the wire and the remainder never will, unless resent below.
+    for (idx, chunk) in iovs.chunks(entries_per_send).enumerate() {
         match io.send_gso(chunk, stride) {
             IOCallbackResult::Ok(_) => continue,
+            IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+            // The caller only batches while GSO is enabled, so a latch
+            // seen here was tripped by this very send: the unsent segments
+            // are intact, already encrypted and framed.
+            IOCallbackResult::Err(_) if !io.gso_enabled() => {
+                return send_segments_individually(
+                    io,
+                    &iovs[idx * entries_per_send..],
+                    entries_per_seg,
+                );
+            }
+            IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+        }
+    }
+    IOCallbackResult::Ok(())
+}
+
+/// Send GSO wire segments as plain datagrams, one per segment of
+/// `entries_per_seg` iovec entries. Used once per socket, when the egress
+/// path rejects `UDP_SEGMENT` mid-flush.
+#[cfg(target_os = "linux")]
+fn send_segments_individually(
+    io: &OutsideIOSendCallbackArg,
+    iovs: &[std::io::IoSlice<'_>],
+    entries_per_seg: usize,
+) -> IOCallbackResult<()> {
+    let mut seg = Vec::new();
+    for entries in iovs.chunks(entries_per_seg) {
+        seg.clear();
+        for e in entries {
+            seg.extend_from_slice(e);
+        }
+        match io.send(&seg) {
+            IOCallbackResult::Ok(_) => {}
             IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
             IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
         }
@@ -631,27 +669,54 @@ mod tests {
     type FakeGsoState = (VecDeque<IOCallbackResult<usize>>, Vec<(usize, u16)>);
 
     /// Records every `send_gso` call as `(total_bytes, gso_size)`,
-    /// optionally failing calls from a scripted queue first.
+    /// optionally failing calls from a scripted queue first. With
+    /// `latch_on_err`, a failing `send_gso` also latches GSO off (as the
+    /// real socket does for `EIO`) and plain `send`s are recorded.
     #[cfg(target_os = "linux")]
-    struct FakeGsoIOSend(Mutex<FakeGsoState>);
+    struct FakeGsoIOSend {
+        state: Mutex<FakeGsoState>,
+        latch_on_err: bool,
+        latched: std::sync::atomic::AtomicBool,
+        sends: Mutex<Vec<Vec<u8>>>,
+    }
 
     #[cfg(target_os = "linux")]
     impl FakeGsoIOSend {
+        fn build(fakes: VecDeque<IOCallbackResult<usize>>, latch_on_err: bool) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new((fakes, Vec::new())),
+                latch_on_err,
+                latched: Default::default(),
+                sends: Mutex::new(Vec::new()),
+            })
+        }
         fn new() -> Arc<Self> {
-            Arc::new(Self(Mutex::new((VecDeque::new(), Vec::new()))))
+            Self::build(VecDeque::new(), false)
         }
         fn with_fakes(fakes: VecDeque<IOCallbackResult<usize>>) -> Arc<Self> {
-            Arc::new(Self(Mutex::new((fakes, Vec::new()))))
+            Self::build(fakes, false)
+        }
+        fn latching(fakes: VecDeque<IOCallbackResult<usize>>) -> Arc<Self> {
+            Self::build(fakes, true)
         }
         fn calls(&self) -> Vec<(usize, u16)> {
-            self.0.lock().unwrap().1.clone()
+            self.state.lock().unwrap().1.clone()
+        }
+        fn sends(&self) -> Vec<Vec<u8>> {
+            self.sends.lock().unwrap().clone()
         }
     }
 
     #[cfg(target_os = "linux")]
     impl OutsideIOSendCallback for FakeGsoIOSend {
-        fn send(&self, _buf: &[u8]) -> IOCallbackResult<usize> {
-            std::unreachable!("Should not be testing send");
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            assert!(self.latch_on_err, "Should not be testing send");
+            self.sends.lock().unwrap().push(buf.to_vec());
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn gso_enabled(&self) -> bool {
+            !self.latched.load(std::sync::atomic::Ordering::Relaxed)
         }
 
         fn send_gso(
@@ -660,9 +725,16 @@ mod tests {
             gso_size: u16,
         ) -> IOCallbackResult<usize> {
             let total: usize = bufs.iter().map(|b| b.len()).sum();
-            let (fakes, calls) = &mut *self.0.lock().unwrap();
+            let (fakes, calls) = &mut *self.state.lock().unwrap();
             calls.push((total, gso_size));
             match fakes.pop_front() {
+                Some(IOCallbackResult::Err(e)) => {
+                    if self.latch_on_err {
+                        self.latched
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    IOCallbackResult::Err(e)
+                }
                 Some(r) => r,
                 None => IOCallbackResult::Ok(total),
             }
@@ -1167,5 +1239,45 @@ mod tests {
         let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
         assert!(matches!(r, IOCallbackResult::Err(e) if e.to_string() == "EMSGSIZE"));
         assert_eq!(io.calls().len(), 2);
+    }
+
+    /// When a chunk's failure latches GSO off, that chunk and every later
+    /// one are resent as plain datagrams, one per segment (header and
+    /// payload joined), and the earlier chunks are not repeated.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_latch_resends_remainder_individually() {
+        const HDR: usize = 16;
+        const PAYLOAD: usize = 1334;
+        const STRIDE: usize = HDR + PAYLOAD;
+        const SEGS: usize = 50;
+
+        let io = FakeGsoIOSend::latching(
+            vec![
+                IOCallbackResult::Ok(48 * STRIDE),
+                IOCallbackResult::Err(Error::other("EIO")),
+            ]
+            .into(),
+        );
+        let hdr = vec![0xBB; HDR];
+        let payload = vec![0xAA; PAYLOAD];
+        let mut iovs: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(SEGS * 2);
+        for _ in 0..SEGS {
+            iovs.push(std::io::IoSlice::new(&hdr));
+            iovs.push(std::io::IoSlice::new(&payload));
+        }
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 2, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+        assert_eq!(io.calls().len(), 2, "no GSO send after the latch");
+
+        let sends = io.sends();
+        assert_eq!(sends.len(), SEGS - 48, "only the unsent segments");
+        let mut expected = hdr.clone();
+        expected.extend_from_slice(&payload);
+        for s in sends {
+            assert_eq!(s, expected);
+        }
     }
 }
