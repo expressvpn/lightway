@@ -89,6 +89,7 @@ pub struct MockTransport {
     caps: TransportCaps,
     pending: BytesMut,
     records: VecDeque<BytesMut>,
+    handshakes: VecDeque<PollResult<()>>,
 }
 
 impl MockTransport {
@@ -98,6 +99,7 @@ impl MockTransport {
             caps,
             pending: BytesMut::new(),
             records: VecDeque::new(),
+            handshakes: VecDeque::new(),
         }
     }
 }
@@ -112,7 +114,7 @@ impl Transport for MockTransport {
     }
 
     fn handshake(&mut self) -> PollResult<()> {
-        Ok(Poll::Ready(()))
+        self.handshakes.pop_front().unwrap_or(Ok(Poll::Ready(())))
     }
 
     fn feed(&mut self, buf: &[u8]) {
@@ -352,15 +354,17 @@ mod tests {
     }
 
     fn pair(caps: TransportCaps) -> Pair {
-        pair_with(caps, None, 0)
+        pair_with(caps, None, 0, Vec::new())
     }
 
     /// `codecs` are the client and the server codecs. The first
-    /// `blocked_sends` client sends block.
+    /// `blocked_sends` client sends block. The first server handshakes
+    /// return `server_handshakes`.
     fn pair_with(
         caps: TransportCaps,
         codecs: Option<(Arc<BlackHole>, Arc<BlackHole>)>,
         blocked_sends: usize,
+        server_handshakes: Vec<PollResult<()>>,
     ) -> Pair {
         let (client_io, server_io) = MockOutsideIo::pair();
         client_io.block_sends(blocked_sends);
@@ -404,7 +408,12 @@ mod tests {
             .with_inside_pkt_codec(server_codec)
             .accept(
                 (),
-                Box::new(move |_| Ok(Box::new(MockTransport::new(caps)))),
+                Box::new(move |_| {
+                    Ok(Box::new(MockTransport {
+                        handshakes: server_handshakes.into(),
+                        ..MockTransport::new(caps)
+                    }))
+                }),
             )
             .unwrap();
 
@@ -497,7 +506,7 @@ mod tests {
             Arc::new(BlackHole(AtomicBool::new(false))),
             Arc::new(BlackHole(AtomicBool::new(false))),
         );
-        let mut p = pair_with(LOSSY, Some(codecs), 0).pump_to_online();
+        let mut p = pair_with(LOSSY, Some(codecs), 0, Vec::new()).pump_to_online();
 
         p.client.set_encoding(true).unwrap();
         p.pump();
@@ -529,9 +538,44 @@ mod tests {
         assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
     }
 
+    #[test_case::test_case(&[0xEE, 1, 2, 3], true; "unknown frame type")]
+    #[test_case::test_case(&[5, 0, 10, 1, 2], false; "truncated data frame")]
+    fn a_lossy_connection_survives_a_bad_frame(bad: &[u8], fails: bool) {
+        let mut p = pair(LOSSY).pump_to_online();
+        let mut bad = BytesMut::from(bad);
+        let result = p
+            .server
+            .outside_data_received(OutsidePacket::Wire(&mut bad));
+        assert_eq!(result.is_err(), fails);
+        if let Err(err) = result {
+            assert!(!p.server.is_fatal(&err));
+        }
+
+        let mut up = BytesMut::from(&b"\x40up"[..]);
+        p.client.inside_data_received(&mut up).unwrap();
+        p.pump();
+        assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
+    }
+
+    #[test]
+    fn a_lossy_connection_drops_a_packet_that_fails_the_handshake() {
+        let handshakes = vec![
+            Ok(Poll::Pending),
+            Err(TransportError::new(false, "bad handshake packet")),
+        ];
+        let mut p = pair_with(LOSSY, None, 0, handshakes);
+        let mut bad = BytesMut::from(&[0xEE, 1, 2, 3][..]);
+        let err = p
+            .server
+            .outside_data_received(OutsidePacket::Wire(&mut bad))
+            .unwrap_err();
+        assert!(!p.server.is_fatal(&err));
+        p.pump_to_online();
+    }
+
     #[test]
     fn control_frames_queue_behind_a_blocked_stream() {
-        let mut p = pair_with(RELIABLE, None, 1);
+        let mut p = pair_with(RELIABLE, None, 1, Vec::new());
         let server_inbox = p.server_io.inbox();
         assert!(
             server_inbox.lock().unwrap().is_empty(),
@@ -547,7 +591,7 @@ mod tests {
 
     #[test]
     fn a_blocked_lossy_packet_is_dropped() {
-        let mut p = pair_with(LOSSY, None, 1);
+        let mut p = pair_with(LOSSY, None, 1, Vec::new());
         let server_inbox = p.server_io.inbox();
         assert!(server_inbox.lock().unwrap().is_empty());
 
