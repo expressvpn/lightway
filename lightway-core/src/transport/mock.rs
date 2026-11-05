@@ -529,6 +529,25 @@ mod tests {
         assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
     }
 
+    #[test_case::test_case(&[0xEE, 1, 2, 3], true; "unknown frame type")]
+    #[test_case::test_case(&[5, 0, 10, 1, 2], false; "truncated data frame")]
+    fn a_lossy_connection_survives_a_bad_frame(bad: &[u8], fails: bool) {
+        let mut p = pair(LOSSY).pump_to_online();
+        let mut bad = BytesMut::from(bad);
+        let result = p
+            .server
+            .outside_data_received(OutsidePacket::Wire(&mut bad));
+        assert_eq!(result.is_err(), fails);
+        if let Err(err) = result {
+            assert!(!p.server.is_fatal(&err));
+        }
+
+        let mut up = BytesMut::from(&b"\x40up"[..]);
+        p.client.inside_data_received(&mut up).unwrap();
+        p.pump();
+        assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
+    }
+
     #[test]
     fn control_frames_queue_behind_a_blocked_stream() {
         let mut p = pair_with(RELIABLE, None, 1);

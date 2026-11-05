@@ -1796,6 +1796,12 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         self.transport.packet_done();
+        // A packet on a lossy transport holds whole frames, so bytes
+        // left here are a bad or truncated frame. If kept, they cause
+        // every later packet to fail.
+        if self.caps.is_lossy() {
+            self.receive_buf.clear();
+        }
 
         frame_read_count_result
     }
