@@ -107,7 +107,9 @@ pub trait Transport: Send {
     fn packet_done(&mut self);
 
     /// Read decrypted frame bytes into `into`. `Pending` once no bytes
-    /// are left, until the next outside packet.
+    /// are left, until the next outside packet. On a `lossy` transport,
+    /// the bytes of one packet hold only whole frames. The connection
+    /// drops a partial frame at the end of each packet.
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize>;
 
     /// Encrypt and send frame bytes. `buf` holds exactly one Lightway

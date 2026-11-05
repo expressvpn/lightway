@@ -540,6 +540,24 @@ mod tests {
         assert!(!p.client.is_encoding_enabled());
     }
 
+    #[test_case::test_case(&[0xEE, 1, 2, 3]; "unknown frame type")]
+    #[test_case::test_case(&[5, 0, 10, 1, 2]; "truncated data frame")]
+    fn a_lossy_connection_survives_a_bad_frame(bad: &[u8]) {
+        let mut p = pair(LOSSY).pump_to_online();
+        let mut bad = BytesMut::from(bad);
+        if let Err(err) = p
+            .server
+            .outside_data_received(OutsidePacket::Wire(&mut bad))
+        {
+            assert!(!p.server.is_fatal(&err));
+        }
+
+        let mut up = BytesMut::from(&b"\x40up"[..]);
+        p.client.inside_data_received(&mut up).unwrap();
+        p.pump();
+        assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
+    }
+
     #[test_case::test_case(RELIABLE; "reliable")]
     #[test_case::test_case(LOSSY_RELIABLE_CONTROL; "lossy with reliable control")]
     fn control_frames_queue_behind_a_blocked_write(caps: TransportCaps) {
