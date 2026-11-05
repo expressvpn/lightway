@@ -1784,7 +1784,21 @@ impl<AppState: Send> Connection<AppState> {
 
         self.transport.feed(&buf[..]);
 
-        let frame_read_count_result = match self.state {
+        let frame_read_count_result = self.read_packet(hdr.map(|h| h.session));
+
+        self.transport.packet_done();
+        // A packet on a lossy transport holds whole frames, so bytes
+        // left here are a bad or truncated frame. If kept, they cause
+        // every later packet to fail.
+        if self.caps.is_lossy() {
+            self.receive_buf.clear();
+        }
+
+        frame_read_count_result
+    }
+
+    fn read_packet(&mut self, session: Option<SessionId>) -> ConnectionResult<usize> {
+        match self.state {
             State::Connecting => {
                 let res = self.transport.handshake();
                 match self.send_records_after(res)? {
@@ -1794,21 +1808,15 @@ impl<AppState: Send> Connection<AppState> {
                     }
                     Poll::Ready(_) => {
                         self.set_state(State::LinkUp)?;
-                        self.handle_messages(hdr.map(|h| h.session))
+                        self.handle_messages(session)
                     }
                 }
             }
 
-            State::LinkUp | State::Authenticating | State::Online => {
-                self.handle_messages(hdr.map(|h| h.session))
-            }
+            State::LinkUp | State::Authenticating | State::Online => self.handle_messages(session),
 
             State::Disconnecting | State::Disconnected => Err(ConnectionError::InvalidState),
-        };
-
-        self.transport.packet_done();
-
-        frame_read_count_result
+        }
     }
 
     /// Handle the frames of one received packet, adopting `session` once
