@@ -414,3 +414,16 @@ pub enum ExpresslaneState {
     /// Expresslane enabled but degraded, falling back to D/TLS
     Degraded,
 }
+
+impl ExpresslaneState {
+    /// Get string representation of expresslane state
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExpresslaneState::Disabled => "disabled",
+            ExpresslaneState::WaitingForClient => "waiting_for_client",
+            ExpresslaneState::Inactive => "inactive",
+            ExpresslaneState::Active => "active",
+            ExpresslaneState::Degraded => "degraded",
+        }
+    }
+}
