@@ -29,6 +29,7 @@ use anyhow::{Context, Result, anyhow};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use lightway_app_utils::{PacketCodecFactoryType, TunConfig, connection_ticker_cb};
+use lightway_core::TlsServerFactory;
 use lightway_core::{
     AuthMethod, BuilderPredicates, ConnectionError, ConnectionResult, IOCallbackResult,
     InsideIpConfig, MAX_IO_BATCH_SIZE, Secret, ServerContextBuilder, ipv4_update_destination,
@@ -365,7 +366,7 @@ pub(crate) fn handle_inside_io_error(conn: Arc<Connection>, result: ConnectionRe
             metrics::tun_rejected_packet_invalid_inside_packet();
         }
         Err(err) => {
-            let fatal = err.is_fatal(conn.connection_type());
+            let fatal = conn.is_fatal(&err);
             metrics::tun_rejected_packet_invalid_other(fatal);
             if fatal {
                 tracing::info!(session = ?conn.session_id(), ?err, "Inside IO error, disconnecting");
@@ -602,15 +603,19 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         }
     };
 
-    let ctx = ServerContextBuilder::new(
+    let transport = TlsServerFactory::new(
         (&connection_type).into(),
         server_cert,
         server_key,
+        config.enable_pqc,
+    )?;
+
+    let ctx = ServerContextBuilder::new(
         auth,
         ip_manager.clone(),
         inside_io.clone().into_io_send_callback(),
         connection_ticker_cb,
-    )?
+    )
     .with_key_update_interval(config.key_update_interval)
     .when(config.enable_expresslane, |b| {
         b.with_expresslane(config.expresslane_keys_rotation_interval)
@@ -621,7 +626,6 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
     .when(config.expresslane_metrics.is_some(), |b| {
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
     })
-    .try_when(config.enable_pqc, |b| b.enable_pq_crypto())?
     .with_inside_plugins(config.inside_plugins)
     .with_outside_plugins(config.outside_plugins)
     .build()?;
@@ -667,35 +671,37 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
         tokio::spawn(offload_events::run(conn_manager.clone(), events));
     }
 
-    let mut server: Box<dyn Server> = match connection_type {
-        ServerConnectionMode::Datagram(may_be_sock) => {
-            let udp_io = io::outside::UdpIo::new(
-                config.bind_address,
-                config.udp_buffer_size,
-                config.enable_batch_receive,
-                config.enable_batch_send,
-                may_be_sock,
-            )
-            .await?;
-            Box::new(io::outside::DatagramServer::new(
-                Box::new(udp_io),
-                conn_manager.clone(),
-            ))
-        }
-        ServerConnectionMode::DatagramIo(outside_io) => Box::new(io::outside::DatagramServer::new(
-            outside_io,
-            conn_manager.clone(),
-        )),
-        ServerConnectionMode::Stream(may_be_sock) => Box::new(
-            io::outside::TcpServer::new(
-                conn_manager.clone(),
-                config.bind_address,
-                config.proxy_protocol,
-                may_be_sock,
-            )
-            .await?,
-        ),
-    };
+    let mut server: Box<dyn Server> =
+        match connection_type {
+            ServerConnectionMode::Datagram(may_be_sock) => {
+                let udp_io = io::outside::UdpIo::new(
+                    config.bind_address,
+                    config.udp_buffer_size,
+                    config.enable_batch_receive,
+                    config.enable_batch_send,
+                    may_be_sock,
+                )
+                .await?;
+                Box::new(io::outside::DatagramServer::new(
+                    Box::new(udp_io),
+                    transport,
+                    conn_manager.clone(),
+                ))
+            }
+            ServerConnectionMode::DatagramIo(outside_io) => Box::new(
+                io::outside::DatagramServer::new(outside_io, transport, conn_manager.clone()),
+            ),
+            ServerConnectionMode::Stream(may_be_sock) => Box::new(
+                io::outside::TcpServer::new(
+                    conn_manager.clone(),
+                    config.bind_address,
+                    transport,
+                    config.proxy_protocol,
+                    may_be_sock,
+                )
+                .await?,
+            ),
+        };
 
     let inside_io_loop: JoinHandle<anyhow::Result<()>> = {
         if gso {

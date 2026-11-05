@@ -1,23 +1,27 @@
 use bytes::BytesMut;
 use thiserror::Error;
 
-use crate::{ConnectionType, Header, PluginResult, plugin::PluginList};
+use crate::{Header, PluginResult, plugin::PluginList};
 
 #[derive(Debug)]
 /// Packet structure used by application to inject outside packets into lightway-core
 pub enum OutsidePacket<'pkt> {
     /// Opaque wire packet, before running plugin chain
-    Wire(&'pkt mut BytesMut, ConnectionType),
-    /// Raw TCP frame, after running plugin chain
+    Wire(&'pkt mut BytesMut),
+    /// Frame without a wire header, after running plugin chain. A
+    /// transport without [`crate::TransportCaps::wire_header`] gets
+    /// this variant.
     TcpFrame(&'pkt mut BytesMut),
-    /// Raw UDP frame, after running plugin chain
+    /// Frame with its parsed wire header, after running plugin chain.
+    /// A transport with [`crate::TransportCaps::wire_header`] gets this
+    /// variant.
     UdpFrame(&'pkt mut BytesMut, Header),
 }
 
 impl<'pkt> OutsidePacket<'pkt> {
     pub(crate) fn into_payload(self) -> Option<&'pkt mut BytesMut> {
         match self {
-            Self::Wire(_, _) => None,
+            Self::Wire(_) => None,
             Self::TcpFrame(buf) => Some(buf),
             Self::UdpFrame(buf, _hdr) => Some(buf),
         }
@@ -34,9 +38,10 @@ impl<'pkt> OutsidePacket<'pkt> {
     pub(crate) fn apply_ingress_chain(
         self,
         plugins: &PluginList,
+        wire_header: bool,
     ) -> Result<Self, OutsidePacketError> {
         match self {
-            Self::Wire(buf, conn_type) => {
+            Self::Wire(buf) => {
                 let buf = match plugins.do_ingress(buf) {
                     PluginResult::Accept => buf,
                     PluginResult::Drop => return Err(OutsidePacketError::PluginDrop),
@@ -44,14 +49,12 @@ impl<'pkt> OutsidePacket<'pkt> {
                     PluginResult::Error(e) => return Err(OutsidePacketError::PluginError(e)),
                 };
 
-                match conn_type {
-                    ConnectionType::Stream => Ok(Self::TcpFrame(buf)),
-                    ConnectionType::Datagram => {
-                        let hdr = Header::try_from_wire(buf)
-                            .map_err(|e| OutsidePacketError::BadWireHeader(e.into()))?;
-                        Ok(Self::UdpFrame(buf, hdr))
-                    }
+                if !wire_header {
+                    return Ok(Self::TcpFrame(buf));
                 }
+                let hdr = Header::try_from_wire(buf)
+                    .map_err(|e| OutsidePacketError::BadWireHeader(e.into()))?;
+                Ok(Self::UdpFrame(buf, hdr))
             }
 
             // Plugin chain already ran
