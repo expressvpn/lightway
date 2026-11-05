@@ -1,4 +1,4 @@
-use lightway_core::ConnectionActivity;
+use lightway_core::{ConnectionActivity, ExpresslaneState};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -7,7 +7,7 @@ use tracing::info;
 use crate::{
     connection_manager::ConnectionManager,
     ip_manager::IpManager,
-    metrics::{self, ConnectionIntervalStats},
+    metrics::{self, ConnectionIntervalStats, ExpresslaneSessionStats},
 };
 
 /// Default interval between statistics reports
@@ -61,15 +61,33 @@ fn calculate_session_stats(
     (standby, active)
 }
 
+fn calculate_expresslane_stats(states: &[ExpresslaneState]) -> ExpresslaneSessionStats {
+    let mut stats: ExpresslaneSessionStats = Default::default();
+
+    for state in states {
+        match state {
+            ExpresslaneState::Disabled => stats.disabled += 1,
+            ExpresslaneState::WaitingForClient => stats.waiting_for_client += 1,
+            ExpresslaneState::Inactive => stats.inactive += 1,
+            ExpresslaneState::Active => stats.active += 1,
+            ExpresslaneState::Degraded => stats.degraded += 1,
+        }
+    }
+
+    stats
+}
+
 fn session_stats(conn_manager: &Weak<ConnectionManager>) {
     let Some(conn_manager) = conn_manager.upgrade() else {
         // Conn manager is gone
         return;
     };
 
-    let current_sessions = conn_manager.online_connection_activity();
+    let (current_sessions, expresslane_states): (Vec<_>, Vec<_>) =
+        conn_manager.online_connection_stats().into_iter().unzip();
 
     let (standby, active) = calculate_session_stats(&current_sessions);
+    let expresslane = calculate_expresslane_stats(&expresslane_states);
 
     let current = current_sessions.len();
     let total = conn_manager.total_sessions();
@@ -94,6 +112,7 @@ fn session_stats(conn_manager: &Weak<ConnectionManager>) {
         active,
         standby,
     );
+    metrics::sessions_expresslane(&expresslane);
 }
 
 fn ip_manager_stats(ip_manager: &Weak<IpManager>) {
@@ -180,5 +199,29 @@ mod tests {
         let (standby, active) = calculate_session_stats(&sessions);
 
         format!("{}+{}", standby.fmt(), active.fmt())
+    }
+    #[test]
+    fn calculate_expresslane_stats_counts_each_state() {
+        let states = [
+            ExpresslaneState::Disabled,
+            ExpresslaneState::WaitingForClient,
+            ExpresslaneState::WaitingForClient,
+            ExpresslaneState::Inactive,
+            ExpresslaneState::Active,
+            ExpresslaneState::Active,
+            ExpresslaneState::Active,
+            ExpresslaneState::Degraded,
+        ];
+
+        assert_eq!(
+            calculate_expresslane_stats(&states),
+            ExpresslaneSessionStats {
+                disabled: 1,
+                waiting_for_client: 2,
+                inactive: 1,
+                active: 3,
+                degraded: 1,
+            }
+        );
     }
 }

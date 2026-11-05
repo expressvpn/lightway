@@ -1,4 +1,4 @@
-use lightway_core::{SessionId, Version};
+use lightway_core::{ExpresslaneState, SessionId, Version};
 use metrics::{Counter, Gauge, Histogram, counter, gauge, histogram};
 use std::sync::LazyLock;
 use tracing::trace;
@@ -114,18 +114,31 @@ static METRIC_SESSIONS_ENCODING_ENABLED: LazyLock<Gauge> =
 static METRIC_ASSIGNED_INTERNAL_IPS: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("assigned_internal_ips"));
 
+const METRIC_SESSIONS_EXPRESSLANE: &str = "sessions_expresslane";
+const METRIC_EXPRESSLANE_STATE_CHANGED: &str = "expresslane_state_changed";
+
 // Labels for use with the above
 const CIPHER_LABEL: &str = "cipher";
 const CURVE_LABEL: &str = "curve";
 const TLS_PROTOCOL_VERSION_LABEL: &str = "tls_protocol_version";
 const LIGHTWAY_PROTOCOL_VERSION_LABEL: &str = "lightway_protocol_version";
 const FATAL_LABEL: &str = "fatal";
+const EXPRESSLANE_STATE_LABEL: &str = "state";
 
 #[derive(Default, Debug)]
 pub(crate) struct ConnectionIntervalStats {
     pub five_minutes: usize,
     pub fifteen_minutes: usize,
     pub sixty_minutes: usize,
+}
+
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct ExpresslaneSessionStats {
+    pub disabled: usize,
+    pub waiting_for_client: usize,
+    pub inactive: usize,
+    pub active: usize,
+    pub degraded: usize,
 }
 
 /// Calling `accept(2)` on our listening socket failed
@@ -427,4 +440,113 @@ pub(crate) fn connection_encoding_disabled() {
 /// Number of IP addresses in use
 pub(crate) fn assigned_internal_ips(nr: usize) {
     METRIC_ASSIGNED_INTERNAL_IPS.set(nr as f64);
+}
+
+/// Connection's expresslane state changed
+pub(crate) fn expresslane_state_changed(state: ExpresslaneState) {
+    counter!(METRIC_EXPRESSLANE_STATE_CHANGED, EXPRESSLANE_STATE_LABEL => state.as_str())
+        .increment(1);
+}
+
+/// Number of online connections in each expresslane state
+pub(crate) fn sessions_expresslane(stats: &ExpresslaneSessionStats) {
+    for (state, nr) in [
+        (ExpresslaneState::Disabled, stats.disabled),
+        (ExpresslaneState::WaitingForClient, stats.waiting_for_client),
+        (ExpresslaneState::Inactive, stats.inactive),
+        (ExpresslaneState::Active, stats.active),
+        (ExpresslaneState::Degraded, stats.degraded),
+    ] {
+        gauge!(METRIC_SESSIONS_EXPRESSLANE, EXPRESSLANE_STATE_LABEL => state.as_str())
+            .set(nr as f64);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+
+    fn value(snapshotter: &Snapshotter, name: &str, state: &str) -> Option<DebugValue> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find(|(k, ..)| {
+                k.key().name() == name
+                    && k.key()
+                        .labels()
+                        .any(|l| l.key() == EXPRESSLANE_STATE_LABEL && l.value() == state)
+            })
+            .map(|(.., v)| v)
+    }
+
+    pub(crate) fn gauge_value(snapshotter: &Snapshotter, state: &str) -> Option<f64> {
+        match value(snapshotter, METRIC_SESSIONS_EXPRESSLANE, state) {
+            Some(DebugValue::Gauge(v)) => Some(v.into_inner()),
+            None => None,
+            other => panic!("unexpected value {other:?}"),
+        }
+    }
+
+    pub(crate) fn counter_value(snapshotter: &Snapshotter, state: &str) -> u64 {
+        match value(snapshotter, METRIC_EXPRESSLANE_STATE_CHANGED, state) {
+            Some(DebugValue::Counter(v)) => v,
+            None => 0,
+            other => panic!("unexpected value {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sessions_expresslane_sets_every_state() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            sessions_expresslane(&ExpresslaneSessionStats {
+                waiting_for_client: 3,
+                active: 2,
+                ..Default::default()
+            });
+        });
+
+        assert_eq!(gauge_value(&snapshotter, "disabled"), Some(0.0));
+        assert_eq!(gauge_value(&snapshotter, "waiting_for_client"), Some(3.0));
+        assert_eq!(gauge_value(&snapshotter, "inactive"), Some(0.0));
+        assert_eq!(gauge_value(&snapshotter, "active"), Some(2.0));
+        assert_eq!(gauge_value(&snapshotter, "degraded"), Some(0.0));
+    }
+
+    #[test]
+    fn sessions_expresslane_replaces_previous_snapshot() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            sessions_expresslane(&ExpresslaneSessionStats {
+                active: 2,
+                ..Default::default()
+            });
+            sessions_expresslane(&ExpresslaneSessionStats {
+                degraded: 1,
+                ..Default::default()
+            });
+        });
+
+        assert_eq!(gauge_value(&snapshotter, "active"), Some(0.0));
+        assert_eq!(gauge_value(&snapshotter, "degraded"), Some(1.0));
+    }
+
+    #[test]
+    fn expresslane_state_changed_counts_each_transition() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            expresslane_state_changed(ExpresslaneState::Inactive);
+            expresslane_state_changed(ExpresslaneState::Active);
+            expresslane_state_changed(ExpresslaneState::Inactive);
+            expresslane_state_changed(ExpresslaneState::Active);
+        });
+
+        assert_eq!(counter_value(&snapshotter, "inactive"), 2);
+        assert_eq!(counter_value(&snapshotter, "active"), 2);
+    }
 }
