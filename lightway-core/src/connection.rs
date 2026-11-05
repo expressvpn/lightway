@@ -1787,7 +1787,21 @@ impl<AppState: Send> Connection<AppState> {
 
         self.transport.feed(&buf[..]);
 
-        let frame_read_count_result = match self.state {
+        let frame_read_count_result = self.read_packet();
+
+        self.transport.packet_done();
+        // A packet on a lossy transport holds whole frames, so bytes
+        // left here are a bad or truncated frame. If kept, they cause
+        // every later packet to fail.
+        if self.caps.is_lossy() {
+            self.receive_buf.clear();
+        }
+
+        frame_read_count_result
+    }
+
+    fn read_packet(&mut self) -> ConnectionResult<usize> {
+        match self.state {
             State::Connecting => {
                 let res = self.transport.handshake();
                 match self.send_records_after(res)? {
@@ -1805,11 +1819,7 @@ impl<AppState: Send> Connection<AppState> {
             State::LinkUp | State::Authenticating | State::Online => self.handle_messages(),
 
             State::Disconnecting | State::Disconnected => Err(ConnectionError::InvalidState),
-        };
-
-        self.transport.packet_done();
-
-        frame_read_count_result
+        }
     }
 
     fn handle_messages(&mut self) -> ConnectionResult<usize> {
