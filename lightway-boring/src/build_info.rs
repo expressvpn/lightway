@@ -12,12 +12,18 @@ mod built_info {
 ///
 /// The [`Display`](fmt::Display) impl renders a single line suitable for
 /// logging, e.g.
-/// `lightway-boring 0.1.0, BoringSSL API 43, features: debug`.
+/// `lightway-boring 0.1.0, boring 5.3.0, BoringSSL API 43, features: debug`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BuildInfo {
     /// Version of the `lightway-boring` crate
     pub crate_version: &'static str,
+    /// Version of the `boring` crate, as recorded in the `Cargo.lock` found
+    /// at build time.
+    ///
+    /// When `lightway-boring` is a git dependency this is lightway's own
+    /// lockfile, so it may differ from the version the consumer resolved.
+    pub boring_version: &'static str,
     /// `BORINGSSL_API_VERSION` of the BoringSSL library built by `boring-sys`.
     ///
     /// BoringSSL has no release versions, and its `OpenSSL_version()` only
@@ -31,8 +37,8 @@ impl fmt::Display for BuildInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lightway-boring {}, BoringSSL API {}, features: ",
-            self.crate_version, self.boringssl_api_version
+            "lightway-boring {}, boring {}, BoringSSL API {}, features: ",
+            self.crate_version, self.boring_version, self.boringssl_api_version
         )?;
         if self.features.is_empty() {
             f.write_str("none")
@@ -46,6 +52,7 @@ impl fmt::Display for BuildInfo {
 pub fn build_info() -> BuildInfo {
     BuildInfo {
         crate_version: built_info::PKG_VERSION,
+        boring_version: env!("LIGHTWAY_BORING_BORING_VERSION"),
         boringssl_api_version: boring_sys::BORINGSSL_API_VERSION,
         features: &built_info::FEATURES_LOWERCASE,
     }
@@ -63,6 +70,16 @@ mod tests {
     }
 
     #[test]
+    fn build_info_boring_version_matches_cargo_lock() {
+        let lockfile = include_str!("../../Cargo.lock");
+        let expected = format!(
+            "name = \"boring\"\nversion = \"{}\"",
+            build_info().boring_version
+        );
+        assert!(lockfile.contains(&expected));
+    }
+
+    #[test]
     fn build_info_features_match_cfg() {
         let features = build_info().features;
         assert_eq!(features.contains(&"debug"), cfg!(feature = "debug"));
@@ -72,12 +89,13 @@ mod tests {
     fn build_info_display() {
         let info = BuildInfo {
             crate_version: "1.2.3",
+            boring_version: "4.5.6",
             boringssl_api_version: 42,
             features: &["debug"],
         };
         assert_eq!(
             info.to_string(),
-            "lightway-boring 1.2.3, BoringSSL API 42, features: debug"
+            "lightway-boring 1.2.3, boring 4.5.6, BoringSSL API 42, features: debug"
         );
 
         let info = BuildInfo {
@@ -86,7 +104,7 @@ mod tests {
         };
         assert_eq!(
             info.to_string(),
-            "lightway-boring 1.2.3, BoringSSL API 42, features: none"
+            "lightway-boring 1.2.3, boring 4.5.6, BoringSSL API 42, features: none"
         );
     }
 }
