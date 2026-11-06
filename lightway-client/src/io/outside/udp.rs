@@ -1,3 +1,5 @@
+#[cfg(linux)]
+use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -60,6 +62,17 @@ pub struct Udp {
     swallowed_sends: AtomicU64,
     #[cfg(batch_receive)]
     batch_receive_enabled: bool,
+    /// Consecutive batch receives that truncated a datagram, reset by one
+    /// that did not; rate-limits the truncation warning.
+    #[cfg(batch_receive)]
+    truncated_recvs: AtomicU64,
+    #[cfg(linux)]
+    gro_enabled: bool,
+    /// Latched `true` (for the socket's lifetime) once a `UDP_SEGMENT`
+    /// send is rejected with a capability error; read via
+    /// [`OutsideIOSendCallback::gso_enabled`].
+    #[cfg(linux)]
+    gso_broken: std::sync::atomic::AtomicBool,
 }
 
 impl Udp {
@@ -119,6 +132,12 @@ impl Udp {
             swallowed_sends: AtomicU64::new(0),
             #[cfg(batch_receive)]
             batch_receive_enabled: false,
+            #[cfg(batch_receive)]
+            truncated_recvs: AtomicU64::new(0),
+            #[cfg(linux)]
+            gro_enabled: false,
+            #[cfg(linux)]
+            gso_broken: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -209,6 +228,30 @@ impl Udp {
         }
     }
 
+    /// Switch this socket to the GRO receive path and ask the kernel to
+    /// coalesce trains of equal-size datagrams into one buffer per
+    /// `recvmsg`. The receive path moves to
+    /// [`OutsideIORecvGro::recv_gro_batch`] unconditionally; the
+    /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
+    /// this logs and continues, with that path degrading to one wire
+    /// packet per slot.
+    #[cfg(linux)]
+    pub fn enable_gro(&mut self) {
+        // Route receives through `recv_gro_batch` whenever offload is
+        // requested, not only when the sockopt succeeds: socket-read
+        // coalescing (the `UDP_GRO` sockopt) is what makes the kernel
+        // coalesce, but the path degrades to single-datagram slots when it
+        // does not (old kernel, or a zero-checksum peer the GRO engine
+        // skips), and the independent TUN-write coalescing still applies.
+        self.gro_enabled = true;
+        match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Err(e) => tracing::warn!(
+                "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
+            ),
+        }
+    }
+
     #[cfg(batch_receive)]
     pub fn enable_batch_receive(&mut self) {
         #[cfg(apple)]
@@ -246,6 +289,88 @@ impl Udp {
                 }
                 Err(e) => return IOCallbackResult::Err(e),
             }
+        }
+    }
+
+    /// Map a send result into an [`IOCallbackResult`], applying the error
+    /// policy shared by the per-datagram [`OutsideIOSendCallback::send`]
+    /// and GSO [`OutsideIOSendCallback::send_gso`] paths. `len` is the
+    /// requested byte count, reported as "sent" for the swallowed transient
+    /// errors so TLS does not live-lock resending the same record; DTLS
+    /// retransmission covers the loss. Platform-specific swallow cases are
+    /// matched by `send` before delegating here.
+    fn map_send_result(&self, res: std::io::Result<usize>, len: usize) -> IOCallbackResult<usize> {
+        match res {
+            Ok(nr) => {
+                self.swallowed_sends.store(0, Ordering::Relaxed);
+                IOCallbackResult::Ok(nr)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                IOCallbackResult::WouldBlock
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
+                // Possibly the server isn't listening (yet).
+                //
+                // Swallow the error so the TLS socket does not
+                // enter the error state, and DTLS would handle the retransmission as well.
+                //
+                // This way we can continue if/when the server shows up.
+                //
+                // Returning the number of bytes requested to be sent to mock
+                // that the send is successful.
+                // Otherwise, TLS perceives that no data is sent and try
+                // to send the same data again, creating a live-lock until
+                // the network is reachable.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
+                // This case indicates network unreachable error.
+                // Possibly there is a network change at the moment.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.raw_os_error(), Some(ENOBUFS)) => {
+                // No buffer space available
+                // UDP sockets may have this error when the system is overloaded.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(len)
+            }
+            Err(err) => {
+                tracing::warn!("Outside IO Send failed: {err:?}");
+                IOCallbackResult::Err(err)
+            }
+        }
+    }
+
+    /// Errno families where the egress path can't do UDP GSO at all, as
+    /// opposed to a transient condition. `EIO` is the kernel refusing a
+    /// `UDP_SEGMENT` send when the device lacks TX checksum offload (the
+    /// dominant cause); `EINVAL`/`EOPNOTSUPP` cover other outright
+    /// rejections. Transient errors (`ENOBUFS`, `ECONNREFUSED`, ...) and
+    /// the sizing error `EMSGSIZE` are handled elsewhere and must not latch.
+    #[cfg(linux)]
+    fn is_gso_unsupported(err: &std::io::Error) -> bool {
+        matches!(
+            err.raw_os_error(),
+            Some(libc::EIO) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+        )
+    }
+
+    /// Latch the GSO-unsupported flag when a send error shows the device
+    /// cannot segment. Logs once, on the false→true transition only.
+    #[cfg(linux)]
+    fn note_gso_send_error(&self, err: &std::io::Error) {
+        if Self::is_gso_unsupported(err) && !self.gso_broken.swap(true, Ordering::Release) {
+            tracing::warn!(
+                "kernel rejected UDP_SEGMENT send ({err}); the egress device likely lacks \
+                 TX checksum offload. Disabling GSO on this socket and falling back to \
+                 per-datagram sends"
+            );
         }
     }
 }
@@ -314,8 +439,18 @@ impl OutsideIO for Udp {
         let fd = self.sock.as_raw_fd();
 
         self.try_readable_io(|| {
-            batch_receive::recv_multiple(fd, bufs, lightway_core::MAX_IO_BATCH_SIZE)
+            batch_receive::recv_multiple(
+                fd,
+                bufs,
+                lightway_core::MAX_IO_BATCH_SIZE,
+                &self.truncated_recvs,
+            )
         })
+    }
+
+    #[cfg(linux)]
+    fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
+        if self.gro_enabled { Some(self) } else { None }
     }
 
     fn into_io_send_callback(self: Arc<Self>) -> OutsideIOSendCallbackArg {
@@ -400,6 +535,21 @@ impl OutsideIO for Udp {
     }
 }
 
+#[cfg(linux)]
+impl OutsideIORecvGro for Udp {
+    fn recv_gro_batch(
+        &self,
+        bufs: &mut [bytes::BytesMut; lightway_core::MAX_IO_BATCH_SIZE],
+        gro_sizes: &mut [Option<u16>; lightway_core::MAX_IO_BATCH_SIZE],
+    ) -> IOCallbackResult<usize> {
+        use std::os::fd::AsRawFd;
+        let fd = self.sock.as_raw_fd();
+        self.try_readable_io(|| {
+            batch_receive::recv_multiple_gro(fd, bufs, gro_sizes, &self.truncated_recvs)
+        })
+    }
+}
+
 impl OutsideIOSendCallback for Udp {
     fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
         // On a connected socket the destination is already known, so `send`
@@ -419,45 +569,6 @@ impl OutsideIOSendCallback for Udp {
         let result = self.sock.try_send_to(buf, self.peer_addr);
 
         match result {
-            Ok(nr) => {
-                self.swallowed_sends.store(0, Ordering::Relaxed);
-                IOCallbackResult::Ok(nr)
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
-                IOCallbackResult::WouldBlock
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::ConnectionRefused) => {
-                // Possibly the server isn't listening (yet).
-                //
-                // Swallow the error so the TLS socket does not
-                // enter the error state, and DTLS would handle the retransmission as well.
-                //
-                // This way we can continue if/when the server shows up.
-                //
-                // Returning the number of bytes requested to be sent to mock
-                // that the send is successful.
-                // Otherwise, TLS perceives that no data is sent and try
-                // to send the same data again, creating a live-lock until
-                // the network is reachable.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable) => {
-                // This case indicates network unreachable error.
-                // Possibly there is a network change at the moment.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.raw_os_error(), Some(ENOBUFS)) => {
-                // No buffer space available
-                // UDP sockets may have this error when the system is overloaded.
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
-                self.note_swallowed_send(&err);
-                IOCallbackResult::Ok(buf.len())
-            }
             #[cfg(apple)]
             Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
                 // The source address is no longer valid (e.g. Switched WiFi hotspots)
@@ -543,15 +654,68 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
-            Err(err) => {
-                tracing::warn!("Outside IO Send failed: {err:?}");
-                IOCallbackResult::Err(err)
-            }
+            result => self.map_send_result(result, buf.len()),
         }
     }
 
+    /// Send concatenated wire packets in one `sendmsg` with a
+    /// `UDP_SEGMENT` control message; the kernel splits the payload
+    /// into `gso_size`-byte datagrams.
+    #[cfg(linux)]
+    fn send_gso(&self, bufs: &[std::io::IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize> {
+        use lightway_app_utils::cmsg;
+        use socket2::{MsgHdr, SockRef};
+        use tokio::io::Interest;
+
+        const CMSG_SIZE: usize = cmsg::Message::space::<u16>();
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        let peer_addr = socket2::SockAddr::from(self.peer_addr);
+
+        let res = self.sock.try_io(Interest::WRITABLE, || {
+            let sock = SockRef::from(self.sock.as_ref());
+
+            let mut cmsg = cmsg::BufferMut::<CMSG_SIZE>::zeroed();
+            let mut builder = cmsg.builder();
+            builder.fill_next(libc::SOL_UDP, libc::UDP_SEGMENT, gso_size)?;
+
+            let msghdr = MsgHdr::new()
+                .with_addr(&peer_addr)
+                .with_buffers(bufs)
+                .with_control(cmsg.as_ref());
+
+            sock.sendmsg(&msghdr, 0)
+        });
+
+        // Latch off on a capability error so the connection drops to the
+        // per-segment fallback instead of failing here on every batch.
+        if let Err(ref err) = res {
+            self.note_gso_send_error(err);
+        }
+
+        // Note `map_send_result` swallows several transient errors as
+        // `Ok(len)` so TLS does not live-lock resending the same record.
+        // That contract was written for a single datagram; applied here
+        // it reports an entire discarded batch as fully sent, so the
+        // swallow is logged (rate-limited) like a per-datagram one.
+        self.map_send_result(res, total_len)
+    }
+
+    #[cfg(not(linux))]
     fn send_gso(&self, _bufs: &[std::io::IoSlice<'_>], _gso_size: u16) -> IOCallbackResult<usize> {
         IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    fn gso_enabled(&self) -> bool {
+        #[cfg(linux)]
+        {
+            !self.gso_broken.load(Ordering::Acquire)
+        }
+        // Non-Linux has no `UDP_SEGMENT`; `send_gso` is unsupported.
+        #[cfg(not(linux))]
+        {
+            false
+        }
     }
 
     fn peer_addr(&self) -> SocketAddr {
@@ -571,6 +735,73 @@ impl OutsideIOSendCallback for Udp {
 fn local_addr_str(sock: &tokio::net::UdpSocket) -> String {
     sock.local_addr()
         .map_or_else(|e| e.to_string(), |a| a.to_string())
+}
+
+#[cfg(all(test, linux))]
+mod linux_tests {
+    use super::*;
+    use std::io::Error;
+
+    async fn make_udp() -> Udp {
+        // No server is needed: these tests exercise the latch bookkeeping,
+        // not an actual send. `peer_addr` just has to be a valid address.
+        let peer_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        // `new` takes an fwmark arg on non-mobile Linux only.
+        #[cfg(not(feature = "mobile"))]
+        let udp = Udp::new(peer_addr, None, 0).await.unwrap();
+        #[cfg(feature = "mobile")]
+        let udp = Udp::new(peer_addr, None).await.unwrap();
+        udp
+    }
+
+    #[test]
+    fn classifies_capability_errors() {
+        for errno in [libc::EIO, libc::EINVAL, libc::EOPNOTSUPP] {
+            assert!(
+                Udp::is_gso_unsupported(&Error::from_raw_os_error(errno)),
+                "errno {errno} should latch GSO off"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_transient_and_sizing_errors() {
+        for errno in [
+            libc::ENOBUFS,
+            libc::ECONNREFUSED,
+            libc::ENETUNREACH,
+            libc::EPERM,
+            libc::EAGAIN,
+            libc::EMSGSIZE,
+        ] {
+            assert!(
+                !Udp::is_gso_unsupported(&Error::from_raw_os_error(errno)),
+                "errno {errno} must not latch GSO off"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn latches_gso_off_on_capability_error() {
+        let udp = make_udp().await;
+        // Enabled by default.
+        assert!(OutsideIOSendCallback::gso_enabled(&udp));
+
+        // A capability error latches it off for good.
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::EIO));
+        assert!(!OutsideIOSendCallback::gso_enabled(&udp));
+
+        // Idempotent: staying off after a repeat.
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::EIO));
+        assert!(!OutsideIOSendCallback::gso_enabled(&udp));
+    }
+
+    #[tokio::test]
+    async fn transient_error_keeps_gso_enabled() {
+        let udp = make_udp().await;
+        udp.note_gso_send_error(&Error::from_raw_os_error(libc::ENOBUFS));
+        assert!(OutsideIOSendCallback::gso_enabled(&udp));
+    }
 }
 
 /// ICMP errors (port/host/net unreachable) are delivered asynchronously to a
