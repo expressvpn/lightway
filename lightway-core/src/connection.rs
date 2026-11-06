@@ -2316,6 +2316,11 @@ impl<AppState: Send> Connection<AppState> {
             if self.expresslane.data.has_valid_keys() {
                 self.set_expresslane_state(ExpresslaneState::Active);
             }
+        } else if config.key.is_invalid() {
+            // Degrade notice from `set_expresslane_degraded`. A failed key
+            // update also sends enabled=false, but with a random key.
+            debug!("Peer has degraded expresslane, setting state to Degraded");
+            self.set_expresslane_state(ExpresslaneState::Degraded);
         } else {
             debug!("Peer has disabled expresslane, setting state to Inactive");
             self.set_expresslane_state(ExpresslaneState::Inactive);

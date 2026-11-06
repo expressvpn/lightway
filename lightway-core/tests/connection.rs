@@ -918,12 +918,13 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
 
 /// Drives a client/server pair through repeated keepalive windows and
 /// reports how the client's expresslane health check reacted: the final
-/// state, which window (if any) first saw it go Degraded, and how many
-/// probe packets came back reflected (proof traffic actually flowed).
+/// state, which window (if any) first saw it go Degraded, how many
+/// probe packets came back reflected (proof traffic actually flowed), and
+/// the server's final state.
 async fn expresslane_health_probe(
     client_metrics: Option<Arc<dyn ExpresslaneMetrics + Send + Sync>>,
     server_metrics: Option<ExpresslaneMetricsType>,
-) -> (ExpresslaneState, Option<usize>, usize) {
+) -> (ExpresslaneState, Option<usize>, usize, ExpresslaneState) {
     // Comfortably above MIN_PACKETS_FOR_LOSS_CHECK (10) so a bad window is
     // unambiguous; WINDOWS above EXPRESSLANE_MISSING_STATS_LIMIT (3) so
     // "degrades at the limit, not before" is observable.
@@ -959,13 +960,14 @@ async fn expresslane_health_probe(
     // the health-check windows this probe measures.
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
     let (cert, key) = pki.server_secrets();
+    let (server_conn_tx, server_conn_rx) = oneshot::channel();
     let server_task = server(
         server_sock,
         TestServerConfig {
             auth,
             pqc,
             expresslane: Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
-            conn_out: None,
+            conn_out: Some(server_conn_tx),
             metrics: server_metrics,
             cert,
             key,
@@ -1095,8 +1097,11 @@ async fn expresslane_health_probe(
             }
         }
 
+        let server_conn = server_conn_rx.await.expect("server connection");
+        let server_state = server_conn.lock().unwrap().expresslane_state();
+
         conn.lock().unwrap().disconnect().unwrap();
-        (el_state, degraded_at, reflected)
+        (el_state, degraded_at, reflected, server_state)
     };
 
     // Emulated targets requires much more time to run this,
@@ -1141,7 +1146,7 @@ impl ExpresslaneMetrics for AlwaysUnavailableStats {
 /// nothing to report must say so, not fabricate zeros.
 #[tokio::test]
 async fn zero_stats_readings_degrade_as_total_loss() {
-    let (state, _degraded_at, reflected) =
+    let (state, _degraded_at, reflected, _) =
         expresslane_health_probe(Some(Arc::new(AlwaysZeroStats)), None).await;
 
     assert_eq!(
@@ -1160,7 +1165,7 @@ async fn zero_stats_readings_degrade_as_total_loss() {
 /// snapshots) and fail-safes on the third, never earlier.
 #[tokio::test]
 async fn failed_local_readings_skip_briefly_then_degrade() {
-    let (state, degraded_at, reflected) =
+    let (state, degraded_at, reflected, _) =
         expresslane_health_probe(Some(Arc::new(AlwaysUnavailableStats)), None).await;
 
     assert_eq!(state, ExpresslaneState::Degraded);
@@ -1180,7 +1185,7 @@ async fn failed_local_readings_skip_briefly_then_degrade() {
 /// and degrade, even though its own local counters read fine throughout.
 #[tokio::test]
 async fn peer_that_stops_reporting_degrades() {
-    let (state, degraded_at, reflected) =
+    let (state, degraded_at, reflected, _) =
         expresslane_health_probe(None, Some(Arc::new(AlwaysUnavailableStats))).await;
 
     assert_eq!(state, ExpresslaneState::Degraded);
@@ -1193,6 +1198,17 @@ async fn peer_that_stops_reporting_degrades() {
         Some(3),
         "the first two windows must be tolerated (skip) and the third fail-safe"
     );
+}
+
+/// A client that degrades notifies the server, which must degrade too
+/// rather than fall back to Inactive and keep offering expresslane.
+#[tokio::test]
+async fn server_follows_client_degrade() {
+    let (state, _degraded_at, _reflected, server_state) =
+        expresslane_health_probe(Some(Arc::new(AlwaysZeroStats)), None).await;
+
+    assert_eq!(state, ExpresslaneState::Degraded);
+    assert_eq!(server_state, ExpresslaneState::Degraded);
 }
 
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
