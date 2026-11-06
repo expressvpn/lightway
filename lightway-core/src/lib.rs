@@ -62,7 +62,7 @@ pub use plugin::{
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
-    tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
+    ipv6_is_valid_packet, tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
 };
 pub use version::Version;
 pub use wire::{
