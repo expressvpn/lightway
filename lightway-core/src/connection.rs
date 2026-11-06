@@ -1494,11 +1494,14 @@ impl<AppState: Send> Connection<AppState> {
     /// Disconnect this connection
     pub fn disconnect(&mut self) -> ConnectionResult<()> {
         // Return error if in the wrong state
-        if matches!(
-            self.state,
-            State::Disconnecting | State::Connecting | State::Disconnected
-        ) {
+        if matches!(self.state, State::Disconnecting | State::Disconnected) {
             return Err(ConnectionError::InvalidState);
+        }
+
+        // Before the handshake ends, there is no inside IP to free and
+        // no frame can go out.
+        if self.state == State::Connecting {
+            return self.set_state(State::Disconnected);
         }
 
         self.set_state(State::Disconnecting)?;
@@ -1796,6 +1799,12 @@ impl<AppState: Send> Connection<AppState> {
         };
 
         self.transport.packet_done();
+        // A packet on a lossy transport holds whole frames, so bytes
+        // left here are a bad or truncated frame. If kept, they cause
+        // every later packet to fail.
+        if self.caps.lossy {
+            self.receive_buf.clear();
+        }
 
         frame_read_count_result
     }

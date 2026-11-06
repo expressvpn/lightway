@@ -5,6 +5,8 @@
 //! Lightway state machine and never touches the secure session or the
 //! socket.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
 pub(crate) mod tls;
 
 use std::net::SocketAddr;
@@ -105,7 +107,9 @@ pub trait Transport: Send {
     fn packet_done(&mut self);
 
     /// Read decrypted frame bytes into `into`. `Pending` once no bytes
-    /// are left, until the next outside packet.
+    /// are left, until the next outside packet. On a `lossy` transport,
+    /// the bytes of one packet hold only whole frames. The connection
+    /// drops a partial frame at the end of each packet.
     fn read(&mut self, into: &mut BytesMut) -> PollResult<usize>;
 
     /// Encrypt and send frame bytes. `buf` holds exactly one Lightway
