@@ -2271,6 +2271,16 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
+        // Expresslane is off on this side. Ack so the peer stops
+        // retransmitting, but take no key or state change from it.
+        if matches!(self.expresslane.state, ExpresslaneState::Disabled) {
+            if !config.ack {
+                debug!("Ignoring expresslane config from peer (expresslane disabled)");
+                self.ack_expresslane_config(config);
+            }
+            return Ok(());
+        }
+
         // Handle acknowledgement from peer
         if config.ack {
             if config.counter == self.expresslane.config_counter {
@@ -2326,18 +2336,21 @@ impl<AppState: Send> Connection<AppState> {
             self.set_expresslane_state(ExpresslaneState::Inactive);
         }
 
-        // Send acknowledgement with the negotiated version
-        let mut config = config;
-        config.ack = true;
-        config.version = self.expresslane.data.version();
-        let msg = wire::Frame::ExpresslaneConfig(config);
-        let _ = self.send_frame_or_queue(msg);
+        self.ack_expresslane_config(config);
 
         // Send our own key share so the peer can set our peer key.
         // No-op if we already have a pending key.
         let _ = self.rotate_expresslane_key();
 
         Ok(())
+    }
+
+    /// Send acknowledgement with the negotiated version
+    fn ack_expresslane_config(&mut self, mut config: wire::ExpresslaneConfig) {
+        config.ack = true;
+        config.version = self.expresslane.data.version();
+        let msg = wire::Frame::ExpresslaneConfig(config);
+        let _ = self.send_frame_or_queue(msg);
     }
 
     /// Rotate expresslane key, subject to the configured rotation interval.

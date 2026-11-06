@@ -56,6 +56,7 @@ async fn run_test<S: TestSock>(
                         .then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
                     conn_out: None,
                     metrics: None,
+                    expresslane_cb: None,
                     cert,
                     key,
                 },
@@ -158,6 +159,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
             expresslane: None,
             conn_out: None,
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -420,6 +422,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
                         expresslane: None,
                         conn_out: None,
                         metrics: None,
+                        expresslane_cb: None,
                         cert,
                         key,
                     },
@@ -567,6 +570,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
             expresslane: Some(INTERVAL),
             conn_out: Some(conn_tx),
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -969,6 +973,7 @@ async fn expresslane_health_probe(
             expresslane: Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
             conn_out: Some(server_conn_tx),
             metrics: server_metrics,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -1211,6 +1216,142 @@ async fn server_follows_client_degrade() {
     assert_eq!(server_state, ExpresslaneState::Degraded);
 }
 
+/// A server with expresslane disabled must not take up a client's
+/// expresslane config: no key install or publish, no state change. It
+/// still acks, so the client does not keep retransmitting.
+#[tokio::test]
+async fn disabled_server_ignores_expresslane_config() {
+    struct CallCount(std::sync::atomic::AtomicUsize);
+    impl<T> ExpresslaneCb<T> for CallCount {
+        fn update(&self, _sid: SessionId, _data: ExpresslaneCbData, _s: &T) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // Set once the client's own key is promoted, i.e. the server acked.
+    struct AckSeen(std::sync::atomic::AtomicBool);
+    impl<T> ExpresslaneCb<T> for AckSeen {
+        fn update(&self, _sid: SessionId, data: ExpresslaneCbData, _s: &T) {
+            if !data.self_key.is_invalid() {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let server_cb = Arc::new(CallCount(Default::default()));
+    let client_cb = Arc::new(AckSeen(Default::default()));
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+    let server_task = server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: Some(conn_tx),
+            metrics: None,
+            expresslane_cb: Some(server_cb.clone()),
+            cert,
+            key,
+        },
+    );
+
+    let client_task = async move {
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+        .with_expresslane_cb(client_cb.clone())
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    if client_cb.0.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            server_conn.lock().unwrap().expresslane_state(),
+            ExpresslaneState::Disabled
+        );
+        assert_eq!(
+            server_cb.0.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a disabled server must not install or publish the client key"
+        );
+        assert_eq!(
+            conn.lock().unwrap().expresslane_state(),
+            ExpresslaneState::Inactive
+        );
+
+        conn.lock().unwrap().disconnect().unwrap();
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async move { tokio::join!(server_task, client_task) },
+    )
+    .await
+    .expect("client never saw its expresslane config acked");
+}
+
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
 /// fires once per state or estimate change (never for a no-op step), the
 /// getter agrees with the last event, and for every step that requests a
@@ -1303,6 +1444,7 @@ async fn pmtud_reports_status_changes() {
             expresslane: None,
             conn_out: None,
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },
