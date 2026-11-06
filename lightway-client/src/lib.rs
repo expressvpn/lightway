@@ -1884,8 +1884,8 @@ pub async fn connect<
             // Disconnected (emitting StateChanged events) and make a
             // best-effort attempt to notify the peer with a Goodbye frame.
             // Without this the connection task just aborts its I/O tasks,
-            // leaving no Disconnecting/Disconnected transition. `disconnect()`
-            // is a no-op if the connection never reached a connected state.
+            // leaving no Disconnecting/Disconnected transition. Before the
+            // handshake ends, `disconnect()` goes straight to Disconnected.
             if let Ok(mut conn) = stop_conn.lock() {
                 let _ = conn.disconnect();
             }

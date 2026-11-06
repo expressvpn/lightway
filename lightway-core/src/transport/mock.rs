@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,6 +89,9 @@ pub struct MockTransport {
     caps: TransportCaps,
     pending: BytesMut,
     records: VecDeque<BytesMut>,
+    /// Whether `handshake` returns `Pending`.
+    pub pending_handshake: bool,
+    closed: Arc<AtomicBool>,
 }
 
 impl MockTransport {
@@ -98,7 +101,14 @@ impl MockTransport {
             caps,
             pending: BytesMut::new(),
             records: VecDeque::new(),
+            pending_handshake: false,
+            closed: Default::default(),
         }
+    }
+
+    /// Whether `shutdown` ran on this transport.
+    pub fn closed(&self) -> Arc<AtomicBool> {
+        self.closed.clone()
     }
 }
 
@@ -112,6 +122,9 @@ impl Transport for MockTransport {
     }
 
     fn handshake(&mut self) -> PollResult<()> {
+        if self.pending_handshake {
+            return Ok(Poll::Pending);
+        }
         Ok(Poll::Ready(()))
     }
 
@@ -143,7 +156,9 @@ impl Transport for MockTransport {
         self.records.pop_front()
     }
 
-    fn shutdown(&mut self) {}
+    fn shutdown(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
 
     fn key_update(&mut self) -> PollResult<()> {
         Ok(Poll::Ready(()))
@@ -546,6 +561,32 @@ mod tests {
         p.client.inside_data_received(&mut up).unwrap();
         p.pump();
         assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
+    }
+
+    #[test]
+    fn a_connecting_connection_disconnects() {
+        let mut st = MockTransport::new(LOSSY);
+        st.pending_handshake = true;
+        let closed = st.closed();
+        let (_, server_io) = MockOutsideIo::pair();
+        let server_ctx = ServerContextBuilder::new(
+            Arc::new(Auth),
+            Arc::new(Pool),
+            Arc::new(Tun::default()),
+            tick,
+        )
+        .build()
+        .unwrap();
+        let mut server = server_ctx
+            .start_accept(Version::MAXIMUM, server_io)
+            .unwrap()
+            .accept((), Box::new(move |_| Ok(Box::new(st))))
+            .unwrap();
+        assert_eq!(server.state(), State::Connecting);
+
+        server.disconnect().unwrap();
+        assert_eq!(server.state(), State::Disconnected);
+        assert!(closed.load(Ordering::SeqCst));
     }
 
     #[test]
