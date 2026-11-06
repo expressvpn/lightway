@@ -147,16 +147,18 @@ pub(crate) async fn run(
     ip_manager: Arc<IpManager>,
     reporting_interval: Duration,
 ) {
-    let conn_manager = Arc::downgrade(&conn_manager);
-    let ip_manager = Arc::downgrade(&ip_manager);
+    let weak_conn_manager = Arc::downgrade(&conn_manager);
+    let weak_ip_manager = Arc::downgrade(&ip_manager);
+    drop(conn_manager);
+    drop(ip_manager);
 
     let mut ticker = tokio::time::interval(reporting_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 
     while ticker.next().await.is_some() {
-        session_stats(&conn_manager);
-        ip_manager_stats(&ip_manager);
+        session_stats(&weak_conn_manager);
+        ip_manager_stats(&weak_ip_manager);
     }
 }
 
@@ -260,5 +262,20 @@ mod tests {
                 degraded: 1,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn run_does_not_keep_managers_alive() {
+        let conn_manager = crate::io::outside::datagram::tests::test_conn_manager();
+        let ip_manager = crate::tests::test_ip_manager();
+        let weak_conn_manager = Arc::downgrade(&conn_manager);
+        let weak_ip_manager = Arc::downgrade(&ip_manager);
+
+        let task = tokio::spawn(run(conn_manager, ip_manager, Duration::from_millis(10)));
+        tokio::task::yield_now().await;
+
+        assert!(weak_conn_manager.upgrade().is_none());
+        assert!(weak_ip_manager.upgrade().is_none());
+        task.abort();
     }
 }

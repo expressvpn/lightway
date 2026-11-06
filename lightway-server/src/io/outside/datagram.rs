@@ -172,7 +172,7 @@ impl Server for DatagramServer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::connection::ConnectionState;
     use crate::ip_manager::IpManager;
@@ -226,7 +226,7 @@ mod tests {
         }
     }
 
-    fn test_conn_manager() -> Arc<ConnectionManager> {
+    pub(crate) fn test_conn_manager() -> Arc<ConnectionManager> {
         test_conn_manager_with_minimum_version(Version::MINIMUM)
     }
 

@@ -773,7 +773,7 @@ pub async fn server<SA: for<'a> ServerAuth<AuthState<'a>> + Sync + Send + 'stati
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use lightway_core::InsideIOSendCallbackArg;
     use std::collections::VecDeque;
@@ -837,7 +837,7 @@ mod tests {
 
     impl crate::io::inside::InsideIO for ScriptedInsideIO {}
 
-    fn test_ip_manager() -> Arc<IpManager<Arc<Connection>>> {
+    pub(crate) fn test_ip_manager() -> Arc<IpManager<Arc<Connection>>> {
         let pool: Ipv4Net = "10.125.0.0/16".parse().unwrap();
         Arc::new(IpManager::new(
             pool,
