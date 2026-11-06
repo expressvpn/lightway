@@ -48,6 +48,8 @@ pub struct MockTransport {
     outside_io: OutsideIOSendCallbackArg,
     /// Number of next writes that return `Pending`.
     pub blocked_writes: usize,
+    /// Whether `handshake` returns `Pending`.
+    pub pending_handshake: bool,
 }
 
 impl MockTransport {
@@ -70,6 +72,7 @@ impl MockTransport {
             peer_inbox,
             outside_io: Arc::new(NullOutsideIo),
             blocked_writes: 0,
+            pending_handshake: false,
         }
     }
 
@@ -89,6 +92,9 @@ impl Transport for MockTransport {
     }
 
     fn handshake(&mut self) -> PollResult<()> {
+        if self.pending_handshake {
+            return Ok(Poll::Pending);
+        }
         Ok(Poll::Ready(()))
     }
 
@@ -556,6 +562,29 @@ mod tests {
         p.client.inside_data_received(&mut up).unwrap();
         p.pump();
         assert_eq!(&p.server_tun.0.lock().unwrap()[0][..], b"\x40up");
+    }
+
+    #[test]
+    fn a_connecting_connection_disconnects() {
+        let (_, mut st) = MockTransport::pair(LOSSY);
+        st.pending_handshake = true;
+        let server_ctx = ServerContextBuilder::new(
+            Arc::new(Auth),
+            Arc::new(Pool),
+            Arc::new(Tun::default()),
+            tick,
+        )
+        .build()
+        .unwrap();
+        let mut server = server_ctx
+            .start_accept(Version::MAXIMUM, Arc::new(NullOutsideIo))
+            .unwrap()
+            .accept((), Box::new(move |_| Ok(Box::new(st))))
+            .unwrap();
+        assert_eq!(server.state(), State::Connecting);
+
+        server.disconnect().unwrap();
+        assert_eq!(server.state(), State::Disconnected);
     }
 
     #[test_case::test_case(RELIABLE; "reliable")]
