@@ -230,6 +230,7 @@ pub struct TestServerConfig<'a> {
     pub expresslane: Option<std::time::Duration>,
     pub conn_out: Option<oneshot::Sender<Arc<Mutex<lightway_core::Connection<ConnectionTicker>>>>>,
     pub metrics: Option<ExpresslaneMetricsType>,
+    pub expresslane_cb: Option<ExpresslaneCbType<ConnectionTicker>>,
     pub cert: Secret<'a>,
     pub key: Secret<'a>,
 }
@@ -241,6 +242,7 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
         expresslane,
         conn_out,
         metrics,
+        expresslane_cb,
         cert: server_cert,
         key: server_key,
     } = config;
@@ -277,6 +279,7 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
     let server_ctx = server_ctx
         .when_some(expresslane, |s, interval| s.with_expresslane(interval))
         .when_some(metrics, |s, m| s.with_expresslane_metrics(m))
+        .when_some(expresslane_cb, |s, cb| s.with_expresslane_cb(cb))
         .build()
         .unwrap();
 

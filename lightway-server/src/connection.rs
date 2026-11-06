@@ -12,7 +12,7 @@ use crate::{
 };
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
 use lightway_core::{
-    ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType,
+    ConnectionActivity, ConnectionError, ConnectionResult, ConnectionType, ExpresslaneState,
     OutsideIOSendCallbackArg, OutsidePacket, PacketDecoderType, PacketEncoderType, ProtocolVersion,
     ServerContext, SessionId, State, TickType, Version,
 };
@@ -111,6 +111,7 @@ impl Connection {
             pub fn current_curve(&self) -> Option<String>;
             pub fn state(&self) -> State;
             pub fn activity(&self) -> ConnectionActivity;
+            pub fn expresslane_state(&self) -> ExpresslaneState;
             pub fn tick(&self, t: TickType) -> ConnectionResult<()>;
             pub fn authentication_expired(&self) -> ConnectionResult<bool>;
 

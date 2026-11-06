@@ -1,4 +1,4 @@
-use lightway_core::ConnectionActivity;
+use lightway_core::{ConnectionActivity, ExpresslaneState};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -7,7 +7,7 @@ use tracing::info;
 use crate::{
     connection_manager::ConnectionManager,
     ip_manager::IpManager,
-    metrics::{self, ConnectionIntervalStats},
+    metrics::{self, ConnectionIntervalStats, ExpresslaneSessionStats},
 };
 
 /// Default interval between statistics reports
@@ -61,15 +61,48 @@ fn calculate_session_stats(
     (standby, active)
 }
 
+fn calculate_expresslane_stats(states: &[ExpresslaneState]) -> ExpresslaneSessionStats {
+    let mut stats: ExpresslaneSessionStats = Default::default();
+
+    for state in states {
+        match state {
+            ExpresslaneState::Disabled => stats.disabled += 1,
+            ExpresslaneState::WaitingForClient => stats.waiting_for_client += 1,
+            ExpresslaneState::Inactive => stats.inactive += 1,
+            ExpresslaneState::Active => stats.active += 1,
+            ExpresslaneState::Degraded => stats.degraded += 1,
+        }
+    }
+
+    stats
+}
+
+/// Connections with expresslane active which also had data traffic
+/// (as counted by `sessions_active_5m`) in the most recent five minutes.
+fn calculate_expresslane_active_5m(sessions: &[(ConnectionActivity, ExpresslaneState)]) -> usize {
+    let now = std::time::Instant::now();
+
+    sessions
+        .iter()
+        .filter(|(activity, state)| {
+            matches!(state, ExpresslaneState::Active)
+                && now.duration_since(activity.last_data_traffic_from_peer) <= FIVE_MINUTES
+        })
+        .count()
+}
+
 fn session_stats(conn_manager: &Weak<ConnectionManager>) {
     let Some(conn_manager) = conn_manager.upgrade() else {
         // Conn manager is gone
         return;
     };
 
-    let current_sessions = conn_manager.online_connection_activity();
+    let sessions = conn_manager.online_connection_stats();
+    let expresslane_active_5m = calculate_expresslane_active_5m(&sessions);
+    let (current_sessions, expresslane_states): (Vec<_>, Vec<_>) = sessions.into_iter().unzip();
 
     let (standby, active) = calculate_session_stats(&current_sessions);
+    let expresslane = calculate_expresslane_stats(&expresslane_states);
 
     let current = current_sessions.len();
     let total = conn_manager.total_sessions();
@@ -94,6 +127,8 @@ fn session_stats(conn_manager: &Weak<ConnectionManager>) {
         active,
         standby,
     );
+    metrics::sessions_expresslane(&expresslane);
+    metrics::sessions_expresslane_active_5m(expresslane_active_5m);
 }
 
 fn ip_manager_stats(ip_manager: &Weak<IpManager>) {
@@ -112,16 +147,18 @@ pub(crate) async fn run(
     ip_manager: Arc<IpManager>,
     reporting_interval: Duration,
 ) {
-    let conn_manager = Arc::downgrade(&conn_manager);
-    let ip_manager = Arc::downgrade(&ip_manager);
+    let weak_conn_manager = Arc::downgrade(&conn_manager);
+    let weak_ip_manager = Arc::downgrade(&ip_manager);
+    drop(conn_manager);
+    drop(ip_manager);
 
     let mut ticker = tokio::time::interval(reporting_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticker = tokio_stream::wrappers::IntervalStream::new(ticker);
 
     while ticker.next().await.is_some() {
-        session_stats(&conn_manager);
-        ip_manager_stats(&ip_manager);
+        session_stats(&weak_conn_manager);
+        ip_manager_stats(&weak_ip_manager);
     }
 }
 
@@ -180,5 +217,65 @@ mod tests {
         let (standby, active) = calculate_session_stats(&sessions);
 
         format!("{}+{}", standby.fmt(), active.fmt())
+    }
+    #[test_case(ExpresslaneState::Active,   Duration::ZERO         => 1 ; "expresslane active, recent data")]
+    #[test_case(ExpresslaneState::Active,   Duration::from_mins(6) => 0 ; "expresslane active, 5+ mins since data")]
+    #[test_case(ExpresslaneState::Inactive, Duration::ZERO         => 0 ; "expresslane inactive, recent data")]
+    fn calculate_expresslane_active_5m_aging(
+        state: ExpresslaneState,
+        data_traffic_age: Duration,
+    ) -> usize {
+        let now = Instant::now();
+
+        let sessions = vec![(
+            ConnectionActivity {
+                last_outside_data_received: now - data_traffic_age,
+                last_data_traffic_from_peer: now - data_traffic_age,
+                last_data_delivered_to_inside: now - data_traffic_age,
+            },
+            state,
+        )];
+
+        calculate_expresslane_active_5m(&sessions)
+    }
+
+    #[test]
+    fn calculate_expresslane_stats_counts_each_state() {
+        let states = [
+            ExpresslaneState::Disabled,
+            ExpresslaneState::WaitingForClient,
+            ExpresslaneState::WaitingForClient,
+            ExpresslaneState::Inactive,
+            ExpresslaneState::Active,
+            ExpresslaneState::Active,
+            ExpresslaneState::Active,
+            ExpresslaneState::Degraded,
+        ];
+
+        assert_eq!(
+            calculate_expresslane_stats(&states),
+            ExpresslaneSessionStats {
+                disabled: 1,
+                waiting_for_client: 2,
+                inactive: 1,
+                active: 3,
+                degraded: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn run_does_not_keep_managers_alive() {
+        let conn_manager = crate::io::outside::datagram::tests::test_conn_manager();
+        let ip_manager = crate::tests::test_ip_manager();
+        let weak_conn_manager = Arc::downgrade(&conn_manager);
+        let weak_ip_manager = Arc::downgrade(&ip_manager);
+
+        let task = tokio::spawn(run(conn_manager, ip_manager, Duration::from_millis(10)));
+        tokio::task::yield_now().await;
+
+        assert!(weak_conn_manager.upgrade().is_none());
+        assert!(weak_ip_manager.upgrade().is_none());
+        task.abort();
     }
 }

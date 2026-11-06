@@ -48,6 +48,7 @@ pub(crate) async fn run(
     interval: Duration,
 ) {
     let weak = Arc::downgrade(&conn_manager);
+    drop(conn_manager);
     let mut seen: HashMap<SessionId, Seen> = HashMap::new();
 
     let mut ticker = tokio::time::interval(interval);
@@ -133,5 +134,34 @@ mod tests {
             received_bytes: 900,
         });
         assert_eq!(decide(prev, stats(5, 9, 500, 900)), (false, false, 0, 0));
+    }
+
+    struct NoStats;
+
+    impl lightway_core::ExpresslaneMetrics for NoStats {
+        fn get_stats(
+            &self,
+            _session_id: SessionId,
+        ) -> Result<ExpresslanePacketStats, lightway_core::ExpresslaneStatsError> {
+            unreachable!("no online connections")
+        }
+    }
+
+    #[tokio::test]
+    async fn run_stops_once_conn_manager_is_dropped() {
+        let conn_manager = crate::io::outside::datagram::tests::test_conn_manager();
+        let weak = Arc::downgrade(&conn_manager);
+
+        let task = tokio::spawn(run(
+            conn_manager,
+            Arc::new(NoStats),
+            Duration::from_millis(10),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("run() kept the connection manager alive")
+            .unwrap();
+        assert!(weak.upgrade().is_none());
     }
 }

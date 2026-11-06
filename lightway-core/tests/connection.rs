@@ -56,6 +56,7 @@ async fn run_test<S: TestSock>(
                         .then_some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
                     conn_out: None,
                     metrics: None,
+                    expresslane_cb: None,
                     cert,
                     key,
                 },
@@ -158,6 +159,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
             expresslane: None,
             conn_out: None,
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -420,6 +422,7 @@ async fn test_server_dn(server_dn: Option<&str>) {
                         expresslane: None,
                         conn_out: None,
                         metrics: None,
+                        expresslane_cb: None,
                         cert,
                         key,
                     },
@@ -493,6 +496,41 @@ async fn mark_offload_activity_bumps_by_rule() {
     assert!(after_rx.last_outside_data_received > after_tx.last_outside_data_received);
 }
 
+#[test_case(true, ExpresslaneState::Inactive; "expresslane enabled")]
+#[test_case(false, ExpresslaneState::Disabled; "expresslane disabled")]
+#[tokio::test]
+async fn expresslane_state_reports_initial_client_state(
+    enable_expresslane: bool,
+    expected: ExpresslaneState,
+) {
+    let (client_sock, _server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let ca_cert = TestPki::get_valid(2, RsaKeySize::_2048).root_ca();
+    let (ticker, _ticker_task) = ConnectionTicker::new();
+    let state = ConnectionState { ticker };
+
+    let conn = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        None,
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .when(enable_expresslane, |b| {
+        b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+    })
+    .build()
+    .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .connect(state)
+    .unwrap();
+
+    assert_eq!(conn.expresslane_state(), expected);
+}
+
 /// Proves the offload-nudge chain end to end: a server-side
 /// `mark_offload_activity` call (exactly what the offload-stats poller
 /// does) rotates the expresslane key on both ends while the client sees
@@ -532,6 +570,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
             expresslane: Some(INTERVAL),
             conn_out: Some(conn_tx),
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -883,12 +922,13 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
 
 /// Drives a client/server pair through repeated keepalive windows and
 /// reports how the client's expresslane health check reacted: the final
-/// state, which window (if any) first saw it go Degraded, and how many
-/// probe packets came back reflected (proof traffic actually flowed).
+/// state, which window (if any) first saw it go Degraded, how many
+/// probe packets came back reflected (proof traffic actually flowed), and
+/// the server's final state.
 async fn expresslane_health_probe(
     client_metrics: Option<Arc<dyn ExpresslaneMetrics + Send + Sync>>,
     server_metrics: Option<ExpresslaneMetricsType>,
-) -> (ExpresslaneState, Option<usize>, usize) {
+) -> (ExpresslaneState, Option<usize>, usize, ExpresslaneState) {
     // Comfortably above MIN_PACKETS_FOR_LOSS_CHECK (10) so a bad window is
     // unambiguous; WINDOWS above EXPRESSLANE_MISSING_STATS_LIMIT (3) so
     // "degrades at the limit, not before" is observable.
@@ -924,14 +964,16 @@ async fn expresslane_health_probe(
     // the health-check windows this probe measures.
     let pki = TestPki::get_valid(2, RsaKeySize::_2048);
     let (cert, key) = pki.server_secrets();
+    let (server_conn_tx, server_conn_rx) = oneshot::channel();
     let server_task = server(
         server_sock,
         TestServerConfig {
             auth,
             pqc,
             expresslane: Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
-            conn_out: None,
+            conn_out: Some(server_conn_tx),
             metrics: server_metrics,
+            expresslane_cb: None,
             cert,
             key,
         },
@@ -1060,8 +1102,11 @@ async fn expresslane_health_probe(
             }
         }
 
+        let server_conn = server_conn_rx.await.expect("server connection");
+        let server_state = server_conn.lock().unwrap().expresslane_state();
+
         conn.lock().unwrap().disconnect().unwrap();
-        (el_state, degraded_at, reflected)
+        (el_state, degraded_at, reflected, server_state)
     };
 
     // Emulated targets requires much more time to run this,
@@ -1106,7 +1151,7 @@ impl ExpresslaneMetrics for AlwaysUnavailableStats {
 /// nothing to report must say so, not fabricate zeros.
 #[tokio::test]
 async fn zero_stats_readings_degrade_as_total_loss() {
-    let (state, _degraded_at, reflected) =
+    let (state, _degraded_at, reflected, _) =
         expresslane_health_probe(Some(Arc::new(AlwaysZeroStats)), None).await;
 
     assert_eq!(
@@ -1125,7 +1170,7 @@ async fn zero_stats_readings_degrade_as_total_loss() {
 /// snapshots) and fail-safes on the third, never earlier.
 #[tokio::test]
 async fn failed_local_readings_skip_briefly_then_degrade() {
-    let (state, degraded_at, reflected) =
+    let (state, degraded_at, reflected, _) =
         expresslane_health_probe(Some(Arc::new(AlwaysUnavailableStats)), None).await;
 
     assert_eq!(state, ExpresslaneState::Degraded);
@@ -1145,7 +1190,7 @@ async fn failed_local_readings_skip_briefly_then_degrade() {
 /// and degrade, even though its own local counters read fine throughout.
 #[tokio::test]
 async fn peer_that_stops_reporting_degrades() {
-    let (state, degraded_at, reflected) =
+    let (state, degraded_at, reflected, _) =
         expresslane_health_probe(None, Some(Arc::new(AlwaysUnavailableStats))).await;
 
     assert_eq!(state, ExpresslaneState::Degraded);
@@ -1158,6 +1203,153 @@ async fn peer_that_stops_reporting_degrades() {
         Some(3),
         "the first two windows must be tolerated (skip) and the third fail-safe"
     );
+}
+
+/// A client that degrades notifies the server, which must degrade too
+/// rather than fall back to Inactive and keep offering expresslane.
+#[tokio::test]
+async fn server_follows_client_degrade() {
+    let (state, _degraded_at, _reflected, server_state) =
+        expresslane_health_probe(Some(Arc::new(AlwaysZeroStats)), None).await;
+
+    assert_eq!(state, ExpresslaneState::Degraded);
+    assert_eq!(server_state, ExpresslaneState::Degraded);
+}
+
+/// A server with expresslane disabled must not take up a client's
+/// expresslane config: no key install or publish, no state change. It
+/// still acks, so the client does not keep retransmitting.
+#[tokio::test]
+async fn disabled_server_ignores_expresslane_config() {
+    struct CallCount(std::sync::atomic::AtomicUsize);
+    impl<T> ExpresslaneCb<T> for CallCount {
+        fn update(&self, _sid: SessionId, _data: ExpresslaneCbData, _s: &T) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // Set once the client's own key is promoted, i.e. the server acked.
+    struct AckSeen(std::sync::atomic::AtomicBool);
+    impl<T> ExpresslaneCb<T> for AckSeen {
+        fn update(&self, _sid: SessionId, data: ExpresslaneCbData, _s: &T) {
+            if !data.self_key.is_invalid() {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let server_cb = Arc::new(CallCount(Default::default()));
+    let client_cb = Arc::new(AckSeen(Default::default()));
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+    let server_task = server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: Some(conn_tx),
+            metrics: None,
+            expresslane_cb: Some(server_cb.clone()),
+            cert,
+            key,
+        },
+    );
+
+    let client_task = async move {
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+        .with_expresslane_cb(client_cb.clone())
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    if client_cb.0.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            server_conn.lock().unwrap().expresslane_state(),
+            ExpresslaneState::Disabled
+        );
+        assert_eq!(
+            server_cb.0.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a disabled server must not install or publish the client key"
+        );
+        assert_eq!(
+            conn.lock().unwrap().expresslane_state(),
+            ExpresslaneState::Inactive
+        );
+
+        conn.lock().unwrap().disconnect().unwrap();
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async move { tokio::join!(server_task, client_task) },
+    )
+    .await
+    .expect("client never saw its expresslane config acked");
 }
 
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
@@ -1252,6 +1444,7 @@ async fn pmtud_reports_status_changes() {
             expresslane: None,
             conn_out: None,
             metrics: None,
+            expresslane_cb: None,
             cert,
             key,
         },

@@ -79,6 +79,9 @@ Lightway server also supports metrics to monitor. The following are the metrics 
 | sessions_active_5m<br>sessions_active_15m<br>sessions_active_60m | server | Gauge | The number of connections which were “active” in most recent N minutes.<br>An “active” connection is one where traffic has been seen from the client to the Internet |
 | sessions_standby_5m<br>sessions_standby_15m<br>sessions_standby_60m | server | Gauge | The number of connections which were “on standby” in most recent N minutes.<br>An “on standby” connection is one where traffic has been seen from the Internet to the client |
 | sessions_encoding_enabled | server | Gauge | The number of connections which currently have encoding enabled |
+| sessions_expresslane | server | Gauge | The number of connections in the Online state in each expresslane state, labelled `state` (`disabled`, `waiting_for_client`, `inactive`, `active`, `degraded`). Updated every `statistics_reporting_interval`.<br>`waiting_for_client` connections have expresslane enabled but the client has not started it (TCP, older clients, or clients with expresslane off).<br>`active` means expresslane keys are negotiated, not traffic as in `sessions_active_*` |
+| sessions_expresslane_active_5m | server | Gauge | The number of connections in `sessions_expresslane{state="active"}` which were also “active” (see `sessions_active_5m`) in the most recent 5 minutes.<br>Leaves out abandoned connections that have not been evicted yet |
+| expresslane_state_changed | server | Counter | Counts expresslane state changes, labelled `state` with the new state |
 | assigned_internal_ips | server | Gauge | The current number of IPs which are allocated to connections |
 
 

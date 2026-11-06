@@ -26,8 +26,8 @@ use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback, PacketCodecFactoryType};
 use lightway_core::{
     ConnectionActivity, ConnectionBuilderError, ConnectionError, ContextError, Event,
-    MAX_IO_BATCH_SIZE, OutsideIOSendCallbackArg, OutsidePacket, ServerContext, SessionId, State,
-    Version,
+    ExpresslaneState, MAX_IO_BATCH_SIZE, OutsideIOSendCallbackArg, OutsidePacket, ServerContext,
+    SessionId, State, Version,
 };
 
 use crate::handle_inside_io_error;
@@ -229,6 +229,7 @@ async fn handle_events(
             Event::TlsKeysUpdateCompleted => handle_tls_keys_update_complete(),
             Event::ExpresslaneStateChanged(s) => {
                 info!("Setting expresslane state to {:?}", s);
+                metrics::expresslane_state_changed(s);
             }
             Event::FirstPacketReceived | Event::PmtudStateChanged(_) => {
                 unreachable!("client only event received");
@@ -648,12 +649,12 @@ impl ConnectionManager {
         metrics::udp_session_rotation_finalized();
     }
 
-    pub(crate) fn online_connection_activity(&self) -> Vec<ConnectionActivity> {
+    pub(crate) fn online_connection_stats(&self) -> Vec<(ConnectionActivity, ExpresslaneState)> {
         self.connections
             .lock()
             .iter_connections()
             .filter_map(|c| match c.state() {
-                State::Online => Some(c.activity()),
+                State::Online => Some((c.activity(), c.expresslane_state())),
                 _ => None,
             })
             .collect()
@@ -730,5 +731,35 @@ impl ConnectionManager {
         for conn in connections {
             let _ = conn.lw_disconnect();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::tests::counter_value;
+    use lightway_core::EventCallback;
+    use metrics_util::debugging::DebuggingRecorder;
+
+    #[test]
+    fn handle_events_counts_expresslane_state_changes() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        ::metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (mut cb, stream) = EventStreamCallback::new();
+                cb.event(Event::ExpresslaneStateChanged(ExpresslaneState::Inactive));
+                cb.event(Event::ExpresslaneStateChanged(ExpresslaneState::Active));
+                drop(cb);
+                handle_events(stream, Weak::new(), None).await;
+            });
+        });
+
+        assert_eq!(counter_value(&snapshotter, "inactive"), 1);
+        assert_eq!(counter_value(&snapshotter, "active"), 1);
     }
 }

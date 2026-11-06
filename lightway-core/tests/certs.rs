@@ -37,6 +37,7 @@ async fn handshake(pki: &'static TestPki) -> Result<(), String> {
                     expresslane: None,
                     conn_out: None,
                     metrics: None,
+                    expresslane_cb: None,
                     cert,
                     key,
                 },
