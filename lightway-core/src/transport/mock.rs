@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -90,6 +90,7 @@ pub struct MockTransport {
     pending: BytesMut,
     records: VecDeque<BytesMut>,
     handshakes: VecDeque<PollResult<()>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl MockTransport {
@@ -100,7 +101,13 @@ impl MockTransport {
             pending: BytesMut::new(),
             records: VecDeque::new(),
             handshakes: VecDeque::new(),
+            closed: Default::default(),
         }
+    }
+
+    /// Whether `shutdown` ran on this transport.
+    pub fn closed(&self) -> Arc<AtomicBool> {
+        self.closed.clone()
     }
 }
 
@@ -145,7 +152,9 @@ impl Transport for MockTransport {
         self.records.pop_front()
     }
 
-    fn shutdown(&mut self) {}
+    fn shutdown(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
 
     fn key_update(&mut self) -> PollResult<()> {
         Ok(Poll::Ready(()))
@@ -571,6 +580,32 @@ mod tests {
             .unwrap_err();
         assert!(!p.server.is_fatal(&err));
         p.pump_to_online();
+    }
+
+    #[test]
+    fn a_connecting_connection_disconnects() {
+        let mut st = MockTransport::new(LOSSY);
+        st.handshakes.push_back(Ok(Poll::Pending));
+        let closed = st.closed();
+        let (_, server_io) = MockOutsideIo::pair();
+        let server_ctx = ServerContextBuilder::new(
+            Arc::new(Auth),
+            Arc::new(Pool),
+            Arc::new(Tun::default()),
+            tick,
+        )
+        .build()
+        .unwrap();
+        let mut server = server_ctx
+            .start_accept(Version::MAXIMUM, server_io)
+            .unwrap()
+            .accept((), Box::new(move |_| Ok(Box::new(st))))
+            .unwrap();
+        assert_eq!(server.state(), State::Connecting);
+
+        server.disconnect().unwrap();
+        assert_eq!(server.state(), State::Disconnected);
+        assert!(closed.load(Ordering::SeqCst));
     }
 
     #[test]
