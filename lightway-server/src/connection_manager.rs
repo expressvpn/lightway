@@ -9,7 +9,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Weak,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 use thiserror::Error;
@@ -17,11 +17,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::StreamExt;
 use tracing::{info, instrument, warn};
 
-use crate::connection_manager::connection_map::InsertError;
+pub use crate::connection_manager::connection_map::InsertError;
 use crate::{
     connection::{Connection, ConnectionState},
     metrics,
 };
+pub(crate) use connection_map::ConnectionId;
 use connection_map::ConnectionMap;
 use lightway_app_utils::{EventStream, EventStreamCallback, PacketCodecFactoryType};
 use lightway_core::{
@@ -68,6 +69,10 @@ pub(crate) enum KeyRotation {
 }
 
 impl connection_map::Value for Connection {
+    fn id(&self) -> ConnectionId {
+        self.id
+    }
+
     fn socket_addr(&self) -> SocketAddr {
         self.peer_addr()
     }
@@ -78,7 +83,8 @@ impl connection_map::Value for Connection {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ConnectionManagerError {
+#[non_exhaustive]
+pub enum ConnectionManagerError {
     /// Client session id and connection session id mismatch
     #[error("Client session id and connection session id mismatch")]
     SessionIdMismatch,
@@ -104,12 +110,13 @@ pub(crate) enum ConnectionManagerError {
     LwContextError(#[from] ContextError),
 }
 
-pub(crate) struct ConnectionManager {
+/// Owns every connection of a server.
+pub struct ConnectionManager {
     pub(crate) ctx: ServerContext<ConnectionState>,
     connections: Mutex<ConnectionMap<Connection>>,
     pending_session_id_rotations: Mutex<HashMap<SessionId, Weak<Connection>>>,
     /// Total number of sessions there have ever been
-    total_sessions: AtomicUsize,
+    total_sessions: AtomicU64,
     inside_io_codec_factory: Option<PacketCodecFactoryType>,
     /// Optional callback to forward per-connection events with session ID
     event_cb: Option<crate::ServerEventCbType>,
@@ -300,8 +307,6 @@ fn new_connection(
     let (event_cb, event_stream) = EventStreamCallback::new();
     let server_event_cb = manager.event_cb.clone();
 
-    manager.total_sessions.fetch_add(1, Ordering::Relaxed);
-
     let (inside_io_codec, pkt_receivers) = match &manager.inside_io_codec_factory {
         Some(codec_factory) => {
             let codec = codec_factory.build();
@@ -409,8 +414,13 @@ impl ConnectionManager {
         }
     }
 
-    pub(crate) fn total_sessions(&self) -> usize {
+    pub(crate) fn total_sessions(&self) -> u64 {
         self.total_sessions.load(Ordering::Relaxed)
+    }
+
+    /// The id of a new connection is the number of sessions before it.
+    pub(crate) fn next_connection_id(&self) -> ConnectionId {
+        ConnectionId(self.total_sessions.fetch_add(1, Ordering::Relaxed))
     }
 
     pub(crate) fn connection_age_expiration_interval(&self) -> Duration {
@@ -421,21 +431,25 @@ impl ConnectionManager {
         self.pending_session_id_rotations.lock().len()
     }
 
-    pub(crate) fn create_streaming_connection(
+    /// Create a connection whose outside data the caller delivers.
+    ///
+    /// `transport` builds the transport of the connection. The manager
+    /// tracks the connection by id and session id. It does not route by
+    /// peer address.
+    pub fn create_connection(
         self: &Arc<Self>,
         protocol_version: Version,
-        socket_addr: SocketAddr,
+        local_addr: SocketAddr,
         outside_io: OutsideIOSendCallbackArg,
         transport: ServerTransportBuilder<'_>,
     ) -> Result<Arc<Connection>, ConnectionManagerError> {
         let conn = new_connection(
             self.clone(),
             protocol_version,
-            socket_addr,
+            local_addr,
             outside_io,
             transport,
         )?;
-        // TODO: what if addr was already present?
         self.connections.lock().insert(&conn)?;
         Ok(conn)
     }
@@ -527,16 +541,21 @@ impl ConnectionManager {
     /// datagram receive path, which routes an occupied address to its existing
     /// owner and never treats it as a roam.
     ///
-    /// The check and the swap share one lock on the connection map: `conn`'s
-    /// own address is only mutated once the map has agreed to take it, so the
-    /// two can never diverge.
+    /// Also refuses when the outside IO keeps the old address, because the
+    /// map finds the entry of a connection by its `peer_addr`.
+    ///
+    /// The check and the swap share one lock on the connection map, so the
+    /// key always equals the address of the connection.
     pub(crate) fn set_peer_addr(&self, conn: &Arc<Connection>, new_addr: SocketAddr) -> bool {
         let mut connections = self.connections.lock();
         if !connections.can_take_socketaddr(new_addr, conn) {
             return false;
         }
         let old_addr = conn.set_peer_addr(new_addr);
-        connections.update_socketaddr_for_connection(old_addr, new_addr);
+        if conn.peer_addr() != new_addr {
+            return false;
+        }
+        connections.update_socketaddr_for_connection(conn, old_addr, new_addr);
         true
     }
 
@@ -550,8 +569,8 @@ impl ConnectionManager {
     /// offload engine reporting against the new id would otherwise be ignored
     /// for exactly the period a roam makes reports most likely.
     ///
-    /// `by_session_id` holds streaming connections too, so the type is checked
-    /// here rather than left to each caller.
+    /// `by_session_id` holds every connection, so this method checks the
+    /// type for each caller.
     pub(crate) fn find_datagram_connection_by_session(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -621,6 +640,7 @@ impl ConnectionManager {
         }
     }
 
+    /// Forget `conn`. [`Connection::disconnect`] calls this.
     pub(crate) fn remove_connection(&self, conn: &Connection) {
         self.connections.lock().remove(conn)
     }
@@ -639,14 +659,15 @@ impl ConnectionManager {
 
     pub(crate) fn finalize_session_id_rotation(
         &self,
-        _conn: &Arc<Connection>,
+        conn: &Arc<Connection>,
         old: SessionId,
         new: SessionId,
     ) {
-        self.pending_session_id_rotations.lock().remove(&new);
+        // Map first, so a packet with `new` finds the alias or the entry.
         self.connections
             .lock()
-            .update_session_id_for_connection(old, new);
+            .update_session_id_for_connection(conn, old, new);
+        self.pending_session_id_rotations.lock().remove(&new);
 
         metrics::udp_session_rotation_finalized();
     }

@@ -150,8 +150,22 @@ impl DatagramServer {
     }
 }
 
+/// The built-in [`Server`] for a datagram [`OutsideIO`].
+pub(crate) struct DatagramIoServer {
+    pub(crate) io: Box<dyn OutsideIO>,
+    pub(crate) transport: TlsServerFactory,
+}
+
 #[async_trait]
-impl Server for DatagramServer {
+impl Server for DatagramIoServer {
+    async fn run(self: Box<Self>, manager: Arc<ConnectionManager>) -> Result<()> {
+        DatagramServer::new(self.io, self.transport, manager)
+            .run()
+            .await
+    }
+}
+
+impl DatagramServer {
     async fn run(&mut self) -> Result<()> {
         let mut bufs: [BytesMut; MAX_IO_BATCH_SIZE] =
             std::array::from_fn(|_| BytesMut::with_capacity(MAX_OUTSIDE_MTU));
@@ -462,5 +476,25 @@ mod tests {
             manager.find_datagram_connection_with(PEER_B).is_none(),
             "the routing index must not have moved either"
         );
+    }
+
+    #[tokio::test]
+    async fn an_ignored_peer_address_does_not_move_the_map() {
+        let manager = test_conn_manager();
+        let io = Arc::new(MockIo::default());
+        let server = server(&io, manager.clone());
+
+        let mut buf = wire_packet(Version::MINIMUM, SessionId::EMPTY);
+        server.dispatch(&mut buf, &meta(PEER_A));
+        let conn = manager
+            .find_datagram_connection_with(PEER_A)
+            .expect("connection created for PEER_A");
+
+        // `MockSend` keeps the default `set_peer_addr`, which ignores
+        // the address.
+        assert!(!manager.set_peer_addr(&conn, PEER_B));
+        assert_eq!(conn.peer_addr(), PEER_A);
+        assert!(manager.find_datagram_connection_with(PEER_A).is_some());
+        assert!(manager.find_datagram_connection_with(PEER_B).is_none());
     }
 }
