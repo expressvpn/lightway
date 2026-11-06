@@ -651,14 +651,15 @@ impl ConnectionManager {
 
     pub(crate) fn finalize_session_id_rotation(
         &self,
-        _conn: &Arc<Connection>,
+        conn: &Arc<Connection>,
         old: SessionId,
         new: SessionId,
     ) {
-        self.pending_session_id_rotations.lock().remove(&new);
+        // Map first, so a packet with `new` finds the alias or the entry.
         self.connections
             .lock()
-            .update_session_id_for_connection(old, new);
+            .update_session_id_for_connection(conn, old, new);
+        self.pending_session_id_rotations.lock().remove(&new);
 
         metrics::udp_session_rotation_finalized();
     }

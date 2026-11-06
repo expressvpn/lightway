@@ -71,7 +71,9 @@ pub(crate) enum Entry<'a, T> {
 /// `remove` finds the entries of a connection by its `socket_addr` and
 /// its `session_id`, so these are the keys. One exception: in a session
 /// id rotation, the connection takes the new id first, and the key stays
-/// the old id until `update_session_id_for_connection`.
+/// the old id until `update_session_id_for_connection`. A removal in that
+/// gap leaves the entry for the old id, which points at no connection in
+/// `by_id`, until that call drops it.
 pub(crate) struct ConnectionMap<T> {
     by_id: HashMap<ConnectionId, Arc<T>>,
     by_socket_addr: HashMap<SocketAddr, Arc<T>>,
@@ -140,17 +142,6 @@ impl<T> ConnectionMap<T> {
             None => true,
         }
     }
-
-    /// Update the current connection mapped by [`SessionId`] `old` to
-    /// be mapped instead by `new`.
-    ///
-    /// If there is no current entry for `old` then this method is a
-    /// nop.
-    pub(crate) fn update_session_id_for_connection(&mut self, old: SessionId, new: SessionId) {
-        if let Some(value) = self.by_session_id.remove(&old) {
-            self.by_session_id.insert(new, value);
-        }
-    }
 }
 
 impl<T: Value> ConnectionMap<T> {
@@ -167,6 +158,30 @@ impl<T: Value> ConnectionMap<T> {
     ) {
         if let Some(entry) = remove_owned(&mut self.by_socket_addr, &old_addr, value.id()) {
             self.by_socket_addr.insert(new_addr, entry);
+        }
+    }
+
+    /// Update the current connection mapped by [`SessionId`] `old` to
+    /// be mapped instead by `new`.
+    ///
+    /// If the entry for `old` is not `value` then this method is a
+    /// nop. If `value` is no longer in `by_id`, drop the entry for `old`.
+    pub(crate) fn update_session_id_for_connection(
+        &mut self,
+        value: &T,
+        old: SessionId,
+        new: SessionId,
+    ) {
+        let id = value.id();
+        let Some(entry) = remove_owned(&mut self.by_session_id, &old, id) else {
+            return;
+        };
+        // The connection takes `new` before the map follows. A removal in
+        // that gap leaves the entry for `old`, so drop it here. The entry
+        // holds an `Arc`, so the connection stays alive and its rotation
+        // event always calls this method.
+        if self.by_id.contains_key(&id) {
+            self.by_session_id.insert(new, entry);
         }
     }
 
@@ -447,7 +462,7 @@ mod tests {
             m.by_socket_addr.get(&SOCKET_ADDR_A).unwrap()
         ));
 
-        m.update_session_id_for_connection(SESSION_ID_A, SESSION_ID_B);
+        m.update_session_id_for_connection(&v, SESSION_ID_A, SESSION_ID_B);
 
         assert!(!m.by_session_id.contains_key(&SESSION_ID_A));
         assert!(Arc::ptr_eq(&v, m.by_session_id.get(&SESSION_ID_B).unwrap()));
@@ -569,7 +584,7 @@ mod tests {
             session_id: SESSION_ID_A,
         });
         m.insert(&v).unwrap();
-        m.update_session_id_for_connection(SESSION_ID_A, SESSION_ID_B);
+        m.update_session_id_for_connection(&v, SESSION_ID_A, SESSION_ID_B);
 
         assert!(m.find_by_session(SESSION_ID_A).is_none());
         let found = m
@@ -642,6 +657,59 @@ mod tests {
 
         assert!(Arc::ptr_eq(&routed, &m.find_by(SOCKET_ADDR_A).unwrap()));
         assert!(m.find_by(SOCKET_ADDR_B).is_none());
+    }
+
+    /// The connection takes its new session id before the map follows.
+    /// A removal in that gap finds no entry for the new id.
+    #[test]
+    fn a_session_id_change_after_removal_adds_no_entry() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let v = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        m.insert(&v).unwrap();
+
+        let rotated = V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_B,
+        };
+        m.remove(&rotated);
+        m.update_session_id_for_connection(&rotated, SESSION_ID_A, SESSION_ID_B);
+
+        assert!(m.by_session_id.is_empty());
+    }
+
+    #[test]
+    fn update_session_id_keeps_an_entry_that_belongs_to_another_connection() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let owner = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        let other = Arc::new(V {
+            id: ConnectionId(2),
+            socket_addr: SOCKET_ADDR_B,
+            session_id: SESSION_ID_B,
+        });
+        m.insert(&owner).unwrap();
+        m.insert(&other).unwrap();
+
+        m.update_session_id_for_connection(&other, SESSION_ID_A, SESSION_ID_B);
+
+        assert!(Arc::ptr_eq(
+            &owner,
+            &m.find_by_session(SESSION_ID_A).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &other,
+            &m.find_by_session(SESSION_ID_B).unwrap()
+        ));
     }
 
     #[test]
