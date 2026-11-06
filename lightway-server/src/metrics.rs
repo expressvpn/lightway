@@ -113,6 +113,8 @@ static METRIC_SESSIONS_ENCODING_ENABLED: LazyLock<Gauge> =
 
 static METRIC_ASSIGNED_INTERNAL_IPS: LazyLock<Gauge> =
     LazyLock::new(|| gauge!("assigned_internal_ips"));
+static METRIC_SESSIONS_EXPRESSLANE_ACTIVE_5M: LazyLock<Gauge> =
+    LazyLock::new(|| gauge!("sessions_expresslane_active_5m"));
 
 const METRIC_SESSIONS_EXPRESSLANE: &str = "sessions_expresslane";
 const METRIC_EXPRESSLANE_STATE_CHANGED: &str = "expresslane_state_changed";
@@ -460,6 +462,11 @@ pub(crate) fn sessions_expresslane(stats: &ExpresslaneSessionStats) {
         gauge!(METRIC_SESSIONS_EXPRESSLANE, EXPRESSLANE_STATE_LABEL => state.as_str())
             .set(nr as f64);
     }
+}
+
+/// Number of online connections with expresslane active and recent data traffic
+pub(crate) fn sessions_expresslane_active_5m(nr: usize) {
+    METRIC_SESSIONS_EXPRESSLANE_ACTIVE_5M.set(nr as f64);
 }
 
 #[cfg(test)]

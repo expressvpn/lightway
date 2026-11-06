@@ -77,14 +77,29 @@ fn calculate_expresslane_stats(states: &[ExpresslaneState]) -> ExpresslaneSessio
     stats
 }
 
+/// Connections with expresslane active which also had data traffic
+/// (as counted by `sessions_active_5m`) in the most recent five minutes.
+fn calculate_expresslane_active_5m(sessions: &[(ConnectionActivity, ExpresslaneState)]) -> usize {
+    let now = std::time::Instant::now();
+
+    sessions
+        .iter()
+        .filter(|(activity, state)| {
+            matches!(state, ExpresslaneState::Active)
+                && now.duration_since(activity.last_data_traffic_from_peer) <= FIVE_MINUTES
+        })
+        .count()
+}
+
 fn session_stats(conn_manager: &Weak<ConnectionManager>) {
     let Some(conn_manager) = conn_manager.upgrade() else {
         // Conn manager is gone
         return;
     };
 
-    let (current_sessions, expresslane_states): (Vec<_>, Vec<_>) =
-        conn_manager.online_connection_stats().into_iter().unzip();
+    let sessions = conn_manager.online_connection_stats();
+    let expresslane_active_5m = calculate_expresslane_active_5m(&sessions);
+    let (current_sessions, expresslane_states): (Vec<_>, Vec<_>) = sessions.into_iter().unzip();
 
     let (standby, active) = calculate_session_stats(&current_sessions);
     let expresslane = calculate_expresslane_stats(&expresslane_states);
@@ -113,6 +128,7 @@ fn session_stats(conn_manager: &Weak<ConnectionManager>) {
         standby,
     );
     metrics::sessions_expresslane(&expresslane);
+    metrics::sessions_expresslane_active_5m(expresslane_active_5m);
 }
 
 fn ip_manager_stats(ip_manager: &Weak<IpManager>) {
@@ -200,6 +216,27 @@ mod tests {
 
         format!("{}+{}", standby.fmt(), active.fmt())
     }
+    #[test_case(ExpresslaneState::Active,   Duration::ZERO         => 1 ; "expresslane active, recent data")]
+    #[test_case(ExpresslaneState::Active,   Duration::from_mins(6) => 0 ; "expresslane active, 5+ mins since data")]
+    #[test_case(ExpresslaneState::Inactive, Duration::ZERO         => 0 ; "expresslane inactive, recent data")]
+    fn calculate_expresslane_active_5m_aging(
+        state: ExpresslaneState,
+        data_traffic_age: Duration,
+    ) -> usize {
+        let now = Instant::now();
+
+        let sessions = vec![(
+            ConnectionActivity {
+                last_outside_data_received: now - data_traffic_age,
+                last_data_traffic_from_peer: now - data_traffic_age,
+                last_data_delivered_to_inside: now - data_traffic_age,
+            },
+            state,
+        )];
+
+        calculate_expresslane_active_5m(&sessions)
+    }
+
     #[test]
     fn calculate_expresslane_stats_counts_each_state() {
         let states = [
