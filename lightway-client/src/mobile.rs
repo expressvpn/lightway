@@ -153,6 +153,7 @@ impl RustVpnConnection {
         let mut config = crate::config::Config::default();
 
         config.apply(serde_saphyr::from_str(&config_content)?);
+        config.validate()?;
 
         info!("Received {} endpoints", config.len());
         if config.is_empty() {
