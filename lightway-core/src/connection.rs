@@ -779,6 +779,11 @@ impl<AppState: Send> Connection<AppState> {
         self.state
     }
 
+    /// Get the current expresslane state.
+    pub fn expresslane_state(&self) -> ExpresslaneState {
+        self.expresslane.state
+    }
+
     /// Get the current connection activity statistics.
     pub fn activity(&self) -> ConnectionActivity {
         self.activity

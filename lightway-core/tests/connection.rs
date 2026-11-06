@@ -493,6 +493,41 @@ async fn mark_offload_activity_bumps_by_rule() {
     assert!(after_rx.last_outside_data_received > after_tx.last_outside_data_received);
 }
 
+#[test_case(true, ExpresslaneState::Inactive; "expresslane enabled")]
+#[test_case(false, ExpresslaneState::Disabled; "expresslane disabled")]
+#[tokio::test]
+async fn expresslane_state_reports_initial_client_state(
+    enable_expresslane: bool,
+    expected: ExpresslaneState,
+) {
+    let (client_sock, _server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let ca_cert = TestPki::get_valid(2, RsaKeySize::_2048).root_ca();
+    let (ticker, _ticker_task) = ConnectionTicker::new();
+    let state = ConnectionState { ticker };
+
+    let conn = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        None,
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .when(enable_expresslane, |b| {
+        b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+    })
+    .build()
+    .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .connect(state)
+    .unwrap();
+
+    assert_eq!(conn.expresslane_state(), expected);
+}
+
 /// Proves the offload-nudge chain end to end: a server-side
 /// `mark_offload_activity` call (exactly what the offload-stats poller
 /// does) rotates the expresslane key on both ends while the client sees
