@@ -24,9 +24,9 @@ use bytesize::ByteSize;
 use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
 #[cfg(linux)]
 pub use io::inside::InsideIORecvGso;
-/// The downlink TCP coalescing kill switch — re-exported so embedders
-/// (which know whether inner packets can be forwarded) can drive it
-/// without reaching into the io module tree.
+/// The embedder's runtime switch for downlink TCP coalescing,
+/// re-exported so applications can veto it without reaching into the
+/// io module tree.
 #[cfg(any(linux, android))]
 pub use io::inside::raw_gro::set_tun_tcp_coalescing_allowed;
 pub use io::inside::{InsideIO, InsideIORecv};
@@ -326,7 +326,8 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Linux TUN opened without [`Self::enable_tun_offload`], with which
     /// it is mutually exclusive. Ignored on other platforms.
     ///
-    /// Must not be enabled on a host that forwards tunnel traffic; see
+    /// `client()` does not coalesce while IPv4 forwarding is on for the
+    /// TUN (re-checked every 5 s); see
     /// `io::inside::raw_gro` for why a forwarded coalesced packet
     /// blackholes its flow.
     ///
@@ -2400,14 +2401,65 @@ where
     }
 }
 
-/// Whether this host has IPv4 forwarding enabled, i.e. whether an
-/// inner packet could be forwarded rather than delivered locally. Read
-/// from `procfs`; an unreadable file is reported as not forwarding,
-/// which only costs a warning that is not printed.
+/// Whether IPv4 packets arriving on the TUN `tun_name` can be
+/// forwarded rather than delivered locally. The kernel decides per
+/// ingress device, so this reads the TUN's own
+/// `/proc/sys/net/ipv4/conf/<tun>/forwarding`; `ip_forward` is only the
+/// value written to every device's entry. Fails closed: an unknown
+/// name or an unreadable entry counts as forwarding.
 #[cfg(linux)]
-fn ipv4_forwarding_enabled() -> bool {
-    std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
-        .is_ok_and(|s| s.trim() != "0" && !s.trim().is_empty())
+fn tun_forwarding_enabled(tun_name: Option<&str>) -> bool {
+    let contents = tun_name.and_then(|name| {
+        std::fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{name}/forwarding")).ok()
+    });
+    forwarding_value(contents.as_deref())
+}
+
+/// Parse a forwarding sysctl; `None` (unreadable) counts as forwarding.
+#[cfg(linux)]
+fn forwarding_value(contents: Option<&str>) -> bool {
+    contents.is_none_or(|s| s.trim() != "0")
+}
+
+/// How often `client()` re-reads the TUN's forwarding sysctl while TCP
+/// coalescing can be active.
+#[cfg(linux)]
+const FORWARDING_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Keep the host-safety switch in step with `forwarding()` until
+/// `alive` is dropped, so forwarding turned on after startup (a
+/// container runtime, a hotspot) stops coalescing within one interval.
+/// `last` is the value already stored. Every tick passes the reading to
+/// `store`, as "host is safe", so the switch recovers even if something
+/// else wrote it; only a change is logged.
+#[cfg(linux)]
+async fn forwarding_watch_task(
+    alive: Weak<()>,
+    mut last: bool,
+    forwarding: impl Fn() -> bool + Send,
+    store: impl Fn(bool) + Send,
+) {
+    let mut tick = tokio::time::interval(FORWARDING_POLL_INTERVAL);
+    tick.tick().await; // The first tick completes immediately.
+    loop {
+        tick.tick().await;
+        if alive.strong_count() == 0 {
+            return;
+        }
+        let now = forwarding();
+        store(!now);
+        if now != last {
+            last = now;
+            if now {
+                tracing::warn!(
+                    "IPv4 forwarding turned on for the TUN (or became unreadable): \
+                     stopping TCP coalescing"
+                );
+            } else {
+                tracing::info!("IPv4 forwarding turned off for the TUN: TCP coalescing allowed");
+            }
+        }
+    }
 }
 
 fn validate_client_config<
@@ -2545,24 +2597,8 @@ pub async fn client<
         tracing::warn!("enable_tun_offload is only supported on Linux, ignoring");
     }
 
-    // Raw downlink TCP coalescing has no app layer here to drive its
-    // runtime gate, so the config flag *is* the operator's opt-in.
-    //
-    // Unlike Android — where tethered traffic never reaches the tun —
-    // a Linux host genuinely can forward inner packets, and a coalesced
-    // packet that gets forwarded is blackholed rather than slowed (see
-    // `io::inside::raw_gro`). Forwarding being off is the one thing that
-    // makes this unconditionally safe, so say so when it is not.
     #[cfg(linux)]
     if config.enable_tun_tcp_coalescing {
-        if ipv4_forwarding_enabled() {
-            tracing::warn!(
-                "enable_tun_tcp_coalescing is set while net.ipv4.ip_forward is enabled: \
-                 coalesced packets that this host *forwards* instead of delivering locally \
-                 will be dropped with ICMP frag-needed and those flows will blackhole. \
-                 Only enable this on a host that does not forward tunnel traffic."
-            );
-        }
         // Legal, but it will look like the feature is broken: a window
         // only merges what one receive returns, which is one datagram
         // over UDP without either option, and one read of about an MTU
@@ -2586,7 +2622,6 @@ pub async fn client<
                  call Tun::set_tcp_coalescing_configured on the device instead"
             );
         }
-        set_tun_tcp_coalescing_allowed(true);
     }
 
     let inside_io = match &config.inside_io {
@@ -2607,8 +2642,9 @@ pub async fn client<
             let mut tun =
                 io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
                     .await?;
-            // The static rollout gate; the runtime switch above and the
-            // device capability probe still apply on top. A device that
+            // The static rollout gate; the runtime switches (the
+            // embedder's, and the host check below) and the device
+            // capability probe still apply on top. A device that
             // negotiated `IFF_VNET_HDR` ignores this and uses the
             // vnet-hdr path instead.
             #[cfg(any(linux, android))]
@@ -2616,6 +2652,53 @@ pub async fn client<
             tun
         }),
     };
+
+    // A coalesced packet that the host forwards instead of delivering
+    // locally is dropped, blackholing its flow (see `io::inside::raw_gro`),
+    // so the host-safety switch follows the TUN's forwarding sysctl.
+    // Stored both ways on every start, before any connection can open a
+    // coalescing window, so an earlier run in this process cannot leak
+    // in; `forwarding_watch_task` keeps it current afterwards. A
+    // caller-supplied TUN may have coalescing configured by its owner,
+    // so it is covered too. The watch runs from here, so it also covers
+    // the connection phase, and stops once `client()` returns and drops
+    // `_forwarding_watch`. The switch is process-wide, so this assumes
+    // one `client()` at a time: concurrent ones on different TUNs would
+    // overwrite each other's reading.
+    #[cfg(linux)]
+    let coalescing_possible = config.enable_tun_tcp_coalescing || config.inside_io.is_some();
+    #[cfg(linux)]
+    let tun_name = inside_io.name().ok();
+    #[cfg(linux)]
+    let forwarding = tun_forwarding_enabled(tun_name.as_deref());
+    #[cfg(linux)]
+    {
+        io::inside::raw_gro::set_host_safe_to_coalesce(!forwarding);
+        if forwarding && config.enable_tun_tcp_coalescing {
+            tracing::warn!(
+                tun = ?tun_name,
+                "IPv4 forwarding is on for the TUN (or unreadable): not coalescing TCP, \
+                 it would blackhole forwarded flows"
+            );
+        } else if forwarding && coalescing_possible {
+            tracing::debug!(
+                tun = ?tun_name,
+                "IPv4 forwarding is on for the TUN (or unreadable): TCP coalescing not allowed"
+            );
+        }
+    }
+    #[cfg(linux)]
+    let _forwarding_watch = coalescing_possible.then(|| {
+        let alive = Arc::new(());
+        tokio::spawn(forwarding_watch_task(
+            Arc::downgrade(&alive),
+            forwarding,
+            move || tun_forwarding_enabled(tun_name.as_deref()),
+            io::inside::raw_gro::set_host_safe_to_coalesce,
+        ));
+        alive
+    });
+
     if let Ok(device_name) = inside_io.name() {
         tracing::info!(
             message = "Interface Details",
@@ -2988,6 +3071,65 @@ mod tests {
         config.enable_tun_offload = true;
 
         assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
+    /// The watch stores the reading every tick, as "host is safe", and
+    /// exits once its guard is dropped. The store is injected, so the
+    /// process-wide switch is never touched.
+    #[cfg(linux)]
+    #[tokio::test(start_paused = true)]
+    async fn forwarding_watch_follows_forwarding_until_dropped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let forwarding = Arc::new(AtomicBool::new(false));
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let alive = Arc::new(());
+        let task = tokio::spawn(forwarding_watch_task(
+            Arc::downgrade(&alive),
+            false,
+            {
+                let forwarding = forwarding.clone();
+                move || forwarding.load(Ordering::Relaxed)
+            },
+            {
+                let stored = stored.clone();
+                move |safe| stored.lock().unwrap().push(safe)
+            },
+        ));
+        let poll = || tokio::time::sleep(FORWARDING_POLL_INTERVAL + Duration::from_millis(1));
+
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true], "stored on every tick");
+
+        forwarding.store(true, Ordering::Relaxed);
+        poll().await;
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true, false, false]);
+
+        forwarding.store(false, Ordering::Relaxed);
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true, false, false, true]);
+
+        drop(alive);
+        poll().await;
+        assert!(task.is_finished());
+    }
+
+    /// The sysctl parse fails closed: only an explicit 0 means "not
+    /// forwarding".
+    #[cfg(linux)]
+    #[test_case(Some("0\n") => false)]
+    #[test_case(Some("1\n") => true)]
+    #[test_case(Some("") => true; "empty")]
+    #[test_case(None => true; "unreadable")]
+    fn forwarding_value_fails_closed(contents: Option<&str>) -> bool {
+        forwarding_value(contents)
+    }
+
+    /// An unknown TUN name counts as forwarding.
+    #[cfg(linux)]
+    #[test]
+    fn tun_forwarding_without_a_name_fails_closed() {
+        assert!(tun_forwarding_enabled(None));
     }
 
     #[test_case(1, vec![], false => None)]
