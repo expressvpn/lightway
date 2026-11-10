@@ -458,6 +458,21 @@ impl OutsideIOSendCallback for Udp {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(buf.len())
             }
+            #[cfg(linux)]
+            Err(err)
+                if self.peer_addr.is_ipv6()
+                    && matches!(err.kind(), std::io::ErrorKind::HostUnreachable) =>
+            {
+                // An IPv6 server is reached through its /128 route, which a
+                // network change can remove. Until a re-pin adds it back, the
+                // unreachable routes that block IPv6 answer sends to the
+                // server with EHOSTUNREACH. This is usually brief and DTLS
+                // retransmission covers it; if the route does not come back,
+                // `keepalive_timeout` ends the session. Letting it reach
+                // wolfSSL would end the session on every such gap.
+                self.note_swallowed_send(&err);
+                IOCallbackResult::Ok(buf.len())
+            }
             #[cfg(apple)]
             Err(err) if matches!(err.kind(), std::io::ErrorKind::AddrNotAvailable) => {
                 // The source address is no longer valid (e.g. Switched WiFi hotspots)
