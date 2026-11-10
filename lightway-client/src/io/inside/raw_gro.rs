@@ -46,17 +46,14 @@
 //!
 //!   On Android the condition is not reachable through this device:
 //!   tethered-client traffic is forwarded between interfaces by the
-//!   kernel and never enters the app's `VpnService` tun. The runtime
-//!   allow flag ([`set_tun_tcp_coalescing_allowed`]) is retained
-//!   anyway as a defensive control for configurations where inner
-//!   packets could be forwarded — other platforms, OEM variations, a
-//!   future Android that routes tethered traffic through the VPN, or a
-//!   rooted device with `ip_forward` into the tun — and so an embedder
-//!   that knows it is in one can revoke coalescing synchronously. It
-//!   **defaults to off**, so a caller that never opts in keeps the
-//!   per-packet write path.
-//! - **Config-gated rollout.** Independently of the runtime flag, the
-//!   `enable_tun_tcp_coalescing` config flag (also default off,
+//!   kernel and never enters the app's `VpnService` tun. On Linux it
+//!   is, so two process-wide runtime switches, both default on, must
+//!   agree: a host-safety switch that `client()` keeps off while the
+//!   TUN forwards IPv4, and an embedder switch
+//!   ([`set_tun_tcp_coalescing_allowed`]) for an application that
+//!   knows inner packets can be forwarded or wants coalescing off.
+//! - **Config-gated rollout.** Independently of the runtime switches,
+//!   the `enable_tun_tcp_coalescing` config flag (default off,
 //!   [`RawGro::set_configured`]) gates the feature per connection
 //!   config, exactly as `enable_tun_offload` gates the Linux offload
 //!   paths.
@@ -119,32 +116,42 @@ const IPPROTO_EXPERIMENTAL: u8 = 253;
 /// per-packet overhead; doubling it again buys almost nothing.
 pub(crate) const DEFAULT_MAX_SUPERPACKET: usize = 32 * 1024;
 
-/// The global coalescing allow flag — the runtime kill switch.
-/// Defaults to **off**: an app that never opts in gets the plain
-/// per-packet write path.
-static COALESCING_ALLOWED: AtomicBool = AtomicBool::new(false);
+/// The embedder's switch; see [`set_tun_tcp_coalescing_allowed`].
+/// Nothing in this crate writes it.
+static COALESCING_ALLOWED: AtomicBool = AtomicBool::new(true);
 
-/// Allow or forbid downlink TCP coalescing on the Android TUN write
-/// path. **Correctness gate, not a tuning knob**: it exists so an
-/// embedder can revoke coalescing when inner packets might be
-/// *forwarded* rather than delivered locally, which would blackhole
-/// those flows (see the module docs).
+/// Whether the host is safe to coalesce on: off while the TUN forwards
+/// IPv4. `client()` owns it on Linux; elsewhere it stays on.
+static HOST_SAFE: AtomicBool = AtomicBool::new(true);
+
+/// Allow or forbid raw downlink TCP coalescing on every TUN in the
+/// process. **Correctness gate, not a tuning knob**: turn it off when
+/// inner packets might be *forwarded* rather than delivered locally,
+/// which would blackhole those flows (see the module docs), or to
+/// switch coalescing off at runtime. Whether to coalesce at all is the
+/// per-device config gate (`Tun::set_tcp_coalescing_configured`).
 ///
-/// The Android app can enable this unconditionally — tethered-client
-/// traffic never enters the `VpnService` tun, so the forwarding
-/// condition is unreachable there. Callers that can reach it (other
-/// platforms, OEM variations, a rooted device forwarding into the tun)
-/// should revoke as soon as they know: the store is immediate, so every
-/// packet offered after this returns is written per-packet (at most one
-/// already in-flight oversized write can still complete) and there is
-/// no need to wait for a batch boundary.
+/// Defaults to on and belongs to the embedder: nothing in this crate
+/// writes it, so a veto holds across tunnel restarts. On Linux,
+/// `client()` additionally stops coalescing while the TUN forwards
+/// IPv4, through a separate switch this one cannot override. That
+/// switch is process-wide too, so run one `client()` at a time.
 ///
-/// Enabling is lazy and safe to call before the tunnel exists: the
-/// first coalescing window after enablement runs the capability probe,
-/// and the flag has no effect on platforms without the raw path.
+/// The store takes effect immediately: every packet offered after this
+/// returns is written per-packet (at most one in-flight oversized
+/// write can still complete), with no need to wait for a batch
+/// boundary. Enabling is lazy: the first coalescing window afterwards
+/// runs the capability probe.
 pub fn set_tun_tcp_coalescing_allowed(allowed: bool) {
     COALESCING_ALLOWED.store(allowed, Ordering::Relaxed);
     tracing::info!(allowed, "tun TCP coalescing allow flag set");
+}
+
+/// Set the host-safety switch; `client()` drives it from the TUN's
+/// forwarding sysctl.
+#[cfg(linux)]
+pub(crate) fn set_host_safe_to_coalesce(safe: bool) {
+    HOST_SAFE.store(safe, Ordering::Relaxed);
 }
 
 /// The device writes the raw coalescer performs. Implemented for
@@ -168,17 +175,28 @@ pub(crate) trait RawTunIo {
 /// Single-run downlink TCP coalescer over a raw (no `virtio_net_hdr`)
 /// TUN write path. See the module docs for the whole contract.
 ///
-/// Coalescing engages only when every gate agrees: the
-/// `enable_tun_tcp_coalescing` config flag ([`Self::set_configured`],
-/// the static rollout control), the app's runtime allow flag
-/// ([`set_tun_tcp_coalescing_allowed`], the kill switch for
-/// forwarding-capable setups), the one-shot capability probe, and no
-/// permanent fallback tripped.
+/// Coalescing engages only when every gate agrees:
+///
+/// | Gate          | Scope          | Set by                              | Lifetime                    | When off                               |
+/// |---------------|----------------|-------------------------------------|-----------------------------|----------------------------------------|
+/// | `configured`  | per device     | [`Self::set_configured`] at setup   | fixed once shared           | no probe, no window                    |
+/// | `allowed`     | process-global | [`set_tun_tcp_coalescing_allowed`]  | runtime, either direction   | held run re-split, then per-packet     |
+/// | `host_safe`   | process-global | `client()` (TUN forwarding sysctl)  | runtime, either direction   | as `allowed`                           |
+/// | `capable`     | per device     | first [`Self::open`] (the probe)    | latched, never re-probed    | window never opens                     |
+/// | `fell_back`   | per device     | `EMSGSIZE`/`EINVAL`/short run write | latched for the device      | run re-split, window never opens       |
+/// | `window_open` | per device     | [`Self::open`] / [`Self::flush`]    | one decrypt batch           | [`Self::send`] skips the batch lock    |
+///
+/// `configured` is the operator's choice (`enable_tun_tcp_coalescing`);
+/// `allowed` is the embedder's runtime switch and `host_safe` says
+/// whether the host forwards; both can flip at runtime.
+/// `capable` and `fell_back` live on
+/// this struct, so a new device (each tunnel start creates one)
+/// probes again.
 pub(crate) struct RawGro {
     /// The `enable_tun_tcp_coalescing` config flag: static rollout
     /// gate, fixed before the device is shared. Off means windows
     /// never open and the probe never runs, regardless of the runtime
-    /// allow flag.
+    /// switches.
     configured: bool,
     /// Whether a coalescing window is open (between the outside IO
     /// loop's `gro_open` and `gro_flush` around one decrypt batch).
@@ -217,9 +235,11 @@ pub(crate) struct RawGro {
     /// must equal the cap `batch` enforces: both clamp to
     /// `IP_MAX_DATAGRAM_SIZE` (here and in `TcpGroBatch::with_max_len`).
     max_len: usize,
-    /// The allow flag consulted on every packet; the global
-    /// [`COALESCING_ALLOWED`] in production, injectable for tests.
+    /// The two runtime switches consulted on every packet; the
+    /// globals [`COALESCING_ALLOWED`] and [`HOST_SAFE`] in production,
+    /// injectable for tests.
     allowed: &'static AtomicBool,
+    host_safe: &'static AtomicBool,
     /// Rate limits the warning for any write this path drops.
     drops: Streak,
     /// Rate limits the warning for an oversized write that failed with
@@ -265,10 +285,14 @@ impl Streak {
 
 impl RawGro {
     pub(crate) fn new(max_len: usize) -> Self {
-        Self::with_allowed(max_len, &COALESCING_ALLOWED)
+        Self::with_switches(max_len, &COALESCING_ALLOWED, &HOST_SAFE)
     }
 
-    fn with_allowed(max_len: usize, allowed: &'static AtomicBool) -> Self {
+    fn with_switches(
+        max_len: usize,
+        allowed: &'static AtomicBool,
+        host_safe: &'static AtomicBool,
+    ) -> Self {
         let max_len = max_len.min(IP_MAX_DATAGRAM_SIZE);
         Self {
             configured: false,
@@ -278,6 +302,7 @@ impl RawGro {
             batch: Mutex::new(TcpGroBatch::with_max_len(max_len)),
             max_len,
             allowed,
+            host_safe,
             drops: Streak::default(),
             run_errors: Streak::default(),
         }
@@ -286,19 +311,21 @@ impl RawGro {
     /// Set the `enable_tun_tcp_coalescing` config gate. `&mut self`
     /// pins this to device setup, before the `Tun` is shared: the
     /// static feature flag is not a runtime toggle — that role belongs
-    /// to [`set_tun_tcp_coalescing_allowed`].
+    /// to the runtime switches.
     pub(crate) fn set_configured(&mut self, enabled: bool) {
         self.configured = enabled;
     }
 
+    /// Both runtime switches: the embedder allows coalescing and the
+    /// host does not forward.
     fn allowed(&self) -> bool {
-        self.allowed.load(Ordering::Relaxed)
+        self.allowed.load(Ordering::Relaxed) && self.host_safe.load(Ordering::Relaxed)
     }
 
     /// Open a coalescing window for one decrypt batch. No-op unless
-    /// the feature is configured on, the app has allowed coalescing at
-    /// runtime, and the device passed (or now passes — the probe is
-    /// lazy) the capability probe.
+    /// the feature is configured on, both runtime switches allow it,
+    /// and the device passed (or now passes — the probe is lazy) the
+    /// capability probe.
     pub(crate) fn open(&self, tun: &impl RawTunIo, local_ip: Ipv4Addr) {
         if !self.configured || !self.allowed() || self.fell_back.load(Ordering::Relaxed) {
             return;
@@ -317,7 +344,7 @@ impl RawGro {
     /// one decrypt batch, with no timer.
     pub(crate) fn flush(&self, tun: &impl RawTunIo) {
         if !self.window_open.swap(false, Ordering::Relaxed) {
-            // Never opened (or already closed by a mid-window kill
+            // Never opened (or already closed by a mid-window runtime
             // switch flip, which drained the batch itself).
             return;
         }
@@ -342,7 +369,7 @@ impl RawGro {
         let mut batch = self.batch.lock().unwrap();
 
         if !self.allowed() || self.fell_back.load(Ordering::Relaxed) {
-            // Kill switch flipped (or the fallback tripped) inside an
+            // A runtime switch flipped (or the fallback tripped) inside an
             // open window: stop coalescing immediately. Drain the held
             // run — `write_run` re-splits it per segment in this state,
             // so no further oversized packet is emitted — and only then
@@ -419,7 +446,7 @@ impl RawGro {
         }
 
         if self.fell_back.load(Ordering::Relaxed) || !self.allowed() {
-            // Fallback already tripped, or the kill switch flipped
+            // Fallback already tripped, or a runtime switch flipped
             // after these segments were absorbed: emit them per
             // segment rather than as one oversized packet.
             self.write_resplit(tun, &sp);
@@ -625,6 +652,7 @@ mod tests {
     use pnet_packet::ipv4::MutableIpv4Packet;
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags};
     use std::collections::VecDeque;
+    use test_case::test_case;
 
     const TCP_HDR_LEN: usize = 20;
     const HDR_LEN: usize = IPV4_HDR_LEN + TCP_HDR_LEN;
@@ -644,10 +672,14 @@ mod tests {
         Box::leak(Box::new(AtomicBool::new(initial)))
     }
 
-    /// A coalescer with the config gate on — the baseline for tests
-    /// exercising the runtime gates behind it.
+    /// A coalescer with the config gate on and the host safe — the
+    /// baseline for tests exercising the embedder switch behind it.
     fn raw_gro(allowed: bool) -> RawGro {
-        let mut gro = RawGro::with_allowed(MAX_LEN, allow_flag(allowed));
+        raw_gro_with(allow_flag(allowed), allow_flag(true))
+    }
+
+    fn raw_gro_with(allowed: &'static AtomicBool, host_safe: &'static AtomicBool) -> RawGro {
+        let mut gro = RawGro::with_switches(MAX_LEN, allowed, host_safe);
         gro.set_configured(true);
         gro
     }
@@ -793,13 +825,13 @@ mod tests {
     }
 
     /// The static config gate (`enable_tun_tcp_coalescing`): while it
-    /// is off — the constructor default — the runtime allow flag is
+    /// is off — the constructor default — the runtime switches are
     /// irrelevant, windows never open, no probe packet is ever
     /// injected and every packet is written 1:1.
     #[test]
     fn unconfigured_never_probes_or_coalesces_even_when_allowed() {
         let tun = FakeRawTun::new();
-        let gro = RawGro::with_allowed(MAX_LEN, allow_flag(true));
+        let gro = RawGro::with_switches(MAX_LEN, allow_flag(true), allow_flag(true));
 
         gro.open(&tun, local_ip());
         assert!(!gro.window_open.load(Ordering::Relaxed));
@@ -816,13 +848,14 @@ mod tests {
         assert_eq!(writes[1], data(MSS as u32).to_vec());
     }
 
-    /// The default-off runtime gate: without the app's opt-in, opening
-    /// a window is a no-op — no probe packet is ever injected and every
-    /// packet is written 1:1.
-    #[test]
-    fn disallowed_never_probes_or_coalesces() {
+    /// Either runtime switch off (the embedder's veto, or the host
+    /// forwarding): opening a window is a no-op — no probe packet is
+    /// ever injected and every packet is written 1:1.
+    #[test_case(false, true; "embedder veto")]
+    #[test_case(true, false; "host forwarding")]
+    fn disallowed_never_probes_or_coalesces(allowed: bool, host_safe: bool) {
         let tun = FakeRawTun::new();
-        let gro = raw_gro(false);
+        let gro = raw_gro_with(allow_flag(allowed), allow_flag(host_safe));
 
         gro.open(&tun, local_ip());
         assert!(!gro.window_open.load(Ordering::Relaxed));
@@ -1045,24 +1078,23 @@ mod tests {
         assert_eq!(streak.hit(), Some(1), "QUIET successes end it");
     }
 
-    /// The kill switch revokes immediately and synchronously: flipped
-    /// mid-window, the held run is drained *per segment* (no further
-    /// oversized packet) before the triggering packet's direct write,
-    /// preserving within-flow order.
-    #[test]
-    fn kill_switch_mid_window_drains_per_segment_in_order() {
-        let allowed = allow_flag(true);
+    /// Either runtime switch revokes immediately and synchronously:
+    /// flipped mid-window, the held run is drained *per segment* (no
+    /// further oversized packet) before the triggering packet's direct
+    /// write, preserving within-flow order.
+    #[test_case(true; "embedder veto")]
+    #[test_case(false; "host forwarding")]
+    fn revoke_mid_window_drains_per_segment_in_order(revoke_embedder: bool) {
+        let (allowed, host_safe) = (allow_flag(true), allow_flag(true));
         let tun = FakeRawTun::new();
-        let mut gro = RawGro::with_allowed(MAX_LEN, allowed);
-        gro.set_configured(true);
+        let gro = raw_gro_with(allowed, host_safe);
 
         gro.open(&tun, local_ip());
         for seq in [0, MSS as u32] {
             send_ok(&gro, &tun, data(seq));
         }
 
-        // The embedder revokes: forwarding may now be in play.
-        allowed.store(false, Ordering::Relaxed);
+        if revoke_embedder { allowed } else { host_safe }.store(false, Ordering::Relaxed);
 
         let third = data(2 * MSS as u32);
         send_ok(&gro, &tun, third.clone());
