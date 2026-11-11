@@ -3,9 +3,9 @@
 //! plugins.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 #[cfg(any(target_os = "linux", test))]
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 use bytes::{Buf, BytesMut};
 #[cfg(any(target_os = "linux", test))]
@@ -15,8 +15,8 @@ use thiserror::Error;
 use crate::tls::IOCallbackResult;
 
 use crate::{
-    ConnectionType, Header, OutsideIOSendCallbackArg, PluginResult, Version, plugin::PluginList,
-    wire,
+    ConnectionError, ConnectionResult, ConnectionType, Header, OutsideIOSendCallbackArg,
+    PluginResult, SessionId, Version, plugin::PluginList, wire,
 };
 
 /// Largest number of outside packets that wait on a stream path. The
@@ -189,11 +189,14 @@ fn send_segments_individually(
 
 /// Wraps records into outside packets and sends them on the outside IO.
 pub(crate) struct Encapsulation {
-    pub(crate) connection_type: ConnectionType,
+    connection_type: ConnectionType,
 
-    pub(crate) protocol_version: Version,
+    /// Server side: check the header of each received packet.
+    server: bool,
 
-    pub(crate) outside_mtu: usize,
+    protocol_version: Version,
+
+    outside_mtu: usize,
 
     /// [`ConnectionType::Stream`] only: outside packets that the
     /// outside IO did not take yet, in order. The head can be partly
@@ -208,28 +211,31 @@ pub(crate) struct Encapsulation {
     /// connections that never see GSO, this stays zero-capacity and
     /// costs only the `GsoBuffer` struct (no heap).
     #[cfg(target_os = "linux")]
-    pub(crate) gso_buf: GsoBuffer,
+    gso_buf: GsoBuffer,
 
     /// Application provided object used to send data.
-    pub(crate) io: OutsideIOSendCallbackArg,
+    io: OutsideIOSendCallbackArg,
 
-    pub(crate) session_id: wire::SessionId,
+    /// The session ID in the header of each sent packet.
+    session_id: wire::SessionId,
 
-    /// Plugins to act while egressing outside packet
-    pub(crate) outside_plugins: Arc<PluginList>,
+    /// Plugins to act on outside packets, in both directions.
+    outside_plugins: PluginList,
 }
 
 impl Encapsulation {
     pub(crate) fn new(
         connection_type: ConnectionType,
+        server: bool,
         protocol_version: Version,
         outside_mtu: usize,
         io: OutsideIOSendCallbackArg,
         session_id: wire::SessionId,
-        outside_plugins: Arc<PluginList>,
+        outside_plugins: PluginList,
     ) -> Self {
         Self {
             connection_type,
+            server,
             protocol_version,
             outside_mtu,
             pending: VecDeque::new(),
@@ -242,8 +248,67 @@ impl Encapsulation {
         }
     }
 
+    pub(crate) fn session_id(&self) -> wire::SessionId {
+        self.session_id
+    }
+
     pub(crate) fn set_session_id(&mut self, session_id: wire::SessionId) {
         self.session_id = session_id;
+    }
+
+    pub(crate) fn protocol_version(&self) -> Version {
+        self.protocol_version
+    }
+
+    pub(crate) fn set_protocol_version(&mut self, version: Version) {
+        self.protocol_version = version;
+    }
+
+    pub(crate) fn peer_addr(&self) -> SocketAddr {
+        self.io.peer_addr()
+    }
+
+    /// Returns the previous address.
+    pub(crate) fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
+        self.io.set_peer_addr(addr)
+    }
+
+    /// Read the record and the header out of an outside packet.
+    ///
+    /// On the server, a header with another protocol version or with
+    /// the rejected session ID is an error.
+    pub(crate) fn receive<'pkt>(
+        &self,
+        pkt: OutsidePacket<'pkt>,
+    ) -> ConnectionResult<(&'pkt mut BytesMut, Option<Header>)> {
+        let (record, hdr) = match (pkt, self.connection_type) {
+            (OutsidePacket::Wire(buf, _), ConnectionType::Stream) => {
+                run_ingress(buf, &self.outside_plugins)?;
+                (buf, None)
+            }
+            (OutsidePacket::Wire(buf, _), ConnectionType::Datagram) => {
+                let (buf, hdr) = parse_datagram(buf, &self.outside_plugins)?;
+                (buf, Some(hdr))
+            }
+            (OutsidePacket::Record(buf, hdr), _) => (buf, Some(hdr)),
+        };
+
+        if self.server
+            && let Some(hdr) = &hdr
+        {
+            if hdr.version != self.protocol_version {
+                return Err(ConnectionError::InvalidProtocolVersion);
+            }
+
+            if hdr.session == SessionId::REJECTED {
+                // Drop reject packets to prevent an infinite loop
+                // where an attacker causes us to send rejected
+                // packets between servers.
+                return Err(ConnectionError::RejectedSessionID);
+            }
+        }
+
+        Ok((record, hdr))
     }
 
     /// Force enable the IPv4 DF bit is set for all packets.
@@ -345,10 +410,39 @@ impl Encapsulation {
         }
     }
 
+    /// Whether the outside IO still takes a GSO batch.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn gso_enabled(&self) -> bool {
+        self.io.gso_enabled()
+    }
+
+    /// Start a GSO batch. Each datagram that [`Encapsulation::udp_send`]
+    /// gets is coalesced, until [`Encapsulation::end_batch`] or
+    /// [`Encapsulation::discard_batch`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn begin_batch(&mut self) {
+        self.gso_buf.open();
+    }
+
+    /// Send the coalesced datagrams as one GSO send, and end the batch.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn end_batch(&mut self) {
+        if let IOCallbackResult::Err(e) = self.udp_send_gso() {
+            tracing::warn!(error = %e, "udp_send_gso failed");
+            crate::metrics::gso_send_failed();
+        }
+        self.gso_buf.reset();
+    }
+
+    /// Drop the coalesced datagrams, and end the batch.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn discard_batch(&mut self) {
+        self.gso_buf.reset();
+    }
+
     /// Take the raw encrypted segments coalesced in `self.gso_buf`,
     /// wrap each with `wire::Header` (+ plugins), and send as one
-    /// `sendmsg` with `UDP_SEGMENT`. The caller is responsible for
-    /// calling `gso_buf.reset()` after this returns.
+    /// `sendmsg` with `UDP_SEGMENT`.
     ///
     /// Every segment but the last is `gso_size` long, so the frame
     /// holds `ceil(len / gso_size)` segments.
@@ -358,7 +452,7 @@ impl Encapsulation {
     /// and slices of `tun_buf` via `iovec`, with no intermediate copy
     /// of the segment bytes.
     #[cfg(target_os = "linux")]
-    pub(crate) fn udp_send_gso(&mut self) -> IOCallbackResult<()> {
+    fn udp_send_gso(&mut self) -> IOCallbackResult<()> {
         use std::io::{Error, IoSlice};
 
         // No coalesced frame yet — caller's `gso.reset()` cleanup
@@ -459,10 +553,20 @@ impl Encapsulation {
     pub(crate) fn send(&mut self, record: BytesMut) -> std::io::Result<()> {
         match self.connection_type {
             ConnectionType::Stream => self.tcp_send(record),
-            ConnectionType::Datagram => match self.udp_send(&record, false) {
-                IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => Ok(()),
-                IOCallbackResult::Err(e) => Err(e),
-            },
+            ConnectionType::Datagram => self.send_datagram(&record, false),
+        }
+    }
+
+    /// Send one expresslane record. A packet that the outside IO
+    /// cannot take is dropped.
+    pub(crate) fn send_expresslane(&mut self, record: &[u8]) -> std::io::Result<()> {
+        self.send_datagram(record, true)
+    }
+
+    fn send_datagram(&mut self, record: &[u8], expresslane_data: bool) -> std::io::Result<()> {
+        match self.udp_send(record, expresslane_data) {
+            IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => Ok(()),
+            IOCallbackResult::Err(e) => Err(e),
         }
     }
 
@@ -513,60 +617,44 @@ impl Encapsulation {
 }
 
 #[derive(Debug)]
-/// Packet structure used by application to inject outside packets into lightway-core
+/// An outside packet that the application gives to
+/// [`crate::Connection::outside_data_received`].
 pub enum OutsidePacket<'pkt> {
-    /// Opaque wire packet, before running plugin chain
+    /// An outside packet as it came from the outside IO.
     Wire(&'pkt mut BytesMut, ConnectionType),
-    /// Raw TCP frame, after running plugin chain
-    TcpFrame(&'pkt mut BytesMut),
-    /// Raw UDP frame, after running plugin chain
-    UdpFrame(&'pkt mut BytesMut, Header),
+    /// The record of an outside packet, and its header, after
+    /// [`crate::ServerContext::parse_raw_outside_packet`] ran the
+    /// ingress plugins.
+    Record(&'pkt mut BytesMut, Header),
 }
 
-impl<'pkt> OutsidePacket<'pkt> {
-    pub(crate) fn into_payload(self) -> Option<&'pkt mut BytesMut> {
-        match self {
-            Self::Wire(_, _) => None,
-            Self::TcpFrame(buf) => Some(buf),
-            Self::UdpFrame(buf, _hdr) => Some(buf),
-        }
-    }
-
-    /// Returns the `Header` from the UDP OutsidePacket
+impl OutsidePacket<'_> {
+    /// Returns the `Header` of a [`OutsidePacket::Record`]
     pub fn header(&self) -> Option<&Header> {
         match self {
-            Self::UdpFrame(_buf, hdr) => Some(hdr),
-            _ => None,
+            Self::Record(_buf, hdr) => Some(hdr),
+            Self::Wire(..) => None,
         }
     }
+}
 
-    pub(crate) fn apply_ingress_chain(
-        self,
-        plugins: &PluginList,
-    ) -> Result<Self, OutsidePacketError> {
-        match self {
-            Self::Wire(buf, conn_type) => {
-                let buf = match plugins.do_ingress(buf) {
-                    PluginResult::Accept => buf,
-                    PluginResult::Drop => return Err(OutsidePacketError::PluginDrop),
-                    PluginResult::DropWithReply(_) => return Err(OutsidePacketError::PluginDrop),
-                    PluginResult::Error(e) => return Err(OutsidePacketError::PluginError(e)),
-                };
-
-                match conn_type {
-                    ConnectionType::Stream => Ok(Self::TcpFrame(buf)),
-                    ConnectionType::Datagram => {
-                        let hdr = Header::try_from_wire(buf)
-                            .map_err(|e| OutsidePacketError::BadWireHeader(e.into()))?;
-                        Ok(Self::UdpFrame(buf, hdr))
-                    }
-                }
-            }
-
-            // Plugin chain already ran
-            _ => Ok(self),
-        }
+fn run_ingress(buf: &mut BytesMut, plugins: &PluginList) -> Result<(), OutsidePacketError> {
+    match plugins.do_ingress(buf) {
+        PluginResult::Accept => Ok(()),
+        PluginResult::Drop | PluginResult::DropWithReply(_) => Err(OutsidePacketError::PluginDrop),
+        PluginResult::Error(e) => Err(OutsidePacketError::PluginError(e)),
     }
+}
+
+/// Run the ingress plugins on a datagram, then read its header.
+pub(crate) fn parse_datagram<'pkt>(
+    buf: &'pkt mut BytesMut,
+    plugins: &PluginList,
+) -> Result<(&'pkt mut BytesMut, Header), OutsidePacketError> {
+    run_ingress(buf, plugins)?;
+    let hdr =
+        Header::try_from_wire(buf).map_err(|e| OutsidePacketError::BadWireHeader(e.into()))?;
+    Ok((buf, hdr))
 }
 
 /// An error with [`OutsidePacket`]
@@ -606,7 +694,7 @@ mod tests {
 
     impl Plugin for OneshotFakePlugin {
         fn ingress(&self, _data: &mut BytesMut) -> PluginResult {
-            std::unreachable!("Should not be testing ingress")
+            self.0.lock().unwrap().take().unwrap()
         }
 
         fn egress(&self, _data: &mut BytesMut) -> PluginResult {
@@ -746,11 +834,12 @@ mod tests {
     ) -> Encapsulation {
         Encapsulation::new(
             connection_type,
+            false,
             Version::MAXIMUM,
             MAX_OUTSIDE_MTU,
             io,
             SessionId::from_const(*b"\xde\xad\xbe\xef\xde\xad\xbe\xef"),
-            outside_plugins.into(),
+            outside_plugins,
         )
     }
 
@@ -876,6 +965,77 @@ mod tests {
 
         e.send(BytesMut::from(&b"jkl"[..])).unwrap();
         assert_eq!(io.0.lock().unwrap().1, b"jkl");
+    }
+
+    fn header(version: Version, session: SessionId) -> Header {
+        Header {
+            version,
+            aggressive_mode: false,
+            expresslane_data: false,
+            session,
+        }
+    }
+
+    fn receiver(
+        connection_type: ConnectionType,
+        server: bool,
+        plugins: PluginList,
+    ) -> Encapsulation {
+        let mut e = make_encapsulation(connection_type, FakeOutsideIOSend::new(), plugins);
+        e.server = server;
+        e
+    }
+
+    #[test]
+    fn datagram_receive_reads_the_header() {
+        let hdr = header(Version::MAXIMUM, SessionId::from_const(*b"12345678"));
+        let mut buf = BytesMut::new();
+        hdr.append_to_wire(&mut buf);
+        buf.extend_from_slice(b"abc");
+        let e = receiver(ConnectionType::Datagram, true, Default::default());
+
+        let (record, got) = e
+            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Datagram))
+            .unwrap();
+        assert_eq!(&record[..], b"abc");
+        assert_eq!(got, Some(hdr));
+    }
+
+    #[test]
+    fn stream_receive_has_no_header() {
+        let mut buf = BytesMut::from(&b"abc"[..]);
+        let e = receiver(ConnectionType::Stream, true, Default::default());
+
+        let (record, got) = e
+            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
+            .unwrap();
+        assert_eq!(&record[..], b"abc");
+        assert_eq!(got, None);
+    }
+
+    #[test_case(true, Version::MINIMUM, SessionId::EMPTY => matches Err(ConnectionError::InvalidProtocolVersion); "server, other version")]
+    #[test_case(true, Version::MAXIMUM, SessionId::REJECTED => matches Err(ConnectionError::RejectedSessionID); "server, rejected session")]
+    #[test_case(true, Version::MAXIMUM, SessionId::EMPTY => matches Ok(()); "server, valid")]
+    #[test_case(false, Version::MINIMUM, SessionId::REJECTED => matches Ok(()); "client checks nothing")]
+    fn receive_checks_the_header(
+        server: bool,
+        version: Version,
+        session: SessionId,
+    ) -> ConnectionResult<()> {
+        let mut buf = BytesMut::from(&b"abc"[..]);
+        let e = receiver(ConnectionType::Datagram, server, Default::default());
+        e.receive(OutsidePacket::Record(&mut buf, header(version, session)))
+            .map(|_| ())
+    }
+
+    #[test_case(PluginResult::Drop => matches Err(ConnectionError::PacketError(OutsidePacketError::PluginDrop)); "drop")]
+    #[test_case(PluginResult::Error("ERR".into()) => matches Err(ConnectionError::PacketError(OutsidePacketError::PluginError(_))); "error")]
+    fn receive_runs_the_ingress_plugins(r: PluginResult) -> ConnectionResult<()> {
+        let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
+        let mut buf = BytesMut::from(&b"abc"[..]);
+        let e = receiver(ConnectionType::Stream, false, PluginList::from(plugins));
+        e.receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
+            .map(|_| ())
     }
 
     #[test]

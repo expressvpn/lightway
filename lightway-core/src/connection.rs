@@ -501,9 +501,6 @@ pub struct Connection<AppState: Send = ()> {
     /// Type of connection
     connection_type: ConnectionType,
 
-    /// Protocol version used by this connection
-    tunnel_protocol_version: Version,
-
     /// App specific state.
     ///
     /// If you want to recover a Sync/Send handle to the
@@ -551,9 +548,6 @@ pub struct Connection<AppState: Send = ()> {
 
     /// Inside plugins
     inside_plugins: PluginList,
-
-    /// Outside plugins
-    outside_plugins: Arc<PluginList>,
 
     /// Is a tick callback pending
     is_tick_timer_running: bool,
@@ -603,7 +597,6 @@ pub struct Connection<AppState: Send = ()> {
 struct NewConnectionArgs<AppState> {
     app_state: AppState,
     connection_type: ConnectionType,
-    protocol_version: Version,
     session: crate::tls::Session<TlsIOAdapter>,
     encapsulation: Encapsulation,
     session_id: SessionId,
@@ -614,7 +607,6 @@ struct NewConnectionArgs<AppState> {
     schedule_tick_cb: ScheduleTickCb<AppState>,
     event_cb: Option<EventCallbackArg>,
     inside_plugins: PluginList,
-    outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     pmtud_base_mtu: Option<u16>,
@@ -641,7 +633,6 @@ impl<AppState: Send> Connection<AppState> {
         };
         let mut conn = Connection {
             connection_type: args.connection_type,
-            tunnel_protocol_version: args.protocol_version,
             app_state: args.app_state,
             state: State::Connecting,
             session: args.session,
@@ -655,7 +646,6 @@ impl<AppState: Send> Connection<AppState> {
             schedule_tick_cb: args.schedule_tick_cb,
             event_cb: args.event_cb,
             inside_plugins: args.inside_plugins,
-            outside_plugins: args.outside_plugins,
             is_tick_timer_running: false,
             activity: ConnectionActivity {
                 last_data_traffic_from_peer: now,
@@ -824,7 +814,7 @@ impl<AppState: Send> Connection<AppState> {
     /// connection establishment up until [`State::Online`] and in
     /// particular during authentication.
     pub fn tunnel_protocol_version(&self) -> Version {
-        self.tunnel_protocol_version
+        self.encapsulation.protocol_version()
     }
 
     /// Set the lightway protocol version of this connection.
@@ -833,7 +823,7 @@ impl<AppState: Send> Connection<AppState> {
     /// prior to reaching [`State::Online`].
     ///
     /// If called while in [`State::Online`] then `v` must be the same
-    /// as the current `self.tunnel_protocol_version`.
+    /// as the current tunnel protocol version.
     pub fn set_tunnel_protocol_version(&mut self, v: Version) -> ConnectionResult<()> {
         if !matches!(self.mode, ConnectionMode::Server { .. }) {
             error!(
@@ -842,7 +832,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidMode);
         }
 
-        if matches!(self.state, State::Online) && self.tunnel_protocol_version == v {
+        if matches!(self.state, State::Online) && self.tunnel_protocol_version() == v {
             return Ok(());
         }
 
@@ -852,25 +842,25 @@ impl<AppState: Send> Connection<AppState> {
         ) {
             error!(
                 state = ?self.state,
-                current_version = ?self.tunnel_protocol_version,
+                current_version = ?self.tunnel_protocol_version(),
                 version = ?v, "Attempted to set tunnel protocol version in invalid state"
             );
             return Err(ConnectionError::InvalidState);
         }
 
-        self.tunnel_protocol_version = v;
+        self.encapsulation.set_protocol_version(v);
 
         Ok(())
     }
 
     /// Query the address of this connection's peer
     pub fn peer_addr(&self) -> SocketAddr {
-        self.encapsulation.io.peer_addr()
+        self.encapsulation.peer_addr()
     }
 
     /// Set the address of this connection's peer
     pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        let old = self.encapsulation.io.set_peer_addr(addr);
+        let old = self.encapsulation.set_peer_addr(addr);
         if old != addr {
             self.publish_expresslane_key();
         }
@@ -1038,30 +1028,7 @@ impl<AppState: Send> Connection<AppState> {
             self.is_first_packet_received = true;
         }
 
-        let pkt = pkt.apply_ingress_chain(&self.outside_plugins)?;
-
-        let hdr = match pkt.header() {
-            Some(hdr) => {
-                if matches!(self.mode, ConnectionMode::Server { .. }) {
-                    if hdr.version != self.tunnel_protocol_version {
-                        return Err(ConnectionError::InvalidProtocolVersion);
-                    }
-
-                    if hdr.session == SessionId::REJECTED {
-                        // Drop reject packets to prevent an infinite loop
-                        // where an attacker causes us to send rejected
-                        // packets between servers.
-                        return Err(ConnectionError::RejectedSessionID);
-                    }
-                }
-                Some(*hdr)
-            }
-            None => None,
-        };
-
-        let Some(payload) = pkt.into_payload() else {
-            return Err(ConnectionError::RejectedSessionID);
-        };
+        let (payload, hdr) = self.encapsulation.receive(pkt)?;
 
         let result = self.process_new_outside_data(payload, hdr);
         match result {
@@ -1326,7 +1293,7 @@ impl<AppState: Send> Connection<AppState> {
         // (too many segments, or the socket latched GSO off after the
         // egress path rejected it), send one datagram per segment rather
         // than dropping it.
-        let batched = gso_fits_one_batch(gso_segs) && self.encapsulation.io.gso_enabled();
+        let batched = gso_fits_one_batch(gso_segs) && self.encapsulation.gso_enabled();
         if !batched {
             crate::metrics::gso_batch_skipped();
             // Warn only for an oversized aggregate. The other reason — the
@@ -1341,13 +1308,12 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        // Open the GSO coalescing buffer — IO callback will coalesce
-        // here. Both DTLS and expresslane paths detect this and
-        // append encrypted segments instead of sending immediately.
+        // Open the GSO batch: the encapsulation coalesces the DTLS and
+        // expresslane datagrams in place of sending each one.
         // Left closed on the fallback path, where `udp_send` passes each
         // segment straight to the socket.
         if batched {
-            self.encapsulation.gso_buf.open();
+            self.encapsulation.begin_batch();
         }
 
         let mut result = Ok(());
@@ -1391,20 +1357,10 @@ impl<AppState: Send> Connection<AppState> {
 
         if batched {
             if result.is_ok() {
-                match self.encapsulation.udp_send_gso() {
-                    IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
-                    IOCallbackResult::Err(e) => {
-                        tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
-                        crate::metrics::gso_send_failed();
-                    }
-                }
+                self.encapsulation.end_batch();
+            } else {
+                self.encapsulation.discard_batch();
             }
-
-            // Always reset the GSO coalescing buffer on exit. udp_send_gso
-            // borrows it; this returns to Passthrough and clears the
-            // bytes in place so the underlying allocation is reused on
-            // the next batch.
-            self.encapsulation.gso_buf.reset();
         }
 
         result
@@ -2252,7 +2208,7 @@ impl<AppState: Send> Connection<AppState> {
     fn expresslane_supported(&self) -> bool {
         self.connection_type.is_datagram()
             && self
-                .tunnel_protocol_version
+                .tunnel_protocol_version()
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && !matches!(
                 self.expresslane.state,
@@ -2553,10 +2509,9 @@ impl<AppState: Send> Connection<AppState> {
         let iv: [u8; 12] = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
         let mut buf = BytesMut::new();
-        // In case of server, pending sesssion id will be used immediately in the Lightway Header
-        // So use it if there is one.
-        // In case of client there will be no pending_session_id, so it is fine
-        let session_id = self.pending_session_id().unwrap_or(self.session_id);
+        // The same session id as in the Lightway Header: on the server,
+        // the pending one during a rotation.
+        let session_id = self.encapsulation.session_id();
         self.expresslane
             .data
             .append_to_wire(
@@ -2569,17 +2524,9 @@ impl<AppState: Send> Connection<AppState> {
             .map_err(expresslane_encrypt_error)?;
         self.activity.last_data_traffic_from_peer = Instant::now();
 
-        // `udp_send` coalesces into the per-connection `GsoBuffer`
-        // when a batch has been opened by an upstream `gso_buf.open()`
-        // (currently only `send_to_outside_gso`), or wraps + sends
-        // immediately otherwise. Both branches hand the same shape
-        // of bytes to `udp_send_gso` at flush time.
-        match self.encapsulation.udp_send(buf.as_ref(), true) {
-            IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
-            IOCallbackResult::Err(e) => {
-                ConnectionResult::Err(ConnectionError::OutsideIoWriteError(e))
-            }
-        }
+        self.encapsulation
+            .send_expresslane(buf.as_ref())
+            .map_err(ConnectionError::OutsideIoWriteError)
     }
 
     fn handle_auth_request(&mut self, auth_request: wire::AuthRequest) -> ConnectionResult<()> {
