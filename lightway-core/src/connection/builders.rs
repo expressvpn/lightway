@@ -10,6 +10,7 @@ use crate::{
     PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
+    encapsulation::Encapsulation,
     max_dtls_outside_mtu,
     plugin::PluginFactoryError,
     wire::SessionId,
@@ -74,17 +75,16 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         let outside_plugins = Arc::new(outside_plugins);
 
         let io = super::TlsIOAdapter {
-            connection_type,
-            protocol_version: Version::MAXIMUM,
-            aggressive_send: connection_type.is_datagram(),
-            outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id: SessionId::EMPTY,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
+            encapsulation: Encapsulation::new(
+                connection_type,
+                Version::MAXIMUM,
+                connection_type.is_datagram(),
+                outside_mtu,
+                outside_io,
+                SessionId::EMPTY,
+                outside_plugins.clone(),
+            ),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
@@ -319,17 +319,16 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let outside_plugins = Arc::new(outside_plugins);
 
         let io = super::TlsIOAdapter {
-            connection_type,
-            protocol_version,
-            aggressive_send: false,
-            outside_mtu,
             recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
+            encapsulation: Encapsulation::new(
+                connection_type,
+                protocol_version,
+                false,
+                outside_mtu,
+                outside_io,
+                session_id,
+                outside_plugins.clone(),
+            ),
         };
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
