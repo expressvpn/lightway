@@ -1,6 +1,6 @@
 use std::{num::NonZeroU16, sync::Arc};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
@@ -52,6 +52,7 @@ pub struct ClientConnectionBuilder<AppState> {
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
     session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    encapsulation: Encapsulation,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
@@ -75,17 +76,17 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
         let outside_plugins = Arc::new(outside_plugins);
 
         let io = super::TlsIOAdapter {
-            recv_buf: BytesMut::new(),
-            encapsulation: Encapsulation::new(
-                connection_type,
-                Version::MAXIMUM,
-                connection_type.is_datagram(),
-                outside_mtu,
-                outside_io,
-                SessionId::EMPTY,
-                outside_plugins.clone(),
-            ),
+            aggressive_send: connection_type.is_datagram(),
+            ..Default::default()
         };
+        let encapsulation = Encapsulation::new(
+            connection_type,
+            Version::MAXIMUM,
+            outside_mtu,
+            outside_io,
+            SessionId::EMPTY,
+            outside_plugins.clone(),
+        );
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
@@ -105,6 +106,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             ctx,
             outside_mtu,
             session_config,
+            encapsulation,
             auth_method: None,
             event_cb: None,
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
@@ -259,6 +261,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             protocol_version,
             outside_mtu: self.outside_mtu,
             session,
+            encapsulation: self.encapsulation,
             session_id: SessionId::EMPTY,
             mode: ConnectionMode::Client {
                 auth_method,
@@ -294,6 +297,7 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
     session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    encapsulation: Encapsulation,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
@@ -318,18 +322,15 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         let outside_plugins = ctx.outside_plugins.build()?;
         let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::TlsIOAdapter {
-            recv_buf: BytesMut::new(),
-            encapsulation: Encapsulation::new(
-                connection_type,
-                protocol_version,
-                false,
-                outside_mtu,
-                outside_io,
-                session_id,
-                outside_plugins.clone(),
-            ),
-        };
+        let io = super::TlsIOAdapter::default();
+        let encapsulation = Encapsulation::new(
+            connection_type,
+            protocol_version,
+            outside_mtu,
+            outside_io,
+            session_id,
+            outside_plugins.clone(),
+        );
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
@@ -342,6 +343,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             protocol_version,
             ctx,
             session_config,
+            encapsulation,
             session_id,
             auth,
             ip_pool,
@@ -395,6 +397,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             connection_type: self.connection_type,
             protocol_version: self.protocol_version,
             session,
+            encapsulation: self.encapsulation,
             session_id: self.session_id,
             mode: ConnectionMode::Server {
                 auth: self.auth,
