@@ -5,10 +5,8 @@ pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
 // Counters for the raw TCP coalescer (`linux` for devices opened
-// without `enable_tun_offload`, `android` for the `VpnService` fd);
-// `test` so the host test build of `io::inside::raw_gro` (compiled for
-// any host) always finds it.
-#[cfg(any(linux, android, test))]
+// without `enable_tun_offload`, `android` for the `VpnService` fd).
+#[cfg(any(linux, android))]
 mod metrics;
 pub mod platform;
 #[cfg(desktop)]
