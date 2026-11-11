@@ -40,7 +40,7 @@ use crate::{
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
-use crate::packet::{OutsidePacket, OutsidePacketError};
+use crate::encapsulation::{OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
 use crate::wire::{
     AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
@@ -757,7 +757,7 @@ impl<AppState: Send> Connection<AppState> {
 
         if matches!(new_state, State::Online) {
             debug!(curve = ?self.current_curve(), cipher = ?self.current_cipher(), "ONLINE");
-            self.session.io_cb_mut().aggressive_send = false;
+            self.session.io_cb_mut().encapsulation.aggressive_send = false;
 
             // Set initial expresslane keys
             self.rotate_expresslane_key()?;
@@ -865,12 +865,17 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Query the address of this connection's peer
     pub fn peer_addr(&self) -> SocketAddr {
-        self.session.io_cb().io.peer_addr()
+        self.session.io_cb().encapsulation.io.peer_addr()
     }
 
     /// Set the address of this connection's peer
     pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        let old = self.session.io_cb_mut().io.set_peer_addr(addr);
+        let old = self
+            .session
+            .io_cb_mut()
+            .encapsulation
+            .io
+            .set_peer_addr(addr);
         if old != addr {
             self.publish_expresslane_key();
         }
@@ -1012,7 +1017,7 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Update TLS Session to use the new outside IO Callback
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
-        self.session.io_cb_mut().io = new_io;
+        self.session.io_cb_mut().encapsulation.io = new_io;
         self.activity.last_data_delivered_to_inside = Instant::now();
     }
 
@@ -1328,7 +1333,8 @@ impl<AppState: Send> Connection<AppState> {
         // (too many segments, or the socket latched GSO off after the
         // egress path rejected it), send one datagram per segment rather
         // than dropping it.
-        let batched = gso_fits_one_batch(gso_segs) && self.session.io_cb().io.gso_enabled();
+        let batched =
+            gso_fits_one_batch(gso_segs) && self.session.io_cb().encapsulation.io.gso_enabled();
         if !batched {
             crate::metrics::gso_batch_skipped();
             // Warn only for an oversized aggregate. The other reason — the
@@ -1349,7 +1355,7 @@ impl<AppState: Send> Connection<AppState> {
         // Left closed on the fallback path, where `udp_send` passes each
         // segment straight to the socket.
         if batched {
-            self.session.io_cb_mut().gso_buf.open();
+            self.session.io_cb_mut().encapsulation.gso_buf.open();
         }
 
         let mut result = Ok(());
@@ -1393,7 +1399,12 @@ impl<AppState: Send> Connection<AppState> {
 
         if batched {
             if result.is_ok() {
-                match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
+                match self
+                    .session
+                    .io_cb_mut()
+                    .encapsulation
+                    .udp_send_gso(gso_segs, expresslane)
+                {
                     IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
                     IOCallbackResult::Err(e) => {
                         tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
@@ -1406,7 +1417,7 @@ impl<AppState: Send> Connection<AppState> {
             // borrows it; this returns to Passthrough and clears the
             // bytes in place so the underlying allocation is reused on
             // the next batch.
-            self.session.io_cb_mut().gso_buf.reset();
+            self.session.io_cb_mut().encapsulation.gso_buf.reset();
         }
 
         result
@@ -1633,7 +1644,10 @@ impl<AppState: Send> Connection<AppState> {
             } => {
                 let new_session_id = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
-                self.session.io_cb_mut().set_session_id(new_session_id);
+                self.session
+                    .io_cb_mut()
+                    .encapsulation
+                    .set_session_id(new_session_id);
 
                 *pending_session_id = Some(new_session_id);
 
@@ -1663,9 +1677,9 @@ impl<AppState: Send> Connection<AppState> {
 
                 let msg = wire::Frame::Ping(ping);
 
-                self.session.io_cb().enable_pmtud_probe();
+                self.session.io_cb().encapsulation.enable_pmtud_probe();
                 let res = self.send_frame_or_queue(msg);
-                self.session.io_cb().disable_pmtud_probe();
+                self.session.io_cb().encapsulation.disable_pmtud_probe();
                 res
             }
             dplpmtud::Action::None => Ok(()),
@@ -1734,7 +1748,10 @@ impl<AppState: Send> Connection<AppState> {
         match self.mode {
             Client { .. } => {
                 self.session_id = session_id;
-                self.session.io_cb_mut().set_session_id(session_id);
+                self.session
+                    .io_cb_mut()
+                    .encapsulation
+                    .set_session_id(session_id);
                 self.publish_expresslane_key();
             }
             Server {
@@ -2533,7 +2550,12 @@ impl<AppState: Send> Connection<AppState> {
         // (currently only `send_to_outside_gso`), or wraps + sends
         // immediately otherwise. Both branches hand the same shape
         // of bytes to `udp_send_gso` at flush time.
-        match self.session.io_cb_mut().udp_send(buf.as_ref(), true) {
+        match self
+            .session
+            .io_cb_mut()
+            .encapsulation
+            .udp_send(buf.as_ref(), true)
+        {
             IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
             IOCallbackResult::Err(e) => {
                 ConnectionResult::Err(ConnectionError::OutsideIoWriteError(e))

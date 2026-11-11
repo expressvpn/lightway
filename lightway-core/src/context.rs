@@ -12,7 +12,7 @@ use crate::{
         DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, ExpresslaneCbType, ExpresslaneMetricsType,
     },
     context::ip_pool::ClientIpConfigArg,
-    packet::OutsidePacketError,
+    encapsulation::OutsidePacketError,
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
     wire::{self, ExpresslaneConfig},

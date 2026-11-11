@@ -7,6 +7,7 @@ mod builder_predicates;
 mod cipher;
 mod connection;
 mod context;
+mod encapsulation;
 mod encoding_request_states;
 mod features;
 #[cfg(any(target_os = "linux", test))]
@@ -16,7 +17,6 @@ pub mod gso;
 mod io;
 mod keyshare;
 mod metrics;
-mod packet;
 mod packet_codec;
 mod plugin;
 pub mod tls;
@@ -43,6 +43,7 @@ pub use context::{
     ServerContextBuilder, TickType,
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
+pub use encapsulation::OutsidePacket;
 pub use features::LightwayFeature;
 #[cfg(any(target_os = "linux", test))]
 pub use gso::VirtioNetHdr;
@@ -51,7 +52,6 @@ pub use io::{
     OutsideIOSendCallbackArg,
 };
 pub use keyshare::KeyShare;
-pub use packet::OutsidePacket;
 pub use packet_codec::{
     CodecStatus, PacketCodecResult, PacketDecoder, PacketDecoderType, PacketEncoder,
     PacketEncoderType,
