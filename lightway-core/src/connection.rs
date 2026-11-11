@@ -1317,8 +1317,6 @@ impl<AppState: Send> Connection<AppState> {
             ));
         }
 
-        let expresslane = self.expresslane_ready();
-
         // One reusable segment buffer. `build_segment` calls `clear()`
         // and then `extend_from_slice` to materialize the segment, so
         // we only need capacity here — no zero-init.
@@ -1393,7 +1391,7 @@ impl<AppState: Send> Connection<AppState> {
 
         if batched {
             if result.is_ok() {
-                match self.encapsulation.udp_send_gso(gso_segs, expresslane) {
+                match self.encapsulation.udp_send_gso() {
                     IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
                     IOCallbackResult::Err(e) => {
                         tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
