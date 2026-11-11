@@ -9,8 +9,10 @@ mod connection;
 mod context;
 mod encoding_request_states;
 mod features;
-// Linux for the vnet-hdr offload paths; Android for the raw TCP
-// coalescer built on `gro::TcpGroBatch::take_raw`.
+// Linux for the vnet-hdr offload paths; Linux and Android for the raw
+// TCP coalescer built on `gro::TcpGroBatch::take_raw`. Dependents
+// cannot see these under their own `cfg(test)`, so they must gate
+// their users to Linux/Android too.
 #[cfg(any(target_os = "linux", target_os = "android", test))]
 pub mod gro;
 #[cfg(any(target_os = "linux", target_os = "android", test))]
