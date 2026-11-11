@@ -245,6 +245,9 @@ impl Udp {
         // does not (old kernel, or a zero-checksum peer the GRO engine
         // skips), and the independent TUN-write coalescing still applies.
         self.gro_enabled = true;
+        // `recv_gro_batch` always reads with `recvmmsg`, whatever
+        // `enable_batch_receive` says.
+        tracing::info!("Using batch receiver (GRO receive path)");
         match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
             Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
             Err(e) => tracing::warn!(
