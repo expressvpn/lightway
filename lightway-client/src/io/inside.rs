@@ -1,9 +1,10 @@
 // The raw coalescer serves any TUN without `virtio_net_hdr` framing:
 // the Android `VpnService` fd, which can never have it, and a Linux
-// device opened without `enable_tun_offload`. Also compiled for `test`
-// so its logic (probe, kill switch, fallback) is unit-testable on any
-// host.
-#[cfg(any(linux, android, test))]
+// device opened without `enable_tun_offload`. Not compiled for `test`
+// on other hosts: it builds on `lightway_core::gro`, which only exists
+// on Linux and Android (a dependency's `cfg(test)` is never set), so
+// its unit tests run on Linux.
+#[cfg(any(linux, android))]
 pub(crate) mod raw_gro;
 pub mod tun;
 

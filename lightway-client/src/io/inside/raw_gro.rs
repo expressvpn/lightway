@@ -89,16 +89,12 @@
 //! `IP_MTU`, and QUIC would start probing oversized datagrams if it
 //! were raised.
 
-// Where neither Linux nor Android wiring is compiled this module
-// exists only for its unit tests (see the declaration in
-// `io::inside`), so the items that wiring consumes look unused.
-#![cfg_attr(not(any(linux, android)), allow(dead_code))]
-
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use bytes::BytesMut;
+use libc::{EINVAL, EMSGSIZE};
 use lightway_core::IOCallbackResult;
 use lightway_core::IP_MAX_DATAGRAM_SIZE;
 use lightway_core::gro::{GroAppend, RawSuperpacket, TcpGroBatch};
@@ -121,12 +117,6 @@ const IPPROTO_EXPERIMENTAL: u8 = 253;
 /// ~0.9µs fixed + ~31ns/KB, so 32KB already removes ~95% of the
 /// per-packet overhead; doubling it again buys almost nothing.
 pub(crate) const DEFAULT_MAX_SUPERPACKET: usize = 32 * 1024;
-
-/// Errno values as Linux/Android define them, spelled locally so this
-/// module (which is compiled for host tests too) does not depend on
-/// per-platform `libc` constants.
-const EINVAL: i32 = 22;
-const EMSGSIZE: i32 = 90;
 
 /// The global coalescing allow flag — the runtime kill switch.
 /// Defaults to **off**: an app that never opts in gets the plain
