@@ -2563,15 +2563,15 @@ pub async fn client<
                  Only enable this on a host that does not forward tunnel traffic."
             );
         }
-        // Legal, but it will look like the feature is broken: with one
-        // datagram per decrypt batch every run holds a single segment,
-        // so nothing ever merges. Say so rather than let it be measured
-        // as "coalescing does nothing".
-        if !config.enable_udp_gro {
+        // Legal, but it will look like the feature is broken: over UDP
+        // with neither option each receive returns one datagram, so
+        // every run holds a single segment and nothing merges. Say so
+        // rather than let it be measured as "coalescing does nothing".
+        // (TCP transport reads several frames at once and is fine.)
+        if !config.enable_udp_gro && !config.enable_batch_receive {
             tracing::warn!(
-                "enable_tun_tcp_coalescing is set without enable_udp_gro: each recvmsg \
-                 returns a single datagram, so every coalescing run holds one segment \
-                 and no merging happens. Enable enable_udp_gro as well."
+                "enable_tun_tcp_coalescing without enable_udp_gro or enable_batch_receive: \
+                 one datagram per UDP receive, so nothing merges"
             );
         }
         // The config gate is applied only to a TUN this function opens
