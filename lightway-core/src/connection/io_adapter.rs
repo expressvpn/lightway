@@ -98,6 +98,75 @@ impl GsoBuffer {
     }
 }
 
+/// Flush GSO wire segments, splitting into multiple `sendmsg(UDP_SEGMENT)`
+/// calls when the batch exceeds either kernel per-send limit: payload bytes
+/// ([`crate::gso::MAX_GSO_SEND_BYTES`], else `EMSGSIZE`) or segment count
+/// ([`crate::gso::MAX_GSO_SEGS`], else `EINVAL` from `udp_send_skb()`). The
+/// byte budget alone does not bound segments — stride 256 packs 255. Chunks
+/// split on segment boundaries so `UDP_SEGMENT`'s uniform stride holds per
+/// call. A mid-batch failure is surfaced for the caller's log and the
+/// remainder dropped; the peer's transport recovers the loss — except when
+/// that failure just latched GSO off on the socket
+/// ([`crate::OutsideIOSendCallback::gso_enabled`] now false), where the failed
+/// chunk and the rest are resent one datagram at a time so the switch to
+/// the fallback path loses nothing.
+#[cfg(target_os = "linux")]
+fn send_gso_chunked(
+    io: &OutsideIOSendCallbackArg,
+    iovs: &[std::io::IoSlice<'_>],
+    entries_per_seg: usize,
+    stride: u16,
+) -> IOCallbackResult<()> {
+    let segs_per_send = (crate::gso::MAX_GSO_SEND_BYTES / stride.max(1) as usize)
+        .clamp(1, crate::gso::MAX_GSO_SEGS);
+    let entries_per_send = segs_per_send * entries_per_seg;
+
+    // Note a failure at chunk index > 0 means the earlier chunks already
+    // reached the wire and the remainder never will, unless resent below.
+    for (idx, chunk) in iovs.chunks(entries_per_send).enumerate() {
+        match io.send_gso(chunk, stride) {
+            IOCallbackResult::Ok(_) => continue,
+            IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+            // The caller only batches while GSO is enabled, so a latch
+            // seen here was tripped by this very send: the unsent segments
+            // are intact, already encrypted and framed.
+            IOCallbackResult::Err(_) if !io.gso_enabled() => {
+                return send_segments_individually(
+                    io,
+                    &iovs[idx * entries_per_send..],
+                    entries_per_seg,
+                );
+            }
+            IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+        }
+    }
+    IOCallbackResult::Ok(())
+}
+
+/// Send GSO wire segments as plain datagrams, one per segment of
+/// `entries_per_seg` iovec entries. Used once per socket, when the egress
+/// path rejects `UDP_SEGMENT` mid-flush.
+#[cfg(target_os = "linux")]
+fn send_segments_individually(
+    io: &OutsideIOSendCallbackArg,
+    iovs: &[std::io::IoSlice<'_>],
+    entries_per_seg: usize,
+) -> IOCallbackResult<()> {
+    let mut seg = Vec::new();
+    for entries in iovs.chunks(entries_per_seg) {
+        seg.clear();
+        for e in entries {
+            seg.extend_from_slice(e);
+        }
+        match io.send(&seg) {
+            IOCallbackResult::Ok(_) => {}
+            IOCallbackResult::WouldBlock => return IOCallbackResult::WouldBlock,
+            IOCallbackResult::Err(e) => return IOCallbackResult::Err(e),
+        }
+    }
+    IOCallbackResult::Ok(())
+}
+
 pub(crate) struct SendBuffer {
     data: BytesMut,
     total_capacity: usize,
@@ -336,19 +405,19 @@ impl TlsIOAdapter {
         &mut self,
         gso_segs: usize,
         expresslane_data: bool,
-    ) -> IOCallbackResult<usize> {
+    ) -> IOCallbackResult<()> {
         use std::io::{Error, IoSlice};
 
         // No coalesced frame yet — caller's `gso.reset()` cleanup
         // path runs unconditionally, so this is also the safe exit
         // when nothing was buffered.
         let Some((tun_buf, tun_gso_size)) = self.gso_buf.frame() else {
-            return IOCallbackResult::Ok(0);
+            return IOCallbackResult::Ok(());
         };
         let tun_gso_size = tun_gso_size.get();
 
         if gso_segs == 0 {
-            return IOCallbackResult::Ok(0);
+            return IOCallbackResult::Ok(());
         }
 
         // Same Lightway header for every segment.
@@ -373,7 +442,7 @@ impl TlsIOAdapter {
                 iovs.push(IoSlice::new(&hdr_buf[..]));
                 iovs.push(IoSlice::new(&tun_buf[start..end]));
             }
-            return self.io.send_gso(&iovs, stride);
+            return send_gso_chunked(&self.io, &iovs, 2, stride);
         }
 
         // Plugin path: each segment is built into its own BytesMut so
@@ -423,12 +492,12 @@ impl TlsIOAdapter {
         // All segments dropped by plugins — nothing to put on the wire,
         // but report success for the inside bytes the caller handed us.
         if segs.is_empty() {
-            return IOCallbackResult::Ok(tun_buf.len());
+            return IOCallbackResult::Ok(());
         }
 
         let stride = wire_gso_size.unwrap_or(0) as u16;
         let iovs: Vec<IoSlice<'_>> = segs.iter().map(|s| IoSlice::new(&s[..])).collect();
-        self.io.send_gso(&iovs, stride)
+        send_gso_chunked(&self.io, &iovs, 1, stride)
     }
 
     // In general, TCP send can succeed even for partial data and the caller
@@ -587,6 +656,88 @@ mod tests {
             _gso_size: u16,
         ) -> IOCallbackResult<usize> {
             IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            std::unreachable!("Should not be testing peer_addr");
+        }
+    }
+
+    /// Scripted results and the recorded `(total_bytes, gso_size)` of
+    /// every `send_gso` call.
+    #[cfg(target_os = "linux")]
+    type FakeGsoState = (VecDeque<IOCallbackResult<usize>>, Vec<(usize, u16)>);
+
+    /// Records every `send_gso` call as `(total_bytes, gso_size)`,
+    /// optionally failing calls from a scripted queue first. With
+    /// `latch_on_err`, a failing `send_gso` also latches GSO off (as the
+    /// real socket does for `EIO`) and plain `send`s are recorded.
+    #[cfg(target_os = "linux")]
+    struct FakeGsoIOSend {
+        state: Mutex<FakeGsoState>,
+        latch_on_err: bool,
+        latched: std::sync::atomic::AtomicBool,
+        sends: Mutex<Vec<Vec<u8>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl FakeGsoIOSend {
+        fn build(fakes: VecDeque<IOCallbackResult<usize>>, latch_on_err: bool) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new((fakes, Vec::new())),
+                latch_on_err,
+                latched: Default::default(),
+                sends: Mutex::new(Vec::new()),
+            })
+        }
+        fn new() -> Arc<Self> {
+            Self::build(VecDeque::new(), false)
+        }
+        fn with_fakes(fakes: VecDeque<IOCallbackResult<usize>>) -> Arc<Self> {
+            Self::build(fakes, false)
+        }
+        fn latching(fakes: VecDeque<IOCallbackResult<usize>>) -> Arc<Self> {
+            Self::build(fakes, true)
+        }
+        fn calls(&self) -> Vec<(usize, u16)> {
+            self.state.lock().unwrap().1.clone()
+        }
+        fn sends(&self) -> Vec<Vec<u8>> {
+            self.sends.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl OutsideIOSendCallback for FakeGsoIOSend {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            assert!(self.latch_on_err, "Should not be testing send");
+            self.sends.lock().unwrap().push(buf.to_vec());
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn gso_enabled(&self) -> bool {
+            !self.latched.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            let total: usize = bufs.iter().map(|b| b.len()).sum();
+            let (fakes, calls) = &mut *self.state.lock().unwrap();
+            calls.push((total, gso_size));
+            match fakes.pop_front() {
+                Some(IOCallbackResult::Err(e)) => {
+                    if self.latch_on_err {
+                        self.latched
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    IOCallbackResult::Err(e)
+                }
+                Some(r) => r,
+                None => IOCallbackResult::Ok(total),
+            }
         }
 
         fn peer_addr(&self) -> std::net::SocketAddr {
@@ -905,5 +1056,228 @@ mod tests {
         g.open();
         g.put(&[0xAA; 1280]);
         g.put(&[0xBB; 1281]);
+    }
+
+    /// A batch that fits within the kernel's single-send limit goes
+    /// out as exactly one `send_gso` call.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_under_limit_single_send() {
+        let io = FakeGsoIOSend::new();
+        let seg = vec![0xAA; 1350];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..10).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, 1350);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+        assert_eq!(io.calls(), vec![(10 * 1350, 1350)]);
+    }
+
+    /// Field failure: a 65535-byte TSO aggregate at MTU 1350 is 50 wire
+    /// segments (67500 bytes), over the skb limit, so the flush must split
+    /// to keep every payload within `MAX_GSO_SEND_BYTES`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_over_limit_splits_on_segment_boundary() {
+        const STRIDE: usize = 1350;
+        const SEGS: usize = 50;
+
+        let io = FakeGsoIOSend::new();
+        let seg = vec![0xAA; STRIDE];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..SEGS).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+
+        let calls = io.calls();
+        let segs_per_send = crate::gso::MAX_GSO_SEND_BYTES / STRIDE; // 48
+        assert_eq!(
+            calls,
+            vec![
+                (segs_per_send * STRIDE, STRIDE as u16),
+                ((SEGS - segs_per_send) * STRIDE, STRIDE as u16)
+            ]
+        );
+        for (total, _) in calls {
+            assert_le!(total, crate::gso::MAX_GSO_SEND_BYTES);
+        }
+    }
+
+    /// Chunk boundaries must fall on whole segments even when each
+    /// segment is scattered over multiple iovec entries (the
+    /// zero-copy path uses 2 per segment: shared header + payload).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_split_respects_entries_per_seg() {
+        const HDR: usize = 16;
+        const PAYLOAD: usize = 1334;
+        const STRIDE: usize = HDR + PAYLOAD; // 1350
+        const SEGS: usize = 50;
+
+        let io = FakeGsoIOSend::new();
+        let hdr = vec![0xBB; HDR];
+        let payload = vec![0xAA; PAYLOAD];
+        let mut iovs: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(SEGS * 2);
+        for _ in 0..SEGS {
+            iovs.push(std::io::IoSlice::new(&hdr));
+            iovs.push(std::io::IoSlice::new(&payload));
+        }
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 2, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+
+        // Every chunk's byte count is a whole multiple of the stride
+        // (all segments here are full-sized), within the send limit.
+        let calls = io.calls();
+        assert_eq!(calls.len(), 2);
+        for (total, _) in calls {
+            assert_eq!(total % STRIDE, 0, "chunk split mid-segment");
+            assert_le!(total, crate::gso::MAX_GSO_SEND_BYTES);
+        }
+    }
+
+    /// `WouldBlock` from the socket must reach the caller rather than
+    /// folding into a successful return.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_would_block_is_surfaced() {
+        const STRIDE: usize = 1350;
+
+        let io = FakeGsoIOSend::with_fakes(vec![IOCallbackResult::WouldBlock].into());
+        let seg = vec![0xAA; STRIDE];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..10).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::WouldBlock));
+        assert_eq!(io.calls().len(), 1);
+    }
+
+    /// The byte budget alone over-packs at small strides: the kernel also
+    /// caps segments per send at `UDP_MAX_SEGMENTS`, so `segs_per_send`
+    /// must be clamped to `MAX_GSO_SEGS` as well. At stride 256 the byte
+    /// budget yields 255 segments (65487/256), over `UDP_MAX_SEGMENTS`.
+    #[test_case(256 ; "stride 256")]
+    #[test_case(100 ; "stride 100")]
+    #[test_case(64  ; "stride 64")]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_clamps_segments_per_send(stride: usize) {
+        const SEGS: usize = 200;
+
+        // Precondition: the byte budget alone would exceed the segment cap.
+        assert!(
+            crate::gso::MAX_GSO_SEND_BYTES / stride > crate::gso::MAX_GSO_SEGS,
+            "stride {stride} does not exercise the clamp"
+        );
+
+        let io = FakeGsoIOSend::new();
+        let seg = vec![0xAA; stride];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..SEGS).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, stride as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+
+        let calls = io.calls();
+        let mut total = 0usize;
+        for (bytes, _) in &calls {
+            assert_eq!(bytes % stride, 0, "chunk split mid-segment");
+            assert!(
+                bytes / stride <= crate::gso::MAX_GSO_SEGS,
+                "chunk of {} segments exceeds the kernel cap",
+                bytes / stride
+            );
+            assert!(*bytes <= crate::gso::MAX_GSO_SEND_BYTES);
+            total += bytes;
+        }
+        assert_eq!(total, SEGS * stride, "no bytes lost");
+        assert_eq!(calls.len(), SEGS.div_ceil(crate::gso::MAX_GSO_SEGS));
+    }
+
+    /// A stride larger than the whole byte budget still yields one segment
+    /// per call rather than zero.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_clamps_lower_bound() {
+        let io = FakeGsoIOSend::new();
+        let stride = crate::gso::MAX_GSO_SEND_BYTES + 100;
+        let seg = vec![0xAA; stride];
+        let iovs: Vec<std::io::IoSlice<'_>> = (0..3).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, u16::MAX);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+        assert_eq!(io.calls().len(), 3, "one segment per call");
+    }
+
+    /// A failure after the first chunk is surfaced to the caller —
+    /// the already-sent chunks cannot be retried, the rest is dropped.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_mid_batch_error_is_surfaced() {
+        const STRIDE: usize = 1350;
+        const SEGS: usize = 50;
+
+        let io = FakeGsoIOSend::with_fakes(
+            vec![
+                IOCallbackResult::Ok(48 * STRIDE),
+                IOCallbackResult::Err(Error::other("EMSGSIZE")),
+            ]
+            .into(),
+        );
+        let seg = vec![0xAA; STRIDE];
+        let iovs: Vec<std::io::IoSlice<'_>> =
+            (0..SEGS).map(|_| std::io::IoSlice::new(&seg)).collect();
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 1, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::Err(e) if e.to_string() == "EMSGSIZE"));
+        assert_eq!(io.calls().len(), 2);
+    }
+
+    /// When a chunk's failure latches GSO off, that chunk and every later
+    /// one are resent as plain datagrams, one per segment (header and
+    /// payload joined), and the earlier chunks are not repeated.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn gso_flush_latch_resends_remainder_individually() {
+        const HDR: usize = 16;
+        const PAYLOAD: usize = 1334;
+        const STRIDE: usize = HDR + PAYLOAD;
+        const SEGS: usize = 50;
+
+        let io = FakeGsoIOSend::latching(
+            vec![
+                IOCallbackResult::Ok(48 * STRIDE),
+                IOCallbackResult::Err(Error::other("EIO")),
+            ]
+            .into(),
+        );
+        let hdr = vec![0xBB; HDR];
+        let payload = vec![0xAA; PAYLOAD];
+        let mut iovs: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(SEGS * 2);
+        for _ in 0..SEGS {
+            iovs.push(std::io::IoSlice::new(&hdr));
+            iovs.push(std::io::IoSlice::new(&payload));
+        }
+        let arg: OutsideIOSendCallbackArg = io.clone();
+
+        let r = send_gso_chunked(&arg, &iovs, 2, STRIDE as u16);
+        assert!(matches!(r, IOCallbackResult::Ok(())));
+        assert_eq!(io.calls().len(), 2, "no GSO send after the latch");
+
+        let sends = io.sends();
+        assert_eq!(sends.len(), SEGS - 48, "only the unsent segments");
+        let mut expected = hdr.clone();
+        expected.extend_from_slice(&payload);
+        for s in sends {
+            assert_eq!(s, expected);
+        }
     }
 }
