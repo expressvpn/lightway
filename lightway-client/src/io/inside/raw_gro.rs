@@ -227,20 +227,38 @@ pub(crate) struct RawGro {
     run_errors: Streak,
 }
 
-/// Consecutive-failure counter that limits a per-write warning to the
-/// 1st, 2nd, 4th, ... failure of each streak, as the vnet-hdr path
-/// does: a TUN that keeps failing would otherwise warn on every batch.
+/// Failure counter that limits a per-write warning to the 1st, 2nd,
+/// 4th, ... failure of a streak: a TUN that keeps failing would
+/// otherwise warn on every batch. The streak ends only after
+/// [`Streak::QUIET`] writes in a row succeed, so failures interleaved
+/// with successes (a queue hovering at full) still thin out.
 #[derive(Default)]
-struct Streak(AtomicU64);
+struct Streak {
+    failures: AtomicU64,
+    successes: AtomicU64,
+}
 
 impl Streak {
-    fn reset(&self) {
-        self.0.store(0, Ordering::Relaxed);
+    /// Successful writes in a row that end a streak.
+    const QUIET: u64 = 64;
+
+    /// Count one successful write. Free while no streak is running,
+    /// which is the per-packet common case.
+    fn ok(&self) {
+        if self.failures.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if self.successes.fetch_add(1, Ordering::Relaxed) + 1 >= Self::QUIET {
+            self.failures.store(0, Ordering::Relaxed);
+            self.successes.store(0, Ordering::Relaxed);
+        }
     }
 
-    /// Count one failure; `Some(streak length)` when it should be logged.
+    /// Count one failure; `Some(failures in this streak)` when it
+    /// should be logged.
     fn hit(&self) -> Option<u64> {
-        let count = self.0.fetch_add(1, Ordering::Relaxed) + 1;
+        self.successes.store(0, Ordering::Relaxed);
+        let count = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
         count.is_power_of_two().then_some(count)
     }
 }
@@ -387,7 +405,7 @@ impl RawGro {
             // A run of one is the original packet, bytes untouched —
             // an ordinary-sized write with no capability implications.
             match tun.send_slice(&sp.pkt) {
-                IOCallbackResult::Ok(_) => self.drops.reset(),
+                IOCallbackResult::Ok(_) => self.drops.ok(),
                 IOCallbackResult::WouldBlock => {
                     crate::metrics::tun_gro_batch_dropped_would_block(1);
                     self.warn_drop("held TCP segment", "TUN would block");
@@ -410,8 +428,8 @@ impl RawGro {
 
         match tun.send_slice(&sp.pkt) {
             IOCallbackResult::Ok(n) if n == sp.pkt.len() => {
-                self.drops.reset();
-                self.run_errors.reset();
+                self.drops.ok();
+                self.run_errors.ok();
             }
             IOCallbackResult::Ok(n) => {
                 // The kernel drops the truncated injection at
@@ -444,10 +462,11 @@ impl RawGro {
                 // The segments may still fit as ordinary writes:
                 // re-send them rather than lose the whole run. Any
                 // segment that also fails is counted there.
+                crate::metrics::tun_raw_gro_run_write_failed();
                 if let Some(count) = self.run_errors.hit() {
                     tracing::warn!(
                         segments = sp.segs,
-                        "Coalesced run write failed ({count} consecutive), \
+                        "Coalesced run write failed ({count} in this streak), \
                          re-sending per segment: {err}"
                     );
                 }
@@ -469,7 +488,7 @@ impl RawGro {
                 continue;
             }
             match tun.send_slice(&out) {
-                IOCallbackResult::Ok(_) => self.drops.reset(),
+                IOCallbackResult::Ok(_) => self.drops.ok(),
                 IOCallbackResult::WouldBlock => {
                     crate::metrics::tun_raw_gro_resplit_segment_dropped();
                     self.warn_drop("re-split segment", "TUN would block");
@@ -486,7 +505,7 @@ impl RawGro {
     /// The metrics count every drop; only the log is thinned.
     fn warn_drop(&self, what: impl std::fmt::Display, err: impl std::fmt::Display) {
         if let Some(count) = self.drops.hit() {
-            tracing::warn!("Dropping {what} ({count} consecutive): {err}");
+            tracing::warn!("Dropping {what} ({count} in this streak): {err}");
         }
     }
 
@@ -1006,15 +1025,24 @@ mod tests {
         assert_eq!(tun.writes()[4].len(), HDR_LEN + 2 * MSS);
     }
 
-    /// Drop warnings are thinned to powers of two per streak, and a
-    /// successful write starts a new streak.
+    /// Drop warnings are thinned to powers of two per streak, even
+    /// when failures alternate with successes; only `QUIET` successes
+    /// in a row start a new streak.
     #[test]
-    fn drop_streak_logs_powers_of_two_and_resets() {
+    fn drop_streak_logs_powers_of_two_and_resets_after_quiet() {
         let streak = Streak::default();
-        let logged: Vec<_> = (0..9).filter_map(|_| streak.hit()).collect();
-        assert_eq!(logged, [1, 2, 4, 8]);
-        streak.reset();
-        assert_eq!(streak.hit(), Some(1));
+        let logged: Vec<_> = (0..9)
+            .filter_map(|_| {
+                streak.ok();
+                streak.hit()
+            })
+            .collect();
+        assert_eq!(logged, [1, 2, 4, 8], "interleaved successes do not reset");
+
+        (1..Streak::QUIET).for_each(|_| streak.ok());
+        assert_eq!(streak.hit(), None, "one short of QUIET keeps the streak");
+        (0..Streak::QUIET).for_each(|_| streak.ok());
+        assert_eq!(streak.hit(), Some(1), "QUIET successes end it");
     }
 
     /// The kill switch revokes immediately and synchronously: flipped

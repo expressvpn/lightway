@@ -753,7 +753,8 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
 ///
-/// When `inside_io` is provided (the mobile data plane does), a TUN
+/// When `inside_io` is provided (both `client()` and the mobile data
+/// plane do), a TUN
 /// coalescing window is opened around each decrypt batch: decrypted
 /// same-flow TCP segments delivered through the inside send callback
 /// may be merged into superpackets and the window is flushed before
@@ -2563,15 +2564,19 @@ pub async fn client<
                  Only enable this on a host that does not forward tunnel traffic."
             );
         }
-        // Legal, but it will look like the feature is broken: over UDP
-        // with neither option each receive returns one datagram, so
-        // every run holds a single segment and nothing merges. Say so
-        // rather than let it be measured as "coalescing does nothing".
-        // (TCP transport reads several frames at once and is fine.)
-        if !config.enable_udp_gro && !config.enable_batch_receive {
+        // Legal, but it will look like the feature is broken: a window
+        // only merges what one receive returns, which is one datagram
+        // over UDP without either option, and one read of about an MTU
+        // over TCP. Say so rather than let it be measured as
+        // "coalescing does nothing". The flags only apply to a plain
+        // `Datagram` socket: a connector's IO is the application's own.
+        let any_udp = conn_confs
+            .iter()
+            .any(|c| matches!(c.mode, ClientConnectionMode::Datagram(_)));
+        if !(any_udp && (config.enable_udp_gro || config.enable_batch_receive)) {
             tracing::warn!(
-                "enable_tun_tcp_coalescing without enable_udp_gro or enable_batch_receive: \
-                 one datagram per UDP receive, so nothing merges"
+                "enable_tun_tcp_coalescing needs a UDP server with enable_udp_gro or \
+                 enable_batch_receive: otherwise each receive holds about one segment"
             );
         }
         // The config gate is applied only to a TUN this function opens
