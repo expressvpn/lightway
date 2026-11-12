@@ -11,5 +11,6 @@ build-container:
         run-parallel-connect-test.sh \
         run-mtu-test.sh \
         run-tun-liveness-test.sh \
+        run-tcp-coalescing-test.sh \
         .
 
