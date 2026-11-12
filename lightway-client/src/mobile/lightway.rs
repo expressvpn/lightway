@@ -86,9 +86,11 @@ impl OutsideIOBuilder {
         }
     }
 
+    #[cfg_attr(not(android), allow(unused_variables))]
     async fn build(
         self,
         _plugins: &mut PluginFactoryList,
+        use_udp_gro: bool,
     ) -> uniffi::Result<(ConnectionType, Arc<dyn OutsideIO>)> {
         let result: Result<(ConnectionType, Arc<dyn OutsideIO>), _> = match self.socket {
             OutsideSocket::Tcp(s) => {
@@ -99,9 +101,18 @@ impl OutsideIOBuilder {
                 Ok((ConnectionType::Stream, Arc::new(sock)))
             }
             OutsideSocket::Udp(s) => {
-                let sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
+                #[cfg_attr(not(android), allow(unused_mut))]
+                let mut sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
                     .await
                     .context("Outside IO UDP")?;
+                // With the sockopt on, the kernel can merge a train of
+                // datagrams into one buffer, so this socket must be read
+                // by the GRO loop: `run_outside_io` picks it from
+                // `as_gro()`, which this call turns on.
+                #[cfg(android)]
+                if use_udp_gro {
+                    sock.enable_gro();
+                }
                 // TODO: Skip setting send/recv buffer size on Android for now
                 #[cfg(apple)]
                 {
@@ -231,6 +242,7 @@ pub(crate) async fn async_lightway_start(
                     socket: outside_sockets[instance_id].take(),
                     enable_keepalive: config.keepalive_continuous,
                     enable_expresslane: config.enable_expresslane,
+                    enable_udp_gro: config.enable_udp_gro,
                     expresslane_keys_rotation_interval: config
                         .expresslane_keys_rotation_interval
                         .into(),
@@ -458,6 +470,48 @@ struct OutsideIOConfig {
     mtu: usize,
     connection_type: ConnectionType,
     outside_io: Arc<dyn OutsideIO>,
+    /// Enable `UDP_GRO` on replacement sockets too.
+    use_udp_gro: bool,
+}
+
+/// Run whichever outside receive loop this socket needs: the GRO loop
+/// when `UDP_GRO` was enabled on it (the plain loop would pass a merged
+/// buffer to the decryptor as one packet), the plain loop otherwise.
+/// Both get the TUN so each decrypt batch is a coalescing window.
+async fn run_outside_io(
+    conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
+    mtu: usize,
+    connection_type: ConnectionType,
+    outside_io: Arc<dyn OutsideIO>,
+    inside_io: Arc<io::inside::Tun>,
+    keepalive: Keepalive,
+    ready_tx: Option<oneshot::Sender<()>>,
+) -> uniffi::Result<()> {
+    #[cfg(android)]
+    if let Some(gro_io) = outside_io.clone().as_gro() {
+        let inside_io: Arc<dyn io::inside::InsideIO<TunnelState>> = inside_io;
+        return crate::outside_io_task_gro(
+            conn,
+            connection_type,
+            gro_io,
+            inside_io,
+            keepalive,
+            ready_tx,
+        )
+        .await;
+    }
+
+    let inside_io: Arc<dyn io::inside::InsideIORecv<TunnelState>> = inside_io;
+    outside_io_task(
+        conn,
+        mtu,
+        connection_type,
+        outside_io,
+        Some(inside_io),
+        keepalive,
+        ready_tx,
+    )
+    .await
 }
 
 /// This function is responsible for running `outside_io_task` to handle outside packet.
@@ -471,11 +525,6 @@ async fn restartable_outside_io_task(
     mut new_outside_io_receiver: MpscReceiver<()>,
     external_event_handler: Arc<dyn EventHandlers>,
 ) -> uniffi::Result<()> {
-    // Handed to `outside_io_task` so decrypted TCP segments coalesce
-    // on the TUN write path within each decrypt batch (Android's raw
-    // coalescer / the Linux vnet-hdr path in mobile-test builds; a
-    // no-op elsewhere or while gated off).
-    let inside_io: Arc<dyn io::inside::InsideIORecv<TunnelState>> = inside_io;
     let mut current_outside_io = outside_io_config.outside_io;
     let mut first_run = true;
 
@@ -505,7 +554,7 @@ async fn restartable_outside_io_task(
         };
 
         tokio::select! {
-            result = outside_io_task(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), Some(inside_io.clone()), keepalive.clone(), ready_tx) => return result,
+            result = run_outside_io(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), inside_io.clone(), keepalive.clone(), ready_tx) => return result,
 
             new_outside_io_result = new_outside_io_receiver.recv() => {
                 match new_outside_io_result {
@@ -515,7 +564,7 @@ async fn restartable_outside_io_task(
                         let socket = OutsideSocket::new(false, None)?;
                         let mut outside_plugins = PluginFactoryList::new();
                         let (_, new_socket) = OutsideIOBuilder::new(socket, peer_addr)
-                            .build(&mut outside_plugins)
+                            .build(&mut outside_plugins, outside_io_config.use_udp_gro)
                             .await?;
                         let mut conn = conn.lock().unwrap();
                         current_outside_io = new_socket.clone();
@@ -589,6 +638,9 @@ struct LightwayClientConnectArgs {
     socket: Option<OutsideSocket>,
     enable_keepalive: bool,
     enable_expresslane: bool,
+    /// Enable `UDP_GRO` on the outside UDP socket, which also selects
+    /// the GRO receive loop for it.
+    enable_udp_gro: bool,
     expresslane_keys_rotation_interval: std::time::Duration,
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
@@ -611,6 +663,7 @@ async fn lightway_client_connect(
         socket,
         enable_keepalive,
         enable_expresslane,
+        enable_udp_gro,
         expresslane_keys_rotation_interval,
         online_signal_sender,
         event_stream_handler,
@@ -633,7 +686,7 @@ async fn lightway_client_connect(
 
     let (connection_type, outside_io): (ConnectionType, Arc<dyn OutsideIO>) = {
         let builder = OutsideIOBuilder::new(socket, server_sockaddr);
-        builder.build(&mut outside_plugins).await?
+        builder.build(&mut outside_plugins, enable_udp_gro).await?
     };
 
     let root_ca_cert = connect_conf.load_ca()?;
@@ -732,6 +785,7 @@ async fn lightway_client_connect(
                 mtu: outside_mtu,
                 connection_type,
                 outside_io,
+                use_udp_gro: enable_udp_gro,
             },
             tunnel_inside_io,
             keepalive.clone(),
