@@ -122,6 +122,16 @@ run-udp-both-tun-offload-test:
 run-tcp-client-tun-offload-test:
     DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--enable-tun-offload"
 
+# run-udp-client-tcp-coalescing-test runs e2e test using UDP with the client's
+# raw TCP coalescing (TUN without offload) and UDP_GRO enabled
+run-udp-client-tcp-coalescing-test:
+    DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-tun-tcp-coalescing --enable-udp-gro" --TEST_SCRIPT="./run-tcp-coalescing-test.sh udp"
+
+# run-tcp-client-tcp-coalescing-test runs e2e test using TCP with the client's
+# raw TCP coalescing enabled
+run-tcp-client-tcp-coalescing-test:
+    DO +TEST --MODE=tcp --SERVER_PORT=443 --CLIENT_EXTRA_ARGS="--enable-tun-tcp-coalescing" --TEST_SCRIPT="./run-tcp-coalescing-test.sh tcp"
+
 # run-udp-client-batch-receive-test runs e2e test using UDP with batch receive enabled
 run-udp-client-batch-receive-test:
     DO +TEST --MODE=udp --SERVER_PORT=27690 --CLIENT_EXTRA_ARGS="--enable-batch-receive"
@@ -315,6 +325,8 @@ run-all-tests-wolfssl:
     BUILD +run-udp-client-tun-offload-test
     BUILD +run-udp-both-tun-offload-test
     BUILD +run-tcp-client-tun-offload-test
+    BUILD +run-udp-client-tcp-coalescing-test
+    BUILD +run-tcp-client-tcp-coalescing-test
     BUILD +run-udp-client-batch-receive-test
     BUILD +run-udp-server-batch-receive-test
     BUILD +run-udp-both-batch-receive-test
