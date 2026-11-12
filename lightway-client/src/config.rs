@@ -337,7 +337,7 @@ pub struct Config {
                syscalls on its own, and is what puts several segments inside one \
                decrypt batch — so enable_tun_tcp_coalescing has little to coalesce \
                without it (or enable_batch_receive). Implied by enable_tun_offload. \
-               Linux only, 5.0+"
+               Linux 5.0+ and Android"
     ))]
     #[schemars(extend("x-cfg" = "linux"))]
     pub enable_udp_gro: bool,
