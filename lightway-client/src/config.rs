@@ -313,6 +313,38 @@ pub struct Config {
     #[patch(attribute(clap(long)))]
     #[patch(empty_value = false)]
     #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable downlink TCP coalescing on the TUN write path, by merging \
+               same-flow TCP segments into one oversized packet per write. For \
+               devices with no virtio_net_hdr framing: the Android VpnService fd, \
+               or a Linux TUN opened without enable_tun_offload (mutually exclusive \
+               with it). Coalescing still engages only once the device passes the \
+               oversized-write capability probe. \
+               Do NOT enable on a host that forwards tunnel traffic (e.g. a gateway \
+               with net.ipv4.ip_forward on): a coalesced packet that is forwarded \
+               rather than delivered locally is dropped with ICMP frag-needed, \
+               blackholing that flow"
+    ))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub enable_tun_tcp_coalescing: bool,
+
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
+    #[patch(attribute(
+        doc = "Enable UDP_GRO on the outside socket, so the kernel returns a train \
+               of same-flow datagrams per recvmsg instead of one. Reduces receive \
+               syscalls on its own, and is what puts several segments inside one \
+               decrypt batch — so enable_tun_tcp_coalescing has little to coalesce \
+               without it (or enable_batch_receive). Implied by enable_tun_offload. \
+               Linux only, 5.0+"
+    ))]
+    #[schemars(extend("x-cfg" = "linux"))]
+    pub enable_udp_gro: bool,
+
+    #[patch(attribute(clap(long)))]
+    #[patch(empty_value = false)]
+    #[patch(attribute(serde(default)))]
     #[patch(attribute(doc = "Enable IO-uring interface for Tunnel"))]
     #[schemars(extend("x-cfg" = "linux"))]
     pub enable_tun_iouring: bool,
@@ -606,6 +638,8 @@ impl Default for Config {
             enable_pmtud: false,
             pmtud_base_mtu: None,
             enable_tun_offload: false,
+            enable_tun_tcp_coalescing: false,
+            enable_udp_gro: false,
             enable_tun_iouring: false,
             iouring_entry_count: 1024,
             iouring_sqpoll_idle_time: Duration::from_std_duration(StdDuration::from_millis(100)),

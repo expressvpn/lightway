@@ -77,6 +77,47 @@ fn get_tls_library_version() -> String {
     lightway_core::tls::get_version_string().to_string()
 }
 
+/// Allow or forbid downlink TCP coalescing on the TUN write path.
+/// Android only; a logged no-op on other platforms. Defaults to
+/// **forbidden** — an app that never calls this gets plain per-packet
+/// writes.
+///
+/// This is a correctness gate, not a tuning knob. Coalesced packets are
+/// oversized and only safe when the local stack reassembles them: one
+/// that the kernel *forwards* instead is dropped with an ICMP
+/// frag-needed aimed at the remote origin, permanently blackholing that
+/// flow. Whether a packet will be forwarded is invisible to the
+/// library, so it cannot be decided per packet.
+///
+/// On Android that condition is unreachable through this tun —
+/// tethered-client traffic is forwarded between interfaces by the
+/// kernel and never enters the `VpnService` tun — so an Android app can
+/// call this with `true` once and leave it. The switch is kept for
+/// embedders that *can* forward inner packets (other platforms, OEM
+/// variations, a rooted device forwarding into the tun): call with
+/// `false` as soon as that is known, and it takes effect for every
+/// packet offered after the call returns, mid-batch included.
+///
+/// Safe to call at any time relative to the tunnel lifecycle; the
+/// device capability itself is probed on first use and coalescing
+/// silently stays off where the probe fails.
+///
+/// This runtime gate composes with a static one: the connection config
+/// must also set `enable_tun_tcp_coalescing` (default off), so the
+/// feature can be rolled out via config exactly like
+/// `enable_tun_offload` gates the Linux offload paths. Allowing it
+/// here has no effect on connections configured without the flag.
+#[cfg_attr(not(feature = "mobile-test"), uniffi::export)]
+fn set_tun_tcp_coalescing_allowed(allowed: bool) {
+    #[cfg(android)]
+    crate::set_tun_tcp_coalescing_allowed(allowed);
+    #[cfg(not(android))]
+    info!(
+        allowed,
+        "tun TCP coalescing is not available on this platform"
+    );
+}
+
 /// Sets up a global default logging bridge between Rust and the mobile app, while
 /// installing a panic hook for proper crash reporting.
 /// Invoking this multiple times replaces the previously registered logger so that the latest callback is used.

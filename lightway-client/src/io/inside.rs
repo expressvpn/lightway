@@ -1,3 +1,11 @@
+// The raw coalescer serves any TUN without `virtio_net_hdr` framing:
+// the Android `VpnService` fd, which can never have it, and a Linux
+// device opened without `enable_tun_offload`. Not compiled for `test`
+// on other hosts: it builds on `lightway_core::gro`, which only exists
+// on Linux and Android (a dependency's `cfg(test)` is never set), so
+// its unit tests run on Linux.
+#[cfg(any(linux, android))]
+pub(crate) mod raw_gro;
 pub mod tun;
 
 use anyhow::Result;
@@ -59,14 +67,18 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
 
     /// Open a GRO coalescing window on the send path. Until the matching
     /// [`Self::gro_flush`], packets delivered via the inside send callback
-    /// may be coalesced into TSO superpackets instead of written
-    /// individually. Backends without TUN offload leave this a no-op.
-    #[cfg(linux)]
+    /// may be coalesced into superpackets instead of written individually
+    /// — TSO aggregates behind a `virtio_net_hdr` where the device
+    /// negotiated `IFF_VNET_HDR`, raw oversized packets on a TUN without
+    /// it (the Android `VpnService` fd, or Linux without
+    /// `enable_tun_offload`). Backends without a coalescing-capable
+    /// device leave this a no-op.
+    #[cfg(any(linux, android))]
     fn gro_open(&self) {}
 
     /// Flush any coalesced packets and close the window opened by
     /// [`Self::gro_open`].
-    #[cfg(linux)]
+    #[cfg(any(linux, android))]
     fn gro_flush(&self) {}
 
     fn into_io_send_callback(
