@@ -40,8 +40,10 @@ pub struct Tun {
     /// `virtio_net_hdr` framing (see [`raw_gro`]): the Android
     /// `VpnService` fd, which can never have it, or a Linux device
     /// opened without `enable_tun_offload`. Gated off by default —
-    /// callers opt in via [`Self::set_tcp_coalescing_configured`] plus
-    /// [`raw_gro::set_tun_tcp_coalescing_allowed`]. Where the device
+    /// callers opt in via [`Self::set_tcp_coalescing_configured`]; the
+    /// process-wide runtime switches (the embedder's
+    /// [`raw_gro::set_tun_tcp_coalescing_allowed`] and the host
+    /// forwarding check) can still veto it. Where the device
     /// *did* negotiate `IFF_VNET_HDR`, [`Self::gro`] is used instead
     /// and this stays dormant.
     #[cfg(any(linux, android))]
@@ -85,8 +87,9 @@ impl Tun {
     /// Apply the `enable_tun_tcp_coalescing` config flag — the static
     /// rollout gate for the raw downlink TCP coalescer. Off by
     /// default. `&mut self` restricts this to device setup, before the
-    /// `Tun` is shared; the runtime kill switch
-    /// ([`raw_gro::set_tun_tcp_coalescing_allowed`]) and the
+    /// `Tun` is shared; the runtime switches
+    /// ([`raw_gro::set_tun_tcp_coalescing_allowed`] and the host
+    /// forwarding check) and the
     /// capability probe still apply on top.
     ///
     /// Has no effect on a device that negotiated `IFF_VNET_HDR`
