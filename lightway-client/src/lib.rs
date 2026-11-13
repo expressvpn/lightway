@@ -753,7 +753,8 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
 ///
-/// When `inside_io` is provided (the mobile data plane does), a TUN
+/// When `inside_io` is provided (both `client()` and the mobile data
+/// plane do), a TUN
 /// coalescing window is opened around each decrypt batch: decrypted
 /// same-flow TCP segments delivered through the inside send callback
 /// may be merged into superpackets and the window is flushed before
@@ -2438,6 +2439,16 @@ fn validate_client_config<
         ));
     }
 
+    // The io-uring backend opens its own `Tun` and never applies the
+    // coalescing config gate, so the flag would be silently ignored.
+    #[cfg(all(linux, feature = "io-uring"))]
+    if config.enable_tun_tcp_coalescing && config.enable_tun_iouring {
+        return Err(anyhow!(
+            "enable_tun_tcp_coalescing and enable_tun_iouring cannot be enabled together: \
+             the io-uring inside IO backend does not support raw TCP coalescing"
+        ));
+    }
+
     // Both flags ask for downlink TCP coalescing by different means, and
     // a device can only use one: with `IFF_VNET_HDR` negotiated the
     // vnet-hdr path takes precedence and the raw coalescer stays dormant
@@ -2553,15 +2564,27 @@ pub async fn client<
                  Only enable this on a host that does not forward tunnel traffic."
             );
         }
-        // Legal, but it will look like the feature is broken: with one
-        // datagram per decrypt batch every run holds a single segment,
-        // so nothing ever merges. Say so rather than let it be measured
-        // as "coalescing does nothing".
-        if !config.enable_udp_gro {
+        // Legal, but it will look like the feature is broken: a window
+        // only merges what one receive returns, which is one datagram
+        // over UDP without either option, and one read of about an MTU
+        // over TCP. Say so rather than let it be measured as
+        // "coalescing does nothing". The flags only apply to a plain
+        // `Datagram` socket: a connector's IO is the application's own.
+        let any_udp = conn_confs
+            .iter()
+            .any(|c| matches!(c.mode, ClientConnectionMode::Datagram(_)));
+        if !(any_udp && (config.enable_udp_gro || config.enable_batch_receive)) {
             tracing::warn!(
-                "enable_tun_tcp_coalescing is set without enable_udp_gro: each recvmsg \
-                 returns a single datagram, so every coalescing run holds one segment \
-                 and no merging happens. Enable enable_udp_gro as well."
+                "enable_tun_tcp_coalescing needs a UDP server with enable_udp_gro or \
+                 enable_batch_receive: otherwise each receive holds about one segment"
+            );
+        }
+        // The config gate is applied only to a TUN this function opens
+        // (below); a caller-supplied device keeps whatever its owner set.
+        if config.inside_io.is_some() {
+            tracing::warn!(
+                "enable_tun_tcp_coalescing has no effect on a caller-supplied inside_io: \
+                 call Tun::set_tcp_coalescing_configured on the device instead"
             );
         }
         set_tun_tcp_coalescing_allowed(true);
@@ -2923,6 +2946,26 @@ mod tests {
         assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
         config.enable_tun_tcp_coalescing = false;
         config.enable_tun_offload = true;
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
+    /// The io-uring backend never applies the coalescing config gate,
+    /// so accepting the pair would silently ignore the flag.
+    ///
+    /// Needs `--features io-uring`, which CI does not test with; run
+    /// `cargo test -p lightway-client --features io-uring validate_` by
+    /// hand on Linux.
+    #[cfg(all(linux, feature = "io-uring"))]
+    #[test]
+    fn validate_tun_iouring_with_tcp_coalescing() {
+        let mut config = test_client_config();
+        config.enable_tun_iouring = true;
+        config.enable_tun_tcp_coalescing = true;
+        let err = validate_client_config(&config, &[test_conn_config(None)])
+            .expect_err("io-uring + raw coalescing must be rejected");
+        assert!(err.to_string().contains("enable_tun_iouring"), "{err}");
+
+        config.enable_tun_tcp_coalescing = false;
         assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
     }
 

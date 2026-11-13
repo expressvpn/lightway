@@ -68,7 +68,8 @@
 //!   `EINVAL` or short write afterwards trips a permanent, logged
 //!   fallback to per-packet writes; the failed run is re-split into
 //!   its wire segments ([`RawSuperpacket::build_segment`]) so nothing
-//!   is lost.
+//!   is lost. Any other error is re-split the same way but leaves
+//!   coalescing on; only `WouldBlock` drops the run.
 //! - **Strict arrival order, no buffering across batches.** A single
 //!   run accumulator coalesces only adjacent packets: anything that
 //!   cannot join the run flushes it first, and the window is opened
@@ -90,7 +91,7 @@
 //! were raised.
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use bytes::BytesMut;
@@ -219,6 +220,47 @@ pub(crate) struct RawGro {
     /// The allow flag consulted on every packet; the global
     /// [`COALESCING_ALLOWED`] in production, injectable for tests.
     allowed: &'static AtomicBool,
+    /// Rate limits the warning for any write this path drops.
+    drops: Streak,
+    /// Rate limits the warning for an oversized write that failed with
+    /// a non-capability error and was re-sent per segment.
+    run_errors: Streak,
+}
+
+/// Failure counter that limits a per-write warning to the 1st, 2nd,
+/// 4th, ... failure of a streak: a TUN that keeps failing would
+/// otherwise warn on every batch. The streak ends only after
+/// [`Streak::QUIET`] writes in a row succeed, so failures interleaved
+/// with successes (a queue hovering at full) still thin out.
+#[derive(Default)]
+struct Streak {
+    failures: AtomicU64,
+    successes: AtomicU64,
+}
+
+impl Streak {
+    /// Successful writes in a row that end a streak.
+    const QUIET: u64 = 64;
+
+    /// Count one successful write. Free while no streak is running,
+    /// which is the per-packet common case.
+    fn ok(&self) {
+        if self.failures.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if self.successes.fetch_add(1, Ordering::Relaxed) + 1 >= Self::QUIET {
+            self.failures.store(0, Ordering::Relaxed);
+            self.successes.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Count one failure; `Some(failures in this streak)` when it
+    /// should be logged.
+    fn hit(&self) -> Option<u64> {
+        self.successes.store(0, Ordering::Relaxed);
+        let count = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        count.is_power_of_two().then_some(count)
+    }
 }
 
 impl RawGro {
@@ -236,6 +278,8 @@ impl RawGro {
             batch: Mutex::new(TcpGroBatch::with_max_len(max_len)),
             max_len,
             allowed,
+            drops: Streak::default(),
+            run_errors: Streak::default(),
         }
     }
 
@@ -361,14 +405,14 @@ impl RawGro {
             // A run of one is the original packet, bytes untouched —
             // an ordinary-sized write with no capability implications.
             match tun.send_slice(&sp.pkt) {
-                IOCallbackResult::Ok(_) => {}
+                IOCallbackResult::Ok(_) => self.drops.ok(),
                 IOCallbackResult::WouldBlock => {
                     crate::metrics::tun_gro_batch_dropped_would_block(1);
-                    tracing::warn!("Dropping coalesced packet: TUN would block");
+                    self.warn_drop("held TCP segment", "TUN would block");
                 }
                 IOCallbackResult::Err(err) => {
                     crate::metrics::tun_gro_batch_dropped_err(1);
-                    tracing::warn!("Dropping coalesced packet: {err}");
+                    self.warn_drop("held TCP segment", err);
                 }
             }
             return;
@@ -383,7 +427,10 @@ impl RawGro {
         }
 
         match tun.send_slice(&sp.pkt) {
-            IOCallbackResult::Ok(n) if n == sp.pkt.len() => {}
+            IOCallbackResult::Ok(n) if n == sp.pkt.len() => {
+                self.drops.ok();
+                self.run_errors.ok();
+            }
             IOCallbackResult::Ok(n) => {
                 // The kernel drops the truncated injection at
                 // `ip_rcv` (total_length exceeds the bytes), so the
@@ -398,9 +445,9 @@ impl RawGro {
                 // queue. One dropped run costs up to `segs` segments;
                 // the counters keep that amplification measurable.
                 crate::metrics::tun_gro_batch_dropped_would_block(sp.segs as u64);
-                tracing::warn!(
-                    segments = sp.segs,
-                    "Dropping coalesced run: TUN would block"
+                self.warn_drop(
+                    format_args!("coalesced run of {} segments", sp.segs),
+                    "TUN would block",
                 );
             }
             IOCallbackResult::Err(err)
@@ -410,8 +457,20 @@ impl RawGro {
                 self.write_resplit(tun, &sp);
             }
             IOCallbackResult::Err(err) => {
-                crate::metrics::tun_gro_batch_dropped_err(sp.segs as u64);
-                tracing::warn!(segments = sp.segs, "Dropping coalesced run: {err}");
+                // Not a verdict on oversized writes (e.g. `ENOBUFS`
+                // allocating the large skb), so coalescing stays on.
+                // The segments may still fit as ordinary writes:
+                // re-send them rather than lose the whole run. Any
+                // segment that also fails is counted there.
+                crate::metrics::tun_raw_gro_run_write_failed();
+                if let Some(count) = self.run_errors.hit() {
+                    tracing::warn!(
+                        segments = sp.segs,
+                        "Coalesced run write failed ({count} in this streak), \
+                         re-sending per segment: {err}"
+                    );
+                }
+                self.write_resplit(tun, &sp);
             }
         }
     }
@@ -422,21 +481,31 @@ impl RawGro {
         let mut out = BytesMut::with_capacity(sp.hdr_len + sp.gso_size);
         for idx in 0..sp.segs {
             if !sp.build_segment(idx, &mut out) {
+                // Cannot happen for a run `TcpGroBatch` built; not
+                // rate limited so a broken invariant stays visible.
                 crate::metrics::tun_raw_gro_resplit_segment_dropped();
                 tracing::warn!(idx, "re-split segment rebuild failed");
                 continue;
             }
             match tun.send_slice(&out) {
-                IOCallbackResult::Ok(_) => {}
+                IOCallbackResult::Ok(_) => self.drops.ok(),
                 IOCallbackResult::WouldBlock => {
                     crate::metrics::tun_raw_gro_resplit_segment_dropped();
-                    tracing::warn!(idx, "Dropping re-split segment: TUN would block");
+                    self.warn_drop("re-split segment", "TUN would block");
                 }
                 IOCallbackResult::Err(err) => {
                     crate::metrics::tun_raw_gro_resplit_segment_dropped();
-                    tracing::warn!(idx, "Dropping re-split segment: {err}");
+                    self.warn_drop("re-split segment", err);
                 }
             }
+        }
+    }
+
+    /// Warn about one dropped write, rate limited by [`Self::drops`].
+    /// The metrics count every drop; only the log is thinned.
+    fn warn_drop(&self, what: impl std::fmt::Display, err: impl std::fmt::Display) {
+        if let Some(count) = self.drops.hit() {
+            tracing::warn!("Dropping {what} ({count} in this streak): {err}");
         }
     }
 
@@ -920,6 +989,60 @@ mod tests {
         gro.flush(&tun);
         assert_eq!(tun.write_count(), 3);
         assert_eq!(tun.writes()[2].len(), HDR_LEN + 2 * MSS);
+    }
+
+    /// Any other error on the coalesced write is not a capability
+    /// verdict: the run is re-sent per segment (no loss) and coalescing
+    /// stays on for the next window.
+    #[test]
+    fn other_write_error_resplits_without_fallback() {
+        let tun = FakeRawTun::new();
+        let gro = raw_gro(true);
+
+        gro.open(&tun, local_ip());
+        for seq in [0, MSS as u32] {
+            send_ok(&gro, &tun, data(seq));
+        }
+        tun.push_result(IOCallbackResult::Err(std::io::Error::from_raw_os_error(
+            libc::ENOBUFS,
+        )));
+        gro.flush(&tun);
+
+        // probe + failed oversized attempt + 2 re-split segments.
+        let writes = tun.writes();
+        assert_eq!(writes.len(), 4, "re-split after the failed write");
+        assert_eq!(writes[2], data(0).to_vec(), "segment 0 re-sent");
+        assert_eq!(writes[3], data(MSS as u32).to_vec(), "segment 1 re-sent");
+        assert!(!gro.fell_back.load(Ordering::Relaxed));
+
+        // Coalescing still works on the next window.
+        gro.open(&tun, local_ip());
+        for seq in [2 * MSS as u32, 3 * MSS as u32] {
+            send_ok(&gro, &tun, data(seq));
+        }
+        gro.flush(&tun);
+        assert_eq!(tun.write_count(), 5);
+        assert_eq!(tun.writes()[4].len(), HDR_LEN + 2 * MSS);
+    }
+
+    /// Drop warnings are thinned to powers of two per streak, even
+    /// when failures alternate with successes; only `QUIET` successes
+    /// in a row start a new streak.
+    #[test]
+    fn drop_streak_logs_powers_of_two_and_resets_after_quiet() {
+        let streak = Streak::default();
+        let logged: Vec<_> = (0..9)
+            .filter_map(|_| {
+                streak.ok();
+                streak.hit()
+            })
+            .collect();
+        assert_eq!(logged, [1, 2, 4, 8], "interleaved successes do not reset");
+
+        (1..Streak::QUIET).for_each(|_| streak.ok());
+        assert_eq!(streak.hit(), None, "one short of QUIET keeps the streak");
+        (0..Streak::QUIET).for_each(|_| streak.ok());
+        assert_eq!(streak.hit(), Some(1), "QUIET successes end it");
     }
 
     /// The kill switch revokes immediately and synchronously: flipped

@@ -13,8 +13,8 @@
 //! one coalesced run can carry many segments: run counts alone
 //! understate the impact.
 
-// Gated at the `mod metrics;` declaration in `lib.rs` (linux, android
-// and host test builds), so no inner `#![cfg]` here — repeating it trips
+// Gated at the `mod metrics;` declaration in `lib.rs` (linux and
+// android), so no inner `#![cfg]` here — repeating it trips
 // `duplicated_attributes`.
 
 use ::metrics::{Counter, counter};
@@ -34,19 +34,22 @@ static METRIC_TUN_RAW_GRO_PERMANENT_FALLBACK: LazyLock<Counter> =
     LazyLock::new(|| counter!("tun_raw_gro_permanent_fallback"));
 static METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED: LazyLock<Counter> =
     LazyLock::new(|| counter!("tun_raw_gro_resplit_segment_dropped"));
+static METRIC_TUN_RAW_GRO_RUN_WRITE_FAILED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_run_write_failed"));
 
-/// A coalesced superpacket was shed because the TUN write queue was
-/// full. Load shedding, not a fault: sustained non-zero values mean
-/// the inside device is the bottleneck, and the segment counter
-/// gives the number of TCP segments actually lost.
+/// A coalesced run (or a single held segment) was shed because the
+/// TUN write queue was full. Load shedding, not a fault: sustained
+/// non-zero values mean the inside device is the bottleneck, and the
+/// segment counter gives the number of TCP segments actually lost.
 pub(crate) fn tun_gro_batch_dropped_would_block(segments: u64) {
     METRIC_TUN_GRO_BATCH_DROPPED_WOULD_BLOCK.increment(1);
     METRIC_TUN_GRO_SEGMENTS_DROPPED_WOULD_BLOCK.increment(segments);
 }
 
-/// A coalesced superpacket was dropped because the TUN write
-/// failed outright — a genuine device error, unlike the
-/// would-block case above.
+/// A segment held for coalescing was dropped because its TUN write
+/// failed outright — a genuine device error, unlike the would-block
+/// case above. A failed multi-segment run is re-sent per segment
+/// instead; see [`tun_raw_gro_run_write_failed`].
 pub(crate) fn tun_gro_batch_dropped_err(segments: u64) {
     METRIC_TUN_GRO_BATCH_DROPPED_ERR.increment(1);
     METRIC_TUN_GRO_SEGMENTS_DROPPED_ERR.increment(segments);
@@ -74,4 +77,12 @@ pub(crate) fn tun_raw_gro_permanent_fallback() {
 /// the inner TCP flow must retransmit it.
 pub(crate) fn tun_raw_gro_resplit_segment_dropped() {
     METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED.increment(1);
+}
+
+/// An oversized run write failed with an error that says nothing about
+/// oversized writes (e.g. `ENOBUFS`), so the run was re-sent per segment
+/// and coalescing stayed on. Each costs one extra failed syscall;
+/// sustained values point at a device problem.
+pub(crate) fn tun_raw_gro_run_write_failed() {
+    METRIC_TUN_RAW_GRO_RUN_WRITE_FAILED.increment(1);
 }
