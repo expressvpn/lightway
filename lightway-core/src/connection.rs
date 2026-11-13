@@ -1535,6 +1535,9 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Generate an event
     fn event(&mut self, event: Event) {
+        if let Some(cb) = &self.expresslane.cb {
+            cb.event(self.session_id, &event, &self.app_state);
+        }
         if let Some(event_cb) = &mut self.event_cb {
             debug!(?event, "event");
             event_cb.event(event);

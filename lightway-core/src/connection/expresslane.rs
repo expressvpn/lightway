@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::SessionId;
 use crate::wire::{ExpresslaneData, ExpresslaneKey, ExpresslaneVersion};
+use crate::{Event, SessionId};
 
 /// Data published when expresslane keys are updated.
 #[derive(Debug)]
@@ -22,9 +22,25 @@ pub struct ExpresslaneCbData {
 ///
 /// Generic over `AppState` so consumers can read connection state directly
 /// (e.g. server reads `internal_ip` from its `ConnectionState`).
+///
+/// Its methods are called inline, on the connection's packet path, with the
+/// connection locked. They must not block - a slow call stalls the
+/// connection and whatever drives it, such as a server's receive loop - and
+/// must not call back into the connection. Hand slow work to another
+/// thread.
 pub trait ExpresslaneCb<AppState> {
     /// Called when expresslane keys are updated for a session.
     fn update(&self, session_id: SessionId, data: ExpresslaneCbData, state: &AppState);
+
+    /// Called for each [`Event`] the connection raises, with the session id
+    /// it uses at that point, just before the event reaches the
+    /// [`EventCallback`](crate::EventCallback).
+    ///
+    /// The event callback may hand events to another task and handle them
+    /// later; this is called inline, in order with [`update`](Self::update).
+    /// State keyed by session id can follow expresslane state changes and
+    /// session id rotations through it exactly.
+    fn event(&self, _session_id: SessionId, _event: &Event, _state: &AppState) {}
 }
 
 /// Convenience type for [`ExpresslaneCb`] trait objects.
