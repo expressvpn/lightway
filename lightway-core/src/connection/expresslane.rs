@@ -25,6 +25,19 @@ pub struct ExpresslaneCbData {
 pub trait ExpresslaneCb<AppState> {
     /// Called when expresslane keys are updated for a session.
     fn update(&self, session_id: SessionId, data: ExpresslaneCbData, state: &AppState);
+
+    /// Called when the expresslane state of a session changes.
+    ///
+    /// Unlike [`Event::ExpresslaneStateChanged`](crate::Event::ExpresslaneStateChanged),
+    /// which an application may handle later, this is called inline, in
+    /// order with [`update`](Self::update).
+    fn state_changed(
+        &self,
+        _session_id: SessionId,
+        _expresslane_state: ExpresslaneState,
+        _state: &AppState,
+    ) {
+    }
 }
 
 /// Convenience type for [`ExpresslaneCb`] trait objects.

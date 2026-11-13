@@ -1352,6 +1352,150 @@ async fn disabled_server_ignores_expresslane_config() {
     .expect("client never saw its expresslane config acked");
 }
 
+/// `ExpresslaneCb::state_changed` is called inline with the key pushes, in
+/// the order the connection made them: on the server, the `Inactive` from
+/// the client's first config comes before the first full key push, and
+/// `Active` comes after it.
+#[tokio::test]
+async fn expresslane_cb_sees_state_changes_in_order_with_key_pushes() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Call {
+        Update { full: bool },
+        State(ExpresslaneState),
+    }
+
+    struct Recorder(Mutex<Vec<Call>>);
+    impl<T> ExpresslaneCb<T> for Recorder {
+        fn update(&self, _sid: SessionId, data: ExpresslaneCbData, _s: &T) {
+            let full = !data.self_key.is_invalid() && !data.peer_key.is_invalid();
+            self.0.lock().unwrap().push(Call::Update { full });
+        }
+        fn state_changed(&self, _sid: SessionId, state: ExpresslaneState, _s: &T) {
+            self.0.lock().unwrap().push(Call::State(state));
+        }
+    }
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let server_cb = Arc::new(Recorder(Mutex::new(Vec::new())));
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+    let server_task = server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: Some(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL),
+            conn_out: Some(conn_tx),
+            metrics: None,
+            expresslane_cb: Some(server_cb.clone()),
+            cert,
+            key,
+        },
+    );
+
+    let log = server_cb.clone();
+    let client_task = async move {
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    if server_conn.lock().unwrap().expresslane_state() == ExpresslaneState::Active {
+                        break;
+                    }
+                }
+            }
+        }
+
+        conn.lock().unwrap().disconnect().unwrap();
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async move { tokio::join!(server_task, client_task) },
+    )
+    .await
+    .expect("server expresslane never went Active");
+
+    let log = log.0.lock().unwrap();
+    let states: Vec<_> = log
+        .iter()
+        .filter_map(|c| match c {
+            Call::State(s) => Some(*s),
+            Call::Update { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [ExpresslaneState::Inactive, ExpresslaneState::Active],
+        "one call per state change: {log:?}"
+    );
+    let pos = |call| log.iter().position(|c| *c == call).unwrap();
+    let inactive = pos(Call::State(ExpresslaneState::Inactive));
+    let first_full = pos(Call::Update { full: true });
+    let active = pos(Call::State(ExpresslaneState::Active));
+    assert!(
+        inactive < first_full && first_full < active,
+        "Inactive, then the full key push, then Active: {log:?}"
+    );
+}
+
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
 /// fires once per state or estimate change (never for a no-op step), the
 /// getter agrees with the last event, and for every step that requests a

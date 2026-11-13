@@ -2231,6 +2231,9 @@ impl<AppState: Send> Connection<AppState> {
             return;
         }
         self.expresslane.state = new_state;
+        if let Some(cb) = &self.expresslane.cb {
+            cb.state_changed(self.session_id, new_state, &self.app_state);
+        }
         self.event(Event::ExpresslaneStateChanged(new_state));
     }
 
