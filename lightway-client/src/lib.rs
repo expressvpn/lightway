@@ -3114,6 +3114,143 @@ mod tests {
         assert!(task.is_finished());
     }
 
+    /// Inside device that records the coalescing window calls, and
+    /// whether the connection lock was held at each flush.
+    #[cfg(any(linux, android))]
+    struct WindowRecorder {
+        conn: std::sync::OnceLock<Weak<Mutex<Connection<ConnectionState>>>>,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    #[cfg(any(linux, android))]
+    #[async_trait::async_trait]
+    impl InsideIORecv<()> for WindowRecorder {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            std::future::pending().await
+        }
+        fn try_send(&self, pkt: BytesMut, _ip_config: Option<InsideIpConfig>) -> Result<usize> {
+            Ok(pkt.len())
+        }
+        fn mtu(&self) -> usize {
+            1350
+        }
+        fn gro_open(&self) {
+            self.events.lock().unwrap().push("open");
+        }
+        fn gro_flush(&self) {
+            let conn = self.conn.get().and_then(Weak::upgrade).unwrap();
+            let locked = conn.try_lock().is_err();
+            self.events.lock().unwrap().push(if locked {
+                "flush (locked)"
+            } else {
+                "flush (UNLOCKED)"
+            });
+        }
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            unreachable!("not wired into the connection")
+        }
+    }
+
+    /// `outside_io_task` brackets every receive batch with one
+    /// coalescing window and flushes it while the connection lock is
+    /// still held, so the connection cannot coalesce into a drained
+    /// batch.
+    #[cfg(any(linux, android))]
+    #[tokio::test]
+    async fn outside_io_task_flushes_each_batch_under_the_conn_lock() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_addr = sock.local_addr().unwrap();
+        let udp = io::outside::Udp::new(
+            peer.local_addr().unwrap(),
+            Some(sock),
+            #[cfg(all(linux, not(feature = "mobile")))]
+            0,
+        )
+        .await
+        .unwrap();
+        let outside_io: Arc<dyn io::outside::OutsideIO> = Arc::new(udp);
+
+        let ca = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/certs/ca.crt"
+        ))
+        .unwrap();
+        let (ticker, _ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState {
+            ticker,
+            ip_config: None,
+            extended: (),
+            tun_activity: Default::default(),
+        };
+        let conn = ClientContextBuilder::new(
+            ConnectionType::Datagram,
+            RootCertificate::PemBuffer(&ca),
+            None,
+            Arc::new(ClientIpConfigCb),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(outside_io.clone().into_io_send_callback(), 1350)
+        .unwrap()
+        .with_auth(AuthMethod::UserPass {
+            user: "user".to_string(),
+            password: "password".to_string(),
+        })
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let recorder = Arc::new(WindowRecorder {
+            conn: std::sync::OnceLock::new(),
+            events: Mutex::new(Vec::new()),
+        });
+        recorder.conn.set(Arc::downgrade(&conn)).unwrap();
+        let (keepalive, _keepalive_task) = Keepalive::new(
+            keepalive::Config {
+                interval: Duration::from_secs(60),
+                timeout: Duration::from_secs(60),
+                continuous: false,
+                tracer_trigger_timeout: None,
+            },
+            Arc::downgrade(&conn),
+        );
+
+        let task = tokio::spawn(outside_io_task(
+            conn.clone(),
+            1350,
+            ConnectionType::Datagram,
+            outside_io,
+            Some(recorder.clone() as Arc<dyn io::inside::InsideIORecv<()>>),
+            keepalive,
+            None,
+        ));
+
+        // Not a valid wire frame: the batch decodes nothing, which is
+        // fine, the window must still be opened and flushed.
+        for _ in 0..2 {
+            peer.send_to(b"not a lightway frame", sock_addr)
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let before = recorder.events.lock().unwrap().len();
+            while recorder.events.lock().unwrap().len() < before + 2 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "batch not processed"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        task.abort();
+
+        assert_eq!(
+            *recorder.events.lock().unwrap(),
+            ["open", "flush (locked)", "open", "flush (locked)"]
+        );
+    }
+
     /// The sysctl parse fails closed: only an explicit 0 means "not
     /// forwarding".
     #[cfg(linux)]

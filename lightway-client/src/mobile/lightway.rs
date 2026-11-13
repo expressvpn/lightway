@@ -477,6 +477,28 @@ struct OutsideIOConfig {
     use_udp_gro: bool,
 }
 
+/// The outside receive loop a socket needs.
+enum OutsideLoop {
+    /// `UDP_GRO` is on: the kernel may merge datagrams into one buffer,
+    /// which only the GRO loop splits again.
+    #[cfg(any(linux, android))]
+    Gro(Arc<dyn io::outside::OutsideIORecvGro>),
+    Plain,
+}
+
+/// Pick the receive loop for `outside_io`. Compiled on Linux as well so
+/// it can be tested there; only Android enables `UDP_GRO` on mobile, so
+/// elsewhere this always picks the plain loop.
+fn outside_loop(outside_io: &Arc<dyn OutsideIO>) -> OutsideLoop {
+    #[cfg(any(linux, android))]
+    if let Some(gro_io) = outside_io.clone().as_gro() {
+        return OutsideLoop::Gro(gro_io);
+    }
+    #[cfg(not(any(linux, android)))]
+    let _ = outside_io;
+    OutsideLoop::Plain
+}
+
 /// Run whichever outside receive loop this socket needs: the GRO loop
 /// when `UDP_GRO` was enabled on it (the plain loop would pass a merged
 /// buffer to the decryptor as one packet), the plain loop otherwise.
@@ -490,31 +512,34 @@ async fn run_outside_io(
     keepalive: Keepalive,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> uniffi::Result<()> {
-    #[cfg(android)]
-    if let Some(gro_io) = outside_io.clone().as_gro() {
-        let inside_io: Arc<dyn io::inside::InsideIO<TunnelState>> = inside_io;
-        return crate::outside_io_task_gro(
-            conn,
-            connection_type,
-            gro_io,
-            inside_io,
-            keepalive,
-            ready_tx,
-        )
-        .await;
+    match outside_loop(&outside_io) {
+        #[cfg(any(linux, android))]
+        OutsideLoop::Gro(gro_io) => {
+            let inside_io: Arc<dyn io::inside::InsideIO<TunnelState>> = inside_io;
+            crate::outside_io_task_gro(
+                conn,
+                connection_type,
+                gro_io,
+                inside_io,
+                keepalive,
+                ready_tx,
+            )
+            .await
+        }
+        OutsideLoop::Plain => {
+            let inside_io: Arc<dyn io::inside::InsideIORecv<TunnelState>> = inside_io;
+            outside_io_task(
+                conn,
+                mtu,
+                connection_type,
+                outside_io,
+                Some(inside_io),
+                keepalive,
+                ready_tx,
+            )
+            .await
+        }
     }
-
-    let inside_io: Arc<dyn io::inside::InsideIORecv<TunnelState>> = inside_io;
-    outside_io_task(
-        conn,
-        mtu,
-        connection_type,
-        outside_io,
-        Some(inside_io),
-        keepalive,
-        ready_tx,
-    )
-    .await
 }
 
 /// This function is responsible for running `outside_io_task` to handle outside packet.
@@ -1093,5 +1118,31 @@ mod test {
 
         let udp_result = OutsideSocket::new(false, Some(Arc::new(mock_event_handler)));
         assert!(udp_result.is_ok());
+    }
+
+    /// A socket with `UDP_GRO` enabled must be read by the GRO loop,
+    /// which splits merged datagrams again; any other socket by the
+    /// plain loop.
+    #[cfg(any(linux, android))]
+    #[tokio::test]
+    async fn gro_socket_selects_the_gro_loop() {
+        async fn udp(gro: bool) -> Arc<dyn OutsideIO> {
+            let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer = sock.local_addr().unwrap();
+            let mut udp = io::outside::Udp::new(peer, Some(sock)).await.unwrap();
+            if gro {
+                udp.enable_gro();
+            }
+            Arc::new(udp)
+        }
+
+        assert!(matches!(
+            outside_loop(&udp(true).await),
+            OutsideLoop::Gro(_)
+        ));
+        assert!(matches!(
+            outside_loop(&udp(false).await),
+            OutsideLoop::Plain
+        ));
     }
 }

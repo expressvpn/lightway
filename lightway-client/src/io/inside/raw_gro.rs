@@ -691,6 +691,10 @@ mod tests {
         vnet: Option<bool>,
         results: Mutex<VecDeque<IOCallbackResult<usize>>>,
         writes: Mutex<Vec<Vec<u8>>>,
+        /// When set, every write records whether this coalescer's
+        /// batch lock was held at the time.
+        lock_watch: OnceLock<&'static RawGro>,
+        locked: Mutex<Vec<bool>>,
     }
 
     impl FakeRawTun {
@@ -699,6 +703,8 @@ mod tests {
                 vnet: Some(false),
                 results: Mutex::new(VecDeque::new()),
                 writes: Mutex::new(Vec::new()),
+                lock_watch: OnceLock::new(),
+                locked: Mutex::new(Vec::new()),
             }
         }
 
@@ -729,6 +735,10 @@ mod tests {
         }
 
         fn send_slice(&self, pkt: &[u8]) -> IOCallbackResult<usize> {
+            if let Some(gro) = self.lock_watch.get() {
+                let held = gro.batch.try_lock().is_err();
+                self.locked.lock().unwrap().push(held);
+            }
             self.writes.lock().unwrap().push(pkt.to_vec());
             match self.results.lock().unwrap().pop_front() {
                 Some(r) => r,
@@ -764,9 +774,7 @@ mod tests {
         pkt[32] = ((TCP_HDR_LEN / 4) as u8) << 4; // data offset
         pkt[33] = flags;
         pkt[34..36].copy_from_slice(&0xFFFFu16.to_be_bytes()); // window
-        for (i, b) in pkt[HDR_LEN..].iter_mut().enumerate() {
-            *b = (i % 251) as u8;
-        }
+        pkt[HDR_LEN..].copy_from_slice(&stream(src_port, seq, payload_len));
         {
             let mut ip = MutableIpv4Packet::new(&mut pkt[..IPV4_HDR_LEN]).unwrap();
             let csum = pnet_packet::ipv4::checksum(&ip.to_immutable());
@@ -782,6 +790,15 @@ mod tests {
             tcp.set_checksum(csum);
         }
         BytesMut::from(&pkt[..])
+    }
+
+    /// Bytes `seq..seq + len` of flow `src_port`'s byte stream. Each
+    /// segment carries its own slice, so a payload copied from the
+    /// wrong segment or flow changes the bytes, not just the checksum.
+    fn stream(src_port: u16, seq: u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| ((seq as usize + i) * 7 + src_port as usize) as u8)
+            .collect()
     }
 
     /// A coalescable, full-MSS data segment.
@@ -903,6 +920,7 @@ mod tests {
         let sp = &writes[1];
         assert_eq!(sp.len(), HDR_LEN + 2 * MSS);
         assert_eq!(u32::from_be_bytes(sp[24..28].try_into().unwrap()), 0);
+        assert_eq!(sp[HDR_LEN..], stream(1234, 0, 2 * MSS), "payload in order");
         check_checksums(sp);
 
         // Second window: no re-probe.
@@ -1109,6 +1127,68 @@ mod tests {
         // The end-of-batch flush has nothing left to write.
         gro.flush(&tun);
         assert_eq!(tun.write_count(), 4);
+    }
+
+    /// Two flows interleaved in arrival order (A A B B A, then a gap
+    /// in A): each run holds only adjacent, contiguous segments of one
+    /// flow and is written before whatever ended it, with every byte
+    /// where the stream puts it.
+    #[test]
+    fn interleaved_flows_keep_arrival_order_and_payload() {
+        const B: u16 = 4321;
+        let m = MSS as u32;
+        let tun = FakeRawTun::new();
+        let gro = raw_gro(true);
+
+        gro.open(&tun, local_ip());
+        for pkt in [
+            data(0),
+            data(m),
+            seg(B, 0, MSS, TcpFlags::ACK),
+            seg(B, m, MSS, TcpFlags::ACK),
+            // B's next segment would also be at 2 * m, so this only
+            // stays separate if runs are matched by flow, not just seq.
+            data(2 * m),
+            data(4 * m), // gap: 3 * m never arrived
+        ] {
+            send_ok(&gro, &tun, pkt);
+        }
+        gro.flush(&tun);
+
+        let writes = tun.writes();
+        assert_eq!(writes.len(), 5, "probe + A run + B run + A2 + A4");
+        let expect = [(1234, 0, 2), (B, 0, 2), (1234, 2 * m, 1), (1234, 4 * m, 1)];
+        for (w, (port, seq, segs)) in writes[1..].iter().zip(expect) {
+            assert_eq!(u16::from_be_bytes([w[20], w[21]]), port);
+            assert_eq!(u32::from_be_bytes(w[24..28].try_into().unwrap()), seq);
+            assert_eq!(w[HDR_LEN..], stream(port, seq, segs * MSS));
+            check_checksums(w);
+        }
+    }
+
+    /// Every write of a held run happens under the batch lock, so no
+    /// other sender can reach the device between taking the run and
+    /// writing it. Only the probe (outside any run) is unlocked.
+    #[test]
+    fn run_writes_hold_the_batch_lock() {
+        let gro: &'static RawGro = Box::leak(Box::new(raw_gro(true)));
+        let tun = FakeRawTun::new();
+        tun.lock_watch.set(gro).ok().unwrap();
+
+        gro.open(&tun, local_ip());
+        let m = MSS as u32;
+        for seq in [0, m] {
+            send_ok(gro, &tun, data(seq));
+        }
+        // A pure ACK ends the run: run write, then the direct write.
+        send_ok(gro, &tun, seg(1234, 2 * m, 0, TcpFlags::ACK));
+        for seq in [2 * m, 3 * m] {
+            send_ok(gro, &tun, data(seq));
+        }
+        gro.flush(&tun);
+
+        assert_eq!(tun.write_count(), 4, "probe, run, ACK, run");
+        assert_eq!(*tun.locked.lock().unwrap(), [false, true, true, true]);
     }
 
     /// Same-flow ordering: a packet the run cannot absorb (here a pure
