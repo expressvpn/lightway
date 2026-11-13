@@ -343,10 +343,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Worth having on its own (fewer receive syscalls) and it is what
     /// supplies [`Self::enable_tun_tcp_coalescing`] with multi-segment
     /// runs. Implied by [`Self::enable_tun_offload`], which cannot work
-    /// without it. Only effective in `client()` on Linux. Android
-    /// embedders wire it themselves (`Udp::enable_gro` on the outside
-    /// socket, then `outside_io_task_gro`); this crate's `mobile`
-    /// module does not do so yet.
+    /// without it. Effective in `client()` on Linux and in the `mobile`
+    /// module on Android; other embedders call `Udp::enable_gro` on the
+    /// outside socket and read it with `outside_io_task_gro`.
     pub enable_udp_gro: bool,
 
     /// Enable IO-uring interface for Tunnel
