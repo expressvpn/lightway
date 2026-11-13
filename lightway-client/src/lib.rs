@@ -84,6 +84,14 @@ use tracing::info;
 /// connection, and its failure is a per-connection error rather than a fatal
 /// one.
 ///
+/// Lightway uses the returned IO as it is, for a datagram
+/// ([`ClientConnectionMode::DatagramIoConnector`]) or stream
+/// ([`ClientConnectionMode::StreamIoConnector`]) connection. The connector
+/// does any setup the transport needs first, such as a tunnel through an
+/// intermediate host or a TLS layer, and sets the socket options Lightway
+/// would otherwise set: [`io::outside::Tcp::new`] does that for a connected
+/// TCP stream, which the connector can then wrap.
+///
 /// Named "Connector", not "Factory": this crate already has
 /// [`PluginFactory`](lightway_core::PluginFactory), which takes `&self` and
 /// is called once per connection - a reusable producer. This is an
@@ -103,6 +111,9 @@ pub enum ClientConnectionMode {
     /// A datagram transport the application connects when the connection
     /// attempt starts; see [`OutsideIoConnector`].
     DatagramIoConnector(OutsideIoConnector),
+    /// A stream transport the application connects when the connection
+    /// attempt starts; see [`OutsideIoConnector`].
+    StreamIoConnector(OutsideIoConnector),
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -111,6 +122,7 @@ impl std::fmt::Debug for ClientConnectionMode {
             Self::Stream(_) => f.debug_tuple("Stream").finish(),
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
             Self::DatagramIoConnector(_) => f.debug_tuple("DatagramIoConnector").finish(),
+            Self::StreamIoConnector(_) => f.debug_tuple("StreamIoConnector").finish(),
         }
     }
 }
@@ -1772,6 +1784,97 @@ fn effective_outside_io_settings(
     }
 }
 
+/// Sets up a connection's outside IO, running its connector if it has one.
+async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
+    config: &ClientConfig<ExtAppState>,
+    mode: ClientConnectionMode,
+    server: SocketAddr,
+) -> Result<(ConnectionType, Arc<dyn io::outside::OutsideIO>)> {
+    Ok(match mode {
+        ClientConnectionMode::DatagramIoConnector(connector) => {
+            let io = connector()
+                .await
+                .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+                .context("Outside IO connector")?;
+            (ConnectionType::Datagram, io)
+        }
+        ClientConnectionMode::Datagram(maybe_sock) => {
+            #[cfg_attr(not(batch_receive), allow(unused_mut))]
+            let mut sock = io::outside::Udp::new(
+                server,
+                maybe_sock,
+                #[cfg(all(linux, not(feature = "mobile")))]
+                config.fwmark,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
+            .context("Outside IO UDP")?;
+
+            #[cfg(batch_receive)]
+            if config.enable_batch_receive {
+                sock.enable_batch_receive();
+            }
+
+            // GRO delivery replaces per-packet receive entirely
+            // (a plain recv would merge separate datagrams), so
+            // only flip the sockopt when the GRO outside loop
+            // in connect() will consume it.
+            #[cfg(linux)]
+            if config.enable_tun_offload {
+                sock.enable_gro();
+            }
+
+            sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+            sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+
+            // On Apple platforms a connected UDP socket lets `send` skip
+            // the per-packet route lookup, improving throughput. Safe
+            // because a network change re-connects the socket: via the
+            // network-event coordinator on desktop (see
+            // `initialize_routes`), via the network-change signal
+            // forwarder elsewhere.
+            #[cfg(apple)]
+            if config.enable_connected_udp
+                && let Err(e) = sock.enable_connected_send()
+            {
+                tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
+            }
+
+            (ConnectionType::Datagram, Arc::new(sock))
+        }
+        ClientConnectionMode::StreamIoConnector(connector) => {
+            let io = connector()
+                .await
+                .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+                .context("Outside IO connector")?;
+            (ConnectionType::Stream, io)
+        }
+        ClientConnectionMode::Stream(maybe_sock) => {
+            let sock = io::outside::Tcp::new(
+                server,
+                maybe_sock,
+                #[cfg(all(linux, not(feature = "mobile")))]
+                config.fwmark,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
+            .context("Outside IO TCP")?;
+
+            // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
+            // autotuning, capping the bandwidth-delay product and throttling
+            // high-RTT links to single-digit Mbps. UDP has no autotuning so it
+            // still needs explicit sizing above.
+            // macOS benefits from explicit buffers in real-world testing.
+            #[cfg(target_os = "macos")]
+            {
+                sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
+                sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
+            }
+            (ConnectionType::Stream, Arc::new(sock))
+        }
+    })
+}
+
 #[tracing::instrument(
     level = "info",
     fields(server = server_config.server.to_string(), mode = ?server_config.mode),
@@ -1803,83 +1906,7 @@ pub async fn connect<
         event_handler,
     } = server_config;
 
-    let (connection_type, outside_io): (ConnectionType, Arc<dyn io::outside::OutsideIO>) =
-        match mode {
-            ClientConnectionMode::DatagramIoConnector(connector) => {
-                let io = connector()
-                    .await
-                    .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
-                    .context("Outside IO connector")?;
-                (ConnectionType::Datagram, io)
-            }
-            ClientConnectionMode::Datagram(maybe_sock) => {
-                #[cfg_attr(not(batch_receive), allow(unused_mut))]
-                let mut sock = io::outside::Udp::new(
-                    server,
-                    maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
-                )
-                .await
-                .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
-                .context("Outside IO UDP")?;
-
-                #[cfg(batch_receive)]
-                if config.enable_batch_receive {
-                    sock.enable_batch_receive();
-                }
-
-                // GRO delivery replaces per-packet receive entirely
-                // (a plain recv would merge separate datagrams), so
-                // only flip the sockopt when the GRO outside loop
-                // below will consume it.
-                #[cfg(linux)]
-                if config.enable_tun_offload {
-                    sock.enable_gro();
-                }
-
-                sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
-                sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
-
-                // On Apple platforms a connected UDP socket lets `send` skip
-                // the per-packet route lookup, improving throughput. Safe
-                // because a network change re-connects the socket: via the
-                // network-event coordinator on desktop (see
-                // `initialize_routes`), via the network-change signal
-                // forwarder elsewhere.
-                #[cfg(apple)]
-                if config.enable_connected_udp
-                    && let Err(e) = sock.enable_connected_send()
-                {
-                    tracing::warn!("Failed to connect outside UDP socket, using send_to: {e}");
-                }
-
-                (ConnectionType::Datagram, Arc::new(sock))
-            }
-            ClientConnectionMode::Stream(maybe_sock) => {
-                let sock = io::outside::Tcp::new(
-                    server,
-                    maybe_sock,
-                    #[cfg(all(linux, not(feature = "mobile")))]
-                    config.fwmark,
-                )
-                .await
-                .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
-                .context("Outside IO TCP")?;
-
-                // On Linux/Windows, setting SO_SNDBUF/SO_RCVBUF disables TCP buffer
-                // autotuning, capping the bandwidth-delay product and throttling
-                // high-RTT links to single-digit Mbps. UDP has no autotuning so it
-                // still needs explicit sizing above.
-                // macOS benefits from explicit buffers in real-world testing.
-                #[cfg(target_os = "macos")]
-                {
-                    sock.set_send_buffer_size(config.sndbuf.as_u64().try_into()?)?;
-                    sock.set_recv_buffer_size(config.rcvbuf.as_u64().try_into()?)?;
-                }
-                (ConnectionType::Stream, Arc::new(sock))
-            }
-        };
+    let (connection_type, outside_io) = connect_outside_io(config, mode, server).await?;
 
     let required_outside_mtu = outside_io.required_outside_mtu();
     let (outside_mtu, enable_pmtud) = effective_outside_io_settings(
@@ -2292,7 +2319,7 @@ where
                         connections.push((orig_idx, conn));
                     }
                     Err(e) => {
-                        tracing::error!("Creating connection failed: {e}");
+                        tracing::error!("Creating connection failed: {e:#}");
                     }
                 }
                 if connect_futs.is_empty() {
@@ -2767,6 +2794,104 @@ mod tests {
         config.enable_tun_offload = true;
 
         assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
+    // Where Lightway would dial without a connector. Nothing listens on
+    // the discard port, so a test that reaches it fails.
+    fn unused_server() -> SocketAddr {
+        "127.0.0.1:9".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_io_connector_provides_io() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mode = ClientConnectionMode::StreamIoConnector(Box::new(move || {
+            Box::pin(async move {
+                let stream = TcpStream::connect(addr).await?;
+                let io = io::outside::Tcp::new(
+                    addr,
+                    Some(stream),
+                    #[cfg(all(linux, not(feature = "mobile")))]
+                    0,
+                )
+                .await?;
+                Ok(Arc::new(io) as Arc<dyn io::outside::OutsideIO>)
+            })
+        }));
+
+        let (connection_type, io) =
+            connect_outside_io(&test_client_config(), mode, unused_server())
+                .await
+                .unwrap();
+
+        assert!(matches!(connection_type, ConnectionType::Stream));
+        assert_eq!(io.peer_addr(), addr);
+    }
+
+    #[tokio::test]
+    async fn stream_io_connector_error_is_returned() {
+        let mode = ClientConnectionMode::StreamIoConnector(Box::new(|| {
+            Box::pin(async { Err(anyhow!("connector refused")) })
+        }));
+
+        let err = connect_outside_io(&test_client_config(), mode, unused_server())
+            .await
+            .err()
+            .expect("connector error is returned");
+
+        assert!(format!("{err:#}").contains("connector refused"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn datagram_io_connector_error_is_returned() {
+        let mode = ClientConnectionMode::DatagramIoConnector(Box::new(|| {
+            Box::pin(async { Err(anyhow!("handshake timed out")) })
+        }));
+
+        let err = connect_outside_io(&test_client_config(), mode, unused_server())
+            .await
+            .err()
+            .expect("connector error is returned");
+
+        assert!(
+            format!("{err:#}").contains("handshake timed out"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_mode_dials_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (connection_type, io) = connect_outside_io(
+            &test_client_config(),
+            ClientConnectionMode::Stream(None),
+            addr,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(connection_type, ConnectionType::Stream));
+        assert_eq!(io.peer_addr(), addr);
+    }
+
+    #[tokio::test]
+    async fn datagram_mode_uses_server() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = peer.local_addr().unwrap();
+
+        let (connection_type, io) = connect_outside_io(
+            &test_client_config(),
+            ClientConnectionMode::Datagram(None),
+            addr,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(connection_type, ConnectionType::Datagram));
+        assert_eq!(io.peer_addr(), addr);
     }
 
     #[test_case(1, vec![], false => None)]
