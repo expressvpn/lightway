@@ -15,8 +15,9 @@ use thiserror::Error;
 use crate::tls::IOCallbackResult;
 
 use crate::{
-    ConnectionError, ConnectionResult, ConnectionType, Header, OutsideIOSendCallbackArg,
-    PluginResult, SessionId, Version, plugin::PluginList, wire,
+    ConnectionError, ConnectionResult, Delivery, Header, IPV4_HEADER_SIZE,
+    OutsideIOSendCallbackArg, PluginResult, SessionId, TransportCaps, UDP_HEADER_SIZE, Version,
+    plugin::PluginList, wire,
 };
 
 /// Largest number of outside packets that wait on a stream path. The
@@ -24,6 +25,12 @@ use crate::{
 /// Thus a peer that does not read could otherwise make this queue
 /// grow without a limit.
 const MAX_PENDING_PACKETS: usize = 64;
+
+/// Largest record that one outside packet can carry on a path with
+/// `outside_mtu`, after the IP and UDP headers and the wire header.
+pub(crate) const fn max_record_size(outside_mtu: usize) -> usize {
+    outside_mtu - IPV4_HEADER_SIZE - UDP_HEADER_SIZE - wire::Header::WIRE_SIZE
+}
 
 /// Per-connection UDP GSO coalescing buffer + batch state.
 #[cfg(any(target_os = "linux", test))]
@@ -189,7 +196,7 @@ fn send_segments_individually(
 
 /// Wraps records into outside packets and sends them on the outside IO.
 pub(crate) struct Encapsulation {
-    connection_type: ConnectionType,
+    delivery: Delivery,
 
     /// Server side: check the header of each received packet.
     server: bool,
@@ -198,12 +205,11 @@ pub(crate) struct Encapsulation {
 
     outside_mtu: usize,
 
-    /// [`ConnectionType::Stream`] only: outside packets that the
-    /// outside IO did not take yet, in order. The head can be partly
-    /// sent.
+    /// [`Delivery::Stream`] only: outside packets that the outside IO
+    /// did not take yet, in order. The head can be partly sent.
     pending: VecDeque<BytesMut>,
 
-    /// [`ConnectionType::Datagram`] only: the buffer that each outside
+    /// [`Delivery::Datagram`] only: the buffer that each outside
     /// packet is built in, kept so that a send does not allocate.
     scratch: BytesMut,
 
@@ -225,7 +231,7 @@ pub(crate) struct Encapsulation {
 
 impl Encapsulation {
     pub(crate) fn new(
-        connection_type: ConnectionType,
+        caps: TransportCaps,
         server: bool,
         protocol_version: Version,
         outside_mtu: usize,
@@ -234,7 +240,7 @@ impl Encapsulation {
         outside_plugins: PluginList,
     ) -> Self {
         Self {
-            connection_type,
+            delivery: caps.delivery,
             server,
             protocol_version,
             outside_mtu,
@@ -281,14 +287,14 @@ impl Encapsulation {
         &self,
         pkt: OutsidePacket<'pkt>,
     ) -> ConnectionResult<(&'pkt mut BytesMut, Option<Header>)> {
-        let (record, hdr) = match (pkt, self.connection_type) {
-            (OutsidePacket::Wire(buf, _), ConnectionType::Stream) => {
-                run_ingress(buf, &self.outside_plugins)?;
-                (buf, None)
-            }
-            (OutsidePacket::Wire(buf, _), ConnectionType::Datagram) => {
+        let (record, hdr) = match (pkt, self.delivery) {
+            (OutsidePacket::Wire(buf), Delivery::Datagram { wire_header: true }) => {
                 let (buf, hdr) = parse_datagram(buf, &self.outside_plugins)?;
                 (buf, Some(hdr))
+            }
+            (OutsidePacket::Wire(buf), _) => {
+                run_ingress(buf, &self.outside_plugins)?;
+                (buf, None)
             }
             (OutsidePacket::Record(buf, hdr), _) => (buf, Some(hdr)),
         };
@@ -364,15 +370,8 @@ impl Encapsulation {
         buf: &[u8],
         expresslane_data: bool,
     ) -> IOCallbackResult<usize> {
-        // Prepend our `wire::Header` to the data we've been asked to
-        // send.
-        let h = wire::Header {
-            version: self.protocol_version,
-            aggressive_mode: false,
-            expresslane_data,
-            session: self.session_id,
-        };
-        h.append_to_wire(b);
+        self.append_header(b, expresslane_data);
+        let header_len = b.len();
         b.extend_from_slice(buf);
 
         match self.outside_plugins.do_egress(b) {
@@ -393,11 +392,10 @@ impl Encapsulation {
         match self.io.send(&b[..]) {
             IOCallbackResult::Ok(n) => {
                 // We've sent `n` bytes successfully out of
-                // `wire::Header::WIRE_SIZE` + `b.len()` that we
-                // tried to send.
+                // `header_len` + `buf.len()` that we tried to send.
                 //
-                // TLS library does not know about header, so return buf.len()
-                if n > wire::Header::WIRE_SIZE {
+                // The caller does not know about the header, so return buf.len()
+                if n > header_len {
                     IOCallbackResult::Ok(buf.len())
                 } else {
                     // We didn't even manage to side the header, so we
@@ -465,20 +463,14 @@ impl Encapsulation {
         let gso_segs = tun_buf.len().div_ceil(tun_gso_size);
 
         // Same Lightway header for every segment.
-        let hdr = wire::Header {
-            version: self.protocol_version,
-            aggressive_mode: false,
-            expresslane_data,
-            session: self.session_id,
-        };
         let mut hdr_buf = BytesMut::with_capacity(wire::Header::WIRE_SIZE);
-        hdr.append_to_wire(&mut hdr_buf);
+        self.append_header(&mut hdr_buf, expresslane_data);
 
         // Fast path: no outside plugins. Segments are not mutated, so
         // we scatter-gather via iovec — shared header buffer plus
         // borrowed slices of `tun_buf`, zero payload copies.
         if self.outside_plugins.is_empty() {
-            let stride = (wire::Header::WIRE_SIZE + tun_gso_size) as u16;
+            let stride = (hdr_buf.len() + tun_gso_size) as u16;
             let mut iovs: Vec<IoSlice<'_>> = Vec::with_capacity(gso_segs * 2);
             for i in 0..gso_segs {
                 let start = i * tun_gso_size;
@@ -551,10 +543,23 @@ impl Encapsulation {
     /// [`Encapsulation::flush`] sends it. If [`MAX_PENDING_PACKETS`]
     /// packets already wait, it returns an error.
     pub(crate) fn send(&mut self, record: BytesMut) -> std::io::Result<()> {
-        match self.connection_type {
-            ConnectionType::Stream => self.tcp_send(record),
-            ConnectionType::Datagram => self.send_datagram(&record, false),
+        match self.delivery {
+            Delivery::Stream => self.tcp_send(record),
+            Delivery::Datagram { .. } => self.send_datagram(&record, false),
         }
+    }
+
+    fn append_header(&self, buf: &mut BytesMut, expresslane_data: bool) {
+        if self.delivery != (Delivery::Datagram { wire_header: true }) {
+            return;
+        }
+        wire::Header {
+            version: self.protocol_version,
+            aggressive_mode: false,
+            expresslane_data,
+            session: self.session_id,
+        }
+        .append_to_wire(buf);
     }
 
     /// Send one expresslane record. A packet that the outside IO
@@ -621,7 +626,7 @@ impl Encapsulation {
 /// [`crate::Connection::outside_data_received`].
 pub enum OutsidePacket<'pkt> {
     /// An outside packet as it came from the outside IO.
-    Wire(&'pkt mut BytesMut, ConnectionType),
+    Wire(&'pkt mut BytesMut),
     /// The record of an outside packet, and its header, after
     /// [`crate::ServerContext::parse_raw_outside_packet`] ran the
     /// ingress plugins.
@@ -827,13 +832,23 @@ mod tests {
         }
     }
 
+    const DATAGRAM: TransportCaps = TransportCaps {
+        delivery: Delivery::Datagram { wire_header: true },
+        supports_roaming: true,
+    };
+
+    const STREAM: TransportCaps = TransportCaps {
+        delivery: Delivery::Stream,
+        supports_roaming: false,
+    };
+
     fn make_encapsulation(
-        connection_type: ConnectionType,
+        caps: TransportCaps,
         io: OutsideIOSendCallbackArg,
         outside_plugins: PluginList,
     ) -> Encapsulation {
         Encapsulation::new(
-            connection_type,
+            caps,
             false,
             Version::MAXIMUM,
             MAX_OUTSIDE_MTU,
@@ -849,7 +864,7 @@ mod tests {
     fn udp_send_plugin(r: PluginResult) -> IOCallbackResult<usize> {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let plugins = PluginList::from(plugins);
-        let mut a = make_encapsulation(ConnectionType::Datagram, FakeOutsideIOSend::new(), plugins);
+        let mut a = make_encapsulation(DATAGRAM, FakeOutsideIOSend::new(), plugins);
         a.udp_send(b"abc", false)
     }
 
@@ -860,7 +875,7 @@ mod tests {
     #[test_case(vec![IOCallbackResult::Err(Error::other("ERR"))] => matches(IOCallbackResult::Err(e), v) if e.to_string() == "ERR" && v.is_empty(); "error")]
     fn udp_send_io(fakes: Vec<IOCallbackResult<usize>>) -> (IOCallbackResult<usize>, Vec<u8>) {
         let io = FakeOutsideIOSend::with_fakes(fakes.into());
-        let mut a = make_encapsulation(ConnectionType::Datagram, io.clone(), Default::default());
+        let mut a = make_encapsulation(DATAGRAM, io.clone(), Default::default());
         let r = a.udp_send(b"abcdefghi", false);
 
         let (fakes, sent) = &*io.0.lock().unwrap();
@@ -875,7 +890,7 @@ mod tests {
         fakes: Vec<IOCallbackResult<usize>>,
     ) -> (std::io::Result<()>, Vec<u8>) {
         let io = FakeOutsideIOSend::with_fakes(fakes.into());
-        let mut e = make_encapsulation(ConnectionType::Datagram, io.clone(), Default::default());
+        let mut e = make_encapsulation(DATAGRAM, io.clone(), Default::default());
         let r = e.send(BytesMut::from(&b"abc"[..]));
         assert!(!e.is_blocked());
 
@@ -892,7 +907,7 @@ mod tests {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let plugins = PluginList::from(plugins);
         let io = FakeOutsideIOSend::new();
-        let mut e = make_encapsulation(ConnectionType::Stream, io.clone(), plugins);
+        let mut e = make_encapsulation(STREAM, io.clone(), plugins);
         let r = e.send(BytesMut::from(&b"abc"[..]));
         assert!(!e.is_blocked());
 
@@ -908,7 +923,7 @@ mod tests {
         fakes: Vec<IOCallbackResult<usize>>,
     ) -> (std::io::Result<()>, Vec<u8>, Vec<u8>) {
         let io = FakeOutsideIOSend::with_fakes(fakes.into());
-        let mut e = make_encapsulation(ConnectionType::Stream, io.clone(), Default::default());
+        let mut e = make_encapsulation(STREAM, io.clone(), Default::default());
         let r = e.send(BytesMut::from(&b"abcdefghi"[..]));
         assert_eq!(e.is_blocked(), !e.pending.is_empty());
 
@@ -927,7 +942,7 @@ mod tests {
         let io = FakeOutsideIOSend::with_fakes(
             vec![IOCallbackResult::Ok(3), IOCallbackResult::WouldBlock].into(),
         );
-        let mut e = make_encapsulation(ConnectionType::Stream, io.clone(), Default::default());
+        let mut e = make_encapsulation(STREAM, io.clone(), Default::default());
         e.send(BytesMut::from(&b"abcdefghi"[..])).unwrap();
         e.send(BytesMut::from(&b"jkl"[..])).unwrap();
         assert!(e.is_blocked());
@@ -944,7 +959,7 @@ mod tests {
             .take(MAX_PENDING_PACKETS)
             .collect();
         let io = FakeOutsideIOSend::with_fakes(fakes);
-        let mut e = make_encapsulation(ConnectionType::Stream, io, Default::default());
+        let mut e = make_encapsulation(STREAM, io, Default::default());
         for _ in 0..MAX_PENDING_PACKETS {
             e.send(BytesMut::from(&b"abc"[..])).unwrap();
         }
@@ -955,7 +970,7 @@ mod tests {
     #[test]
     fn set_outside_io_drops_waiting_packets() {
         let io = FakeOutsideIOSend::with_fakes(vec![IOCallbackResult::Ok(3)].into());
-        let mut e = make_encapsulation(ConnectionType::Stream, io, Default::default());
+        let mut e = make_encapsulation(STREAM, io, Default::default());
         e.send(BytesMut::from(&b"abcdefghi"[..])).unwrap();
         assert!(e.is_blocked());
 
@@ -976,12 +991,8 @@ mod tests {
         }
     }
 
-    fn receiver(
-        connection_type: ConnectionType,
-        server: bool,
-        plugins: PluginList,
-    ) -> Encapsulation {
-        let mut e = make_encapsulation(connection_type, FakeOutsideIOSend::new(), plugins);
+    fn receiver(caps: TransportCaps, server: bool, plugins: PluginList) -> Encapsulation {
+        let mut e = make_encapsulation(caps, FakeOutsideIOSend::new(), plugins);
         e.server = server;
         e
     }
@@ -992,11 +1003,9 @@ mod tests {
         let mut buf = BytesMut::new();
         hdr.append_to_wire(&mut buf);
         buf.extend_from_slice(b"abc");
-        let e = receiver(ConnectionType::Datagram, true, Default::default());
+        let e = receiver(DATAGRAM, true, Default::default());
 
-        let (record, got) = e
-            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Datagram))
-            .unwrap();
+        let (record, got) = e.receive(OutsidePacket::Wire(&mut buf)).unwrap();
         assert_eq!(&record[..], b"abc");
         assert_eq!(got, Some(hdr));
     }
@@ -1004,11 +1013,9 @@ mod tests {
     #[test]
     fn stream_receive_has_no_header() {
         let mut buf = BytesMut::from(&b"abc"[..]);
-        let e = receiver(ConnectionType::Stream, true, Default::default());
+        let e = receiver(STREAM, true, Default::default());
 
-        let (record, got) = e
-            .receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
-            .unwrap();
+        let (record, got) = e.receive(OutsidePacket::Wire(&mut buf)).unwrap();
         assert_eq!(&record[..], b"abc");
         assert_eq!(got, None);
     }
@@ -1023,7 +1030,7 @@ mod tests {
         session: SessionId,
     ) -> ConnectionResult<()> {
         let mut buf = BytesMut::from(&b"abc"[..]);
-        let e = receiver(ConnectionType::Datagram, server, Default::default());
+        let e = receiver(DATAGRAM, server, Default::default());
         e.receive(OutsidePacket::Record(&mut buf, header(version, session)))
             .map(|_| ())
     }
@@ -1033,9 +1040,8 @@ mod tests {
     fn receive_runs_the_ingress_plugins(r: PluginResult) -> ConnectionResult<()> {
         let plugins: Vec<crate::PluginType> = vec![OneshotFakePlugin::new(r)];
         let mut buf = BytesMut::from(&b"abc"[..]);
-        let e = receiver(ConnectionType::Stream, false, PluginList::from(plugins));
-        e.receive(OutsidePacket::Wire(&mut buf, ConnectionType::Stream))
-            .map(|_| ())
+        let e = receiver(STREAM, false, PluginList::from(plugins));
+        e.receive(OutsidePacket::Wire(&mut buf)).map(|_| ())
     }
 
     #[test]
@@ -1173,7 +1179,7 @@ mod tests {
         }
 
         let io = Arc::new(GsoCapture(Mutex::new(Vec::new())));
-        let mut e = make_encapsulation(ConnectionType::Datagram, io.clone(), Default::default());
+        let mut e = make_encapsulation(DATAGRAM, io.clone(), Default::default());
         e.gso_buf.open();
         for seg in [&b"abcd"[..], b"efgh", b"ij"] {
             assert!(matches!(e.udp_send(seg, true), IOCallbackResult::Ok(_)));

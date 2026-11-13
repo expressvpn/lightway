@@ -31,6 +31,7 @@ use lightway_app_utils::{
     args::{Cipher, KeyShare},
     connection_ticker_cb,
 };
+use lightway_core::TlsClientFactory;
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
     ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
@@ -727,7 +728,6 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
-    connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
@@ -761,14 +761,8 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             },
         };
 
-        let pkts = bufs
-            .iter_mut()
-            .take(count)
-            .map(|b| OutsidePacket::Wire(b, connection_type));
-        let frames_decoded = conn
-            .lock()
-            .unwrap()
-            .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
+        let pkts = bufs.iter_mut().take(count).map(OutsidePacket::Wire);
+        let frames_decoded = conn.lock().unwrap().multiple_outside_data_received(pkts)?;
 
         // The receives above go through tokio's manual readiness API
         // (`ready()` + `try_io`-style receives), which charges no
@@ -827,7 +821,6 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
 #[cfg(linux)]
 pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
-    connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIORecvGro>,
     inside_io: Arc<dyn io::inside::InsideIO<ExtAppState>>,
     keepalive: Keepalive,
@@ -881,11 +874,8 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                 segments.clear();
                 split_gro_segments(&mut bufs[i], seg_size, &mut segments);
                 wire_pkts += segments.len();
-                let pkts = segments
-                    .iter_mut()
-                    .map(|b| OutsidePacket::Wire(b, connection_type));
-                match conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))
-                {
+                let pkts = segments.iter_mut().map(OutsidePacket::Wire);
+                match conn.multiple_outside_data_received(pkts) {
                     Ok(n) => frames_decoded += n,
                     Err(e) => {
                         acc = Err(e);
@@ -1316,17 +1306,14 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         let Some(conn) = weak.upgrade() else {
             return ClientResult::UserDisconnect;
         };
-        let conn_type = conn.lock().unwrap().connection_type();
-        match conn_type {
-            ConnectionType::Datagram => {
-                info!("sending keepalives due to network change ..");
-                keepalive.network_changed().await;
-            }
-            ConnectionType::Stream => {
-                info!("client shutting down due to network change ..");
-                let _ = conn.lock().unwrap().disconnect();
-                return ClientResult::NetworkChange;
-            }
+        let roams = conn.lock().unwrap().transport_caps().supports_roaming;
+        if roams {
+            info!("sending keepalives due to network change ..");
+            keepalive.network_changed().await;
+        } else {
+            info!("client shutting down due to network change ..");
+            let _ = conn.lock().unwrap().disconnect();
+            return ClientResult::NetworkChange;
         }
     }
     ClientResult::UserDisconnect
@@ -1541,7 +1528,7 @@ pub async fn handle_decoded_pkt_send<ExtAppState: Send + Sync>(
         let mut conn = conn.lock().unwrap();
 
         if let Err(err) = conn.send_to_inside(decoded_packet) {
-            if err.is_fatal(conn.connection_type()) {
+            if conn.is_fatal(&err) {
                 return Err(err.into());
             }
             tracing::error!("Failed to process outside data: {err}");
@@ -1953,14 +1940,30 @@ pub async fn connect<
             None => (None, None, None, None),
         };
 
-    let ctx_builder = ClientContextBuilder::new(
+    let transport = TlsClientFactory::builder(
         connection_type,
         RootCertificate::PemBuffer(cert_content.as_bytes()),
+    )?
+    .with_cipher(cipher.into())?
+    // Ensures any per-connection PQ key share is also offered in the TLS
+    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
+    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
+    // nothing, because wolfSSL configures PQ groups per session.
+    .enable_pq_crypto()?;
+
+    // Register the TLS key logger once on the factory; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let transport = transport.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
+    let ctx_builder = ClientContextBuilder::new(
+        Arc::new(transport.build()),
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
+    )
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
     .when(config.enable_expresslane, |b| {
@@ -1971,19 +1974,6 @@ pub async fn connect<
     })
     .when(config.expresslane_metrics.is_some(), |b| {
         b.with_expresslane_metrics(config.expresslane_metrics.clone().unwrap())
-    });
-
-    // Ensures any per-connection PQ key share is also offered in the context's
-    // supported_groups. The backend difference lives in enable_pq_crypto: it
-    // registers the groups on the SSL_CTX for BoringSSL and is a no-op on
-    // wolfSSL, which configures PQ groups per session.
-    let ctx_builder = ctx_builder.enable_pq_crypto()?;
-
-    // Register the TLS key logger once on the context; core applies it at the
-    // correct layer for the active TLS backend (SSL_CTX vs per session).
-    #[cfg(feature = "debug")]
-    let ctx_builder = ctx_builder.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
     });
 
     let conn_builder = ctx_builder
@@ -2000,9 +1990,7 @@ pub async fn connect<
             config.sni_header.as_deref().filter(|s| !s.is_empty()),
             |b, sni| b.with_sni_header(sni),
         )
-        .when(connection_type.is_datagram() && enable_pmtud, |b| {
-            b.with_pmtud_timer(pmtud_timer)
-        })
+        .when(enable_pmtud, |b| b.with_pmtud_timer(pmtud_timer))
         .with_pq_crypto(config.keyshare.into())
         .when(outside_io.empty_first_key_share(), |b| {
             b.with_no_key_shares()
@@ -2045,7 +2033,6 @@ pub async fn connect<
         tokio::spawn(outside_io_task(
             conn.clone(),
             outside_mtu,
-            connection_type,
             outside_io.clone(),
             keepalive.clone(),
             None,
@@ -2056,7 +2043,6 @@ pub async fn connect<
             match outside_io.clone().as_gro() {
                 Some(gro_io) => tokio::spawn(outside_io_task_gro(
                     conn.clone(),
-                    connection_type,
                     gro_io,
                     inside_io.clone(),
                     keepalive.clone(),
@@ -2175,8 +2161,8 @@ pub async fn connect<
             // Disconnected (emitting StateChanged events) and make a
             // best-effort attempt to notify the peer with a Goodbye frame.
             // Without this the connection task just aborts its I/O tasks,
-            // leaving no Disconnecting/Disconnected transition. `disconnect()`
-            // is a no-op if the connection never reached a connected state.
+            // leaving no Disconnecting/Disconnected transition. Before the
+            // handshake ends, `disconnect()` goes straight to Disconnected.
             if let Ok(mut conn) = stop_conn.lock() {
                 let _ = conn.disconnect();
             }
@@ -2637,15 +2623,17 @@ pub async fn client<
             }
         };
 
-        // Probe after a server-route replacement - Datagram only: the Stream
-        // handler treats a nudge as a teardown, which a route-only change
-        // does not warrant.
+        // Probe after a server-route replacement - roaming transports only:
+        // the handler treats a nudge to any other transport as a teardown,
+        // which a route-only change does not warrant.
         #[cfg(apple)]
         let nudge_on_route_update = !config.keepalive_interval.is_zero()
-            && matches!(
-                connection.conn.lock().unwrap().connection_type(),
-                ConnectionType::Datagram
-            );
+            && connection
+                .conn
+                .lock()
+                .unwrap()
+                .transport_caps()
+                .supports_roaming;
 
         let stop_signal = connection.stop_signal.take();
         connection

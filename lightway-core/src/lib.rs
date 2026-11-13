@@ -20,6 +20,7 @@ mod metrics;
 mod packet_codec;
 mod plugin;
 pub mod tls;
+mod transport;
 mod utils;
 mod version;
 mod wire;
@@ -62,6 +63,13 @@ pub use plugin::{
 };
 #[cfg(feature = "debug")]
 pub use tls::{LoggingCallback as TlsLoggingCallback, Tls13SecretCallbacks};
+#[cfg(feature = "test-utils")]
+pub use transport::mock;
+pub use transport::{
+    ClientTransportArgs, ClientTransportFactory, Delivery, Poll, PollResult,
+    ServerTransportBuilder, Transport, TransportArgs, TransportCaps, TransportError,
+    tls::{TlsClientFactory, TlsClientFactoryBuilder, TlsFactoryError, TlsServerFactory},
+};
 pub use utils::{
     ChecksumUpdate, ipv4_adjust_packet_checksum, ipv4_update_destination, ipv4_update_source,
     tcp_adjust_packet_checksum, udp_adjust_packet_checksum,
@@ -79,12 +87,6 @@ pub const MAX_OUTSIDE_MTU: usize = 1500;
 /// <https://datatracker.ietf.org/doc/html/rfc791>
 pub const MIN_OUTSIDE_MTU: usize = 68;
 
-/// The minimum usable outside path (wire) MTU required for a given
-/// inside path MTU
-const fn dtls_required_outside_mtu(inside_mtu: usize) -> usize {
-    inside_mtu + IPV4_HEADER_SIZE + UDP_HEADER_SIZE + wire::Header::WIRE_SIZE + MAX_DTLS_HEADER_SIZE
-}
-
 const IPV4_HEADER_SIZE: usize = 20;
 const TCP_HEADER_SIZE: usize = 20;
 const UDP_HEADER_SIZE: usize = 8;
@@ -98,16 +100,6 @@ pub const IP_MAX_DATAGRAM_SIZE: usize = u16::MAX as usize;
 
 // D/TLS headers + AES crypto fields
 const MAX_DTLS_HEADER_SIZE: usize = 37;
-
-/// Default MTU size for DTLS on the outside path (max outside MTU less IP and UDP header size)
-const fn max_dtls_outside_mtu(outside_mtu: usize) -> usize {
-    outside_mtu - IPV4_HEADER_SIZE - UDP_HEADER_SIZE - wire::Header::WIRE_SIZE
-}
-
-/// Default MTU size for DTLS payload (max DTLS wire MTU less DTLS overheads)
-const fn max_dtls_mtu(outside_mtu: usize) -> usize {
-    max_dtls_outside_mtu(outside_mtu) - MAX_DTLS_HEADER_SIZE
-}
 
 /// The smallest supported inside MTU.
 pub const MIN_INSIDE_MTU: usize = 1250;

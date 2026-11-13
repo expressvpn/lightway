@@ -259,22 +259,23 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
     );
 
     let connection_type = sock.connection_type();
-    let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
+    let transport = TlsServerFactory::new(
         connection_type,
         server_cert,
         server_key,
+        pqc.enable_server(),
+    )
+    .unwrap();
+    let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
         auth,
         ip_pool,
         Arc::new(tun),
         connection_ticker_cb,
     )
-    .unwrap()
     .with_minimum_protocol_version(Version::MINIMUM)
     .unwrap()
     .with_maximum_protocol_version(Version::MAXIMUM)
     .unwrap();
-
-    let server_ctx = server_ctx.when(pqc.enable_server(), |s| s.enable_pq_crypto().unwrap());
 
     let server_ctx = server_ctx
         .when_some(expresslane, |s, interval| s.with_expresslane(interval))
@@ -292,7 +293,7 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
             .start_accept(version, sock.clone().into_io_send_callback())
             .unwrap()
             .with_inside_pkt_codec(packet_codec)
-            .accept(ticker)
+            .accept(ticker, Box::new(|args| transport.accept(args)))
             .unwrap(),
     ));
 
@@ -357,7 +358,7 @@ pub async fn server<S: TestSock>(sock: Arc<S>, config: TestServerConfig<'_>) {
                 // Inside packets can queue before the inside arm runs, so
                 // check the data traffic timestamp where they are delivered.
                 let backlog = inside_rx.len();
-                let pkt = OutsidePacket::Wire(&mut buf, connection_type);
+                let pkt = OutsidePacket::Wire(&mut buf);
                 let r = conn.outside_data_received(pkt);
 
                 assert_ge!(conn.activity().last_outside_data_received, now,
@@ -474,20 +475,21 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
 
     let state = ConnectionState { ticker };
 
+    let transport = TlsClientFactory::builder(sock.connection_type(), ca_cert)
+        .unwrap()
+        .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
+        .enable_pq_crypto()
+        .unwrap()
+        .build();
     let client = ClientContextBuilder::new(
-        sock.connection_type(),
-        ca_cert,
+        Arc::new(transport),
         Some(Arc::new(tun)),
         client,
         connection_ticker_cb,
     )
-    .unwrap()
-    .when_some(cipher, |b, cipher| b.with_cipher(cipher).unwrap())
     .when(enable_expresslane, |b| {
         b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
     });
-
-    let client = client.enable_pq_crypto().unwrap();
 
     let client = client
         .build()
@@ -526,13 +528,13 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
             match event {
                 Event::StateChanged(State::Online) => {
                     let mut client = client.lock().unwrap();
-                    let conn_type = client.connection_type();
+                    let caps = client.transport_caps();
                     let session_id = client.session_id();
                     let protocol = client.tls_protocol_version();
                     let cipher = client.current_cipher().unwrap();
                     let curve = client.current_curve().unwrap();
                     eprintln!(
-                        "{conn_type:?} connection is Online with {session_id:?}, negotiated protocol {protocol:?}, {cipher} & {curve}"
+                        "{caps:?} connection is Online with {session_id:?}, negotiated protocol {protocol:?}, {cipher} & {curve}"
                     );
                 }
                 Event::StateChanged(state) => eprintln!("Connection change to {state:?}"),
@@ -634,7 +636,7 @@ pub async fn client<S: TestSock>(sock: Arc<S>, config: TestClientConfig<'_>) {
 
                 let mut client = client.lock().unwrap();
 
-                let pkt = OutsidePacket::Wire(&mut buf, sock.connection_type());
+                let pkt = OutsidePacket::Wire(&mut buf);
                 if let Err(err) = client.outside_data_received(pkt) {
                     // TODO: fatal vs non-fatal;
                     panic!("{err}")

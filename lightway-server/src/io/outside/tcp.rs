@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_core::{
-    ConnectionType, IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket, State,
-    Version,
+    IOCallbackResult, MAX_OUTSIDE_MTU, OutsideIOSendCallback, OutsidePacket, State,
+    TlsServerFactory, Version,
 };
 use socket2::SockRef;
 use tokio::io::AsyncReadExt as _;
@@ -123,6 +123,7 @@ async fn handle_connection(
     mut peer_addr: SocketAddr,
     local_addr: SocketAddr,
     conn_manager: Arc<ConnectionManager>,
+    transport: Arc<TlsServerFactory>,
     proxy_protocol: bool,
 ) {
     if proxy_protocol {
@@ -144,9 +145,12 @@ async fn handle_connection(
     });
     // TCP has no version indication, default to the minimum
     // supported version.
-    let Ok(conn) =
-        conn_manager.create_streaming_connection(Version::MINIMUM, local_addr, outside_io)
-    else {
+    let Ok(conn) = conn_manager.create_streaming_connection(
+        Version::MINIMUM,
+        local_addr,
+        outside_io,
+        Box::new(|args| transport.accept(args)),
+    ) else {
         return;
     };
 
@@ -188,7 +192,7 @@ async fn handle_connection(
             Err(err) => break anyhow!(err).context("TCP read error"),
         };
 
-        let pkt = OutsidePacket::Wire(&mut buf, ConnectionType::Stream);
+        let pkt = OutsidePacket::Wire(&mut buf);
         if let Err(err) = conn.outside_data_received(pkt) {
             warn!("Failed to process outside data: {err}");
             if conn.handle_outside_data_error(&err).is_break() {
@@ -212,6 +216,7 @@ async fn handle_connection(
 pub(crate) struct TcpServer {
     conn_manager: Arc<ConnectionManager>,
     sock: Arc<tokio::net::TcpListener>,
+    transport: Arc<TlsServerFactory>,
     proxy_protocol: bool,
 }
 
@@ -219,6 +224,7 @@ impl TcpServer {
     pub(crate) async fn new(
         conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
+        transport: TlsServerFactory,
         proxy_protocol: bool,
         sock: Option<tokio::net::TcpListener>,
     ) -> Result<TcpServer> {
@@ -231,6 +237,7 @@ impl TcpServer {
         Ok(Self {
             conn_manager,
             sock,
+            transport: Arc::new(transport),
             proxy_protocol,
         })
     }
@@ -277,6 +284,7 @@ impl Server for TcpServer {
                 peer_addr,
                 local_addr,
                 self.conn_manager.clone(),
+                self.transport.clone(),
                 self.proxy_protocol,
             ));
         }
