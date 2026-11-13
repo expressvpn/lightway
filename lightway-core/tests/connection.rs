@@ -1588,3 +1588,240 @@ async fn pmtud_reports_status_changes() {
         }
     }
 }
+
+/// A PMTUD probe that meets a blocked socket never leaves later without
+/// the probe mode. Else the path fragments it, the probe succeeds, and
+/// PMTUD learns an MTU that is too large.
+#[tokio::test]
+async fn a_blocked_pmtud_probe_never_leaves_without_probe_mode() {
+    /// The smallest probe that PMTUD sends (its base PLPMTU). Every other
+    /// datagram in this test is much smaller.
+    const PROBE_LEN: usize = 1250;
+
+    #[derive(Default)]
+    struct Shared {
+        probe_mode: bool,
+        blocked_probes: usize,
+        /// Length of each datagram sent after the blocked probe, and
+        /// whether probe mode was on.
+        sends: Vec<(usize, bool)>,
+    }
+
+    struct BlockingSock {
+        inner: Arc<TestDatagramSock>,
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl OutsideIOSendCallback for BlockingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.probe_mode && shared.blocked_probes == 0 {
+                shared.blocked_probes += 1;
+                return IOCallbackResult::WouldBlock;
+            }
+            if shared.blocked_probes > 0 {
+                let probe_mode = shared.probe_mode;
+                shared.sends.push((buf.len(), probe_mode));
+            }
+            self.inner.send(buf)
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            self.inner.send_gso(bufs, gso_size)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            self.inner.peer_addr()
+        }
+
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            self.shared.lock().unwrap().probe_mode = true;
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            self.shared.lock().unwrap().probe_mode = false;
+            Ok(())
+        }
+    }
+
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let (cert, key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    ));
+
+    let shared: Arc<Mutex<Shared>> = Default::default();
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let (pmtud_timer, _pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+    let outside: OutsideIOSendCallbackArg = Arc::new(BlockingSock {
+        inner: client_sock.clone(),
+        shared: shared.clone(),
+    });
+
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        pki.root_ca(),
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(outside, MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_pmtud_timer(pmtud_timer)
+    .connect(ConnectionState { ticker })
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+
+    // Going Online starts PMTUD, which sends the first probe at once.
+    let driver = async {
+        loop {
+            client_sock
+                .readable()
+                .await
+                .expect("client socket readable");
+            let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+            match client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+            let mut c = client.lock().unwrap();
+            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            c.outside_data_received(pkt).expect("outside data received");
+            if c.state() == State::Online {
+                return;
+            }
+        }
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                _ = driver => {}
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
+
+    assert_eq!(shared.lock().unwrap().blocked_probes, 1);
+
+    // The socket is free again, and the next frame is not a probe.
+    client.lock().unwrap().keepalive().expect("keepalive");
+
+    let shared = shared.lock().unwrap();
+    let late: Vec<_> = shared
+        .sends
+        .iter()
+        .filter(|(len, probe_mode)| *len >= PROBE_LEN && !probe_mode)
+        .collect();
+    assert!(
+        late.is_empty(),
+        "probe sent without probe mode: {:?}",
+        shared.sends
+    );
+}
+
+/// A failed send must not stop the other records of the same call to
+/// the session. Records left behind go out with a later, unrelated send,
+/// for example inside a GSO batch, where a short stale record sets the
+/// segment size of the whole batch.
+#[tokio::test]
+async fn a_failed_send_still_sends_the_other_records() {
+    struct CountingSock {
+        sends: Mutex<usize>,
+        fail_first: bool,
+    }
+
+    impl OutsideIOSendCallback for CountingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            let mut sends = self.sends.lock().unwrap();
+            *sends += 1;
+            if self.fail_first && *sends == 1 {
+                return IOCallbackResult::Err(std::io::Error::other("refused"));
+            }
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn send_gso(
+            &self,
+            _bufs: &[std::io::IoSlice<'_>],
+            _gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            IOCallbackResult::Err(std::io::ErrorKind::Unsupported.into())
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            ([127, 0, 0, 1], 1).into()
+        }
+    }
+
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let connect = |fail_first| {
+        let sock = Arc::new(CountingSock {
+            sends: Mutex::new(0),
+            fail_first,
+        });
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, _ticker_task) = ConnectionTicker::new();
+        let result = ClientContextBuilder::new(
+            ConnectionType::Datagram,
+            pki.root_ca(),
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(sock.clone(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(ConnectionState { ticker });
+        (result.is_ok(), *sock.sends.lock().unwrap())
+    };
+
+    let (ok, records) = connect(false);
+    assert!(ok);
+    assert!(
+        records > 1,
+        "the client sends its first flight more than once"
+    );
+
+    let (ok, sends) = connect(true);
+    assert!(!ok);
+    assert_eq!(sends, records);
+}

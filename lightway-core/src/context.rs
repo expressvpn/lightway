@@ -12,7 +12,7 @@ use crate::{
         DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL, ExpresslaneCbType, ExpresslaneMetricsType,
     },
     context::ip_pool::ClientIpConfigArg,
-    packet::OutsidePacketError,
+    encapsulation::{OutsidePacketError, parse_datagram},
     plugin::{PluginFactoryError, PluginFactoryList, PluginList},
     version::VersionRangeInclusive,
     wire::{self, ExpresslaneConfig},
@@ -366,18 +366,25 @@ impl<AppState: Send + 'static> ServerContext<AppState> {
         self.supported_protocol_versions.maximum() == v
     }
 
-    /// Parse raw `OutsidePacket::Wire` to `TcpFrame` or `UdpFrame`
+    /// Parse a datagram `OutsidePacket::Wire` to an `OutsidePacket::Record`
     ///
     /// Usage:
     /// Normally application does not need to parse the `OutsidePacket::Wire` frame
     /// and can call `Connection::outside_data_received` directly.
-    /// But in case, application need to retrieve `Header` from `UdpFrame`, it can
-    /// call this function to run the plugin chain and then parse the header.
+    /// But a datagram server needs the `Header` to route the packet before
+    /// it has a connection, so it calls this to run the plugin chain and
+    /// then parse the header.
     pub fn parse_raw_outside_packet<'pkt>(
         &self,
         pkt: OutsidePacket<'pkt>,
     ) -> Result<OutsidePacket<'pkt>, ContextError> {
-        Ok(pkt.apply_ingress_chain(&self.outside_plugins_instance)?)
+        match pkt {
+            OutsidePacket::Wire(buf, _) => {
+                let (buf, hdr) = parse_datagram(buf, &self.outside_plugins_instance)?;
+                Ok(OutsidePacket::Record(buf, hdr))
+            }
+            record @ OutsidePacket::Record(..) => Ok(record),
+        }
     }
 
     /// Start accepting a server connection, creating a

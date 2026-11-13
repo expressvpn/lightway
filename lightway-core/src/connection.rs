@@ -40,7 +40,7 @@ use crate::{
 };
 
 use crate::context::ip_pool::{ClientIpConfigArg, ServerIpPoolArg};
-use crate::packet::{OutsidePacket, OutsidePacketError};
+use crate::encapsulation::{Encapsulation, OutsidePacket, OutsidePacketError};
 use crate::utils::ipv4_is_valid_packet;
 use crate::wire::{
     AuthSuccessWithConfigV4, EXPRESSLANE_KEY_SIZE, ExpresslaneError, ExpresslaneKey,
@@ -501,9 +501,6 @@ pub struct Connection<AppState: Send = ()> {
     /// Type of connection
     connection_type: ConnectionType,
 
-    /// Protocol version used by this connection
-    tunnel_protocol_version: Version,
-
     /// App specific state.
     ///
     /// If you want to recover a Sync/Send handle to the
@@ -521,6 +518,7 @@ pub struct Connection<AppState: Send = ()> {
 
     /// The TLS connection/session
     session: crate::tls::Session<TlsIOAdapter>,
+    encapsulation: Encapsulation,
 
     /// Client vs Server state.
     mode: ConnectionMode<AppState>,
@@ -551,9 +549,6 @@ pub struct Connection<AppState: Send = ()> {
     /// Inside plugins
     inside_plugins: PluginList,
 
-    /// Outside plugins
-    outside_plugins: Arc<PluginList>,
-
     /// Is a tick callback pending
     is_tick_timer_running: bool,
 
@@ -565,12 +560,8 @@ pub struct Connection<AppState: Send = ()> {
     /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
     tls_tick_interval: Option<Duration>,
 
-    /// Pending packets to write to the TLS library.
-    /// In nonblocking I/O mode, if the underlying I/O could not satisfy the
-    /// needs of the TLS write to continue, the api will return WANT_WRITE.
-    /// In that case, application has to call the api with same buffer again.
-    /// The head of the queue is that in-flight buffer; frames behind it have
-    /// not yet been handed to the TLS library.
+    /// Frames that wait while the outside IO blocks the encapsulation.
+    /// They have not yet been handed to the TLS library.
     tls_pending_queue: VecDeque<BytesMut>,
 
     /// Track partially constructed data fragments from [`wire::DataFrag`].
@@ -606,8 +597,8 @@ pub struct Connection<AppState: Send = ()> {
 struct NewConnectionArgs<AppState> {
     app_state: AppState,
     connection_type: ConnectionType,
-    protocol_version: Version,
     session: crate::tls::Session<TlsIOAdapter>,
+    encapsulation: Encapsulation,
     session_id: SessionId,
     mode: ConnectionMode<AppState>,
     rng: Arc<Mutex<dyn rand_core::CryptoRng + Send>>,
@@ -616,7 +607,6 @@ struct NewConnectionArgs<AppState> {
     schedule_tick_cb: ScheduleTickCb<AppState>,
     event_cb: Option<EventCallbackArg>,
     inside_plugins: PluginList,
-    outside_plugins: Arc<PluginList>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
     pmtud_base_mtu: Option<u16>,
@@ -643,10 +633,10 @@ impl<AppState: Send> Connection<AppState> {
         };
         let mut conn = Connection {
             connection_type: args.connection_type,
-            tunnel_protocol_version: args.protocol_version,
             app_state: args.app_state,
             state: State::Connecting,
             session: args.session,
+            encapsulation: args.encapsulation,
             session_id: args.session_id,
             mode: args.mode,
             rng: args.rng,
@@ -656,7 +646,6 @@ impl<AppState: Send> Connection<AppState> {
             schedule_tick_cb: args.schedule_tick_cb,
             event_cb: args.event_cb,
             inside_plugins: args.inside_plugins,
-            outside_plugins: args.outside_plugins,
             is_tick_timer_running: false,
             activity: ConnectionActivity {
                 last_data_traffic_from_peer: now,
@@ -696,7 +685,8 @@ impl<AppState: Send> Connection<AppState> {
         // This will very likely fail since negotiation always needs
         // more data than will be available. It's just about possible
         // it might succeed under test conditions.
-        match conn.session.try_negotiate()? {
+        let res = conn.session.try_negotiate();
+        match conn.send_records_after(res)? {
             crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {}
             crate::tls::Poll::Ready(_) => conn.set_state(State::LinkUp)?,
             crate::tls::Poll::AppData(_) => metrics::tls_appdata(&ProtocolVersion::Unknown),
@@ -824,7 +814,7 @@ impl<AppState: Send> Connection<AppState> {
     /// connection establishment up until [`State::Online`] and in
     /// particular during authentication.
     pub fn tunnel_protocol_version(&self) -> Version {
-        self.tunnel_protocol_version
+        self.encapsulation.protocol_version()
     }
 
     /// Set the lightway protocol version of this connection.
@@ -833,7 +823,7 @@ impl<AppState: Send> Connection<AppState> {
     /// prior to reaching [`State::Online`].
     ///
     /// If called while in [`State::Online`] then `v` must be the same
-    /// as the current `self.tunnel_protocol_version`.
+    /// as the current tunnel protocol version.
     pub fn set_tunnel_protocol_version(&mut self, v: Version) -> ConnectionResult<()> {
         if !matches!(self.mode, ConnectionMode::Server { .. }) {
             error!(
@@ -842,7 +832,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::InvalidMode);
         }
 
-        if matches!(self.state, State::Online) && self.tunnel_protocol_version == v {
+        if matches!(self.state, State::Online) && self.tunnel_protocol_version() == v {
             return Ok(());
         }
 
@@ -852,25 +842,25 @@ impl<AppState: Send> Connection<AppState> {
         ) {
             error!(
                 state = ?self.state,
-                current_version = ?self.tunnel_protocol_version,
+                current_version = ?self.tunnel_protocol_version(),
                 version = ?v, "Attempted to set tunnel protocol version in invalid state"
             );
             return Err(ConnectionError::InvalidState);
         }
 
-        self.tunnel_protocol_version = v;
+        self.encapsulation.set_protocol_version(v);
 
         Ok(())
     }
 
     /// Query the address of this connection's peer
     pub fn peer_addr(&self) -> SocketAddr {
-        self.session.io_cb().io.peer_addr()
+        self.encapsulation.peer_addr()
     }
 
     /// Set the address of this connection's peer
     pub fn set_peer_addr(&mut self, addr: SocketAddr) -> SocketAddr {
-        let old = self.session.io_cb_mut().io.set_peer_addr(addr);
+        let old = self.encapsulation.set_peer_addr(addr);
         if old != addr {
             self.publish_expresslane_key();
         }
@@ -974,7 +964,7 @@ impl<AppState: Send> Connection<AppState> {
             State::Disconnecting | State::Disconnected => {
                 return Err(ConnectionError::Disconnected);
             }
-            _ if self.connection_type.is_datagram() => match self.session.dtls_has_timed_out() {
+            _ if self.connection_type.is_datagram() => match self.dtls_has_timed_out()? {
                 crate::tls::Poll::Ready(true) => {
                     warn!(session_id = ?self.session_id, "DTLS timed out, disconnecting client");
                     let _ = self.disconnect();
@@ -1012,7 +1002,7 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Update TLS Session to use the new outside IO Callback
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
-        self.session.io_cb_mut().io = new_io;
+        self.encapsulation.set_outside_io(new_io);
         self.activity.last_data_delivered_to_inside = Instant::now();
     }
 
@@ -1038,30 +1028,7 @@ impl<AppState: Send> Connection<AppState> {
             self.is_first_packet_received = true;
         }
 
-        let pkt = pkt.apply_ingress_chain(&self.outside_plugins)?;
-
-        let hdr = match pkt.header() {
-            Some(hdr) => {
-                if matches!(self.mode, ConnectionMode::Server { .. }) {
-                    if hdr.version != self.tunnel_protocol_version {
-                        return Err(ConnectionError::InvalidProtocolVersion);
-                    }
-
-                    if hdr.session == SessionId::REJECTED {
-                        // Drop reject packets to prevent an infinite loop
-                        // where an attacker causes us to send rejected
-                        // packets between servers.
-                        return Err(ConnectionError::RejectedSessionID);
-                    }
-                }
-                Some(*hdr)
-            }
-            None => None,
-        };
-
-        let Some(payload) = pkt.into_payload() else {
-            return Err(ConnectionError::RejectedSessionID);
-        };
+        let (payload, hdr) = self.encapsulation.receive(pkt)?;
 
         let result = self.process_new_outside_data(payload, hdr);
         match result {
@@ -1317,8 +1284,6 @@ impl<AppState: Send> Connection<AppState> {
             ));
         }
 
-        let expresslane = self.expresslane_ready();
-
         // One reusable segment buffer. `build_segment` calls `clear()`
         // and then `extend_from_slice` to materialize the segment, so
         // we only need capacity here — no zero-init.
@@ -1328,7 +1293,7 @@ impl<AppState: Send> Connection<AppState> {
         // (too many segments, or the socket latched GSO off after the
         // egress path rejected it), send one datagram per segment rather
         // than dropping it.
-        let batched = gso_fits_one_batch(gso_segs) && self.session.io_cb().io.gso_enabled();
+        let batched = gso_fits_one_batch(gso_segs) && self.encapsulation.gso_enabled();
         if !batched {
             crate::metrics::gso_batch_skipped();
             // Warn only for an oversized aggregate. The other reason — the
@@ -1343,13 +1308,12 @@ impl<AppState: Send> Connection<AppState> {
             }
         }
 
-        // Open the GSO coalescing buffer — IO callback will coalesce
-        // here. Both DTLS and expresslane paths detect this and
-        // append encrypted segments instead of sending immediately.
+        // Open the GSO batch: the encapsulation coalesces the DTLS and
+        // expresslane datagrams in place of sending each one.
         // Left closed on the fallback path, where `udp_send` passes each
         // segment straight to the socket.
         if batched {
-            self.session.io_cb_mut().gso_buf.open();
+            self.encapsulation.begin_batch();
         }
 
         let mut result = Ok(());
@@ -1393,20 +1357,10 @@ impl<AppState: Send> Connection<AppState> {
 
         if batched {
             if result.is_ok() {
-                match self.session.io_cb_mut().udp_send_gso(gso_segs, expresslane) {
-                    IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => {}
-                    IOCallbackResult::Err(e) => {
-                        tracing::warn!(error = %e, gso_segs, "udp_send_gso failed");
-                        crate::metrics::gso_send_failed();
-                    }
-                }
+                self.encapsulation.end_batch();
+            } else {
+                self.encapsulation.discard_batch();
             }
-
-            // Always reset the GSO coalescing buffer on exit. udp_send_gso
-            // borrows it; this returns to Passthrough and clears the
-            // bytes in place so the underlying allocation is reused on
-            // the next batch.
-            self.session.io_cb_mut().gso_buf.reset();
         }
 
         result
@@ -1543,11 +1497,43 @@ impl<AppState: Send> Connection<AppState> {
 
         // here, goodbye + shutdown are just a courtesy.
         let _ = self.send_frame_or_queue(msg);
-        let _ = self.session.try_shutdown();
+        let res = self.session.try_shutdown();
+        let _ = self.send_records_after(res);
 
         self.set_state(State::Disconnected)?;
 
         Ok(())
+    }
+
+    /// Send the records that the TLS session wrote during its last
+    /// call. An error of that call comes before an error of the send.
+    fn send_records_after<T>(&mut self, res: Result<T, crate::tls::Error>) -> ConnectionResult<T> {
+        let sent = self.send_records();
+        let t = res?;
+        sent?;
+        Ok(t)
+    }
+
+    /// Send every waiting record, and return the first error. A record
+    /// left in the queue would go out with a later, unrelated send.
+    fn send_records(&mut self) -> ConnectionResult<()> {
+        let mut result = Ok(());
+        while let Some(record) = self.session.io_cb_mut().pop_record() {
+            if let Err(e) = self.encapsulation.send(record)
+                && result.is_ok()
+            {
+                result = Err(ConnectionError::OutsideIoWriteError(e));
+            }
+        }
+        result
+    }
+
+    /// Check for a DTLS timeout. The session sends its retransmits
+    /// here.
+    fn dtls_has_timed_out(&mut self) -> ConnectionResult<crate::tls::Poll<bool>> {
+        let poll = self.session.dtls_has_timed_out();
+        self.send_records()?;
+        Ok(poll)
     }
 
     /// Generate an event
@@ -1559,19 +1545,18 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Try to send a frame.
-    /// In case I/O would block, queue the frame inside `ConnectionState`
-    /// and retry on the next call.
+    /// While the outside IO blocks the encapsulation, queue the frame
+    /// inside `ConnectionState` and retry on the next call.
     ///
     /// On [`ConnectionType::Stream`] (TCP), frames not carrying an
     /// inner TCP packet (inner UDP, control frames) are queued up to
     /// [`MAX_TLS_PENDING_QUEUE_PACKETS`] — nothing retransmits these,
     /// so dropping here would lose the frame.
     ///
-    /// Everything else (Datagram connections, frames carrying inner
-    /// TCP packets) retains only the in-flight head buffer (the TLS
-    /// library requires retrying a blocked write with the same
-    /// buffer); further frames are dropped — inner TCP retransmits the
-    /// payloads anyway.
+    /// Everything else (frames carrying inner TCP packets) queues at
+    /// most one frame; further frames are dropped — inner TCP
+    /// retransmits the payloads anyway. A datagram encapsulation never
+    /// blocks, so its frames never wait.
     fn send_frame_or_queue(&mut self, frame: wire::Frame) -> ConnectionResult<()> {
         let queue_limit = match self.connection_type {
             ConnectionType::Stream => match &frame {
@@ -1580,14 +1565,21 @@ impl<AppState: Send> Connection<AppState> {
             },
             ConnectionType::Datagram => 1,
         };
+        self.encapsulation
+            .flush()
+            .map_err(ConnectionError::OutsideIoWriteError)?;
+
         if self.tls_pending_queue.len() < queue_limit {
             let mut buf = BytesMut::new();
             frame.append_to_wire(&mut buf);
             self.tls_pending_queue.push_back(buf);
         }
 
-        while let Some(mut head) = self.tls_pending_queue.pop_front() {
-            match self.session.try_write(&mut head)? {
+        while !self.encapsulation.is_blocked()
+            && let Some(mut head) = self.tls_pending_queue.pop_front()
+        {
+            let res = self.session.try_write(&mut head);
+            match self.send_records_after(res)? {
                 crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
                     self.tls_pending_queue.push_front(head);
                     return Ok(());
@@ -1633,7 +1625,7 @@ impl<AppState: Send> Connection<AppState> {
             } => {
                 let new_session_id = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
-                self.session.io_cb_mut().set_session_id(new_session_id);
+                self.encapsulation.set_session_id(new_session_id);
 
                 *pending_session_id = Some(new_session_id);
 
@@ -1663,9 +1655,9 @@ impl<AppState: Send> Connection<AppState> {
 
                 let msg = wire::Frame::Ping(ping);
 
-                self.session.io_cb().enable_pmtud_probe();
+                self.encapsulation.enable_pmtud_probe();
                 let res = self.send_frame_or_queue(msg);
-                self.session.io_cb().disable_pmtud_probe();
+                self.encapsulation.disable_pmtud_probe();
                 res
             }
             dplpmtud::Action::None => Ok(()),
@@ -1734,7 +1726,7 @@ impl<AppState: Send> Connection<AppState> {
         match self.mode {
             Client { .. } => {
                 self.session_id = session_id;
-                self.session.io_cb_mut().set_session_id(session_id);
+                self.encapsulation.set_session_id(session_id);
                 self.publish_expresslane_key();
             }
             Server {
@@ -1786,7 +1778,8 @@ impl<AppState: Send> Connection<AppState> {
 
         // It's time to update keys!
         info!(session = ?self.session_id, "Update TLS keys");
-        match self.session.try_trigger_update_key()? {
+        let res = self.session.try_trigger_update_key();
+        match self.send_records_after(res)? {
             // If using non-blocking I/O and WANT_WRITE is returned,
             // calling try_write() again will have the message sent when ready.
             //
@@ -1830,24 +1823,27 @@ impl<AppState: Send> Connection<AppState> {
         outside_received_pending.extend_from_slice(&buf[..]);
 
         let frame_read_count_result = match self.state {
-            State::Connecting => match self.session.try_negotiate()? {
-                crate::tls::Poll::PendingWrite => {
-                    self.update_tick_interval();
-                    Ok(0)
+            State::Connecting => {
+                let res = self.session.try_negotiate();
+                match self.send_records_after(res)? {
+                    crate::tls::Poll::PendingWrite => {
+                        self.update_tick_interval();
+                        Ok(0)
+                    }
+                    crate::tls::Poll::PendingRead => {
+                        self.update_tick_interval();
+                        Ok(0)
+                    }
+                    crate::tls::Poll::Ready(_) => {
+                        self.set_state(State::LinkUp)?;
+                        self.handle_messages()
+                    }
+                    crate::tls::Poll::AppData(_) => {
+                        metrics::tls_appdata(&self.tls_protocol_version());
+                        Ok(0)
+                    }
                 }
-                crate::tls::Poll::PendingRead => {
-                    self.update_tick_interval();
-                    Ok(0)
-                }
-                crate::tls::Poll::Ready(_) => {
-                    self.set_state(State::LinkUp)?;
-                    self.handle_messages()
-                }
-                crate::tls::Poll::AppData(_) => {
-                    metrics::tls_appdata(&self.tls_protocol_version());
-                    Ok(0)
-                }
-            },
+            }
 
             State::LinkUp | State::Authenticating | State::Online => self.handle_messages(),
 
@@ -1881,7 +1877,8 @@ impl<AppState: Send> Connection<AppState> {
                     // Ensure we will have room for a whole new frame.
                     self.receive_buf.reserve(self.outside_mtu);
 
-                    match self.session.try_read(&mut self.receive_buf)? {
+                    let res = self.session.try_read(&mut self.receive_buf);
+                    match self.send_records_after(res)? {
                         crate::tls::Poll::PendingWrite => break,
                         crate::tls::Poll::PendingRead => break,
                         crate::tls::Poll::Ready(_) => continue,
@@ -2211,7 +2208,7 @@ impl<AppState: Send> Connection<AppState> {
     fn expresslane_supported(&self) -> bool {
         self.connection_type.is_datagram()
             && self
-                .tunnel_protocol_version
+                .tunnel_protocol_version()
                 .ge(&Version::try_new(1, 3).unwrap_or(Version::MINIMUM))
             && !matches!(
                 self.expresslane.state,
@@ -2512,10 +2509,9 @@ impl<AppState: Send> Connection<AppState> {
         let iv: [u8; 12] = StandardUniform.sample(&mut *self.rng.lock().unwrap());
 
         let mut buf = BytesMut::new();
-        // In case of server, pending sesssion id will be used immediately in the Lightway Header
-        // So use it if there is one.
-        // In case of client there will be no pending_session_id, so it is fine
-        let session_id = self.pending_session_id().unwrap_or(self.session_id);
+        // The same session id as in the Lightway Header: on the server,
+        // the pending one during a rotation.
+        let session_id = self.encapsulation.session_id();
         self.expresslane
             .data
             .append_to_wire(
@@ -2528,17 +2524,9 @@ impl<AppState: Send> Connection<AppState> {
             .map_err(expresslane_encrypt_error)?;
         self.activity.last_data_traffic_from_peer = Instant::now();
 
-        // `udp_send` coalesces into the per-connection `GsoBuffer`
-        // when a batch has been opened by an upstream `gso_buf.open()`
-        // (currently only `send_to_outside_gso`), or wraps + sends
-        // immediately otherwise. Both branches hand the same shape
-        // of bytes to `udp_send_gso` at flush time.
-        match self.session.io_cb_mut().udp_send(buf.as_ref(), true) {
-            IOCallbackResult::Ok(_) | IOCallbackResult::WouldBlock => ConnectionResult::Ok(()),
-            IOCallbackResult::Err(e) => {
-                ConnectionResult::Err(ConnectionError::OutsideIoWriteError(e))
-            }
-        }
+        self.encapsulation
+            .send_expresslane(buf.as_ref())
+            .map_err(ConnectionError::OutsideIoWriteError)
     }
 
     fn handle_auth_request(&mut self, auth_request: wire::AuthRequest) -> ConnectionResult<()> {
