@@ -1981,7 +1981,6 @@ dependencies = [
 name = "lightway-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bitfield-struct",
  "bytes",
@@ -1998,7 +1997,6 @@ dependencies = [
  "more-asserts",
  "num_enum",
  "once_cell",
- "parking_lot",
  "pem 4.0.0",
  "pnet",
  "pnet_packet",
@@ -2057,7 +2055,6 @@ dependencies = [
  "serial_test",
  "socket2",
  "struct-patch",
- "strum",
  "test-case",
  "thiserror 2.0.21",
  "time",

@@ -21,18 +21,15 @@ debug = ["wolfssl?/debug", "boringssl?/debug"]
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
 bitfield-struct = "0.13.0"
 bytes.workspace = true
 delegate.workspace = true
-internet-checksum.workspace = true
 lightway-expresslane = { version = "0.1.0", path = "../lightway-expresslane" }
 lru = "0.18.0"
 metrics.workspace = true
 more-asserts.workspace = true
 num_enum = "0.7.0"
 once_cell = "1.19.0"
-parking_lot.workspace = true
 pnet_packet.workspace = true
 rand.workspace = true
 rand_core = "0.10.0"
@@ -41,12 +38,16 @@ tracing.workspace = true
 wolfssl = { workspace = true, optional = true }
 boringssl = { path = "../lightway-boring", package = "lightway-boring", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+internet-checksum.workspace = true
+
 [build-dependencies]
 cfg_aliases = "0.2.1"
 
 [dev-dependencies]
 async-trait.workspace = true
 cfg-if = "1.0.4"
+internet-checksum.workspace = true
 itertools = "0.15.0"
 lightway-app-utils.workspace = true
 pem = "4.0.0"

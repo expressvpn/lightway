@@ -143,7 +143,7 @@ mod tests {
         assert!(w.would_reject(7), "would_reject must be side-effect free");
     }
 
-    /// The pre-extraction shifting implementation, frozen verbatim as a
+    /// The pre-extraction shifting implementation, frozen as a
     /// reference. Semantics must match exactly; only the cost changes.
     mod reference {
         pub struct Shifting {
@@ -192,9 +192,7 @@ mod tests {
                         self.bitmap[i] = lower | upper;
                     }
                 }
-                for i in 0..block_shift.min(128) {
-                    self.bitmap[i] = 0;
-                }
+                self.bitmap[..block_shift.min(128)].fill(0);
             }
             pub fn accept(&mut self, counter: u64) -> bool {
                 if counter == 0 {

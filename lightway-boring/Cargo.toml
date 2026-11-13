@@ -6,6 +6,8 @@ description = "BoringSSL-backed TLS/DTLS abstraction layer for Lightway"
 repository.workspace = true
 license = "Apache-2.0"
 
+[lints]
+
 [features]
 debug = []
 
