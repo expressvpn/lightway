@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, hash_map},
+    hash::Hash,
     net::SocketAddr,
     sync::Arc,
 };
@@ -8,7 +9,8 @@ use thiserror::Error;
 use lightway_core::SessionId;
 
 #[derive(Error, Debug)]
-pub(crate) enum InsertError {
+#[non_exhaustive]
+pub enum InsertError {
     #[error("Insert with different SocketAddr to initial lookup")]
     InconsistentSocketAddr,
 
@@ -16,13 +18,21 @@ pub(crate) enum InsertError {
     InsertReservedSessionId,
 }
 
+/// Identity of a connection for its whole life. Peer address and
+/// session id can change. The server routes only datagram connections
+/// by address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ConnectionId(pub(crate) u64);
+
 pub(crate) trait Value {
+    fn id(&self) -> ConnectionId;
     fn socket_addr(&self) -> SocketAddr;
     fn session_id(&self) -> SessionId;
 }
 
 pub(crate) struct VacantEntry<'a, T> {
     socket_addr_entry: hash_map::VacantEntry<'a, SocketAddr, Arc<T>>,
+    by_id: &'a mut HashMap<ConnectionId, Arc<T>>,
 
     // For `SessionId` we insert via a new lookup not a `VacantEntry`
     // since for a new connection the session id isn't assigned until
@@ -42,6 +52,7 @@ impl<T: Value> VacantEntry<'_, T> {
             return Err(InsertError::InsertReservedSessionId);
         };
 
+        self.by_id.insert(value.id(), value.clone());
         self.socket_addr_entry.insert(value.clone());
         self.session_id_map
             .insert(value.session_id(), value.clone());
@@ -54,7 +65,16 @@ pub(crate) enum Entry<'a, T> {
     Vacant(VacantEntry<'a, T>),
 }
 
+/// Every connection is in `by_id`. Every entry of the other two
+/// indexes points at a connection in `by_id`. Only datagram
+/// connections have a `by_socket_addr` entry.
+///
+/// `remove` finds the entries of a connection by its `socket_addr` and
+/// its `session_id`, so these are the keys. One exception: in a session
+/// id rotation, the connection takes the new id first, and the key stays
+/// the old id until `update_session_id_for_connection`.
 pub(crate) struct ConnectionMap<T> {
+    by_id: HashMap<ConnectionId, Arc<T>>,
     by_socket_addr: HashMap<SocketAddr, Arc<T>>,
     by_session_id: HashMap<SessionId, Arc<T>>,
 }
@@ -62,6 +82,7 @@ pub(crate) struct ConnectionMap<T> {
 impl<T> Default for ConnectionMap<T> {
     fn default() -> Self {
         Self {
+            by_id: Default::default(),
             by_socket_addr: Default::default(),
             by_session_id: Default::default(),
         }
@@ -71,13 +92,14 @@ impl<T> Default for ConnectionMap<T> {
 impl<T> ConnectionMap<T> {
     pub(crate) fn iter_connections(
         &self,
-    ) -> std::collections::hash_map::Values<'_, SocketAddr, Arc<T>> {
-        self.by_socket_addr.values()
+    ) -> std::collections::hash_map::Values<'_, ConnectionId, Arc<T>> {
+        self.by_id.values()
     }
 
     pub(crate) fn remove_connections(&mut self) -> Vec<Arc<T>> {
         self.by_session_id.clear();
-        self.by_socket_addr.drain().map(|e| e.1).collect()
+        self.by_socket_addr.clear();
+        self.by_id.drain().map(|e| e.1).collect()
     }
 
     pub(crate) fn lookup(&mut self, sock: SocketAddr, session: SessionId) -> Entry<'_, T> {
@@ -91,6 +113,7 @@ impl<T> ConnectionMap<T> {
                     hash_map::Entry::Occupied(e) => Entry::Occupied(e.get().clone()),
                     hash_map::Entry::Vacant(_) => Entry::Vacant(VacantEntry {
                         socket_addr_entry: sa_entry,
+                        by_id: &mut self.by_id,
                         session_id_map: &mut self.by_session_id,
                     }),
                 }
@@ -109,27 +132,13 @@ impl<T> ConnectionMap<T> {
     /// Whether `new_addr` is free for `value` to move onto: either unmapped,
     /// or already mapped to `value` itself.
     ///
-    /// Taking an address another connection holds would drop that connection
-    /// out of `by_socket_addr`, which is the map every eviction path iterates.
+    /// A move onto an address that another connection holds overwrites the
+    /// entry of that connection, and the datagram server then cannot route
+    /// to it.
     pub(crate) fn can_take_socketaddr(&self, new_addr: SocketAddr, value: &Arc<T>) -> bool {
         match self.by_socket_addr.get(&new_addr) {
             Some(existing) => Arc::ptr_eq(existing, value),
             None => true,
-        }
-    }
-
-    /// Update the current connection mapped by `old_addr` to be
-    /// mapped instead by `new_addr`.
-    ///
-    /// If there is no current entry for `old_addr` then this method
-    /// is a nop.
-    pub(crate) fn update_socketaddr_for_connection(
-        &mut self,
-        old_addr: SocketAddr,
-        new_addr: SocketAddr,
-    ) {
-        if let Some(value) = self.by_socket_addr.remove(&old_addr) {
-            self.by_socket_addr.insert(new_addr, value);
         }
     }
 
@@ -146,22 +155,54 @@ impl<T> ConnectionMap<T> {
 }
 
 impl<T: Value> ConnectionMap<T> {
+    /// Update the current connection mapped by `old_addr` to be
+    /// mapped instead by `new_addr`.
+    ///
+    /// If the entry for `old_addr` is not `value` then this method
+    /// is a nop.
+    pub(crate) fn update_socketaddr_for_connection(
+        &mut self,
+        value: &T,
+        old_addr: SocketAddr,
+        new_addr: SocketAddr,
+    ) {
+        if let Some(entry) = remove_owned(&mut self.by_socket_addr, &old_addr, value.id()) {
+            self.by_socket_addr.insert(new_addr, entry);
+        }
+    }
+
+    /// Insert a connection that the server does not route by peer address.
     pub(crate) fn insert(&mut self, value: &Arc<T>) -> Result<(), InsertError> {
         if value.session_id().is_reserved() {
             return Err(InsertError::InsertReservedSessionId);
         };
 
-        self.by_socket_addr
-            .insert(value.socket_addr(), value.clone());
+        self.by_id.insert(value.id(), value.clone());
         self.by_session_id.insert(value.session_id(), value.clone());
 
         Ok(())
     }
 
     pub(crate) fn remove(&mut self, value: &T) {
-        self.by_socket_addr.remove(&value.socket_addr());
-        self.by_session_id.remove(&value.session_id());
+        let id = value.id();
+        if self.by_id.remove(&id).is_none() {
+            return;
+        }
+        remove_owned(&mut self.by_socket_addr, &value.socket_addr(), id);
+        remove_owned(&mut self.by_session_id, &value.session_id(), id);
     }
+}
+
+/// Remove the entry for `key` only if it points at the connection `id`.
+fn remove_owned<K: Eq + Hash, T: Value>(
+    map: &mut HashMap<K, Arc<T>>,
+    key: &K,
+    id: ConnectionId,
+) -> Option<Arc<T>> {
+    if map.get(key)?.id() != id {
+        return None;
+    }
+    map.remove(key)
 }
 
 #[cfg(test)]
@@ -182,11 +223,16 @@ mod tests {
 
     #[derive(Debug)]
     struct V {
+        id: ConnectionId,
         socket_addr: SocketAddr,
         session_id: SessionId,
     }
 
     impl Value for V {
+        fn id(&self) -> ConnectionId {
+            self.id
+        }
+
         fn socket_addr(&self) -> std::net::SocketAddr {
             self.socket_addr
         }
@@ -196,11 +242,21 @@ mod tests {
         }
     }
 
+    /// Insert `v` with an entry for its peer address, as the
+    /// datagram path does.
+    fn insert_routed(m: &mut ConnectionMap<V>, v: &Arc<V>) {
+        match m.lookup(v.socket_addr, SessionId::EMPTY) {
+            Entry::Occupied(_) => panic!("Unexpected hit"),
+            Entry::Vacant(e) => e.insert(v).unwrap(),
+        }
+    }
+
     #[test_case(SessionId::EMPTY => panics "`Err` value: InsertReservedSessionId")]
     #[test_case(SessionId::REJECTED => panics "`Err` value: InsertReservedSessionId")]
     fn inserting_reserved_ids_directly_is_not_tolerated(session_id: SessionId) {
         let mut m = ConnectionMap::<V>::default();
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id,
         });
@@ -212,6 +268,7 @@ mod tests {
     fn inserting_reserved_ids_via_entry_is_not_tolerated(session_id: SessionId) {
         let mut m = ConnectionMap::<V>::default();
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id,
         });
@@ -233,11 +290,12 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
 
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         match m.lookup(socket_addr, session_id) {
             Entry::Occupied(f) => {
@@ -254,10 +312,11 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         let may_be_conn = m.find_by(socket_addr);
         may_be_conn.expect("connection must exist").socket_addr
@@ -270,6 +329,7 @@ mod tests {
 
         let session_id = SESSION_ID_A;
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id,
         });
@@ -279,6 +339,7 @@ mod tests {
             Entry::Vacant(e) => e.insert(&v).unwrap(),
         }
 
+        assert!(Arc::ptr_eq(&v, m.by_id.get(&v.id).unwrap()));
         assert!(Arc::ptr_eq(&v, m.by_socket_addr.get(&socket_addr).unwrap()));
         assert!(Arc::ptr_eq(&v, m.by_session_id.get(&session_id).unwrap()));
     }
@@ -288,11 +349,12 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
 
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         assert!(Arc::ptr_eq(
             &v,
@@ -301,7 +363,12 @@ mod tests {
         assert!(!m.by_socket_addr.contains_key(&SOCKET_ADDR_B));
         assert!(Arc::ptr_eq(&v, m.by_session_id.get(&SESSION_ID_A).unwrap()));
 
-        m.update_socketaddr_for_connection(SOCKET_ADDR_A, SOCKET_ADDR_B);
+        let moved = V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_B,
+            session_id: SESSION_ID_A,
+        };
+        m.update_socketaddr_for_connection(&moved, SOCKET_ADDR_A, SOCKET_ADDR_B);
 
         assert!(!m.by_socket_addr.contains_key(&SOCKET_ADDR_A));
         assert!(Arc::ptr_eq(
@@ -309,16 +376,20 @@ mod tests {
             m.by_socket_addr.get(&SOCKET_ADDR_B).unwrap()
         ));
         assert!(Arc::ptr_eq(&v, m.by_session_id.get(&SESSION_ID_A).unwrap()));
+
+        m.remove(&moved);
+        assert!(m.by_socket_addr.is_empty());
     }
 
     #[test]
     fn a_vacant_socketaddr_can_be_taken() {
         let mut m = ConnectionMap::<V>::default();
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         assert!(m.can_take_socketaddr(SOCKET_ADDR_B, &v));
     }
@@ -327,31 +398,33 @@ mod tests {
     fn a_connection_can_retake_its_own_socketaddr() {
         let mut m = ConnectionMap::<V>::default();
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         assert!(m.can_take_socketaddr(SOCKET_ADDR_A, &v));
     }
 
-    /// Regression: taking an address another connection holds would overwrite
-    /// its `by_socket_addr` entry, and that map is what every eviction path
-    /// iterates - the displaced connection would never age out and its
-    /// authentication expiry would never be checked again.
+    /// Regression: a move onto an address that another connection holds
+    /// overwrites its `by_socket_addr` entry, and the datagram server then
+    /// cannot route to the displaced connection.
     #[test]
     fn a_socketaddr_another_connection_holds_cannot_be_taken() {
         let mut m = ConnectionMap::<V>::default();
         let held = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_B,
             session_id: SESSION_ID_B,
         });
         let mover = Arc::new(V {
+            id: ConnectionId(2),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
-        m.insert(&held).unwrap();
-        m.insert(&mover).unwrap();
+        insert_routed(&mut m, &held);
+        insert_routed(&mut m, &mover);
 
         assert!(!m.can_take_socketaddr(SOCKET_ADDR_B, &mover));
     }
@@ -361,11 +434,12 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
 
-        m.insert(&v).unwrap();
+        insert_routed(&mut m, &v);
 
         assert!(Arc::ptr_eq(&v, m.by_session_id.get(&SESSION_ID_A).unwrap()));
         assert!(!m.by_session_id.contains_key(&SESSION_ID_B));
@@ -389,15 +463,17 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let va = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
         let vb = Arc::new(V {
+            id: ConnectionId(2),
             socket_addr: SOCKET_ADDR_B,
             session_id: SESSION_ID_B,
         });
 
-        m.insert(&va).unwrap();
+        insert_routed(&mut m, &va);
         assert!(Arc::ptr_eq(
             &va,
             m.by_socket_addr.get(&SOCKET_ADDR_A).unwrap()
@@ -407,7 +483,7 @@ mod tests {
             m.by_session_id.get(&SESSION_ID_A).unwrap()
         ));
 
-        m.insert(&vb).unwrap();
+        insert_routed(&mut m, &vb);
         assert!(Arc::ptr_eq(
             &vb,
             m.by_socket_addr.get(&SOCKET_ADDR_B).unwrap()
@@ -419,10 +495,11 @@ mod tests {
 
         m.remove(&va);
 
+        assert!(!m.by_id.contains_key(&va.id));
         assert!(!m.by_socket_addr.contains_key(&SOCKET_ADDR_A));
         assert!(!m.by_session_id.contains_key(&SESSION_ID_A));
 
-        m.insert(&vb).unwrap();
+        assert!(Arc::ptr_eq(&vb, m.by_id.get(&vb.id).unwrap()));
         assert!(Arc::ptr_eq(
             &vb,
             m.by_socket_addr.get(&SOCKET_ADDR_B).unwrap()
@@ -438,10 +515,12 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let va = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
         let vb = Arc::new(V {
+            id: ConnectionId(2),
             socket_addr: SOCKET_ADDR_B,
             session_id: SESSION_ID_B,
         });
@@ -470,6 +549,7 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
@@ -485,6 +565,7 @@ mod tests {
         let mut m = ConnectionMap::<V>::default();
 
         let v = Arc::new(V {
+            id: ConnectionId(1),
             socket_addr: SOCKET_ADDR_A,
             session_id: SESSION_ID_A,
         });
@@ -496,5 +577,94 @@ mod tests {
             .find_by_session(SESSION_ID_B)
             .expect("session is remapped");
         assert!(Arc::ptr_eq(&v, &found));
+    }
+
+    #[test]
+    fn an_unrouted_connection_has_no_socket_addr_entry() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let v = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        m.insert(&v).unwrap();
+
+        assert!(m.find_by(SOCKET_ADDR_A).is_none());
+        assert!(matches!(
+            m.lookup(SOCKET_ADDR_B, SESSION_ID_A),
+            Entry::Occupied(f) if Arc::ptr_eq(&v, &f)
+        ));
+        assert_eq!(1, m.iter_connections().count());
+    }
+
+    #[test]
+    fn remove_keeps_entries_that_belong_to_another_connection() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let routed = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        let unrouted = Arc::new(V {
+            id: ConnectionId(2),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_B,
+        });
+        insert_routed(&mut m, &routed);
+        m.insert(&unrouted).unwrap();
+
+        m.remove(&unrouted);
+
+        assert!(Arc::ptr_eq(&routed, &m.find_by(SOCKET_ADDR_A).unwrap()));
+        assert!(!m.by_session_id.contains_key(&SESSION_ID_B));
+        assert_eq!(1, m.iter_connections().count());
+    }
+
+    #[test]
+    fn update_socketaddr_keeps_an_entry_that_belongs_to_another_connection() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let routed = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        let unrouted = Arc::new(V {
+            id: ConnectionId(2),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_B,
+        });
+        insert_routed(&mut m, &routed);
+        m.insert(&unrouted).unwrap();
+
+        m.update_socketaddr_for_connection(&unrouted, SOCKET_ADDR_A, SOCKET_ADDR_B);
+
+        assert!(Arc::ptr_eq(&routed, &m.find_by(SOCKET_ADDR_A).unwrap()));
+        assert!(m.find_by(SOCKET_ADDR_B).is_none());
+    }
+
+    #[test]
+    fn remove_connections_drains_unrouted_connections() {
+        let mut m = ConnectionMap::<V>::default();
+
+        let routed = Arc::new(V {
+            id: ConnectionId(1),
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        let unrouted = Arc::new(V {
+            id: ConnectionId(2),
+            socket_addr: SOCKET_ADDR_B,
+            session_id: SESSION_ID_B,
+        });
+        insert_routed(&mut m, &routed);
+        m.insert(&unrouted).unwrap();
+
+        assert_eq!(2, m.remove_connections().len());
+        assert_eq!(0, m.iter_connections().count());
+        assert!(m.by_socket_addr.is_empty());
+        assert!(m.by_session_id.is_empty());
     }
 }
