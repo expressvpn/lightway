@@ -1063,24 +1063,7 @@ impl<AppState: Send> Connection<AppState> {
             return Err(ConnectionError::RejectedSessionID);
         };
 
-        let result = self.process_new_outside_data(payload, hdr);
-        match result {
-            // We only look into the session id after we verify the connection is valid
-            Ok(frames_read) if frames_read > 0 => {
-                if let Some(h) = hdr
-                    && h.session != self.session_id
-                {
-                    debug!(
-                        wire_session = ?h.session,
-                        current_session = ?self.session_id,
-                        "Received packet with different session ID"
-                    );
-                }
-                self.update_session_id(hdr.map(|h| h.session));
-            }
-            _ => {}
-        }
-        result
+        self.process_new_outside_data(payload, hdr)
     }
 
     /// Process multiple outside packets.
@@ -1552,6 +1535,9 @@ impl<AppState: Send> Connection<AppState> {
 
     /// Generate an event
     fn event(&mut self, event: Event) {
+        if let Some(cb) = &self.expresslane.cb {
+            cb.event(self.session_id, &event, &self.app_state);
+        }
         if let Some(event_cb) = &mut self.event_cb {
             debug!(?event, "event");
             event_cb.event(event);
@@ -1731,6 +1717,12 @@ impl<AppState: Send> Connection<AppState> {
             return;
         }
 
+        debug!(
+            wire_session = ?session_id,
+            current_session = ?self.session_id,
+            "Received packet with different session ID"
+        );
+
         match self.mode {
             Client { .. } => {
                 self.session_id = session_id;
@@ -1822,6 +1814,7 @@ impl<AppState: Send> Connection<AppState> {
                 .try_from_wire(buf, *hdr.session.as_bytes())
                 .map_err(expresslane_decrypt_error)?;
 
+            self.update_session_id(Some(hdr.session));
             self.handle_outside_data_bytes(data, is_encoded)?;
             return Ok(1);
         }
@@ -1841,7 +1834,7 @@ impl<AppState: Send> Connection<AppState> {
                 }
                 crate::tls::Poll::Ready(_) => {
                     self.set_state(State::LinkUp)?;
-                    self.handle_messages()
+                    self.handle_messages(hdr.map(|h| h.session))
                 }
                 crate::tls::Poll::AppData(_) => {
                     metrics::tls_appdata(&self.tls_protocol_version());
@@ -1849,7 +1842,9 @@ impl<AppState: Send> Connection<AppState> {
                 }
             },
 
-            State::LinkUp | State::Authenticating | State::Online => self.handle_messages(),
+            State::LinkUp | State::Authenticating | State::Online => {
+                self.handle_messages(hdr.map(|h| h.session))
+            }
 
             State::Disconnecting | State::Disconnected => Err(ConnectionError::InvalidState),
         };
@@ -1866,7 +1861,9 @@ impl<AppState: Send> Connection<AppState> {
         frame_read_count_result
     }
 
-    fn handle_messages(&mut self) -> ConnectionResult<usize> {
+    /// Handle the frames of one received packet, adopting `session` once
+    /// the packet proves authentic.
+    fn handle_messages(&mut self, mut session: Option<SessionId>) -> ConnectionResult<usize> {
         let mut frames_read = 0;
 
         // Loop consuming frames until we either run out of data or
@@ -1881,16 +1878,24 @@ impl<AppState: Send> Connection<AppState> {
                     // Ensure we will have room for a whole new frame.
                     self.receive_buf.reserve(self.outside_mtu);
 
-                    match self.session.try_read(&mut self.receive_buf)? {
+                    let read = match self.session.try_read(&mut self.receive_buf)? {
                         crate::tls::Poll::PendingWrite => break,
                         crate::tls::Poll::PendingRead => break,
-                        crate::tls::Poll::Ready(_) => continue,
+                        crate::tls::Poll::Ready(n) => n,
                         crate::tls::Poll::AppData(data) => {
                             self.receive_buf.extend_from_slice(&data[..]);
                             metrics::tls_appdata(&self.tls_protocol_version());
-                            continue;
+                            data.len()
                         }
+                    };
+                    // Plaintext came out of the packet's record, so it is not a
+                    // replayed or corrupted one. Adopt the session id before
+                    // handling the frames, so any reply to them carries it.
+                    // The header itself is not authenticated.
+                    if read > 0 {
+                        self.update_session_id(session.take());
                     }
+                    continue;
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -2490,6 +2495,9 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn publish_expresslane_key(&self) {
+        if matches!(self.state, State::Disconnecting | State::Disconnected) {
+            return;
+        }
         if let Some(xp_config_cb) = &self.expresslane.cb {
             let self_key = self.expresslane.data.self_key();
             let peer_key = self.expresslane.data.peer_key();

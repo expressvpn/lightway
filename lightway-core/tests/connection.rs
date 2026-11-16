@@ -1352,6 +1352,268 @@ async fn disabled_server_ignores_expresslane_config() {
     .expect("client never saw its expresslane config acked");
 }
 
+/// The server announces a session id rotation with a ping stamped with the
+/// new id. An idle client's pong to it has to carry the new id already, so
+/// that it completes the rotation without waiting for other traffic.
+#[tokio::test]
+async fn idle_client_acknowledges_session_id_rotation_with_its_pong() {
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+    let server_task = server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: Some(conn_tx),
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    );
+
+    let client_task = async move {
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+        let mut rotated_to = None;
+
+        loop {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+
+                    let mut conn = conn.lock().unwrap();
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    let mut server = server_conn.lock().unwrap();
+                    match rotated_to {
+                        None if server.state() == State::Online
+                            && conn.lock().unwrap().state() == State::Online =>
+                        {
+                            rotated_to = Some(server.rotate_session_id().unwrap());
+                        }
+                        Some(new) if server.session_id() == new => {
+                            assert_eq!(server.pending_session_id(), None);
+                            assert_eq!(conn.lock().unwrap().session_id(), new);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        conn.lock().unwrap().disconnect().unwrap();
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async move { tokio::join!(server_task, client_task) },
+    )
+    .await
+    .expect("the client's pong never completed the session id rotation");
+}
+
+/// The session id in a packet's header is only adopted once the packet's
+/// record decrypts. A replayed datagram, or one whose record fails to
+/// decrypt, must not move the client to the id in its header.
+#[tokio::test]
+async fn client_ignores_session_id_of_replayed_or_corrupted_packets() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Phase {
+        Connecting,
+        AwaitPing,
+        AwaitSecondPing,
+        Done,
+    }
+
+    fn with_session(raw: &BytesMut, session: SessionId) -> BytesMut {
+        let mut pkt = raw.clone();
+        pkt[8..16].copy_from_slice(session.as_bytes());
+        pkt
+    }
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (conn_tx, conn_rx) = oneshot::channel();
+
+    let auth = Arc::new(TestAuth::default());
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+    let (cert, key) = pki.server_secrets();
+    let server_task = server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: Some(conn_tx),
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    );
+
+    let client_task = async move {
+        let server_conn = conn_rx.await.expect("server conn handle");
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState { ticker };
+
+        let conn = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let mut join_set = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&conn), &mut join_set);
+
+        let bogus = SessionId::from_const([0x42; 8]);
+        let mut phase = Phase::Connecting;
+        let mut ticks = tokio::time::interval(std::time::Duration::from_millis(50));
+
+        while phase != Phase::Done {
+            tokio::select! {
+                is_readable = client_sock.readable() => {
+                    is_readable.expect("client socket readable");
+
+                    let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+                    match client_sock.try_recv_buf(&mut buf) {
+                        Ok(0) => panic!("EOF"),
+                        Ok(_nr) => {}
+                        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                            continue;
+                        }
+                        Err(err) => panic!("read for sock {err}"),
+                    };
+                    let raw = buf.clone();
+
+                    let mut conn = conn.lock().unwrap();
+                    let session = conn.session_id();
+                    match phase {
+                        Phase::Connecting => {}
+                        Phase::AwaitPing => {
+                            // Deliver the ping, then replay it under another id.
+                            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                            conn.outside_data_received(pkt).unwrap();
+                            let mut replay = with_session(&raw, bogus);
+                            let pkt = OutsidePacket::Wire(&mut replay, client_sock.connection_type());
+                            let _ = conn.outside_data_received(pkt);
+                            assert_eq!(conn.session_id(), session, "adopted a replayed packet's id");
+                            phase = Phase::AwaitSecondPing;
+                            server_conn.lock().unwrap().keepalive().unwrap();
+                            continue;
+                        }
+                        Phase::AwaitSecondPing => {
+                            // Corrupt the record, then deliver the original.
+                            let mut corrupted = with_session(&raw, bogus);
+                            let last = corrupted.len() - 1;
+                            corrupted[last] ^= 0xff;
+                            let pkt = OutsidePacket::Wire(&mut corrupted, client_sock.connection_type());
+                            let _ = conn.outside_data_received(pkt);
+                            assert_eq!(conn.session_id(), session, "adopted a corrupted packet's id");
+                            phase = Phase::Done;
+                        }
+                        Phase::Done => unreachable!(),
+                    }
+                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    if let Err(err) = conn.outside_data_received(pkt) {
+                        panic!("{err}")
+                    }
+                }
+
+                _ = ticks.tick() => {
+                    if phase == Phase::Connecting
+                        && conn.lock().unwrap().state() == State::Online
+                        && server_conn.lock().unwrap().state() == State::Online
+                    {
+                        phase = Phase::AwaitPing;
+                        server_conn.lock().unwrap().keepalive().unwrap();
+                    }
+                }
+            }
+        }
+
+        conn.lock().unwrap().disconnect().unwrap();
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async move { tokio::join!(server_task, client_task) },
+    )
+    .await
+    .expect("test never reached the replayed and corrupted packets");
+}
+
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
 /// fires once per state or estimate change (never for a no-op step), the
 /// getter agrees with the last event, and for every step that requests a
