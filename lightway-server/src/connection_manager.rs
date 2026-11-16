@@ -641,10 +641,10 @@ impl ConnectionManager {
         old: SessionId,
         new: SessionId,
     ) {
-        self.pending_session_id_rotations.lock().remove(&new);
         self.connections
             .lock()
             .update_session_id_for_connection(old, new);
+        self.pending_session_id_rotations.lock().remove(&new);
 
         metrics::udp_session_rotation_finalized();
     }
