@@ -2492,6 +2492,9 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     fn publish_expresslane_key(&self) {
+        if matches!(self.state, State::Disconnecting | State::Disconnected) {
+            return;
+        }
         if let Some(xp_config_cb) = &self.expresslane.cb {
             let self_key = self.expresslane.data.self_key();
             let peer_key = self.expresslane.data.peer_key();
