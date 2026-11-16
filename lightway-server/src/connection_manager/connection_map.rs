@@ -159,8 +159,29 @@ impl<T: Value> ConnectionMap<T> {
     }
 
     pub(crate) fn remove(&mut self, value: &T) {
-        self.by_socket_addr.remove(&value.socket_addr());
-        self.by_session_id.remove(&value.session_id());
+        let is_value = |v: &Arc<T>| std::ptr::eq(Arc::as_ptr(v), value);
+
+        // Read each key once: the session id can change under us.
+        let in_map = match self.by_socket_addr.entry(value.socket_addr()) {
+            hash_map::Entry::Occupied(e) if is_value(e.get()) => {
+                e.remove();
+                true
+            }
+            _ => false,
+        };
+
+        let removed = match self.by_session_id.entry(value.session_id()) {
+            hash_map::Entry::Occupied(e) if is_value(e.get()) => {
+                e.remove();
+                true
+            }
+            _ => false,
+        };
+        if !removed && in_map {
+            // Still in the map, so under an older session id: a rotation the
+            // connection has acknowledged, which the map only follows later.
+            self.by_session_id.retain(|_, v| !is_value(v));
+        }
     }
 }
 
@@ -381,6 +402,69 @@ mod tests {
         assert!(Arc::ptr_eq(
             &v,
             m.by_socket_addr.get(&SOCKET_ADDR_A).unwrap()
+        ));
+    }
+
+    #[test]
+    fn remove_finds_connection_filed_under_older_session_id() {
+        struct Rotating {
+            socket_addr: SocketAddr,
+            session_id: std::sync::Mutex<SessionId>,
+        }
+
+        impl Value for Rotating {
+            fn socket_addr(&self) -> SocketAddr {
+                self.socket_addr
+            }
+
+            fn session_id(&self) -> SessionId {
+                *self.session_id.lock().unwrap()
+            }
+        }
+
+        let mut m = ConnectionMap::<Rotating>::default();
+        let v = Arc::new(Rotating {
+            socket_addr: SOCKET_ADDR_A,
+            session_id: std::sync::Mutex::new(SESSION_ID_A),
+        });
+        m.insert(&v).unwrap();
+
+        // Acknowledged in core, then removed before the map follows.
+        *v.session_id.lock().unwrap() = SESSION_ID_B;
+        m.remove(&v);
+        m.update_session_id_for_connection(SESSION_ID_A, SESSION_ID_B);
+
+        assert!(m.by_socket_addr.is_empty());
+        assert!(
+            m.by_session_id.is_empty(),
+            "dead connection left in the map"
+        );
+    }
+
+    #[test]
+    fn remove_again_leaves_a_new_connection_at_the_same_addr() {
+        let mut m = ConnectionMap::<V>::default();
+        let va = Arc::new(V {
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_A,
+        });
+        let vb = Arc::new(V {
+            socket_addr: SOCKET_ADDR_A,
+            session_id: SESSION_ID_B,
+        });
+
+        m.insert(&va).unwrap();
+        m.remove(&va);
+        m.insert(&vb).unwrap();
+        m.remove(&va);
+
+        assert!(Arc::ptr_eq(
+            &vb,
+            m.by_socket_addr.get(&SOCKET_ADDR_A).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &vb,
+            m.by_session_id.get(&SESSION_ID_B).unwrap()
         ));
     }
 
