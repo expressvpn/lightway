@@ -1,6 +1,8 @@
+pub mod stream_plugin;
 pub mod tcp;
 pub mod udp;
 
+pub use stream_plugin::StreamPluginIo;
 pub use tcp::Tcp;
 pub use udp::Udp;
 
