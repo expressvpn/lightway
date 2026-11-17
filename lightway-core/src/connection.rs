@@ -2840,7 +2840,7 @@ impl<AppState: Send> Connection<AppState> {
         let encoder = match &mut self.inside_pkt_encoder {
             Some(encoder) => encoder,
             None => {
-                error!("Received EncodingResponse packet even without an encoder.");
+                warn!("Received EncodingResponse packet even without an encoder.");
                 return Err(ConnectionError::PacketCodecDoesNotExist);
             }
         };
