@@ -1980,7 +1980,11 @@ impl<AppState: Send> Connection<AppState> {
 
         if pong.id == wire::Ping::KEEPALIVE_ID {
             self.event(Event::KeepaliveReply);
-            self.check_expresslane_health(&pong.payload)?;
+            // The client checks; the server only reports its counters in
+            // its pongs and pings only to announce a session id rotation.
+            if matches!(self.mode, ConnectionMode::Client { .. }) {
+                self.check_expresslane_health(&pong.payload)?;
+            }
         }
 
         self.drive_pmtud(|pmtud, state| pmtud.pong_received(&pong, state))?;
