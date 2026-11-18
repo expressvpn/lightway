@@ -21,10 +21,15 @@ use tokio::net::UdpSocket;
 #[cfg(batch_receive)]
 mod batch_receive;
 
-// Winsock reports WSAENOBUFS (10055), not the CRT's ENOBUFS (119).
+// Winsock reports WSAENOBUFS (10055) and WSAEMSGSIZE (10040), not the
+// CRT's ENOBUFS (119) and EMSGSIZE (115).
 const ENOBUFS: i32 = cfg_select! {
     windows => { windows_sys::Win32::Networking::WinSock::WSAENOBUFS }
     _ => { libc::ENOBUFS }
+};
+const EMSGSIZE: i32 = cfg_select! {
+    windows => { windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE }
+    _ => { libc::EMSGSIZE }
 };
 
 pub struct Udp {
@@ -349,6 +354,13 @@ impl Udp {
             Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
                 self.note_swallowed_send(&err);
                 IOCallbackResult::Ok(len)
+            }
+            Err(err) if matches!(err.raw_os_error(), Some(EMSGSIZE)) => {
+                // Too big to send with DF set, which is expected of a PMTUD
+                // probe beyond the path MTU. Core tells a refused probe by
+                // this error, so pass it on unchanged, but don't warn.
+                tracing::debug!("Outside IO Send too big: {err:?}");
+                IOCallbackResult::Err(err)
             }
             Err(err) => {
                 tracing::warn!("Outside IO Send failed: {err:?}");
@@ -857,6 +869,10 @@ mod linux_tests {
 /// socket never sees them. They are transient from the tunnel's point of view
 /// (server restart, router mid-transition) and DTLS retransmission recovers
 /// once the peer is reachable again, so they must not tear the connection down.
+///
+/// An ICMP "fragmentation needed" or ICMPv6 Packet Too Big answering a DF
+/// probe surfaces the same way, as `EMSGSIZE`; PMTUD already counts the
+/// unanswered probe as lost.
 #[cfg(apple)]
 fn is_icmp_derived_err(err: &std::io::Error) -> bool {
     matches!(
@@ -864,7 +880,7 @@ fn is_icmp_derived_err(err: &std::io::Error) -> bool {
         std::io::ErrorKind::ConnectionRefused
             | std::io::ErrorKind::HostUnreachable
             | std::io::ErrorKind::NetworkUnreachable
-    )
+    ) || matches!(err.raw_os_error(), Some(EMSGSIZE))
 }
 
 #[cfg(all(test, apple))]
@@ -1061,6 +1077,28 @@ mod tests {
             // The recv side must map it to WouldBlock, never a fatal Err that
             // would tear the connection down.
             assert!(!matches!(udp.recv_buf(&mut buf), IOCallbackResult::Err(_)));
+        }
+    }
+
+    #[test]
+    fn emsgsize_is_icmp_derived() {
+        // A Packet Too Big answering a probe surfaces as EMSGSIZE, which
+        // std does not give an `ErrorKind` of its own.
+        let err = std::io::Error::from_raw_os_error(libc::EMSGSIZE);
+        assert!(is_icmp_derived_err(&err));
+    }
+
+    #[tokio::test]
+    async fn emsgsize_send_error_is_passed_on() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp = Udp::new(peer.local_addr().unwrap(), None).await.unwrap();
+
+        // Core needs it to tell a probe that is too big.
+        let err = std::io::Error::from_raw_os_error(libc::EMSGSIZE);
+        match udp.map_send_result(Err(err), 1400) {
+            IOCallbackResult::Err(e) => assert_eq!(e.raw_os_error(), Some(libc::EMSGSIZE)),
+            IOCallbackResult::Ok(n) => panic!("expected Err(EMSGSIZE), got Ok({n})"),
+            IOCallbackResult::WouldBlock => panic!("expected Err(EMSGSIZE), got WouldBlock"),
         }
     }
 }
