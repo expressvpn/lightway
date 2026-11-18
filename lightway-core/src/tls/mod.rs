@@ -18,10 +18,10 @@ cfg_select! {
     }
 }
 
-/// Get version string for the TLS library that we're using
+/// Get version string for the TLS library that we're using.
+///
+/// This is the backend's `build_info()` rendered as a single line, covering
+/// the crate versions, the underlying C library version and enabled features.
 pub fn get_version_string() -> String {
-    cfg_select! {
-        wolfssl => format!("WolfSSL v{}", get_wolfssl_version_string()),
-        boringssl => format!("BoringSSL - {}", boringssl::get_version_string()),
-    }
+    build_info().to_string()
 }
