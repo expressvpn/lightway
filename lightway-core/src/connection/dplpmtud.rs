@@ -251,6 +251,18 @@ impl<AppState> Dplpmtud<AppState> {
         self.state = State::Disabled;
     }
 
+    /// Signal that the path may have changed: drop the estimate and, if
+    /// lower layer connectivity is `online`, start again from the base
+    /// probe.
+    pub(crate) fn restart(&mut self, online: bool, state: &mut AppState) -> Action {
+        self.offline(state);
+        if online {
+            self.online(state)
+        } else {
+            Action::None
+        }
+    }
+
     // Current best estimate of plpmtu
     fn current_plpmtu(&self) -> Option<usize> {
         match self.state {
@@ -1789,6 +1801,30 @@ mod tests {
 
         pmtud.offline(&mut ());
         assert!(matches!(pmtud.state, State::Disabled));
+        assert!(pmtud.pending_probe.is_none());
+        timer.expect_idle();
+    }
+
+    #[test]
+    fn restart_while_online_starts_again_from_base() {
+        let timer = FakeTimer::new();
+        let (_, mut pmtud) = complete_search(&timer);
+
+        let action = pmtud.restart(true, &mut ());
+        assert!(matches!(pmtud.state, State::Base));
+        assert!(matches!(pmtud.pending_probe, Some(ref pending) if pending.size == 1250));
+        assert!(matches!(action, Action::SendProbe { size, .. } if size == 1250 - 1 - 4));
+        timer.expect_pending(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn restart_while_not_online_stays_disabled() {
+        let timer = FakeTimer::new();
+        let (_, mut pmtud) = complete_search(&timer);
+
+        let action = pmtud.restart(false, &mut ());
+        assert!(matches!(pmtud.state, State::Disabled));
+        assert!(matches!(action, Action::None));
         assert!(pmtud.pending_probe.is_none());
         timer.expect_idle();
     }
