@@ -235,6 +235,46 @@ impl SendBuffer {
     }
 }
 
+/// Why the socket refused a PMTUD probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeRefusal {
+    /// Larger than the local interface can send with DF set. Sending
+    /// that size again is pointless.
+    TooBig,
+    /// Any other send error. The probe is lost.
+    Other,
+}
+
+impl ProbeRefusal {
+    fn from_send_error(err: &std::io::Error) -> Self {
+        const TOO_BIG: Option<i32> = cfg_select! {
+            unix => { Some(libc::EMSGSIZE) }
+            // WSAEMSGSIZE
+            windows => { Some(10040) }
+            _ => { None }
+        };
+
+        if TOO_BIG.is_some() && err.raw_os_error() == TOO_BIG {
+            Self::TooBig
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// How [`TlsIOAdapter::udp_send`] treats datagrams around a PMTUD probe.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeSend {
+    /// No probe is being written.
+    #[default]
+    Idle,
+    /// A probe is being written with DF set. A send error means the
+    /// socket refused it: remember why, and report the datagram as
+    /// sent so that the TLS library discards the record instead of
+    /// sending it again once DF is clear.
+    Probing(Option<ProbeRefusal>),
+}
+
 /// Adapt requirements of [`crate::Connection`] to those of the TLS/DTLS I/O API.
 pub(crate) struct TlsIOAdapter {
     pub(crate) connection_type: ConnectionType,
@@ -266,6 +306,9 @@ pub(crate) struct TlsIOAdapter {
     /// Application provided object used to send data.
     pub(crate) io: OutsideIOSendCallbackArg,
 
+    /// PMTUD probe handling of the datagrams passing through `udp_send`.
+    pub(crate) probe_send: ProbeSend,
+
     pub(crate) session_id: wire::SessionId,
 
     /// Plugins to act while egressing outside packet
@@ -284,8 +327,10 @@ impl TlsIOAdapter {
         self.session_id = session_id;
     }
 
-    /// Force enable the IPv4 DF bit is set for all packets.
-    pub(crate) fn enable_pmtud_probe(&self) {
+    /// Force the IPv4 DF bit on for the PMTUD probe about to be written.
+    /// Until [`Self::end_pmtud_probe`] a send error counts as the socket
+    /// refusing the probe.
+    pub(crate) fn begin_pmtud_probe(&mut self) {
         match self.io.enable_pmtud_probe() {
             Ok(_) => {}
             Err(err) => {
@@ -293,10 +338,16 @@ impl TlsIOAdapter {
                 tracing::warn!(?err, "Failed to enable PMTUD probe");
             }
         }
+        self.probe_send = ProbeSend::Probing(None);
     }
 
-    /// Stop force enabling the IPv4 DF bit.
-    pub(crate) fn disable_pmtud_probe(&self) {
+    /// Stop forcing the IPv4 DF bit. Returns why the socket refused the
+    /// probe, if it did.
+    pub(crate) fn end_pmtud_probe(&mut self) -> Option<ProbeRefusal> {
+        let refusal = match std::mem::take(&mut self.probe_send) {
+            ProbeSend::Probing(refusal) => refusal,
+            ProbeSend::Idle => None,
+        };
         match self.io.disable_pmtud_probe() {
             Ok(_) => {}
             Err(err) => {
@@ -304,6 +355,7 @@ impl TlsIOAdapter {
                 tracing::warn!(?err, "Failed to disable PMTUD probe");
             }
         }
+        refusal
     }
 
     pub(crate) fn udp_send(
@@ -311,6 +363,24 @@ impl TlsIOAdapter {
         buf: &[u8],
         expresslane_data: bool,
     ) -> IOCallbackResult<usize> {
+        match self.probe_send {
+            ProbeSend::Idle => self.udp_send_datagram(buf, expresslane_data),
+            ProbeSend::Probing(refusal) => match self.udp_send_datagram(buf, expresslane_data) {
+                IOCallbackResult::Err(err) => {
+                    tracing::debug!(?err, len = buf.len(), "PMTUD probe refused");
+                    // Too big is the one which settles the probe's fate.
+                    if refusal != Some(ProbeRefusal::TooBig) {
+                        let refusal = ProbeRefusal::from_send_error(&err);
+                        self.probe_send = ProbeSend::Probing(Some(refusal));
+                    }
+                    IOCallbackResult::Ok(buf.len())
+                }
+                res => res,
+            },
+        }
+    }
+
+    fn udp_send_datagram(&mut self, buf: &[u8], expresslane_data: bool) -> IOCallbackResult<usize> {
         // GSO buffering: when a batch is open, coalesce the raw
         // post-encrypt, pre-`wire::Header` bytes; `udp_send_gso` will
         // later wrap each segment with `wire::Header` and flush via
@@ -758,6 +828,7 @@ mod tests {
             recv_buf: Default::default(),
             send_buf: SendBuffer::new(MAX_OUTSIDE_MTU),
             io,
+            probe_send: Default::default(),
             session_id: SessionId::from_const(*b"\xde\xad\xbe\xef\xde\xad\xbe\xef"),
             outside_plugins: outside_plugins.into(),
             #[cfg(target_os = "linux")]

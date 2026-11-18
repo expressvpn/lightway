@@ -491,6 +491,30 @@ impl<AppState> Dplpmtud<AppState> {
         }
     }
 
+    /// The pending probe is larger than the local interface can send: the
+    /// socket refused it and it never reached the wire. That size has
+    /// failed for good, so act as if its last retry had timed out rather
+    /// than sending it again.
+    pub(crate) fn probe_too_big(&mut self, state: &mut AppState) -> Action {
+        let Some(ref pending) = self.pending_probe else {
+            return Action::None;
+        };
+        tracing::debug!(id = ?pending.id, size = pending.size, state = ?self.state, "DPLPMTUD probe too big to send");
+        match self.state {
+            State::Disabled => Action::None,
+            // Not even the base fits.
+            State::Base => self.error(state),
+            // Leave the retry timer running, the interface may change.
+            State::Error => Action::None,
+            State::Searching => match self.step_size {
+                StepSize::Big => self.search_probe_start(state, StepSize::Small),
+                StepSize::Small => self.search_complete(state),
+            },
+            // The confirmed size no longer fits, start over from the base.
+            State::SearchComplete => self.base_probe_start(state),
+        }
+    }
+
     /// Called in response to receipt of a [`wire::Pong`] frame
     pub(crate) fn pong_received(&mut self, pong: &wire::Pong, state: &mut AppState) -> Action {
         // We never use id == 0, those are regular keepalive pings
@@ -1007,6 +1031,54 @@ mod tests {
     }
 
     #[test]
+    fn base_probe_too_big() {
+        let timer = FakeTimer::new();
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
+
+        // Nothing is pending before the first probe.
+        assert!(matches!(pmtud.probe_too_big(&mut ()), Action::None));
+        assert!(matches!(pmtud.state, State::Disabled));
+        timer.expect_idle();
+
+        // online, the 1st base probe cannot be sent: straight to error
+        // without retrying, which probes the base again
+        pmtud.online(&mut ());
+        let base_id = pmtud.pending_probe.as_ref().unwrap().id;
+        timer.reset();
+        let action = pmtud.probe_too_big(&mut ());
+        let expected_id = base_id + 1;
+        assert!(matches!(pmtud.state, State::Error));
+        assert!(pmtud.effective_pmtu().is_none());
+        assert_eq!(pmtud.probe_count, 1);
+        assert!(
+            matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
+        );
+        assert!(
+            matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
+        );
+        timer.expect_pending(Duration::from_secs(5));
+
+        // that one cannot be sent either: wait for the retry timer
+        let action = pmtud.probe_too_big(&mut ());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(pmtud.state, State::Error));
+        assert_eq!(pmtud.probe_count, 1);
+        assert!(
+            matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
+        );
+        timer.expect_pending(Duration::from_secs(5));
+
+        // the timer retries the base
+        let expected_id = base_id + 2;
+        let action = pmtud.tick(&mut ());
+        assert!(matches!(pmtud.state, State::Error));
+        assert!(
+            matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
+        );
+        timer.expect_pending(Duration::from_secs(5));
+    }
+
+    #[test]
     fn recover_from_error_state_on_probe_success() {
         let timer = FakeTimer::new();
         let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
@@ -1289,6 +1361,65 @@ mod tests {
         timer.expect_pending(Duration::from_secs(5));
     }
 
+    #[test]
+    fn search_probe_too_big() {
+        let timer = FakeTimer::new();
+        let (_, mut pmtud) = start_search(&timer);
+        // id 1 was sent and acked (the base probe), id 2 is in flight
+        let base_id = pmtud.next_probe_id - 1;
+        assert!(
+            matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: base_id, size: 1282 })
+        );
+
+        // The big step cannot be sent: no retries at that size, switch
+        // to small steps at once
+        timer.reset();
+        let action = pmtud.probe_too_big(&mut ());
+        let expected_id = base_id + 1;
+        assert!(matches!(pmtud.state, State::Searching));
+        assert!(matches!(pmtud.step_size, StepSize::Small));
+        assert_eq!(pmtud.plpmtu, 1250);
+        assert_eq!(pmtud.probe_count, 1);
+        assert!(
+            matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1258 })
+        );
+        assert!(
+            matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1258 - 1 - 4)
+        );
+        timer.expect_pending(Duration::from_secs(5));
+
+        // The small step is acked, the next is sent
+        let action = pmtud.pong_received(
+            &wire::Pong {
+                id: expected_id.as_u16(),
+                payload: Default::default(),
+            },
+            &mut (),
+        );
+        let expected_id = base_id + 2;
+        assert!(matches!(pmtud.state, State::Searching));
+        assert_eq!(pmtud.plpmtu, 1258);
+        assert!(
+            matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1266 - 1 - 4)
+        );
+
+        // A small step which cannot be sent completes the search on
+        // the last confirmed size
+        let action = pmtud.probe_too_big(&mut ());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(pmtud.state, State::SearchComplete));
+        assert_eq!(pmtud.plpmtu, 1258);
+        assert_eq!(pmtud.probe_count, 0);
+        assert!(pmtud.pending_probe.is_none());
+        timer.expect_pending(Duration::from_mins(10));
+
+        // Nothing is pending until the raise timer fires
+        let action = pmtud.probe_too_big(&mut ());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(pmtud.state, State::SearchComplete));
+        timer.expect_pending(Duration::from_mins(10));
+    }
+
     #[test_case(1250 => 1250; "min")]
     #[test_case(1282 => 1282; "middle (exact multiple of big step)")]
     #[test_case(1284 => 1282; "middle (multiple of neither big nor small step)")]
@@ -1536,6 +1667,27 @@ mod tests {
         let action = pmtud.tick(&mut ());
         assert!(matches!(action, Action::SendProbe{size, ..} if size == 1250 - 1 - 4));
         assert!(matches!(pmtud.state, State::Base));
+        assert_eq!(pmtud.probe_count, 1);
+        timer.expect_pending(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn confirm_probe_too_big() {
+        let timer = FakeTimer::new();
+        let (_, mut pmtud) = complete_search(&timer);
+
+        // PMTU_RAISE_TIMER fires, 1st CONFIRM is sent
+        let action = pmtud.tick(&mut ());
+        assert!(matches!(action, Action::SendProbe{size, ..} if size == pmtud.plpmtu - 1 - 4));
+        assert!(matches!(pmtud.state, State::SearchComplete));
+        assert_eq!(pmtud.probe_count, 1);
+
+        // It cannot be sent: no retries, back to `Base`
+        timer.reset();
+        let action = pmtud.probe_too_big(&mut ());
+        assert!(matches!(action, Action::SendProbe{size, ..} if size == 1250 - 1 - 4));
+        assert!(matches!(pmtud.state, State::Base));
+        assert!(pmtud.effective_pmtu().is_none());
         assert_eq!(pmtud.probe_count, 1);
         timer.expect_pending(Duration::from_secs(5));
     }
