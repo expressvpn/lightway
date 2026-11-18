@@ -185,8 +185,11 @@ impl UdpIo {
         // Set Omit to ignore ICMP FragNeeded PMTU updates. If fragmentation is needed
         // in the path, routers will take care of fragmenting, since we do not set DF
         // This is to avoid PMTU poisoning by attackers
+        //
+        // IPv4 option only: IPv6 routers never fragment, so IPv6 traffic keeps the
+        // default and follows ICMPv6 Packet Too Big.
         #[cfg(target_os = "linux")]
-        sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Omit)?;
+        sockopt::set_ipv4_mtu_discover(&sock, sockopt::IpPmtudisc::Omit)?;
 
         // Check for the socket's writable ready status, so that it can be used
         // successfully in `OutsideIOSendCallback` callback

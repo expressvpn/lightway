@@ -31,6 +31,11 @@ pub struct Udp {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: SocketAddr,
     default_ip_pmtudisc: sockopt::IpPmtudisc,
+    /// The IPv4 option's own default. On an IPv6 socket it covers
+    /// IPv4-mapped traffic and can differ from `default_ip_pmtudisc`,
+    /// which `set_ip_mtu_discover` writes to both options.
+    #[cfg(all(not(apple), unix))]
+    default_ipv4_pmtudisc: sockopt::IpPmtudisc,
     /// Whether connected-send mode was requested; see
     /// [`Udp::enable_connected_send`]. Set once during setup, before the socket
     /// is shared. Apple platforms only.
@@ -111,6 +116,9 @@ impl Udp {
 
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
             .context("Failed to get IP MTU Discovery sockopt")?;
+        #[cfg(all(not(apple), unix))]
+        let default_ipv4_pmtudisc = sockopt::get_ipv4_mtu_discover(&sock)
+            .context("Failed to get IPv4 MTU Discovery sockopt")?;
         // Check for the socket's writable ready status, so that it can be used
         // successfully in TLS's `OutsideIOSendCallback` callback
         sock.writable().await?;
@@ -119,6 +127,8 @@ impl Udp {
             sock: Arc::new(sock),
             peer_addr,
             default_ip_pmtudisc,
+            #[cfg(all(not(apple), unix))]
+            default_ipv4_pmtudisc,
             #[cfg(apple)]
             connect_requested: false,
             #[cfg(apple)]
@@ -727,7 +737,12 @@ impl OutsideIOSendCallback for Udp {
     }
 
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
-        sockopt::set_ip_mtu_discover(self.sock.as_ref(), self.default_ip_pmtudisc)
+        sockopt::set_ip_mtu_discover(self.sock.as_ref(), self.default_ip_pmtudisc)?;
+        // On an IPv6 socket that also wrote the IPv6 default to the IPv4
+        // option, so put the IPv4 default back.
+        #[cfg(all(not(apple), unix))]
+        sockopt::set_ipv4_mtu_discover(self.sock.as_ref(), self.default_ipv4_pmtudisc)?;
+        Ok(())
     }
 }
 
@@ -742,15 +757,15 @@ mod linux_tests {
     use super::*;
     use std::io::Error;
 
-    async fn make_udp() -> Udp {
-        // No server is needed: these tests exercise the latch bookkeeping,
+    async fn make_udp(sock: Option<UdpSocket>) -> Udp {
+        // No server is needed: these tests exercise the socket bookkeeping,
         // not an actual send. `peer_addr` just has to be a valid address.
         let peer_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
         // `new` takes an fwmark arg on non-mobile Linux only.
         #[cfg(not(feature = "mobile"))]
-        let udp = Udp::new(peer_addr, None, 0).await.unwrap();
+        let udp = Udp::new(peer_addr, sock, 0).await.unwrap();
         #[cfg(feature = "mobile")]
-        let udp = Udp::new(peer_addr, None).await.unwrap();
+        let udp = Udp::new(peer_addr, sock).await.unwrap();
         udp
     }
 
@@ -783,7 +798,7 @@ mod linux_tests {
 
     #[tokio::test]
     async fn latches_gso_off_on_capability_error() {
-        let udp = make_udp().await;
+        let udp = make_udp(None).await;
         // Enabled by default.
         assert!(OutsideIOSendCallback::gso_enabled(&udp));
 
@@ -798,9 +813,42 @@ mod linux_tests {
 
     #[tokio::test]
     async fn transient_error_keeps_gso_enabled() {
-        let udp = make_udp().await;
+        let udp = make_udp(None).await;
         udp.note_gso_send_error(&Error::from_raw_os_error(libc::ENOBUFS));
         assert!(OutsideIOSendCallback::gso_enabled(&udp));
+    }
+
+    #[tokio::test]
+    async fn pmtud_probe_restores_each_mtu_discover_option() {
+        // A dual-stack IPv6 socket whose IPv4 option (for IPv4-mapped
+        // traffic) differs from its IPv6 option.
+        let sock = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        sock.set_only_v6(false).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        sock.bind(&"[::]:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        let sock = UdpSocket::from_std(sock.into()).unwrap();
+        sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Want).unwrap();
+        sockopt::set_ipv4_mtu_discover(&sock, sockopt::IpPmtudisc::Dont).unwrap();
+        let udp = make_udp(Some(sock)).await;
+
+        // On an IPv6 socket these read IP_MTU_DISCOVER and
+        // IPV6_MTU_DISCOVER respectively.
+        let ipv4 = || sockopt::get_ipv4_mtu_discover(udp.sock.as_ref()).unwrap();
+        let ipv6 = || sockopt::get_ip_mtu_discover(udp.sock.as_ref()).unwrap();
+
+        udp.enable_pmtud_probe().unwrap();
+        assert!(matches!(ipv4(), sockopt::IpPmtudisc::Probe));
+        assert!(matches!(ipv6(), sockopt::IpPmtudisc::Probe));
+
+        udp.disable_pmtud_probe().unwrap();
+        assert!(matches!(ipv4(), sockopt::IpPmtudisc::Dont));
+        assert!(matches!(ipv6(), sockopt::IpPmtudisc::Want));
     }
 }
 
