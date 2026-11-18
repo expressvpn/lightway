@@ -246,7 +246,6 @@ impl<AppState> Dplpmtud<AppState> {
     }
 
     /// Signal that lower layer connectivity has been lost and return to disabled state.
-    #[allow(dead_code)]
     pub(crate) fn offline(&mut self, state: &mut AppState) {
         self.end_probe(state);
         self.state = State::Disabled;
@@ -488,6 +487,15 @@ impl<AppState> Dplpmtud<AppState> {
                 tracing::debug!(id = ?self.pending_probe, "DPLPMTUD confirm probe timed out");
                 self.search_complete_probe_timeout(state)
             }
+        }
+    }
+
+    /// The pending probe never left this host (the socket could not take
+    /// it), so it says nothing about the path: don't count it towards
+    /// MAX_PROBES. Its timer still runs and sends it again.
+    pub(crate) fn probe_not_sent(&mut self) {
+        if self.pending_probe.is_some() {
+            self.probe_count = self.probe_count.saturating_sub(1);
         }
     }
 

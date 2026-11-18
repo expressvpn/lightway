@@ -274,6 +274,9 @@ pub(crate) enum ProbeSend {
     /// sent so that the TLS library discards the record instead of
     /// sending it again once DF is clear.
     Probing(Option<ProbeRefusal>),
+    /// A probe which missed its DF window is being written. Report it
+    /// as sent without sending it.
+    Discarding,
 }
 
 /// Adapt requirements of [`crate::Connection`] to those of the TLS/DTLS I/O API.
@@ -331,32 +334,34 @@ impl TlsIOAdapter {
     /// Force the IPv4 DF bit on for the PMTUD probe about to be written.
     /// Until [`Self::end_pmtud_probe`] a send error counts as the socket
     /// refusing the probe.
-    pub(crate) fn begin_pmtud_probe(&mut self) {
-        match self.io.enable_pmtud_probe() {
-            Ok(_) => {}
-            Err(err) => {
-                // TODO: metric
-                tracing::warn!(?err, "Failed to enable PMTUD probe");
-            }
+    pub(crate) fn begin_pmtud_probe(&mut self) -> std::io::Result<()> {
+        if let Err(err) = self.io.enable_pmtud_probe() {
+            // It may have been partly applied: don't leave DF on for
+            // ordinary traffic.
+            let _ = self.io.disable_pmtud_probe();
+            return Err(err);
         }
         self.probe_send = ProbeSend::Probing(None);
+        Ok(())
     }
 
     /// Stop forcing the IPv4 DF bit. Returns why the socket refused the
-    /// probe, if it did.
-    pub(crate) fn end_pmtud_probe(&mut self) -> Option<ProbeRefusal> {
+    /// probe, if it did, and whether DF could be cleared.
+    pub(crate) fn end_pmtud_probe(&mut self) -> (Option<ProbeRefusal>, std::io::Result<()>) {
         let refusal = match std::mem::take(&mut self.probe_send) {
             ProbeSend::Probing(refusal) => refusal,
-            ProbeSend::Idle => None,
+            ProbeSend::Idle | ProbeSend::Discarding => None,
         };
-        match self.io.disable_pmtud_probe() {
-            Ok(_) => {}
-            Err(err) => {
-                // TODO: metric
-                tracing::warn!(?err, "Failed to disable PMTUD probe");
-            }
-        }
-        refusal
+        (refusal, self.io.disable_pmtud_probe())
+    }
+
+    /// While set, datagrams are reported as sent without being sent.
+    pub(crate) fn discard_sends(&mut self, discard: bool) {
+        self.probe_send = if discard {
+            ProbeSend::Discarding
+        } else {
+            ProbeSend::Idle
+        };
     }
 
     pub(crate) fn udp_send(
@@ -378,6 +383,7 @@ impl TlsIOAdapter {
                 }
                 res => res,
             },
+            ProbeSend::Discarding => IOCallbackResult::Ok(buf.len()),
         }
     }
 
@@ -845,6 +851,49 @@ mod tests {
         let plugins = PluginList::from(plugins);
         let mut a = make_adapter(ConnectionType::Datagram, FakeOutsideIOSend::new(), plugins);
         a.udp_send(b"abc", false)
+    }
+
+    // While probing, a send error is reported as sent and remembered.
+    #[cfg(unix)]
+    #[test_case(vec![IOCallbackResult::Err(Error::from_raw_os_error(libc::EMSGSIZE))] => (true, Some(ProbeRefusal::TooBig)); "too big")]
+    #[cfg_attr(unix, test_case(vec![IOCallbackResult::Err(Error::from_raw_os_error(libc::EHOSTUNREACH))] => (true, Some(ProbeRefusal::Other)); "other error"))]
+    #[cfg_attr(unix, test_case(vec![IOCallbackResult::Err(Error::from_raw_os_error(libc::EMSGSIZE)), IOCallbackResult::Err(Error::from_raw_os_error(libc::EHOSTUNREACH))] => (true, Some(ProbeRefusal::TooBig)); "too big sticks"))]
+    #[cfg_attr(unix, test_case(vec![IOCallbackResult::WouldBlock] => (false, None); "would block passes through"))]
+    #[cfg_attr(unix, test_case(vec![] => (true, None); "sent"))]
+    fn udp_send_while_probing(fakes: Vec<IOCallbackResult<usize>>) -> (bool, Option<ProbeRefusal>) {
+        let sends = fakes.len().max(1);
+        let io = FakeOutsideIOSend::with_fakes(fakes.into());
+        let mut adapter = make_adapter(ConnectionType::Datagram, io, Default::default());
+        adapter.probe_send = ProbeSend::Probing(None);
+        let mut reported_sent = true;
+        for _ in 0..sends {
+            reported_sent &= matches!(
+                adapter.udp_send(b"abcdefghi", false),
+                IOCallbackResult::Ok(9)
+            );
+        }
+        match adapter.probe_send {
+            ProbeSend::Probing(refusal) => (reported_sent, refusal),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn udp_send_while_discarding() {
+        let io = FakeOutsideIOSend::with_fakes(
+            vec![IOCallbackResult::Err(Error::other("sent after discarding"))].into(),
+        );
+        let mut adapter = make_adapter(ConnectionType::Datagram, io, Default::default());
+        adapter.discard_sends(true);
+        assert!(matches!(
+            adapter.udp_send(b"abc", false),
+            IOCallbackResult::Ok(3)
+        ));
+        adapter.discard_sends(false);
+        assert!(matches!(
+            adapter.udp_send(b"abc", false),
+            IOCallbackResult::Err(_)
+        ));
     }
 
     // Reminder: `udp_send` adds a 16 byte [`wire::Header`].
