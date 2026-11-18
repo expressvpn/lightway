@@ -8,6 +8,8 @@
   cmake,
   git,
   perl,
+  pkg-config,
+  aws-lc,
   buildPackages,
   packages ? [ "lightway-client" ],
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
@@ -79,11 +81,14 @@ rustPlatform.buildRustPackage {
     cmake
     git
     perl
+    pkg-config
   ]
   ++ lib.optionals (!isCross) [
     # For native builds, use bindgenHook normally
     rustPlatform.bindgenHook
   ];
+
+  buildInputs = [ aws-lc ];
 
   # For cross-compilation, manually configure bindgen
   # Use build platform's libclang but target platform's headers
