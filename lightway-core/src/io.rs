@@ -52,11 +52,20 @@ pub trait OutsideIOSendCallback {
     }
 
     /// Force enable the IPv4 DF bit is set for all packets (UDP only).
+    ///
+    /// Called before each PMTUD probe. An error, as from this default,
+    /// disables PMTUD for the connection: a probe that may be fragmented
+    /// proves nothing about the path. While it is in effect, `send` must
+    /// return a datagram the interface refuses for its size as the OS
+    /// error (`EMSGSIZE`, `WSAEMSGSIZE`) unchanged.
     fn enable_pmtud_probe(&self) -> std::io::Result<()> {
         Err(std::io::Error::other("pmtud probe not supported"))
     }
 
     /// Stop force enabling the IPv4 DF bit (UDP only).
+    ///
+    /// Called after each PMTUD probe. On error PMTUD carries on and the
+    /// next probe tries again.
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
         Err(std::io::Error::other("pmtud probe not supported"))
     }
