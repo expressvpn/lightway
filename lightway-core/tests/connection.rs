@@ -1808,11 +1808,12 @@ async fn pmtud_reports_status_changes() {
         "discovery starts once Online: {log:?}"
     );
 
-    // One event per change, none for a no-op step: base 1250, big steps of
-    // 32 up to max_dtls_mtu(MAX_OUTSIDE_MTU) = 1419, at which point the
-    // search converges without an intermediate Searching(1419).
+    // One event per change, none for a no-op step: base 1250 (unconfirmed
+    // in Base; confirming it changes only the state), big steps of 32 up to
+    // max_dtls_mtu(MAX_OUTSIDE_MTU) = 1419, at which point the search
+    // converges without an intermediate Searching(1419).
     let expected = [
-        (PmtudState::Base, None),
+        (PmtudState::Base, Some(1250)),
         (PmtudState::Searching, Some(1250)),
         (PmtudState::Searching, Some(1282)),
         (PmtudState::Searching, Some(1314)),
@@ -2252,7 +2253,7 @@ async fn pmtud_probe_refused_with_emsgsize_is_not_confirmed(writes_after_refusal
         .map(|s| (s.state, s.plpmtu))
         .collect();
     let expected = [
-        (PmtudState::Base, None),
+        (PmtudState::Base, Some(1250)),
         (PmtudState::Searching, Some(1250)),
         (PmtudState::Searching, Some(1282)),
         (PmtudState::Searching, Some(1314)),
@@ -2302,7 +2303,7 @@ async fn pmtud_stops_when_probe_mode_cannot_be_enabled() {
         .collect();
     assert_eq!(
         observed,
-        [(PmtudState::Base, None), (PmtudState::Disabled, None)]
+        [(PmtudState::Base, Some(1250)), (PmtudState::Disabled, None)]
     );
 
     // No probe left. The handshake's first flight is larger than any
