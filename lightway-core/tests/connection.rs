@@ -2489,3 +2489,272 @@ async fn pmtud_probe_not_sent_is_not_counted() {
     assert!(t.link.count(PmtudLinkOutcome::Blocked) >= 5);
     assert_eq!(t.status(), converged);
 }
+
+/// A change of outside path restarts PMTUD: the estimate learned on the old
+/// path is dropped, a fresh base probe goes out at once and the search runs
+/// to completion again. `set_outside_io` does the same, probing through the
+/// new outside I/O.
+#[tokio::test]
+async fn pmtud_restarts_when_outside_path_changes() {
+    /// PMTUD events and outside sends (tagged with the socket that carried
+    /// them) in the order the connection produced them.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Entry {
+        Pmtud(PmtudStatus),
+        Send { sock: u8, len: usize },
+    }
+    type Log = Arc<Mutex<Vec<Entry>>>;
+
+    struct RecordingSock {
+        inner: Arc<TestDatagramSock>,
+        id: u8,
+        log: Log,
+    }
+
+    impl OutsideIOSendCallback for RecordingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            let entry = Entry::Send {
+                sock: self.id,
+                len: buf.len(),
+            };
+            self.log.lock().unwrap().push(entry);
+            self.inner.send(buf)
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            self.inner.send_gso(bufs, gso_size)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            self.inner.peer_addr()
+        }
+
+        // Unix datagram sockets have no DF bit; accept the probe bracket.
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingEvents {
+        inner: EventStreamCallback,
+        log: Log,
+    }
+
+    impl EventCallback for RecordingEvents {
+        fn event(&mut self, event: Event) {
+            if let Event::PmtudStateChanged(status) = &event {
+                self.log.lock().unwrap().push(Entry::Pmtud(*status));
+            }
+            self.inner.event(event);
+        }
+    }
+
+    // Take the shared test PKI before the timeout window (RSA keygen is very
+    // slow on QEMU, and only happens on first use).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let pqc = PQCrypto {
+        server_pqc: false,
+        keyshare: None,
+    };
+
+    // The server answers every probe Ping with a Pong.
+    let (cert, key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc,
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    ));
+
+    let log: Log = Default::default();
+    let recording_sock = |id| -> OutsideIOSendCallbackArg {
+        Arc::new(RecordingSock {
+            inner: client_sock.clone(),
+            id,
+            log: log.clone(),
+        })
+    };
+    let ca_cert = pki.root_ca();
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (event_cb, mut event_stream) = EventStreamCallback::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let (pmtud_timer, pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+    let state = ConnectionState { ticker };
+
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        ca_cert,
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(recording_sock(0), MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_event_cb(Box::new(RecordingEvents {
+        inner: event_cb,
+        log: log.clone(),
+    }))
+    .with_pmtud_timer(pmtud_timer)
+    .connect(state)
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&client), &mut join_set);
+
+    // Drain events so the stream never backpressures the connection.
+    tokio::spawn(async move { while event_stream.next().await.is_some() {} });
+
+    // Pump the client until the search converges. Nothing is lost on the
+    // socket pair, so no probe timer ever fires and every probe is confirmed.
+    let search_complete = || async {
+        loop {
+            client_sock
+                .readable()
+                .await
+                .expect("client socket readable");
+            let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+            match client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+            let mut c = client.lock().unwrap();
+            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            c.outside_data_received(pkt).expect("outside data received");
+            if c.pmtud_status()
+                .is_some_and(|s| s.state == PmtudState::SearchComplete)
+            {
+                return;
+            }
+        }
+    };
+
+    // The PMTUD states reported from log entry `from` onwards.
+    let states_since = |from: usize| -> Vec<PmtudState> {
+        let log = log.lock().unwrap();
+        log[from..]
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Pmtud(s) => Some(s.state),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let run = async {
+        // Before the connection is online a path change starts nothing.
+        client.lock().unwrap().pmtud_path_changed().unwrap();
+        assert!(states_since(0).is_empty());
+        assert_eq!(
+            client.lock().unwrap().pmtud_status().map(|s| s.state),
+            Some(PmtudState::Disabled)
+        );
+
+        search_complete().await;
+
+        // What a search from scratch looks like on this path.
+        let first_search = states_since(0);
+        assert_eq!(first_search.first(), Some(&PmtudState::Base));
+        assert_eq!(first_search.last(), Some(&PmtudState::SearchComplete));
+        let converged = client.lock().unwrap().pmtud_status();
+        let base_probe_len = {
+            let log = log.lock().unwrap();
+            let base = log
+                .iter()
+                .position(|e| matches!(e, Entry::Pmtud(s) if s.state == PmtudState::Base))
+                .expect("Base was reported");
+            match log[base + 1] {
+                Entry::Send { len, .. } => len,
+                other => panic!("expected the base probe, found {other:?}"),
+            }
+        };
+        // A datagram carrying the 1250 byte base PLPMTU.
+        assert!(
+            (1250..1300).contains(&base_probe_len),
+            "base probe was {base_probe_len} bytes"
+        );
+
+        // Same outside I/O, new path: back to Base with a fresh base probe.
+        let mark = log.lock().unwrap().len();
+        client.lock().unwrap().pmtud_path_changed().unwrap();
+        {
+            let log = log.lock().unwrap();
+            assert!(
+                matches!(
+                    log[mark..],
+                    [Entry::Pmtud(s), Entry::Send { sock: 0, len }]
+                        if s.state == PmtudState::Base && len == base_probe_len
+                ),
+                "after path change: {:?}",
+                &log[mark..]
+            );
+        }
+        assert_eq!(
+            client.lock().unwrap().pmtud_status().map(|s| s.state),
+            Some(PmtudState::Base)
+        );
+
+        search_complete().await;
+        assert_eq!(states_since(mark), first_search);
+        assert_eq!(client.lock().unwrap().pmtud_status(), converged);
+
+        // New outside I/O: the same restart, probing through the new one.
+        let mark = log.lock().unwrap().len();
+        client.lock().unwrap().set_outside_io(recording_sock(1));
+        {
+            let log = log.lock().unwrap();
+            assert!(
+                matches!(
+                    log[mark..],
+                    [Entry::Pmtud(s), Entry::Send { sock: 1, len }]
+                        if s.state == PmtudState::Base && len == base_probe_len
+                ),
+                "after outside I/O change: {:?}",
+                &log[mark..]
+            );
+        }
+
+        search_complete().await;
+        assert_eq!(states_since(mark), first_search);
+        assert_eq!(client.lock().unwrap().pmtud_status(), converged);
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                _ = run => {}
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
+}
