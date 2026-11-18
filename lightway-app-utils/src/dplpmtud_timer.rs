@@ -1,6 +1,9 @@
 //! Provide `lightway_core::DplpmtudTimer` using Tokio
 use std::{
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -10,8 +13,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Implements `lightway_core::DplpmtudTimer` using Tokio.
 pub struct DplpmtudTimer {
-    tick: mpsc::UnboundedSender<()>,
+    tick: mpsc::UnboundedSender<u64>,
     running: Mutex<Option<CancellationToken>>,
+    /// Bumped by every `start()` and `stop()`. Each tick carries the
+    /// generation which armed it, so that a tick still queued when the
+    /// timer is restarted or stopped can be dropped.
+    generation: Arc<AtomicU64>,
 }
 
 impl DplpmtudTimer {
@@ -21,57 +28,77 @@ impl DplpmtudTimer {
     /// with a weak reference to it.
     pub fn new() -> (Arc<Self>, DplpmtudTimerTask) {
         let (send, recv) = mpsc::unbounded_channel();
+        let generation = Arc::new(AtomicU64::new(0));
 
         (
             Arc::new(Self {
                 tick: send,
                 running: Mutex::new(None),
+                generation: generation.clone(),
             }),
-            DplpmtudTimerTask(recv),
+            DplpmtudTimerTask {
+                ticks: recv,
+                generation,
+            },
         )
+    }
+
+    /// Cancel any running timer, replacing it with `token`, and return
+    /// the new generation.
+    fn replace_running(&self, token: Option<CancellationToken>) -> u64 {
+        let mut running = self.running.lock().unwrap();
+        if let Some(running) = std::mem::replace(&mut *running, token) {
+            running.cancel();
+        }
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
 impl<AppState> lightway_core::DplpmtudTimer<AppState> for DplpmtudTimer {
     fn start(&self, d: Duration, _state: &mut AppState) {
         let token = CancellationToken::new();
-        if let Some(running) = self.running.lock().unwrap().replace(token.clone()) {
-            running.cancel();
-        }
+        let generation = self.replace_running(Some(token.clone()));
 
         let sender = self.tick.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {},
                 _ = tokio::time::sleep(d) => {
-                    let _ = sender.send(());
+                    let _ = sender.send(generation);
                 }
             }
         });
     }
 
     fn stop(&self, _state: &mut AppState) {
-        if let Some(running) = self.running.lock().unwrap().take() {
-            running.cancel()
-        }
+        self.replace_running(None);
     }
 }
 
 /// Get a suitable `lightway_core::Connection` on which to call
 /// `pmtud_tick`.
 pub trait DplpmtudTickable: Send + Sync {
-    /// Kick.
-    fn pmtud_tick(&self) -> ConnectionResult<()>;
+    /// Kick, if `current()` still holds once the connection is locked.
+    fn pmtud_tick(&self, current: impl FnOnce() -> bool) -> ConnectionResult<()>;
 }
 
 impl<AppState: Send> DplpmtudTickable for Mutex<Connection<AppState>> {
-    fn pmtud_tick(&self) -> ConnectionResult<()> {
-        self.lock().unwrap().pmtud_tick()
+    fn pmtud_tick(&self, current: impl FnOnce() -> bool) -> ConnectionResult<()> {
+        let mut conn = self.lock().unwrap();
+        // The timer is started and stopped under this lock, so no
+        // restart can slip in between the check and the tick.
+        if !current() {
+            return Ok(());
+        }
+        conn.pmtud_tick()
     }
 }
 
 /// Task which receives tick requests from channel and calls pmtud_tick.
-pub struct DplpmtudTimerTask(mpsc::UnboundedReceiver<()>);
+pub struct DplpmtudTimerTask {
+    ticks: mpsc::UnboundedReceiver<u64>,
+    generation: Arc<AtomicU64>,
+}
 
 impl DplpmtudTimerTask {
     /// Spawn the handler task
@@ -80,14 +107,20 @@ impl DplpmtudTimerTask {
         weak: Weak<T>,
         join_set: &mut JoinSet<()>,
     ) -> tokio::task::AbortHandle {
-        let mut ticks = self.0;
+        let Self {
+            mut ticks,
+            generation,
+        } = self;
         join_set.spawn(async move {
-            while let Some(()) = ticks.recv().await {
+            while let Some(tick) = ticks.recv().await {
                 let Some(tickable) = weak.upgrade() else {
                     return;
                 };
 
-                let _ = tickable.pmtud_tick();
+                // Drop the tick if the timer was restarted or stopped
+                // after it was queued, including while waiting for the
+                // connection lock.
+                let _ = tickable.pmtud_tick(|| tick == generation.load(Ordering::Relaxed));
             }
         })
     }
@@ -112,7 +145,7 @@ mod tests {
         struct Dummy(Mutex<Option<oneshot::Sender<()>>>);
 
         impl DplpmtudTickable for Dummy {
-            fn pmtud_tick(&self) -> ConnectionResult<()> {
+            fn pmtud_tick(&self, _current: impl FnOnce() -> bool) -> ConnectionResult<()> {
                 self.0.lock().unwrap().take().unwrap().send(()).unwrap();
                 Ok(())
             }
@@ -142,7 +175,7 @@ mod tests {
         struct Dummy(Mutex<Option<oneshot::Sender<()>>>);
 
         impl DplpmtudTickable for Dummy {
-            fn pmtud_tick(&self) -> ConnectionResult<()> {
+            fn pmtud_tick(&self, _current: impl FnOnce() -> bool) -> ConnectionResult<()> {
                 self.0.lock().unwrap().take().unwrap().send(()).unwrap();
                 Ok(())
             }
@@ -177,7 +210,7 @@ mod tests {
         struct Dummy;
 
         impl DplpmtudTickable for Dummy {
-            fn pmtud_tick(&self) -> ConnectionResult<()> {
+            fn pmtud_tick(&self, _current: impl FnOnce() -> bool) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -200,6 +233,120 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
+    /// Start a zero length timer and wait until its tick is queued,
+    /// before anything is draining the queue.
+    async fn queue_tick(timer: &DplpmtudTimer, timer_task: &DplpmtudTimerTask) {
+        timer.start(Duration::ZERO, &mut ());
+        while timer_task.ticks.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Release `timer`, then run `timer_task` until it has handled every
+    /// queued tick. Returns the number of ticks delivered.
+    async fn deliver_ticks(timer: Arc<DplpmtudTimer>, timer_task: DplpmtudTimerTask) -> usize {
+        use std::sync::atomic::AtomicUsize;
+
+        struct Counter(AtomicUsize);
+
+        impl DplpmtudTickable for Counter {
+            fn pmtud_tick(&self, current: impl FnOnce() -> bool) -> ConnectionResult<()> {
+                if current() {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+        }
+
+        let conn = Arc::new(Counter(AtomicUsize::new(0)));
+
+        let mut join_set = JoinSet::new();
+        timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
+
+        // The task exits once the timer and all its sleeps have gone.
+        drop(timer);
+        while (join_set.join_next().await).is_some() {}
+
+        conn.0.load(Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn queued_tick_dropped_when_new_timer_started() {
+        let (timer, timer_task) = DplpmtudTimer::new();
+
+        queue_tick(&timer, &timer_task).await;
+
+        // Replaces the timer whose tick is already queued
+        timer.start(Duration::ZERO, &mut ());
+
+        // Only the new timer ticks
+        assert_eq!(deliver_ticks(timer, timer_task).await, 1);
+    }
+
+    #[tokio::test]
+    async fn queued_tick_dropped_when_timer_stopped() {
+        let (timer, timer_task) = DplpmtudTimer::new();
+
+        queue_tick(&timer, &timer_task).await;
+
+        // Stops the timer whose tick is already queued
+        timer.stop(&mut ());
+
+        assert_eq!(deliver_ticks(timer, timer_task).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_dropped_when_new_timer_started_while_waiting_for_lock() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        /// Stands in for `Mutex<Connection>`.
+        struct Conn {
+            lock: Mutex<()>,
+            waiting: AtomicBool,
+            ticks: AtomicUsize,
+        }
+
+        impl DplpmtudTickable for Conn {
+            fn pmtud_tick(&self, current: impl FnOnce() -> bool) -> ConnectionResult<()> {
+                self.waiting.store(true, Ordering::Relaxed);
+                let _conn = self.lock.lock().unwrap();
+                if current() {
+                    self.ticks.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+        }
+
+        let (timer, timer_task) = DplpmtudTimer::new();
+        let conn = Arc::new(Conn {
+            lock: Mutex::new(()),
+            waiting: AtomicBool::new(false),
+            ticks: AtomicUsize::new(0),
+        });
+
+        let mut join_set = JoinSet::new();
+        timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
+
+        // The timer expires while the connection is locked, so its tick
+        // waits for the lock...
+        let guard = conn.lock.lock().unwrap();
+        timer.start(Duration::ZERO, &mut ());
+        let start = std::time::Instant::now();
+        while !conn.waiting.load(Ordering::Relaxed) {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+
+        // ...and the lock holder replaces the timer.
+        timer.start(Duration::ZERO, &mut ());
+        drop(guard);
+
+        // Only the new timer ticks
+        drop(timer);
+        while (join_set.join_next().await).is_some() {}
+        assert_eq!(conn.ticks.load(Ordering::Relaxed), 1);
+    }
+
     #[tokio::test]
     async fn task_exits_when_ticker_released() {
         use std::sync::Arc;
@@ -209,7 +356,7 @@ mod tests {
         struct Dummy;
 
         impl DplpmtudTickable for Dummy {
-            fn pmtud_tick(&self) -> ConnectionResult<()> {
+            fn pmtud_tick(&self, _current: impl FnOnce() -> bool) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
@@ -234,7 +381,7 @@ mod tests {
         struct Dummy;
 
         impl DplpmtudTickable for Dummy {
-            fn pmtud_tick(&self) -> ConnectionResult<()> {
+            fn pmtud_tick(&self, _current: impl FnOnce() -> bool) -> ConnectionResult<()> {
                 panic!("Not expecting to tick");
             }
         }
