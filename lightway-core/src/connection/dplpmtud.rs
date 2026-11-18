@@ -223,6 +223,10 @@ pub(crate) struct Dplpmtud<AppState> {
     step_size: StepSize,
 
     pending_probe: Option<PendingProbe>,
+
+    /// There is no usable path ([`Self::path_lost`]) and no path change
+    /// has been reported since, so discovery does not start.
+    path_lost: bool,
 }
 
 impl<AppState> Dplpmtud<AppState> {
@@ -237,11 +241,18 @@ impl<AppState> Dplpmtud<AppState> {
             next_probe_id: ProbeId::new(),
             step_size: StepSize::Big,
             pending_probe: None,
+            path_lost: false,
         }
     }
 
     /// Signal that lower layer connectivity has been established and begin PMTUD.
+    ///
+    /// Does nothing while the path is lost ([`Self::path_lost`]).
     pub(crate) fn online(&mut self, state: &mut AppState) -> Action {
+        if self.path_lost {
+            tracing::debug!("Online, but there is no usable path: not probing");
+            return Action::None;
+        }
         match self.state {
             State::Disabled => {
                 tracing::debug!("Online, sending initial DPLPMTUD base probe");
@@ -259,7 +270,7 @@ impl<AppState> Dplpmtud<AppState> {
 
     /// Signal that the path may have changed: drop the estimate and, if
     /// lower layer connectivity is `online`, start again from the base
-    /// probe.
+    /// probe. Does not restart while the path is lost.
     pub(crate) fn restart(&mut self, online: bool, state: &mut AppState) -> Action {
         self.offline(state);
         if online {
@@ -267,6 +278,21 @@ impl<AppState> Dplpmtud<AppState> {
         } else {
             Action::None
         }
+    }
+
+    /// Signal that there is a usable path again, which may differ from
+    /// the old one: clear [`Self::path_lost`] and restart as in
+    /// [`Self::restart`].
+    pub(crate) fn path_changed(&mut self, online: bool, state: &mut AppState) -> Action {
+        self.path_lost = false;
+        self.restart(online, state)
+    }
+
+    /// Signal that there is no usable path: drop the estimate and do not
+    /// probe until [`Self::path_changed`].
+    pub(crate) fn path_lost(&mut self, state: &mut AppState) {
+        self.path_lost = true;
+        self.offline(state);
     }
 
     // Current best estimate of plpmtu
@@ -1916,5 +1942,45 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(pmtud.pending_probe.is_none());
         timer.expect_idle();
+    }
+
+    #[test]
+    fn path_lost_stops_probing_until_path_changed() {
+        let timer = FakeTimer::new();
+        let (_, mut pmtud) = complete_search(&timer);
+
+        pmtud.path_lost(&mut ());
+        assert!(matches!(pmtud.state, State::Disabled));
+        assert!(pmtud.pending_probe.is_none());
+        timer.expect_idle();
+
+        // Neither coming online nor a new outside IO starts discovery
+        assert!(matches!(pmtud.online(&mut ()), Action::None));
+        assert!(matches!(pmtud.restart(true, &mut ()), Action::None));
+        assert!(matches!(pmtud.state, State::Disabled));
+        timer.expect_idle();
+
+        // A path change does
+        let action = pmtud.path_changed(true, &mut ());
+        assert!(matches!(pmtud.state, State::Base));
+        assert!(matches!(action, Action::SendProbe { size, .. } if size == 1250 - 1 - 4));
+        timer.expect_pending(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn path_changed_while_not_online_waits_for_online() {
+        let timer = FakeTimer::new();
+        let mut pmtud = Dplpmtud::new(BASE_PLPMTU, TEST_MAX_PLPMTU, timer.clone());
+
+        pmtud.path_lost(&mut ());
+        let action = pmtud.path_changed(false, &mut ());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(pmtud.state, State::Disabled));
+        timer.expect_idle();
+
+        let action = pmtud.online(&mut ());
+        assert!(matches!(pmtud.state, State::Base));
+        assert!(matches!(action, Action::SendProbe { .. }));
+        timer.expect_pending(Duration::from_secs(5));
     }
 }
