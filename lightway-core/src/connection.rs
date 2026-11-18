@@ -476,6 +476,15 @@ enum ConnectionMode<AppState> {
     },
 }
 
+/// What became of a PMTUD probe handed to the outside socket.
+enum ProbeOutcome {
+    /// Sent or lost on the way (or there was nothing to send): the
+    /// reply or the probe timer decides.
+    Pending,
+    /// Larger than the local interface can send; it never left.
+    TooBig,
+}
+
 /// Tracks when [`Connection`] was last active
 #[derive(Copy, Clone)]
 pub struct ConnectionActivity {
@@ -1639,23 +1648,44 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    fn handle_pmtud_action(&mut self, a: dplpmtud::Action) -> ConnectionResult<()> {
-        match a {
-            dplpmtud::Action::SendProbe { id, size } => {
-                info!(id, "Sending PMTUD probe (id {id}, size {size})");
+    /// Carry out the action a DPLPMTUD step requested.
+    fn handle_pmtud_action(&mut self, a: dplpmtud::Action) -> ConnectionResult<ProbeOutcome> {
+        let dplpmtud::Action::SendProbe { id, size } = a else {
+            return Ok(ProbeOutcome::Pending);
+        };
+        info!(id, "Sending PMTUD probe (id {id}, size {size})");
 
-                let payload = BytesMut::zeroed(size as usize).freeze();
-                let ping = wire::Ping { id, payload };
+        let payload = BytesMut::zeroed(size as usize).freeze();
+        let ping = wire::Ping { id, payload };
 
-                let msg = wire::Frame::Ping(ping);
+        let msg = wire::Frame::Ping(ping);
 
-                self.session.io_cb().enable_pmtud_probe();
-                let res = self.send_frame_or_queue(msg);
-                self.session.io_cb().disable_pmtud_probe();
-                res
-            }
-            dplpmtud::Action::None => Ok(()),
+        self.session.io_cb_mut().begin_pmtud_probe();
+        let res = self.send_frame_or_queue(msg);
+        let refusal = self.session.io_cb_mut().end_pmtud_probe();
+
+        match refusal {
+            Some(io_adapter::ProbeRefusal::TooBig) => res.map(|_| ProbeOutcome::TooBig),
+            Some(io_adapter::ProbeRefusal::Other) | None => res.map(|_| ProbeOutcome::Pending),
         }
+    }
+
+    /// Run one DPLPMTUD step and notify the application if the PMTUD
+    /// status changed. Returns the action the step requested.
+    fn pmtud_step(
+        &mut self,
+        step: impl FnOnce(&mut dplpmtud::Dplpmtud<AppState>, &mut AppState) -> dplpmtud::Action,
+    ) -> dplpmtud::Action {
+        let Some(pmtud) = self.pmtud.as_mut() else {
+            return dplpmtud::Action::None;
+        };
+        let before = pmtud.status();
+        let action = step(pmtud, &mut self.app_state);
+        let after = pmtud.status();
+        if before != after {
+            self.event(Event::PmtudStateChanged(after));
+        }
+        action
     }
 
     /// Run one DPLPMTUD step, notify the application if the PMTUD status
@@ -1668,16 +1698,16 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         step: impl FnOnce(&mut dplpmtud::Dplpmtud<AppState>, &mut AppState) -> dplpmtud::Action,
     ) -> ConnectionResult<()> {
-        let Some(pmtud) = self.pmtud.as_mut() else {
-            return Ok(());
-        };
-        let before = pmtud.status();
-        let action = step(pmtud, &mut self.app_state);
-        let after = pmtud.status();
-        if before != after {
-            self.event(Event::PmtudStateChanged(after));
+        let mut action = self.pmtud_step(step);
+        // A probe the socket refuses for its size fails at once and the
+        // state machine may ask for another. Each of those is smaller
+        // or ends the search, so this terminates.
+        loop {
+            action = match self.handle_pmtud_action(action)? {
+                ProbeOutcome::Pending => return Ok(()),
+                ProbeOutcome::TooBig => self.pmtud_step(|pmtud, state| pmtud.probe_too_big(state)),
+            };
         }
-        self.handle_pmtud_action(action)
     }
 
     /// Inject a tick to PMTUD (after timer started with

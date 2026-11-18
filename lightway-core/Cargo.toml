@@ -41,6 +41,9 @@ boringssl = { path = "../lightway-boring", package = "lightway-boring", optional
 [target.'cfg(target_os = "linux")'.dependencies]
 internet-checksum.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [build-dependencies]
 cfg_aliases = "0.2.1"
 

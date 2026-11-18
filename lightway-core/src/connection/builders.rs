@@ -81,6 +81,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             recv_buf: BytesMut::new(),
             send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
+            probe_send: Default::default(),
             session_id: SessionId::EMPTY,
             outside_plugins: outside_plugins.clone(),
             #[cfg(target_os = "linux")]
@@ -326,6 +327,7 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             recv_buf: BytesMut::new(),
             send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
             io: outside_io,
+            probe_send: Default::default(),
             session_id,
             outside_plugins: outside_plugins.clone(),
             #[cfg(target_os = "linux")]
