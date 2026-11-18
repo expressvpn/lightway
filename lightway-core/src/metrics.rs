@@ -162,9 +162,10 @@ pub(crate) fn gso_none_checksum_skipped() {
     METRIC_GSO_NONE_CHECKSUM_SKIPPED.increment(1);
 }
 
-/// A GSO superpacket held more segments than one `sendmsg(UDP_SEGMENT)`
-/// batch may carry, so its segments were sent individually instead. Not a
-/// drop: the aggregate still reaches the peer, just without wire batching.
+/// A GSO superpacket could not go out as one `sendmsg(UDP_SEGMENT)` batch
+/// (too many segments, segments above the PMTUD estimate, or GSO latched
+/// off on the socket), so its segments were sent individually instead. Not
+/// a drop: the aggregate still reaches the peer, just without wire batching.
 #[cfg(target_os = "linux")]
 pub(crate) fn gso_batch_skipped() {
     METRIC_GSO_BATCH_SKIPPED.increment(1);
