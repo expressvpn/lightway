@@ -370,7 +370,20 @@ impl TlsIOAdapter {
         expresslane_data: bool,
     ) -> IOCallbackResult<usize> {
         match self.probe_send {
-            ProbeSend::Idle => self.udp_send_datagram(buf, expresslane_data),
+            ProbeSend::Idle => match self.udp_send_datagram(buf, expresslane_data) {
+                // Too big for the interface with DF set: DF was left on
+                // after a probe, or a connected socket reports an ICMP
+                // learned limit late. Drop it like a datagram lost on the
+                // way; an error would have the TLS library retry the
+                // record ahead of every later write.
+                IOCallbackResult::Err(err)
+                    if ProbeRefusal::from_send_error(&err) == ProbeRefusal::TooBig =>
+                {
+                    tracing::debug!(?err, len = buf.len(), "Outside datagram too big, dropped");
+                    IOCallbackResult::Ok(buf.len())
+                }
+                res => res,
+            },
             ProbeSend::Probing(refusal) => match self.udp_send_datagram(buf, expresslane_data) {
                 IOCallbackResult::Err(err) => {
                     tracing::debug!(?err, len = buf.len(), "PMTUD probe refused");
@@ -876,6 +889,17 @@ mod tests {
             ProbeSend::Probing(refusal) => (reported_sent, refusal),
             other => panic!("{other:?}"),
         }
+    }
+
+    // An ordinary datagram refused for its size is dropped, not failed.
+    #[cfg(unix)]
+    #[test_case(IOCallbackResult::Err(Error::from_raw_os_error(libc::EMSGSIZE)) => matches IOCallbackResult::Ok(9); "too big")]
+    #[cfg_attr(unix, test_case(IOCallbackResult::Err(Error::from_raw_os_error(libc::EHOSTUNREACH)) => matches IOCallbackResult::Err(_); "other error"))]
+    #[cfg_attr(unix, test_case(IOCallbackResult::WouldBlock => matches IOCallbackResult::WouldBlock; "would block"))]
+    fn udp_send_idle(fake: IOCallbackResult<usize>) -> IOCallbackResult<usize> {
+        let io = FakeOutsideIOSend::with_fakes(vec![fake].into());
+        let mut adapter = make_adapter(ConnectionType::Datagram, io, Default::default());
+        adapter.udp_send(b"abcdefghi", false)
     }
 
     #[test]
