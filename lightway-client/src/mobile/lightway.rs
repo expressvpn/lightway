@@ -850,6 +850,13 @@ async fn handle_network_change(
             DeviceNetworkState::Online | DeviceNetworkState::InterfaceChanged => {
                 match conn_type {
                     ConnectionType::Datagram => {
+                        // The path MTU learned on the old network may not hold on the
+                        // new one. Report the change here, in event order: on iOS the
+                        // socket reset below completes later and must not restart
+                        // PMTUD if the device has gone offline by then.
+                        if let Err(e) = conn.lock().unwrap().pmtud_path_changed() {
+                            warn!("Failed to restart PMTUD after network change: {e}");
+                        }
                         // We only need to use reset new socket on iOS but not on Android
                         cfg_select! {
                             apple => {
@@ -859,11 +866,6 @@ async fn handle_network_change(
                                 reset_outside_io_tx.send(()).await?;
                             }
                             _ => {
-                                // The socket is kept, so restart PMTUD here (replacing
-                                // the socket does it on iOS)
-                                if let Err(e) = conn.lock().unwrap().pmtud_path_changed() {
-                                    warn!("Failed to restart PMTUD after network change: {e}");
-                                }
                                 // Trigger a new keepalive on the new socket (keepalive will
                                 // be triggered after the socket has been updated on iOS)
                                 keepalive.network_changed().await;
@@ -897,6 +899,11 @@ async fn handle_network_change(
                 }
             }
             DeviceNetworkState::Offline => {
+                // Probes would only be lost while offline. Every other
+                // network state restarts PMTUD.
+                if let Err(e) = conn.lock().unwrap().pmtud_path_lost() {
+                    warn!("Failed to stop PMTUD while offline: {e}");
+                }
                 // Suspend keepalive timers as we're guaranteed
                 // to fail and disconnect after all failed attempts
                 info!("suspending keepalive...");
