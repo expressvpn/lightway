@@ -1,0 +1,69 @@
+name: lightway-e2e
+
+networks:
+  frontend: # client <-> server (primary interface, initial VPN path)
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 192.168.200.0/24
+
+  # Not internal: after the switch the client reaches the server's frontend
+  # address via the server's frontend2 address as gateway. Docker drops
+  # traffic on an internal network whose destination is outside its subnet.
+  frontend2: # client <-> server (secondary interface, post-switch VPN path)
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.201.0/24
+
+  backend: # server <-> The World
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.0.0.0/16
+
+services:
+  server:
+    image: lightway-test-server:latest
+    command: ${SERVER_ARGS}
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    networks:
+      - frontend
+      - frontend2
+      - backend
+
+  nginx:
+    image: lightway-test-nginx:latest
+    networks:
+      backend:
+        ipv4_address: 10.0.0.42
+
+  client:
+    image: lightway-test-client:latest
+    command: ${CLIENT_ARGS}
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    sysctls:
+      - net.ipv4.conf.all.promote_secondaries=1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    depends_on:
+      server:
+        condition: service_healthy
+      nginx:
+        condition: service_healthy
+    networks:
+      - frontend
+      - frontend2
+    extra_hosts:
+      nginx: "10.0.0.42"
