@@ -2287,6 +2287,8 @@ struct PmtudLinkFaults {
     enable_fails: bool,
     /// The socket cannot be switched back out of probe mode.
     disable_fails: bool,
+    /// The first switch back out of probe mode fails.
+    disable_fails_once: bool,
     /// The first DF datagram of at least this size finds the socket not
     /// writable.
     block_once_from: Option<usize>,
@@ -2300,6 +2302,8 @@ struct PmtudLink {
     faults: PmtudLinkFaults,
     df: std::sync::atomic::AtomicBool,
     blocked: std::sync::atomic::AtomicBool,
+    /// `disable_fails_once` has been used up.
+    disable_failed: std::sync::atomic::AtomicBool,
     /// While set, every DF datagram finds the socket not writable.
     block_df: std::sync::atomic::AtomicBool,
     /// The next this many non-DF datagrams find the socket not writable.
@@ -2416,7 +2420,12 @@ impl OutsideIOSendCallback for PmtudLink {
     }
 
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
-        if self.faults.disable_fails {
+        if self.faults.disable_fails
+            || (self.faults.disable_fails_once
+                && !self
+                    .disable_failed
+                    .swap(true, std::sync::atomic::Ordering::SeqCst))
+        {
             self.trace("disable probe mode -> Err".to_string());
             return Err(std::io::Error::other("disable failed"));
         }
@@ -2493,6 +2502,7 @@ impl PmtudLinkTest {
             faults,
             df: Default::default(),
             blocked: Default::default(),
+            disable_failed: Default::default(),
             block_df: Default::default(),
             block_plain: Default::default(),
             sends: Default::default(),
@@ -2757,6 +2767,85 @@ async fn pmtud_continues_when_probe_mode_cannot_be_disabled() {
         (PmtudState::SearchComplete, Some(1330))
     );
     assert!(t.link.fits(1330) && !t.link.fits(1338));
+}
+
+/// Only probes are sent with DF set. Ordinary traffic flowing for the whole
+/// discovery, between probes and while their answers are outstanding,
+/// leaves without it, so a path narrower than a datagram fragments it
+/// instead of dropping it.
+#[tokio::test]
+async fn pmtud_ordinary_traffic_never_carries_df() {
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults::default());
+
+    let finished = t
+        .run_until(|c, link| {
+            let status = c.pmtud_status().expect("PMTUD enabled");
+            if status.state != PmtudState::Disabled {
+                let r = c.keepalive();
+                link.trace(format!("keepalive -> {r:?}"));
+            }
+            status.state == PmtudState::SearchComplete
+        })
+        .await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(finished, "test timed out");
+    assert_eq!(t.failed_reads, 0);
+    let sends = t.link.sends();
+    let first_probe = sends.iter().position(|s| s.df).expect("probes were sent");
+    let last_probe = sends.iter().rposition(|s| s.df).unwrap();
+    let ordinary_during_search = sends[first_probe..last_probe]
+        .iter()
+        .filter(|s| s.len < 1250)
+        .count();
+    assert!(ordinary_during_search >= 5, "{sends:?}");
+    let small_df: Vec<_> = sends.iter().filter(|s| s.df && s.len < 1250).collect();
+    assert!(
+        small_df.is_empty(),
+        "ordinary datagrams sent with DF: {small_df:?}"
+    );
+}
+
+/// If DF cannot be cleared right after a probe, the next ordinary send
+/// clears it first rather than leaving it on until the next probe, which
+/// can be ten minutes away.
+#[tokio::test]
+async fn pmtud_probe_mode_left_on_is_turned_off_before_next_send() {
+    use std::sync::atomic::Ordering;
+
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults {
+        disable_fails_once: true,
+        ..Default::default()
+    });
+
+    let mut sent_after_failure = false;
+    let finished = t
+        .run_until(|c, link| {
+            if !sent_after_failure && link.disable_failed.load(Ordering::SeqCst) {
+                sent_after_failure = true;
+                let r = c.keepalive();
+                link.trace(format!("keepalive after failed disable -> {r:?}"));
+            }
+            let status = c.pmtud_status().expect("PMTUD enabled");
+            status.state == PmtudState::SearchComplete
+        })
+        .await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(finished, "test timed out");
+    assert!(sent_after_failure);
+    assert_eq!(t.failed_reads, 0);
+    let sends = t.link.sends();
+    let small_df: Vec<_> = sends.iter().filter(|s| s.df && s.len < 1250).collect();
+    assert!(
+        small_df.is_empty(),
+        "ordinary datagrams sent with DF: {small_df:?}"
+    );
+    let status = t.status();
+    assert_eq!(
+        (status.state, status.plpmtu),
+        (PmtudState::SearchComplete, Some(1330))
+    );
 }
 
 /// A probe whose write blocks is still pending in the TLS library when DF
