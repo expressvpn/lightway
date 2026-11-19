@@ -655,7 +655,10 @@ async fn lightway_client_connect(
         .when(server_dn.is_some(), |b| {
             b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
         })
-        .when_some(sni_header.as_deref(), |b, sni| b.with_sni_header(sni))
+        .when_some(
+            crate::effective_sni_header(sni_header.as_deref()),
+            |b, sni| b.with_sni_header(sni),
+        )
         .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
             b.with_pmtud_timer(pmtud_timer)
         })
