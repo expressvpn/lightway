@@ -2119,6 +2119,150 @@ async fn pmtud_reports_status_changes() {
     }
 }
 
+/// A datagram client whose outside MTU is too small for the server's inside
+/// MTU can carry a full-size inside packet only by fragmenting it, which
+/// needs PMTUD. Without PMTUD the connection fails when the server's
+/// configuration arrives; with it the connection comes online.
+#[test_case(true; "with PMTUD")]
+#[test_case(false; "without PMTUD")]
+#[tokio::test]
+async fn small_outside_mtu_requires_pmtud(pmtud: bool) {
+    // The test server's inside MTU is 1350, which needs 1431.
+    const OUTSIDE_MTU: usize = 1400;
+
+    struct ProbingSock(Arc<TestDatagramSock>);
+
+    impl OutsideIOSendCallback for ProbingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            self.0.send(buf)
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            self.0.send_gso(bufs, gso_size)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            self.0.peer_addr()
+        }
+
+        // Unix datagram sockets have no DF bit; accept the probe bracket.
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Take the shared test PKI before the timeout window (RSA keygen is very
+    // slow on QEMU, and only happens on first use).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let (cert, key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    ));
+
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let (pmtud_timer, pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        pki.root_ca(),
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    .build()
+    .start_connect(Arc::new(ProbingSock(client_sock.clone())), OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .when(pmtud, |b| b.with_pmtud_timer(pmtud_timer))
+    .connect(ConnectionState { ticker })
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&client), &mut join_set);
+
+    // Pump the client until it is online or fails.
+    let pump = async {
+        loop {
+            client_sock
+                .readable()
+                .await
+                .expect("client socket readable");
+            let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+            match client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+            let mut c = client.lock().unwrap();
+            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            c.outside_data_received(pkt)?;
+            if matches!(c.state(), State::Online) {
+                return Ok::<_, ConnectionError>(());
+            }
+        }
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                result = pump => result,
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
+
+    if pmtud {
+        result.expect("online with PMTUD");
+    } else {
+        let err = result.expect_err("online without PMTUD");
+        assert!(
+            matches!(
+                err,
+                ConnectionError::PathMtuDiscoveryRequired {
+                    inside_mtu: 1350,
+                    required_outside_mtu: 1431,
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.is_fatal(ConnectionType::Datagram));
+    }
+}
+
 /// What [`PmtudLink`] did with a datagram.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PmtudLinkOutcome {
