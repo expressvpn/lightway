@@ -8,8 +8,6 @@
   cmake,
   git,
   perl,
-  pkg-config,
-  aws-lc,
   buildPackages,
   packages ? [ "lightway-client" ],
   features ? [ ] ++ lib.optionals stdenv.isLinux [ "io-uring" ],
@@ -56,6 +54,11 @@ rustPlatform.buildRustPackage {
     lockFile = ../Cargo.lock;
   };
 
+  # The cargo setup hook sets AWS_LC_SYS_USE_SYSTEM and similar variables.
+  # aws-lc-sys then requires a system AWS-LC. Build the vendored sources instead:
+  # the nixpkgs aws-lc does not cross-compile and does not build for musl.
+  dontCargoUseSystemLibs = true;
+
   # Features use the pkg/feature form: plain --features only applies to the
   # first -p package when several are selected. perPackageFeatures overrides
   # the uniform features list for specific packages.
@@ -81,14 +84,11 @@ rustPlatform.buildRustPackage {
     cmake
     git
     perl
-    pkg-config
   ]
   ++ lib.optionals (!isCross) [
     # For native builds, use bindgenHook normally
     rustPlatform.bindgenHook
   ];
-
-  buildInputs = [ aws-lc ];
 
   # For cross-compilation, manually configure bindgen
   # Use build platform's libclang but target platform's headers
