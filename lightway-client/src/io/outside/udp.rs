@@ -35,10 +35,13 @@ const EMSGSIZE: i32 = cfg_select! {
 pub struct Udp {
     sock: Arc<tokio::net::UdpSocket>,
     peer_addr: SocketAddr,
+    /// The MTU discover mode outside PMTUD probes, put back after each
+    /// probe. DF is clear in it; see [`Udp::new`].
     default_ip_pmtudisc: sockopt::IpPmtudisc,
-    /// The IPv4 option's own default. On an IPv6 socket it covers
-    /// IPv4-mapped traffic and can differ from `default_ip_pmtudisc`,
-    /// which `set_ip_mtu_discover` writes to both options.
+    /// The IPv4 option's own mode outside probes. On an IPv6 socket it
+    /// covers IPv4-mapped traffic and can differ from
+    /// `default_ip_pmtudisc`, which `set_ip_mtu_discover` writes to both
+    /// options.
     #[cfg(all(not(apple), unix))]
     default_ipv4_pmtudisc: sockopt::IpPmtudisc,
     /// Whether connected-send mode was requested; see
@@ -117,6 +120,25 @@ impl Udp {
                 Ok(_) => tracing::info!("Applied firewall mark to outside socket"),
                 Err(e) => tracing::warn!("Fail to set so mark on socket: {}", e),
             }
+        }
+
+        // Send without DF outside PMTUD probes, so that a datagram larger
+        // than the path is fragmented on the way instead of dropped where
+        // no ICMP "fragmentation needed" comes back. Linux's default
+        // (`IP_PMTUDISC_WANT`) sets DF on every datagram, and Windows does
+        // not document its default for datagram sockets. IPv4 only: IPv6
+        // has no DF, and IPv6 routers never fragment. Apple's
+        // `IP_DONTFRAG` is already off.
+        #[cfg(all(not(apple), unix))]
+        let clear_df = sockopt::set_ipv4_mtu_discover(&sock, sockopt::IpPmtudisc::Dont);
+        #[cfg(windows)]
+        let clear_df = match sock.local_addr()? {
+            SocketAddr::V4(_) => sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Dont),
+            SocketAddr::V6(_) => Ok(()),
+        };
+        #[cfg(any(windows, all(not(apple), unix)))]
+        if let Err(e) = clear_df {
+            tracing::warn!("Failed to clear DF on the outside socket: {e}");
         }
 
         let default_ip_pmtudisc = sockopt::get_ip_mtu_discover(&sock)
@@ -830,10 +852,27 @@ mod linux_tests {
         assert!(OutsideIOSendCallback::gso_enabled(&udp));
     }
 
+    // Outside probes the socket sends IPv4 without DF, whatever the
+    // kernel default. Linux's default, `IP_PMTUDISC_WANT`, sets DF on
+    // every datagram.
+    #[tokio::test]
+    async fn sends_without_df_outside_pmtud_probes() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sockopt::set_ipv4_mtu_discover(&sock, sockopt::IpPmtudisc::Want).unwrap();
+        let udp = make_udp(Some(sock)).await;
+        let mode = || sockopt::get_ipv4_mtu_discover(udp.sock.as_ref()).unwrap();
+
+        assert!(matches!(mode(), sockopt::IpPmtudisc::Dont));
+        udp.enable_pmtud_probe().unwrap();
+        assert!(matches!(mode(), sockopt::IpPmtudisc::Probe));
+        udp.disable_pmtud_probe().unwrap();
+        assert!(matches!(mode(), sockopt::IpPmtudisc::Dont));
+    }
+
     #[tokio::test]
     async fn pmtud_probe_restores_each_mtu_discover_option() {
-        // A dual-stack IPv6 socket whose IPv4 option (for IPv4-mapped
-        // traffic) differs from its IPv6 option.
+        // A dual-stack IPv6 socket with the kernel default for both
+        // options. IPv4-mapped traffic follows the IPv4 option.
         let sock = socket2::Socket::new(
             socket2::Domain::IPV6,
             socket2::Type::DGRAM,
@@ -846,13 +885,16 @@ mod linux_tests {
             .unwrap();
         let sock = UdpSocket::from_std(sock.into()).unwrap();
         sockopt::set_ip_mtu_discover(&sock, sockopt::IpPmtudisc::Want).unwrap();
-        sockopt::set_ipv4_mtu_discover(&sock, sockopt::IpPmtudisc::Dont).unwrap();
         let udp = make_udp(Some(sock)).await;
 
         // On an IPv6 socket these read IP_MTU_DISCOVER and
         // IPV6_MTU_DISCOVER respectively.
         let ipv4 = || sockopt::get_ipv4_mtu_discover(udp.sock.as_ref()).unwrap();
         let ipv6 = || sockopt::get_ip_mtu_discover(udp.sock.as_ref()).unwrap();
+
+        // DF is cleared for IPv4; IPv6 has none and keeps its default.
+        assert!(matches!(ipv4(), sockopt::IpPmtudisc::Dont));
+        assert!(matches!(ipv6(), sockopt::IpPmtudisc::Want));
 
         udp.enable_pmtud_probe().unwrap();
         assert!(matches!(ipv4(), sockopt::IpPmtudisc::Probe));
