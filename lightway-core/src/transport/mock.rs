@@ -91,6 +91,8 @@ pub struct MockTransport {
     records: VecDeque<BytesMut>,
     handshakes: VecDeque<PollResult<()>>,
     closed: Arc<AtomicBool>,
+    tick_interval: Arc<Mutex<Option<Duration>>>,
+    ticks: Arc<AtomicUsize>,
 }
 
 impl MockTransport {
@@ -102,12 +104,24 @@ impl MockTransport {
             records: VecDeque::new(),
             handshakes: VecDeque::new(),
             closed: Default::default(),
+            tick_interval: Default::default(),
+            ticks: Default::default(),
         }
     }
 
     /// Whether `shutdown` ran on this transport.
     pub fn closed(&self) -> Arc<AtomicBool> {
         self.closed.clone()
+    }
+
+    /// The value of `tick_interval`. A test can change it at any time.
+    pub fn tick_interval(&self) -> Arc<Mutex<Option<Duration>>> {
+        self.tick_interval.clone()
+    }
+
+    /// How many ticks reached this transport.
+    pub fn ticks(&self) -> Arc<AtomicUsize> {
+        self.ticks.clone()
     }
 }
 
@@ -165,10 +179,11 @@ impl Transport for MockTransport {
     }
 
     fn tick_interval(&mut self) -> Option<Duration> {
-        None
+        *self.tick_interval.lock().unwrap()
     }
 
     fn has_timed_out(&mut self) -> bool {
+        self.ticks.fetch_add(1, Ordering::SeqCst);
         false
     }
 
@@ -323,7 +338,22 @@ mod tests {
         }
     }
 
-    fn tick(_d: Duration, _state: &mut (), _t: TickType) {}
+    thread_local! {
+        /// The connection ticks that this thread scheduled.
+        static SCHEDULED: std::cell::RefCell<Vec<Duration>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    fn tick(d: Duration, _state: &mut (), t: TickType) {
+        if matches!(t, TickType::ConnectionTick) {
+            SCHEDULED.with_borrow_mut(|s| s.push(d));
+        }
+    }
+
+    fn take_scheduled() -> Vec<Duration> {
+        SCHEDULED.with_borrow_mut(std::mem::take)
+    }
 
     /// Accepts every packet and never emits it.
     struct BlackHole(AtomicBool);
@@ -360,6 +390,8 @@ mod tests {
         client_tun: Arc<Tun>,
         server_tun: Arc<Tun>,
         events: Arc<Mutex<Vec<Event>>>,
+        client_tick_interval: Arc<Mutex<Option<Duration>>>,
+        client_ticks: Arc<AtomicUsize>,
     }
 
     fn pair(caps: TransportCaps) -> Pair {
@@ -392,8 +424,11 @@ mod tests {
             None => (None, None),
         };
 
+        let client_transport = MockTransport::new(caps);
+        let client_tick_interval = client_transport.tick_interval();
+        let client_ticks = client_transport.ticks();
         let client = ClientContextBuilder::new(
-            Arc::new(MockFactory::new(MockTransport::new(caps))),
+            Arc::new(MockFactory::new(client_transport)),
             Some(client_tun.clone()),
             Arc::new(ClientIp),
             tick,
@@ -434,6 +469,8 @@ mod tests {
             client_tun,
             server_tun,
             events: log,
+            client_tick_interval,
+            client_ticks,
         }
     }
 
@@ -634,6 +671,45 @@ mod tests {
         p.client.tick(TickType::ConnectionTick).unwrap();
         assert_eq!(server_inbox.lock().unwrap().len(), 1);
         p.pump_to_online();
+    }
+
+    #[test]
+    fn an_online_transport_still_gets_ticks() {
+        let mut p = pair(LOSSY).pump_to_online();
+        take_scheduled();
+        let interval = Duration::from_millis(1);
+        *p.client_tick_interval.lock().unwrap() = Some(interval);
+
+        p.client.keepalive().unwrap();
+        assert_eq!(take_scheduled(), [interval]);
+
+        std::thread::sleep(interval);
+        p.client.tick(TickType::ConnectionTick).unwrap();
+        assert_eq!(p.client_ticks.load(Ordering::SeqCst), 1);
+        assert_eq!(take_scheduled(), [interval]);
+    }
+
+    #[test]
+    fn a_shorter_interval_replaces_the_due_tick() {
+        let mut p = pair(LOSSY).pump_to_online();
+        take_scheduled();
+        let long = Duration::from_secs(3600);
+        let short = Duration::from_millis(1);
+
+        *p.client_tick_interval.lock().unwrap() = Some(long);
+        p.client.keepalive().unwrap();
+        *p.client_tick_interval.lock().unwrap() = Some(short);
+        p.client.keepalive().unwrap();
+        assert_eq!(take_scheduled(), [long, short]);
+
+        *p.client_tick_interval.lock().unwrap() = Some(long);
+        std::thread::sleep(short);
+        p.client.tick(TickType::ConnectionTick).unwrap();
+        assert_eq!(p.client_ticks.load(Ordering::SeqCst), 1);
+
+        // The tick of the first schedule arrives before the new deadline.
+        p.client.tick(TickType::ConnectionTick).unwrap();
+        assert_eq!(p.client_ticks.load(Ordering::SeqCst), 1);
     }
 
     #[test]
