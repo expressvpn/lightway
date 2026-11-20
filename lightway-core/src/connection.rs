@@ -552,14 +552,16 @@ pub struct Connection<AppState: Send = ()> {
     /// Inside plugins
     inside_plugins: PluginList,
 
-    /// Is a tick callback pending
-    is_tick_timer_running: bool,
+    /// When the earliest scheduled tick is due. A tick that arrives
+    /// before this time is stale: a tick with an earlier deadline
+    /// replaced it.
+    tick_deadline: Option<Instant>,
 
     /// Connection activity stats
     activity: ConnectionActivity,
 
     /// When is next tick due (independent of
-    /// `is_tick_timer_running`, since application might be using
+    /// `tick_deadline`, since application might be using
     /// [`Connection::tick_interval`] and [`Connection::tick`] instead)
     transport_tick_interval: Option<Duration>,
 
@@ -669,7 +671,7 @@ impl<AppState: Send> Connection<AppState> {
             schedule_tick_cb: args.schedule_tick_cb,
             event_cb: args.event_cb,
             inside_plugins: args.inside_plugins,
-            is_tick_timer_running: false,
+            tick_deadline: None,
             activity: ConnectionActivity {
                 last_data_traffic_from_peer: now,
                 last_outside_data_received: now,
@@ -897,34 +899,26 @@ impl<AppState: Send> Connection<AppState> {
         self.transport.current_curve()
     }
 
+    /// Schedule a tick when the transport needs one earlier than the
+    /// tick that is already due.
     fn update_tick_interval(&mut self) {
-        let key_update_pending = if let ConnectionMode::Server { key_update, .. } = &self.mode {
-            key_update.is_pending()
-        } else {
-            false
-        };
-
-        if matches!(self.state, State::Online) && !key_update_pending {
-            self.transport_tick_interval = None;
-            return;
-        }
-
         self.transport_tick_interval = self.transport.tick_interval();
         let Some(interval) = self.transport_tick_interval else {
             return;
         };
 
-        // Trigger a callback if timer is not already running
-        if !self.is_tick_timer_running {
-            trace!("Scheduling tick for {:?}", interval);
-            (self.schedule_tick_cb)(
-                interval,
-                &mut self.app_state,
-                crate::TickType::ConnectionTick,
-            );
-
-            self.is_tick_timer_running = true;
+        let deadline = Instant::now() + interval;
+        if self.tick_deadline.is_some_and(|due| due <= deadline) {
+            return;
         }
+
+        trace!("Scheduling tick for {:?}", interval);
+        (self.schedule_tick_cb)(
+            interval,
+            &mut self.app_state,
+            crate::TickType::ConnectionTick,
+        );
+        self.tick_deadline = Some(deadline);
     }
 
     /// Returns the time the application should wait before calling
@@ -957,7 +951,11 @@ impl<AppState: Send> Connection<AppState> {
     /// Inject a tick to the connection. See
     /// [`Connection::tick_interval`] for usage.
     pub fn connection_tick(&mut self) -> ConnectionResult<()> {
-        self.is_tick_timer_running = false;
+        if self.tick_deadline.is_some_and(|due| Instant::now() < due) {
+            trace!(session_id = ?self.session_id, "Ignoring stale connection tick");
+            return Ok(());
+        }
+        self.tick_deadline = None;
         trace!(session_id = ?self.session_id, "Processing connection tick");
 
         match self.state {
@@ -1511,6 +1509,7 @@ impl<AppState: Send> Connection<AppState> {
                 result = Err(ConnectionError::OutsideIoWriteError(e));
             }
         }
+        self.update_tick_interval();
         result
     }
 
@@ -1762,7 +1761,6 @@ impl<AppState: Send> Connection<AppState> {
         let res = self.transport.key_update();
         self.send_records_after(res)?;
         self.event(Event::TlsKeysUpdateStart);
-        self.update_tick_interval();
         Ok(())
     }
 
@@ -1807,10 +1805,7 @@ impl<AppState: Send> Connection<AppState> {
             State::Connecting => {
                 let res = self.transport.handshake();
                 match self.send_records_after(res)? {
-                    Poll::Pending => {
-                        self.update_tick_interval();
-                        Ok(0)
-                    }
+                    Poll::Pending => Ok(0),
                     Poll::Ready(_) => {
                         self.set_state(State::LinkUp)?;
                         self.handle_messages(session)
@@ -1887,7 +1882,6 @@ impl<AppState: Send> Connection<AppState> {
             let pending = self.transport.key_update_pending();
             if !pending && key_update.complete() {
                 self.event(Event::TlsKeysUpdateCompleted);
-                self.update_tick_interval()
             }
         }
 
