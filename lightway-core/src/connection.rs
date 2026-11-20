@@ -476,6 +476,21 @@ enum ConnectionMode<AppState> {
     },
 }
 
+/// What became of a PMTUD probe handed to the outside socket.
+enum ProbeOutcome {
+    /// Sent or lost on the way (or there was nothing to send): the
+    /// reply or the probe timer decides.
+    Pending,
+    /// Larger than the local interface can send; it never left.
+    TooBig,
+    /// It never left this host for another reason (an earlier write
+    /// was pending, the write blocked, or the socket failed it), so it
+    /// says nothing about the path.
+    NotSent,
+    /// The socket cannot be switched into probe mode.
+    Unavailable,
+}
+
 /// Tracks when [`Connection`] was last active
 #[derive(Copy, Clone)]
 pub struct ConnectionActivity {
@@ -573,6 +588,11 @@ pub struct Connection<AppState: Send = ()> {
     /// not yet been handed to the TLS library.
     tls_pending_queue: VecDeque<BytesMut>,
 
+    /// The head of `tls_pending_queue` is a PMTUD probe whose write
+    /// blocked. DF is no longer set for it, so it is discarded rather
+    /// than sent when its write is retried.
+    pending_head_is_stale_probe: bool,
+
     /// Track partially constructed data fragments from [`wire::DataFrag`].
     fragment_map: once_cell::unsync::Lazy<FragmentMap, Box<dyn FnOnce() -> FragmentMap + Send>>,
 
@@ -665,6 +685,7 @@ impl<AppState: Send> Connection<AppState> {
             },
             tls_tick_interval: None,
             tls_pending_queue: VecDeque::new(),
+            pending_head_is_stale_probe: false,
             fragment_map: once_cell::unsync::Lazy::new(Box::new(move || {
                 metrics::connection_alloc_frag_map();
                 FragmentMap::new(max_fragment_map_entries)
@@ -1572,10 +1593,29 @@ impl<AppState: Send> Connection<AppState> {
             self.tls_pending_queue.push_back(buf);
         }
 
+        self.flush_tls_pending_queue()
+    }
+
+    /// Write the frames in `tls_pending_queue` until one blocks.
+    fn flush_tls_pending_queue(&mut self) -> ConnectionResult<()> {
         while let Some(mut head) = self.tls_pending_queue.pop_front() {
-            match self.session.try_write(&mut head)? {
+            // The TLS library must be given a blocked write again, so
+            // a stale probe cannot simply be dropped from the queue:
+            // complete its write without letting it reach the wire.
+            let stale_probe = std::mem::take(&mut self.pending_head_is_stale_probe);
+            let res = if stale_probe {
+                self.session.io_cb_mut().discard_sends(true);
+                let res = self.session.try_write(&mut head);
+                self.session.io_cb_mut().discard_sends(false);
+                res
+            } else {
+                self.session.try_write(&mut head)
+            };
+
+            match res? {
                 crate::tls::Poll::PendingWrite | crate::tls::Poll::PendingRead => {
                     self.tls_pending_queue.push_front(head);
+                    self.pending_head_is_stale_probe = stale_probe;
                     return Ok(());
                 }
                 // try_write advances the buffer by the number of bytes
@@ -1583,6 +1623,7 @@ impl<AppState: Send> Connection<AppState> {
                 crate::tls::Poll::Ready(_) => {
                     if !head.is_empty() {
                         self.tls_pending_queue.push_front(head);
+                        self.pending_head_is_stale_probe = stale_probe;
                         return Ok(());
                     }
                 }
@@ -1639,23 +1680,74 @@ impl<AppState: Send> Connection<AppState> {
         }
     }
 
-    fn handle_pmtud_action(&mut self, a: dplpmtud::Action) -> ConnectionResult<()> {
-        match a {
-            dplpmtud::Action::SendProbe { id, size } => {
-                info!(id, "Sending PMTUD probe (id {id}, size {size})");
+    /// Carry out the action a DPLPMTUD step requested.
+    fn handle_pmtud_action(&mut self, a: dplpmtud::Action) -> ConnectionResult<ProbeOutcome> {
+        let dplpmtud::Action::SendProbe { id, size } = a else {
+            return Ok(ProbeOutcome::Pending);
+        };
+        info!(id, "Sending PMTUD probe (id {id}, size {size})");
 
-                let payload = BytesMut::zeroed(size as usize).freeze();
-                let ping = wire::Ping { id, payload };
-
-                let msg = wire::Frame::Ping(ping);
-
-                self.session.io_cb().enable_pmtud_probe();
-                let res = self.send_frame_or_queue(msg);
-                self.session.io_cb().disable_pmtud_probe();
-                res
-            }
-            dplpmtud::Action::None => Ok(()),
+        // A frame whose write blocked earlier would be written first,
+        // and with DF set. Leave this probe to its timer instead.
+        self.flush_tls_pending_queue()?;
+        if !self.tls_pending_queue.is_empty() {
+            debug!(id, "PMTUD probe not sent, an earlier write is pending");
+            return Ok(ProbeOutcome::NotSent);
         }
+
+        let payload = BytesMut::zeroed(size as usize).freeze();
+        let ping = wire::Ping { id, payload };
+
+        let msg = wire::Frame::Ping(ping);
+
+        // Without DF the probe could be fragmented on the way and
+        // confirm a size the path does not carry.
+        if let Err(err) = self.session.io_cb_mut().begin_pmtud_probe() {
+            warn!(?err, "Failed to enable PMTUD probe");
+            return Ok(ProbeOutcome::Unavailable);
+        }
+        let res = self.send_frame_or_queue(msg);
+        let (refusal, disabled) = self.session.io_cb_mut().end_pmtud_probe();
+        // DF may still be on for ordinary traffic. Keep PMTUD running:
+        // its estimate keeps packets to sizes the path carries with DF
+        // set, and the next probe tries to clear it again.
+        if let Err(err) = disabled {
+            warn!(?err, "Failed to disable PMTUD probe");
+        }
+
+        // The write blocked and DF is clear again, so the probe is
+        // lost: have the TLS library finish with it now if it can.
+        let blocked = !self.tls_pending_queue.is_empty();
+        if blocked {
+            debug!(id, "PMTUD probe blocked, discarding it");
+            self.pending_head_is_stale_probe = true;
+            self.flush_tls_pending_queue()?;
+        }
+
+        res.map(|_| match refusal {
+            Some(io_adapter::ProbeRefusal::TooBig) => ProbeOutcome::TooBig,
+            Some(io_adapter::ProbeRefusal::Other) => ProbeOutcome::NotSent,
+            None if blocked => ProbeOutcome::NotSent,
+            None => ProbeOutcome::Pending,
+        })
+    }
+
+    /// Run one DPLPMTUD step and notify the application if the PMTUD
+    /// status changed. Returns the action the step requested.
+    fn pmtud_step(
+        &mut self,
+        step: impl FnOnce(&mut dplpmtud::Dplpmtud<AppState>, &mut AppState) -> dplpmtud::Action,
+    ) -> dplpmtud::Action {
+        let Some(pmtud) = self.pmtud.as_mut() else {
+            return dplpmtud::Action::None;
+        };
+        let before = pmtud.status();
+        let action = step(pmtud, &mut self.app_state);
+        let after = pmtud.status();
+        if before != after {
+            self.event(Event::PmtudStateChanged(after));
+        }
+        action
     }
 
     /// Run one DPLPMTUD step, notify the application if the PMTUD status
@@ -1668,16 +1760,26 @@ impl<AppState: Send> Connection<AppState> {
         &mut self,
         step: impl FnOnce(&mut dplpmtud::Dplpmtud<AppState>, &mut AppState) -> dplpmtud::Action,
     ) -> ConnectionResult<()> {
-        let Some(pmtud) = self.pmtud.as_mut() else {
-            return Ok(());
-        };
-        let before = pmtud.status();
-        let action = step(pmtud, &mut self.app_state);
-        let after = pmtud.status();
-        if before != after {
-            self.event(Event::PmtudStateChanged(after));
+        let mut action = self.pmtud_step(step);
+        // A probe the socket refuses for its size fails at once and the
+        // state machine may ask for another. Each of those is smaller
+        // or ends the search, so this terminates.
+        loop {
+            action = match self.handle_pmtud_action(action)? {
+                ProbeOutcome::Pending => return Ok(()),
+                ProbeOutcome::TooBig => self.pmtud_step(|pmtud, state| pmtud.probe_too_big(state)),
+                ProbeOutcome::NotSent => self.pmtud_step(|pmtud, _| {
+                    pmtud.probe_not_sent();
+                    dplpmtud::Action::None
+                }),
+                // Running without PMTUD is safe; trusting probes sent
+                // without DF is not.
+                ProbeOutcome::Unavailable => self.pmtud_step(|pmtud, state| {
+                    pmtud.offline(state);
+                    dplpmtud::Action::None
+                }),
+            };
         }
-        self.handle_pmtud_action(action)
     }
 
     /// Inject a tick to PMTUD (after timer started with

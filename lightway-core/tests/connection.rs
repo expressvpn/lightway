@@ -1850,3 +1850,642 @@ async fn pmtud_reports_status_changes() {
         }
     }
 }
+
+/// What [`PmtudLink`] did with a datagram.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PmtudLinkOutcome {
+    Sent,
+    /// `EMSGSIZE`: larger than the interface MTU, with DF set.
+    Refused,
+    /// `WouldBlock`.
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PmtudLinkSend {
+    len: usize,
+    df: bool,
+    outcome: PmtudLinkOutcome,
+}
+
+/// Faults to inject into a [`PmtudLink`].
+#[derive(Default)]
+struct PmtudLinkFaults {
+    /// The socket cannot be switched to probe mode.
+    enable_fails: bool,
+    /// The socket cannot be switched back out of probe mode.
+    disable_fails: bool,
+    /// The first DF datagram of at least this size finds the socket not
+    /// writable.
+    block_once_from: Option<usize>,
+}
+
+/// Outside link with a 1400-byte interface MTU. With DF set the kernel
+/// refuses a larger datagram; without it, the kernel fragments the
+/// datagram and the peer reassembles it, so it arrives whole.
+struct PmtudLink {
+    inner: Arc<TestDatagramSock>,
+    faults: PmtudLinkFaults,
+    df: std::sync::atomic::AtomicBool,
+    blocked: std::sync::atomic::AtomicBool,
+    /// While set, every DF datagram finds the socket not writable.
+    block_df: std::sync::atomic::AtomicBool,
+    /// The next this many non-DF datagrams find the socket not writable.
+    block_plain: std::sync::atomic::AtomicUsize,
+    sends: Mutex<Vec<PmtudLinkSend>>,
+    /// Sends and PMTUD status changes, in order, to explain a failure.
+    trace: Mutex<Vec<String>>,
+}
+
+impl PmtudLink {
+    /// Interface MTU (IP packet size).
+    const MTU: usize = 1400;
+    /// IPv4 and UDP headers the kernel adds to each datagram.
+    const IP_UDP_HEADERS: usize = 28;
+
+    fn trace(&self, entry: String) {
+        self.trace.lock().unwrap().push(entry);
+    }
+
+    fn sends(&self) -> Vec<PmtudLinkSend> {
+        self.sends.lock().unwrap().clone()
+    }
+
+    fn count(&self, outcome: PmtudLinkOutcome) -> usize {
+        self.sends().iter().filter(|s| s.outcome == outcome).count()
+    }
+
+    /// Datagram size of a probe for `plpmtu`. The wire bytes a probe adds
+    /// on top of its PLPMTU are measured from the first probe (the base
+    /// probe at 1250).
+    fn probe_len(&self, plpmtu: u16) -> usize {
+        let base = self.sends().into_iter().find(|s| s.df);
+        plpmtu as usize + base.expect("a probe was sent").len - 1250
+    }
+
+    /// Whether a probe for `plpmtu` fits the interface.
+    fn fits(&self, plpmtu: u16) -> bool {
+        self.probe_len(plpmtu) + Self::IP_UDP_HEADERS <= Self::MTU
+    }
+
+    /// Datagrams which were refused or blocked with DF set and left
+    /// later without it: the kernel fragments them, the server answers
+    /// them, and the search believes the answer. (Oversized non-probe
+    /// sends, e.g. the ClientHello, may fragment.)
+    fn leaked_probes(&self) -> Vec<PmtudLinkSend> {
+        let sends = self.sends();
+        sends
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                s.outcome == PmtudLinkOutcome::Sent
+                    && !s.df
+                    && sends[..*i]
+                        .iter()
+                        .any(|r| r.outcome != PmtudLinkOutcome::Sent && r.len == s.len)
+            })
+            .map(|(_, s)| *s)
+            .collect()
+    }
+}
+
+impl OutsideIOSendCallback for PmtudLink {
+    fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+        use std::sync::atomic::Ordering;
+
+        let df = self.df.load(Ordering::SeqCst);
+        let outcome = if df && buf.len() + Self::IP_UDP_HEADERS > Self::MTU {
+            PmtudLinkOutcome::Refused
+        } else if (df && self.block_df.load(Ordering::SeqCst))
+            || (!df
+                && self
+                    .block_plain
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok())
+            || (df
+                && self.faults.block_once_from.is_some_and(|n| buf.len() >= n)
+                && !self.blocked.swap(true, Ordering::SeqCst))
+        {
+            PmtudLinkOutcome::Blocked
+        } else {
+            PmtudLinkOutcome::Sent
+        };
+        self.sends.lock().unwrap().push(PmtudLinkSend {
+            len: buf.len(),
+            df,
+            outcome,
+        });
+        self.trace(format!("send {} bytes, df={df} -> {outcome:?}", buf.len()));
+        match outcome {
+            PmtudLinkOutcome::Sent => self.inner.send(buf),
+            // lightway-client's UDP socket passes EMSGSIZE up unchanged.
+            PmtudLinkOutcome::Refused => {
+                IOCallbackResult::Err(std::io::Error::from_raw_os_error(libc::EMSGSIZE))
+            }
+            PmtudLinkOutcome::Blocked => IOCallbackResult::WouldBlock,
+        }
+    }
+
+    fn send_gso(&self, bufs: &[std::io::IoSlice<'_>], gso_size: u16) -> IOCallbackResult<usize> {
+        self.inner.send_gso(bufs, gso_size)
+    }
+
+    fn peer_addr(&self) -> std::net::SocketAddr {
+        self.inner.peer_addr()
+    }
+
+    fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+        if self.faults.enable_fails {
+            self.trace("enable probe mode -> Err".to_string());
+            return Err(std::io::Error::other("enable failed"));
+        }
+        self.df.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+        if self.faults.disable_fails {
+            self.trace("disable probe mode -> Err".to_string());
+            return Err(std::io::Error::other("disable failed"));
+        }
+        self.df.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A client running PMTUD over a [`PmtudLink`] to a server which answers
+/// every probe.
+struct PmtudLinkTest {
+    link: Arc<PmtudLink>,
+    client: Arc<Mutex<Connection<ConnectionState>>>,
+    client_sock: Arc<TestDatagramSock>,
+    server_task: tokio::task::JoinHandle<()>,
+    /// Every status delivered with `Event::PmtudStateChanged`.
+    statuses: Arc<Mutex<Vec<PmtudStatus>>>,
+    /// Received packets the connection failed to process.
+    failed_reads: usize,
+    _tasks: JoinSet<()>,
+}
+
+impl PmtudLinkTest {
+    fn start(faults: PmtudLinkFaults) -> Self {
+        struct RecordingEvents {
+            link: Arc<PmtudLink>,
+            statuses: Arc<Mutex<Vec<PmtudStatus>>>,
+        }
+
+        impl EventCallback for RecordingEvents {
+            fn event(&mut self, event: Event) {
+                if let Event::PmtudStateChanged(status) = event {
+                    self.link.trace(format!(
+                        "pmtud {:?} plpmtu={:?}",
+                        status.state, status.plpmtu
+                    ));
+                    self.statuses.lock().unwrap().push(status);
+                }
+            }
+        }
+
+        // Take the shared test PKI before the timeout window (RSA keygen is
+        // very slow on QEMU, and only happens on first use).
+        let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+        let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+        let server_sock = Arc::new(TestDatagramSock(server_sock));
+        let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+        let (auth, _last_method) = TestAuth::new();
+        let pqc = PQCrypto {
+            server_pqc: false,
+            keyshare: None,
+        };
+
+        // The server answers every probe Ping with a Pong.
+        let (cert, key) = pki.server_secrets();
+        let server_task = tokio::spawn(server(
+            server_sock,
+            TestServerConfig {
+                auth,
+                pqc,
+                expresslane: None,
+                conn_out: None,
+                metrics: None,
+                expresslane_cb: None,
+                cert,
+                key,
+            },
+        ));
+
+        let link = Arc::new(PmtudLink {
+            inner: client_sock.clone(),
+            faults,
+            df: Default::default(),
+            blocked: Default::default(),
+            block_df: Default::default(),
+            block_plain: Default::default(),
+            sends: Default::default(),
+            trace: Default::default(),
+        });
+        let outside: OutsideIOSendCallbackArg = link.clone();
+        let statuses: Arc<Mutex<Vec<PmtudStatus>>> = Default::default();
+
+        let ca_cert = pki.root_ca();
+        let (tun, _inside_rx) = ChannelTun::new();
+        let (ticker, ticker_task) = ConnectionTicker::new();
+        let (pmtud_timer, pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+        let state = ConnectionState { ticker };
+
+        let client = ClientContextBuilder::new(
+            client_sock.connection_type(),
+            ca_cert,
+            Some(Arc::new(tun)),
+            Arc::new(Client),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(outside, MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .with_event_cb(Box::new(RecordingEvents {
+            link: link.clone(),
+            statuses: statuses.clone(),
+        }))
+        .with_pmtud_timer(pmtud_timer)
+        .connect(state)
+        .unwrap();
+        let client = Arc::new(Mutex::new(client));
+
+        let mut tasks = JoinSet::new();
+        ticker_task.spawn_in(Arc::downgrade(&client), &mut tasks);
+        pmtud_timer_task.spawn(Arc::downgrade(&client), &mut tasks);
+
+        Self {
+            link,
+            client,
+            client_sock,
+            server_task,
+            statuses,
+            failed_reads: 0,
+            _tasks: tasks,
+        }
+    }
+
+    /// Feed the client one packet from the server, then let `step` use
+    /// the connection. Returns what `step` returned.
+    async fn receive<T>(&mut self, step: impl FnOnce(&mut Connection<ConnectionState>) -> T) -> T {
+        let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+        loop {
+            tokio::select! {
+                r = self.client_sock.readable() => r.expect("client socket readable"),
+                r = &mut self.server_task => panic!("server task ended early: {r:?}"),
+            }
+            match self.client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => break,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+        }
+        let mut c = self.client.lock().unwrap();
+        let pkt = OutsidePacket::Wire(&mut buf, self.client_sock.connection_type());
+        if let Err(e) = c.outside_data_received(pkt) {
+            self.failed_reads += 1;
+            self.link
+                .trace(format!("outside_data_received -> Err({e:?})"));
+        }
+        step(&mut c)
+    }
+
+    /// Feed the client what the server sends until `step` returns true.
+    /// Returns false if that takes longer than the test timeout.
+    async fn run_until(
+        &mut self,
+        mut step: impl FnMut(&mut Connection<ConnectionState>, &PmtudLink) -> bool,
+    ) -> bool {
+        let link = self.link.clone();
+        let timeout = std::time::Duration::from_millis(get_test_timeout());
+        tokio::time::timeout(timeout, async {
+            while !self.receive(|c| step(c, &link)).await {}
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Feed the client everything the server still has to say.
+    async fn settle(&mut self) {
+        let idle = std::time::Duration::from_millis(200);
+        while tokio::time::timeout(idle, self.receive(|_| ()))
+            .await
+            .is_ok()
+        {}
+    }
+
+    fn status(&self) -> PmtudStatus {
+        let c = self.client.lock().unwrap();
+        c.pmtud_status().expect("PMTUD enabled")
+    }
+
+    fn trace(&self) -> String {
+        self.link.trace.lock().unwrap().join("\n  ")
+    }
+}
+
+/// A PMTUD probe larger than the local interface is refused with EMSGSIZE
+/// while DF is set (Linux `IP_PMTUDISC_PROBE`, Apple `IP_DONTFRAG`). That
+/// probe is lost: it must never reach the wire without DF, the search must
+/// settle on a PLPMTU the interface can carry without waiting for probe
+/// timeouts, and the connection must keep receiving.
+///
+/// `writes_after_refusal` is how many ordinary writes (keepalives here; data
+/// behaves the same) the client makes after the refusal: a busy connection
+/// writes more than once before the next packet arrives.
+#[test_case(1; "one write after the refusal")]
+#[test_case(2; "two writes after the refusal")]
+#[tokio::test]
+async fn pmtud_probe_refused_with_emsgsize_is_not_confirmed(writes_after_refusal: usize) {
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults::default());
+
+    let mut refused_seen = 0;
+    let finished = t
+        .run_until(|c, link| {
+            // A probe was just refused. The connection carries on, so its
+            // next ordinary writes go out with DF clear again.
+            let refused = link.count(PmtudLinkOutcome::Refused);
+            if refused > refused_seen {
+                refused_seen = refused;
+                for _ in 0..writes_after_refusal {
+                    let r = c.keepalive();
+                    link.trace(format!("keepalive after refusal -> {r:?}"));
+                }
+            }
+
+            let status = c.pmtud_status().expect("PMTUD enabled");
+            status.state == PmtudState::SearchComplete
+                || status.plpmtu.is_some_and(|p| !link.fits(p))
+        })
+        .await;
+
+    let trace = t.trace();
+    eprintln!("trace ({writes_after_refusal} write(s) after the refusal):\n  {trace}");
+    assert!(finished, "test timed out");
+
+    let sends = t.link.sends();
+    assert!(
+        t.link.count(PmtudLinkOutcome::Refused) > 0,
+        "no probe exceeded the interface MTU: {sends:?}"
+    );
+    assert_eq!(
+        t.link.leaked_probes().len(),
+        0,
+        "probes refused with DF set were later sent without it: {sends:?}"
+    );
+    assert_eq!(t.failed_reads, 0, "received packets could not be processed");
+
+    // 1346 is refused, so small steps from 1314: 1322 and 1330 fit, 1338
+    // is refused. Nothing waits for a probe timer.
+    let observed: Vec<_> = t
+        .statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| (s.state, s.plpmtu))
+        .collect();
+    let expected = [
+        (PmtudState::Base, None),
+        (PmtudState::Searching, Some(1250)),
+        (PmtudState::Searching, Some(1282)),
+        (PmtudState::Searching, Some(1314)),
+        (PmtudState::Searching, Some(1322)),
+        (PmtudState::Searching, Some(1330)),
+        (PmtudState::SearchComplete, Some(1330)),
+    ];
+    assert_eq!(observed, expected);
+    assert!(t.link.fits(1330) && !t.link.fits(1338));
+
+    // No size was tried again once the interface had refused it.
+    let refused: Vec<_> = sends
+        .iter()
+        .filter(|s| s.outcome == PmtudLinkOutcome::Refused)
+        .map(|s| s.len)
+        .collect();
+    let expected = [t.link.probe_len(1346), t.link.probe_len(1338)];
+    assert_eq!(refused, expected, "{sends:?}");
+}
+
+/// A probe sent while DF cannot be set proves nothing about the path. When
+/// the socket cannot be switched into probe mode PMTUD stops for the
+/// connection, says so, and the connection carries on without it.
+#[tokio::test]
+async fn pmtud_stops_when_probe_mode_cannot_be_enabled() {
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults {
+        enable_fails: true,
+        ..Default::default()
+    });
+
+    let online = t.run_until(|c, _| matches!(c.state(), State::Online)).await;
+    t.client.lock().unwrap().keepalive().expect("keepalive");
+    t.settle().await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(online, "test timed out");
+    assert_eq!(t.failed_reads, 0);
+
+    let status = t.status();
+    assert_eq!((status.state, status.plpmtu), (PmtudState::Disabled, None));
+    let observed: Vec<_> = t
+        .statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| (s.state, s.plpmtu))
+        .collect();
+    assert_eq!(
+        observed,
+        [(PmtudState::Base, None), (PmtudState::Disabled, None)]
+    );
+
+    // No probe left. The handshake's first flight is larger than any
+    // probe.
+    let sends = t.link.sends();
+    let handshake = sends.iter().map(|s| s.len).max().unwrap();
+    let probes: Vec<_> = sends
+        .iter()
+        .filter(|s| (1250..handshake).contains(&s.len))
+        .collect();
+    assert!(probes.is_empty(), "{sends:?}");
+    assert!(sends.iter().all(|s| !s.df), "{sends:?}");
+}
+
+/// When DF cannot be cleared after a probe, that probe still went out with
+/// DF set and counts. PMTUD carries on, so packets stay within what the
+/// path carries with DF set, and the connection keeps working.
+#[tokio::test]
+async fn pmtud_continues_when_probe_mode_cannot_be_disabled() {
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults {
+        disable_fails: true,
+        ..Default::default()
+    });
+
+    let finished = t
+        .run_until(|c, _| {
+            c.pmtud_status()
+                .is_some_and(|s| s.state == PmtudState::SearchComplete)
+        })
+        .await;
+    t.client.lock().unwrap().keepalive().expect("keepalive");
+    t.settle().await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(finished, "test timed out");
+    assert_eq!(t.failed_reads, 0);
+    let status = t.status();
+    assert_eq!(
+        (status.state, status.plpmtu),
+        (PmtudState::SearchComplete, Some(1330))
+    );
+    assert!(t.link.fits(1330) && !t.link.fits(1338));
+}
+
+/// A probe whose write blocks is still pending in the TLS library when DF
+/// is cleared again. It must not be sent by a later write: it is lost, and
+/// the probe timer sends that size again with DF set.
+#[tokio::test]
+async fn pmtud_probe_blocked_is_not_sent_later() {
+    // Datagram size: blocks the first search probe (1282), not the base
+    // probe (1250).
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults {
+        block_once_from: Some(1300),
+        ..Default::default()
+    });
+
+    let mut ticked = false;
+    let finished = t
+        .run_until(|c, link| {
+            if !ticked && link.count(PmtudLinkOutcome::Blocked) > 0 {
+                ticked = true;
+                // An ordinary write follows, then the probe times out.
+                let r = c.keepalive();
+                link.trace(format!("keepalive after block -> {r:?}"));
+                let r = c.pmtud_tick();
+                link.trace(format!("pmtud_tick -> {r:?}"));
+            }
+            let status = c.pmtud_status().expect("PMTUD enabled");
+            status.state == PmtudState::SearchComplete
+        })
+        .await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(finished, "test timed out");
+    assert_eq!(t.failed_reads, 0);
+
+    let sends = t.link.sends();
+    let blocked = sends
+        .iter()
+        .position(|s| s.outcome == PmtudLinkOutcome::Blocked)
+        .expect("a probe was blocked");
+    let probe_len = t.link.probe_len(1282);
+    assert_eq!(sends[blocked].len, probe_len);
+    assert_eq!(
+        t.link.leaked_probes().len(),
+        0,
+        "a blocked probe was later sent without DF: {sends:?}"
+    );
+    // The keepalive was not held up behind the probe, and the retry
+    // carried DF.
+    let later: Vec<_> = sends[blocked + 1..]
+        .iter()
+        .take(2)
+        .map(|s| (s.len < 1250, s.len == probe_len, s.df, s.outcome))
+        .collect();
+    assert_eq!(
+        later,
+        [
+            (true, false, false, PmtudLinkOutcome::Sent),
+            (false, true, true, PmtudLinkOutcome::Sent)
+        ],
+        "{sends:?}"
+    );
+    // The search went on from there.
+    let status = t.status();
+    assert_eq!(
+        (status.state, status.plpmtu),
+        (PmtudState::SearchComplete, Some(1330))
+    );
+}
+
+/// A probe is not started while an earlier write is still blocked: that
+/// write would go out first, with DF set, and a refusal of it would be
+/// blamed on the probe. The probe goes out on the next tick instead.
+#[tokio::test]
+async fn pmtud_probe_waits_for_an_earlier_blocked_write() {
+    use std::sync::atomic::Ordering;
+
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults::default());
+    let mut blocked = false;
+    let finished = t
+        .run_until(|c, link| {
+            let status = c.pmtud_status().expect("PMTUD enabled");
+            if !blocked && status.state == PmtudState::Searching {
+                blocked = true;
+                // The keepalive blocks, and so does its retry before the
+                // probe: it is still queued when the probe is due.
+                link.block_plain.store(2, Ordering::SeqCst);
+                let r = c.keepalive();
+                link.trace(format!("keepalive (blocked) -> {r:?}"));
+                let r = c.pmtud_tick();
+                link.trace(format!("pmtud_tick -> {r:?}"));
+                let r = c.pmtud_tick();
+                link.trace(format!("pmtud_tick -> {r:?}"));
+            }
+            status.state == PmtudState::SearchComplete
+        })
+        .await;
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(finished, "test timed out");
+    assert_eq!(t.failed_reads, 0);
+    let sends = t.link.sends();
+    let small_df: Vec<_> = sends.iter().filter(|s| s.df && s.len < 1250).collect();
+    assert!(
+        small_df.is_empty(),
+        "ordinary datagrams sent with DF: {small_df:?}"
+    );
+    // The probe went out again, with DF, once the keepalive had.
+    let probe_len = t.link.probe_len(1282);
+    assert!(
+        sends.iter().filter(|s| s.df && s.len == probe_len).count() >= 2,
+        "{sends:?}"
+    );
+}
+
+/// A probe the socket could not take never reached the path, so it is not
+/// counted as lost: a busy socket when the confirm probes are due does not
+/// look like a black hole.
+#[tokio::test]
+async fn pmtud_probe_not_sent_is_not_counted() {
+    use std::sync::atomic::Ordering;
+
+    let mut t = PmtudLinkTest::start(PmtudLinkFaults::default());
+    let finished = t
+        .run_until(|c, _| {
+            c.pmtud_status()
+                .is_some_and(|s| s.state == PmtudState::SearchComplete)
+        })
+        .await;
+    assert!(finished, "test timed out");
+    let converged = t.status();
+    assert_eq!(converged.plpmtu, Some(1330));
+
+    // The raise timer fires (a confirm probe), then more probe timeouts
+    // than MAX_PROBES, every probe finding the socket not writable.
+    t.link.block_df.store(true, Ordering::SeqCst);
+    for _ in 0..5 {
+        let r = t.client.lock().unwrap().pmtud_tick();
+        t.link.trace(format!("pmtud_tick -> {r:?}"));
+    }
+
+    eprintln!("trace:\n  {}", t.trace());
+    assert!(t.link.count(PmtudLinkOutcome::Blocked) >= 5);
+    assert_eq!(t.status(), converged);
+}
