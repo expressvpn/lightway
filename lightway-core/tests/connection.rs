@@ -1614,6 +1614,273 @@ async fn client_ignores_session_id_of_replayed_or_corrupted_packets() {
     .expect("test never reached the replayed and corrupted packets");
 }
 
+/// A GSO aggregate whose segments fit the inside MTU but not the PMTUD
+/// estimate is fragmented like any other oversized packet: no datagram it
+/// puts on the wire is larger than the probe that confirmed the estimate.
+/// Once the estimate covers the segments, they are batched again.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pmtud_fragments_gso_segments_above_the_estimate() {
+    /// IPv4 + TCP header of the aggregate built below.
+    const HDR_LEN: usize = 40;
+    /// One segment is 1300 bytes: within `ChannelTun`'s 1350-byte inside
+    /// MTU, above the 1247-byte payload the base PLPMTU of 1250 allows.
+    const GSO_SIZE: usize = 1260;
+    const SEGS: usize = 2;
+
+    /// PMTUD events and outside datagrams, in the order the connection
+    /// produced them.
+    #[derive(Debug, Clone, Copy)]
+    enum Entry {
+        Pmtud(PmtudStatus),
+        /// One datagram, sent alone or as part of a GSO batch.
+        Send {
+            len: usize,
+            gso: bool,
+        },
+    }
+    type Log = Arc<Mutex<Vec<Entry>>>;
+
+    /// Keeps the default `gso_enabled() == true`, so the connection batches
+    /// whenever it decides it may.
+    struct RecordingSock {
+        inner: Arc<TestDatagramSock>,
+        log: Log,
+    }
+
+    impl OutsideIOSendCallback for RecordingSock {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            let len = buf.len();
+            self.log
+                .lock()
+                .unwrap()
+                .push(Entry::Send { len, gso: false });
+            self.inner.send(buf)
+        }
+
+        // Record the datagrams the kernel would cut the batch into. Nothing
+        // after the batch needs it delivered.
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            let total: usize = bufs.iter().map(|b| b.len()).sum();
+            let stride = gso_size as usize;
+            let mut log = self.log.lock().unwrap();
+            for offset in (0..total).step_by(stride) {
+                let len = stride.min(total - offset);
+                log.push(Entry::Send { len, gso: true });
+            }
+            IOCallbackResult::Ok(total)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            self.inner.peer_addr()
+        }
+
+        // Unix datagram sockets have no DF bit; accept the probe bracket.
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingEvents(Log);
+
+    impl EventCallback for RecordingEvents {
+        fn event(&mut self, event: Event) {
+            if let Event::PmtudStateChanged(status) = event {
+                self.0.lock().unwrap().push(Entry::Pmtud(status));
+            }
+        }
+    }
+
+    /// An IPv4/TCP aggregate of `SEGS` full segments, as TUN hands it over
+    /// with TSO enabled.
+    fn tcp_aggregate() -> (BytesMut, VirtioNetHdr) {
+        let total = HDR_LEN + SEGS * GSO_SIZE;
+        let mut pkt = BytesMut::zeroed(total);
+        pkt[0] = 0x45; // IPv4, 20-byte header
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        pkt[8] = 64; // TTL
+        pkt[9] = 6; // TCP
+        pkt[12..16].copy_from_slice(&[10, 125, 0, 2]);
+        pkt[16..20].copy_from_slice(&[10, 125, 0, 1]);
+        pkt[32] = 0x50; // 20-byte TCP header
+        pkt[33] = 0x10; // ACK
+        let hdr = VirtioNetHdr {
+            flags: gso::VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: 1, // VIRTIO_NET_HDR_GSO_TCPV4
+            hdr_len: HDR_LEN as u16,
+            gso_size: GSO_SIZE as u16,
+            csum_start: 20,
+            csum_offset: 16,
+        };
+        (pkt, hdr)
+    }
+
+    // Take the shared test PKI before the timeout window (RSA keygen is very
+    // slow on QEMU, and only happens on first use).
+    let pki = TestPki::get_valid(2, RsaKeySize::_2048);
+
+    let (client_sock, server_sock) = UnixDatagram::pair().expect("UnixDatagram");
+    let server_sock = Arc::new(TestDatagramSock(server_sock));
+    let client_sock = Arc::new(TestDatagramSock(client_sock));
+
+    let (auth, _last_method) = TestAuth::new();
+    let (cert, key) = pki.server_secrets();
+    let mut server_task = tokio::spawn(server(
+        server_sock,
+        TestServerConfig {
+            auth,
+            pqc: PQCrypto {
+                server_pqc: false,
+                keyshare: None,
+            },
+            expresslane: None,
+            conn_out: None,
+            metrics: None,
+            expresslane_cb: None,
+            cert,
+            key,
+        },
+    ));
+
+    let log: Log = Default::default();
+    let (tun, _inside_rx) = ChannelTun::new();
+    let (ticker, ticker_task) = ConnectionTicker::new();
+    let (pmtud_timer, pmtud_timer_task) = lightway_app_utils::DplpmtudTimer::new();
+    let outside: OutsideIOSendCallbackArg = Arc::new(RecordingSock {
+        inner: client_sock.clone(),
+        log: log.clone(),
+    });
+
+    let client = ClientContextBuilder::new(
+        client_sock.connection_type(),
+        pki.root_ca(),
+        Some(Arc::new(tun)),
+        Arc::new(Client),
+        connection_ticker_cb,
+    )
+    .unwrap()
+    // As the shared test client does: the server checks the negotiated
+    // curve when inside data reaches it.
+    .enable_pq_crypto()
+    .unwrap()
+    .build()
+    .start_connect(outside, MAX_OUTSIDE_MTU)
+    .unwrap()
+    .with_auth_token("LET ME IN")
+    .with_event_cb(Box::new(RecordingEvents(log.clone())))
+    .with_pmtud_timer(pmtud_timer)
+    .connect(ConnectionState { ticker })
+    .unwrap();
+    let client = Arc::new(Mutex::new(client));
+
+    let mut join_set = JoinSet::new();
+    ticker_task.spawn_in(Arc::downgrade(&client), &mut join_set);
+    pmtud_timer_task.spawn(Arc::downgrade(&client), &mut join_set);
+
+    // Pump the client until the base probe is confirmed, then send the
+    // aggregate under the same lock: the estimate is the base PLPMTU and
+    // nothing else reaches the outside I/O meanwhile. Returns where the
+    // aggregate's datagrams start in the log.
+    // Then again once the search has completed above the segment size.
+    // Returns the log ranges of both aggregates' datagrams.
+    let driver = async {
+        let mut small = None;
+        loop {
+            client_sock
+                .readable()
+                .await
+                .expect("client socket readable");
+            let mut buf = BytesMut::with_capacity(MAX_OUTSIDE_MTU);
+            match client_sock.try_recv_buf(&mut buf) {
+                Ok(0) => panic!("EOF"),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => continue,
+                Err(e) => panic!("client recv: {e}"),
+            }
+            let mut c = client.lock().unwrap();
+            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            c.outside_data_received(pkt).expect("outside data received");
+            let Some(status) = c.pmtud_status() else {
+                continue;
+            };
+            let Some(mps) = status.max_packet_size else {
+                continue;
+            };
+            let send_aggregate = |c: &mut Connection<ConnectionState>| {
+                let (mut pkt, hdr) = tcp_aggregate();
+                let start = log.lock().unwrap().len();
+                c.inside_data_received_gso(&mut pkt, &hdr)
+                    .expect("aggregate sent");
+                start..log.lock().unwrap().len()
+            };
+            match small {
+                None => {
+                    assert!(HDR_LEN + GSO_SIZE > mps, "segments must exceed {mps}");
+                    small = Some(send_aggregate(&mut c));
+                }
+                Some(ref small) if status.state == PmtudState::SearchComplete => {
+                    assert!(HDR_LEN + GSO_SIZE <= mps, "segments must fit {mps}");
+                    return (small.clone(), send_aggregate(&mut c));
+                }
+                Some(_) => {}
+            }
+        }
+    };
+
+    let (small, large) = tokio::time::timeout(
+        std::time::Duration::from_millis(get_test_timeout()),
+        async {
+            tokio::select! {
+                ranges = driver => ranges,
+                r = &mut server_task => panic!("server task ended early: {r:?}"),
+            }
+        },
+    )
+    .await
+    .expect("test timed out");
+
+    let log = log.lock().unwrap().clone();
+
+    // Each PMTUD event precedes the probe it requests, so the datagram right
+    // after `Base` is the probe that confirmed the estimate.
+    let base = log
+        .iter()
+        .position(|e| matches!(e, Entry::Pmtud(s) if s.state == PmtudState::Base))
+        .expect("Base was reported");
+    let Some(Entry::Send { len: limit, .. }) = log.get(base + 1) else {
+        panic!("expected the base probe right after Base: {log:?}");
+    };
+
+    let sent = &log[small];
+    assert!(sent.len() >= SEGS, "aggregate not sent: {sent:?}");
+    for e in sent {
+        let Entry::Send { len, gso } = e else {
+            panic!("unexpected {e:?} while sending the aggregate");
+        };
+        assert!(
+            len <= limit,
+            "{len}-byte datagram (gso: {gso}) exceeds the {limit}-byte base probe: {sent:?}"
+        );
+    }
+    // Once the estimate covers the segments they go out as one batch again.
+    let sent = &log[large];
+    assert!(
+        sent.len() == SEGS
+            && sent
+                .iter()
+                .all(|e| matches!(e, Entry::Send { gso: true, .. })),
+        "aggregate not batched: {sent:?}"
+    );
+}
+
 /// PMTUD reports its progress to the application: `Event::PmtudStateChanged`
 /// fires once per state or estimate change (never for a no-op step), the
 /// getter agrees with the last event, and for every step that requests a
@@ -1808,11 +2075,12 @@ async fn pmtud_reports_status_changes() {
         "discovery starts once Online: {log:?}"
     );
 
-    // One event per change, none for a no-op step: base 1250, big steps of
-    // 32 up to max_dtls_mtu(MAX_OUTSIDE_MTU) = 1419, at which point the
-    // search converges without an intermediate Searching(1419).
+    // One event per change, none for a no-op step: base 1250 (unconfirmed
+    // in Base; confirming it changes only the state), big steps of 32 up to
+    // max_dtls_mtu(MAX_OUTSIDE_MTU) = 1419, at which point the search
+    // converges without an intermediate Searching(1419).
     let expected = [
-        (PmtudState::Base, None),
+        (PmtudState::Base, Some(1250)),
         (PmtudState::Searching, Some(1250)),
         (PmtudState::Searching, Some(1282)),
         (PmtudState::Searching, Some(1314)),
@@ -2252,7 +2520,7 @@ async fn pmtud_probe_refused_with_emsgsize_is_not_confirmed(writes_after_refusal
         .map(|s| (s.state, s.plpmtu))
         .collect();
     let expected = [
-        (PmtudState::Base, None),
+        (PmtudState::Base, Some(1250)),
         (PmtudState::Searching, Some(1250)),
         (PmtudState::Searching, Some(1282)),
         (PmtudState::Searching, Some(1314)),
@@ -2302,7 +2570,7 @@ async fn pmtud_stops_when_probe_mode_cannot_be_enabled() {
         .collect();
     assert_eq!(
         observed,
-        [(PmtudState::Base, None), (PmtudState::Disabled, None)]
+        [(PmtudState::Base, Some(1250)), (PmtudState::Disabled, None)]
     );
 
     // No probe left. The handshake's first flight is larger than any

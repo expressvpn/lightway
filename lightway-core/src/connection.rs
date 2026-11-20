@@ -1350,16 +1350,26 @@ impl<AppState: Send> Connection<AppState> {
         // we only need capacity here — no zero-init.
         let mut segment = BytesMut::with_capacity(mtu);
 
+        // A segment larger than the PMTUD estimate has to be fragmented,
+        // which only `send_to_outside` does. Same check it applies.
+        let fits_pmtud = self
+            .pmtud
+            .as_ref()
+            .and_then(|pmtud| pmtud.maximum_packet_sizes())
+            .is_none_or(|(data_mps, _)| seg_size <= data_mps);
+
         // Can this aggregate travel as one `UDP_SEGMENT` batch? If not
-        // (too many segments, or the socket latched GSO off after the
-        // egress path rejected it), send one datagram per segment rather
-        // than dropping it.
-        let batched = gso_fits_one_batch(gso_segs) && self.session.io_cb().io.gso_enabled();
+        // (too many segments, segments above the PMTUD estimate, or the
+        // socket latched GSO off after the egress path rejected it), send
+        // one datagram per segment rather than dropping it.
+        let batched =
+            gso_fits_one_batch(gso_segs) && fits_pmtud && self.session.io_cb().io.gso_enabled();
         if !batched {
             crate::metrics::gso_batch_skipped();
-            // Warn only for an oversized aggregate. The other reason — the
-            // socket latched GSO off — already warns once when it
-            // disengages, so don't repeat it here on every aggregate.
+            // Warn only for an oversized aggregate. The socket latching GSO
+            // off already warns once when it disengages, and a PMTUD
+            // estimate below the segment size is an ordinary path state, so
+            // neither warns here on every aggregate.
             if !gso_fits_one_batch(gso_segs) {
                 tracing::warn!(
                     gso_segs,
