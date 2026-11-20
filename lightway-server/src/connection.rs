@@ -7,7 +7,7 @@ use std::{
 use tracing::{trace, warn};
 
 use crate::{
-    connection_manager::{ConnectionManager, ConnectionManagerError},
+    connection_manager::{ConnectionId, ConnectionManager, ConnectionManagerError},
     metrics,
 };
 use lightway_app_utils::{ConnectionTicker, ConnectionTickerState, EventStreamCallback, Tickable};
@@ -36,7 +36,9 @@ impl ConnectionTickerState for ConnectionState {
     }
 }
 
-pub(crate) struct Connection {
+/// A connection the server accepted.
+pub struct Connection {
+    pub(crate) id: ConnectionId,
     manager: Arc<ConnectionManager>,
     lw_conn: Mutex<lightway_core::Connection<ConnectionState>>,
     pub(crate) connection_started: std::time::Instant,
@@ -49,7 +51,7 @@ impl Tickable for Connection {
 }
 
 impl Connection {
-    pub fn new(
+    pub(crate) fn new(
         manager: Arc<ConnectionManager>,
         protocol_version: Version,
         local_addr: SocketAddr,
@@ -59,6 +61,7 @@ impl Connection {
         event_cb: EventStreamCallback,
     ) -> Result<Arc<Self>, ConnectionManagerError> {
         tracing::debug!(?local_addr, "New connection");
+        let id = manager.next_connection_id();
         let connection_started = std::time::Instant::now();
 
         let (ticker, ticker_task) = ConnectionTicker::new();
@@ -80,6 +83,7 @@ impl Connection {
         );
 
         let conn = Arc::new(Self {
+            id,
             manager,
             lw_conn,
             connection_started,
@@ -106,22 +110,22 @@ impl Connection {
             pub fn transport_caps(&self) -> TransportCaps;
             pub fn is_fatal(&self, err: &ConnectionError) -> bool;
             pub fn session_id(&self) -> SessionId;
-            pub fn mark_offload_activity(&self, rx: bool, tx: bool);
+            pub(crate) fn mark_offload_activity(&self, rx: bool, tx: bool);
             pub fn peer_addr(&self) -> SocketAddr;
-            pub fn set_peer_addr(&self, addr: SocketAddr) -> SocketAddr;
-            pub fn rotate_expresslane_key_now(&self) -> ConnectionResult<bool>;
+            pub(crate) fn set_peer_addr(&self, addr: SocketAddr) -> SocketAddr;
+            pub(crate) fn rotate_expresslane_key_now(&self) -> ConnectionResult<bool>;
             pub fn current_cipher(&self) -> Option<String>;
             pub fn current_curve(&self) -> Option<String>;
             pub fn state(&self) -> State;
             pub fn activity(&self) -> ConnectionActivity;
             pub fn expresslane_state(&self) -> ExpresslaneState;
-            pub fn tick(&self, t: TickType) -> ConnectionResult<()>;
-            pub fn authentication_expired(&self) -> ConnectionResult<bool>;
+            pub(crate) fn tick(&self, t: TickType) -> ConnectionResult<()>;
+            pub(crate) fn authentication_expired(&self) -> ConnectionResult<bool>;
 
             pub fn outside_data_received(&self, buf: OutsidePacket) -> ConnectionResult<usize>;
-            pub fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
+            pub(crate) fn inside_data_received(&self, pkt: &mut BytesMut) -> ConnectionResult<()>;
             #[cfg(target_os = "linux")]
-            pub fn inside_data_received_gso(&self, pkt: &mut BytesMut, hdr: &lightway_core::gso::VirtioNetHdr) -> ConnectionResult<()>;
+            pub(crate) fn inside_data_received_gso(&self, pkt: &mut BytesMut, hdr: &lightway_core::gso::VirtioNetHdr) -> ConnectionResult<()>;
         }
     }
 
@@ -158,7 +162,7 @@ impl Connection {
         }
     }
 
-    pub fn begin_session_id_rotation(self: &Arc<Self>) {
+    pub(crate) fn begin_session_id_rotation(self: &Arc<Self>) {
         let mut conn = self.lw_conn.lock().unwrap();
 
         // A rotation is already in flight, nothing to be done this time.
@@ -180,11 +184,11 @@ impl Connection {
         self.manager.begin_session_id_rotation(self, new_session);
     }
 
-    pub fn finalize_session_id_rotation(self: &Arc<Self>, old: SessionId, new: SessionId) {
+    pub(crate) fn finalize_session_id_rotation(self: &Arc<Self>, old: SessionId, new: SessionId) {
         self.manager.finalize_session_id_rotation(self, old, new)
     }
 
-    pub fn send_to_outside(
+    pub(crate) fn send_to_outside(
         self: &Arc<Self>,
         mut packet: BytesMut,
         is_encoded: bool,
@@ -194,7 +198,7 @@ impl Connection {
         conn.send_to_outside(&mut packet, is_encoded)
     }
 
-    pub fn send_to_inside(self: &Arc<Self>, packet: BytesMut) -> ConnectionResult<()> {
+    pub(crate) fn send_to_inside(self: &Arc<Self>, packet: BytesMut) -> ConnectionResult<()> {
         let mut conn = self.lw_conn.lock().unwrap();
 
         conn.send_to_inside(packet)
@@ -202,7 +206,7 @@ impl Connection {
 
     // Use this only during shutdown, after clearing all connections from
     // connection_manager
-    pub fn lw_disconnect(self: Arc<Self>) -> ConnectionResult<()> {
+    pub(crate) fn lw_disconnect(self: Arc<Self>) -> ConnectionResult<()> {
         self.lw_conn.lock().unwrap().disconnect()
     }
 

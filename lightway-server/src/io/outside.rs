@@ -2,7 +2,7 @@ pub(crate) mod datagram;
 pub(crate) mod tcp;
 pub(crate) mod udp;
 
-pub(crate) use datagram::DatagramServer;
+pub(crate) use datagram::DatagramIoServer;
 pub(crate) use tcp::TcpServer;
 pub(crate) use udp::UdpIo;
 
@@ -13,10 +13,21 @@ use lightway_core::{
     IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsideIOSendCallbackArg,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use crate::ConnectionManager;
+
+/// Receives outside traffic and feeds it to the connection manager.
+///
+/// Pass a custom implementation as `ServerConnectionMode::Custom`. The
+/// built-in UDP and TCP servers implement it too.
 #[async_trait]
-pub(crate) trait Server {
-    async fn run(&mut self) -> Result<()>;
+pub trait Server: Send {
+    /// Serve the outside path. When `run` returns, with `Ok` or `Err`,
+    /// the [`server`](crate::server) function disconnects every
+    /// connection and returns. That function creates `manager` after it
+    /// selects the mode, so a `Server` cannot hold it from construction.
+    async fn run(self: Box<Self>, manager: Arc<ConnectionManager>) -> Result<()>;
 }
 
 /// Where one received wire packet came from.
@@ -93,9 +104,10 @@ pub trait OutsideIO: Send {
     /// caused the connection to be created.
     ///
     /// When a peer roams, the server calls `set_peer_addr` on this
-    /// callback to redirect sends. A transport that routes internally
-    /// can keep the default no-op; the server keys its connection map
-    /// from its own record, not from this callback.
+    /// callback to redirect sends. The server moves the connection to
+    /// the new address only if `peer_addr` then returns it. With the
+    /// default no-op, the connection keeps its old address, and the
+    /// server finds it by its session id.
     fn send_callback(&self, meta: &RecvMeta) -> OutsideIOSendCallbackArg;
 
     /// Send an already-encoded frame to a peer that has no connection.

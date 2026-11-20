@@ -61,13 +61,16 @@ pub enum Delivery {
     Stream,
     /// One Lightway frame travels per packet, and packets are
     /// independent. A packet can be lost or reordered, and nothing
-    /// retransmits it.
+    /// retransmits it, unless `reliable_control` is set.
     Datagram {
         /// Every packet starts with a [`crate::Header`] that carries the
         /// session id. Expresslane needs it: the header marks an
         /// expresslane record and carries the session id that its
         /// decryption uses.
         wire_header: bool,
+        /// The transport retransmits every frame that does not carry
+        /// inside packets, so the connection does not resend them.
+        reliable_control: bool,
     },
 }
 
@@ -90,7 +93,13 @@ impl TransportCaps {
 
     /// Whether every packet starts with a [`crate::Header`].
     pub fn has_wire_header(&self) -> bool {
-        matches!(self.delivery, Delivery::Datagram { wire_header: true })
+        matches!(
+            self.delivery,
+            Delivery::Datagram {
+                wire_header: true,
+                ..
+            }
+        )
     }
 }
 
@@ -152,9 +161,10 @@ pub trait Transport: Send {
     /// tick.
     fn tick_interval(&mut self) -> Option<Duration>;
 
-    /// The connection calls this on each tick, except while the client
-    /// authenticates. Retransmit here if necessary, and return true
-    /// when the peer is lost.
+    /// The connection calls this on each tick. While a client
+    /// authenticates, its tick resends the auth request instead, except
+    /// with `reliable_control`. Retransmit here if necessary, and return
+    /// true when the peer is lost.
     fn has_timed_out(&mut self) -> bool;
 
     /// Negotiated secure protocol version.

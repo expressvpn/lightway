@@ -290,7 +290,12 @@ impl Encapsulation {
         pkt: OutsidePacket<'pkt>,
     ) -> ConnectionResult<(&'pkt mut BytesMut, Option<Header>)> {
         let (record, hdr) = match (pkt, self.delivery) {
-            (OutsidePacket::Wire(buf), Delivery::Datagram { wire_header: true }) => {
+            (
+                OutsidePacket::Wire(buf),
+                Delivery::Datagram {
+                    wire_header: true, ..
+                },
+            ) => {
                 let (buf, hdr) = parse_datagram(buf, &self.outside_plugins)?;
                 (buf, Some(hdr))
             }
@@ -528,7 +533,13 @@ impl Encapsulation {
     }
 
     fn append_header(&self, buf: &mut BytesMut, expresslane_data: bool) {
-        if self.delivery != (Delivery::Datagram { wire_header: true }) {
+        if !matches!(
+            self.delivery,
+            Delivery::Datagram {
+                wire_header: true,
+                ..
+            }
+        ) {
             return;
         }
         wire::Header {
@@ -804,7 +815,10 @@ mod tests {
     }
 
     const DATAGRAM: TransportCaps = TransportCaps {
-        delivery: Delivery::Datagram { wire_header: true },
+        delivery: Delivery::Datagram {
+            wire_header: true,
+            reliable_control: false,
+        },
         supports_roaming: true,
     };
 
