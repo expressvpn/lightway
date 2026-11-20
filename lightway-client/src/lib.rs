@@ -10,6 +10,8 @@ pub mod route_manager;
 
 #[cfg(feature = "mobile")]
 pub mod mobile;
+#[cfg(test)]
+mod transport_mode_tests;
 
 #[cfg(all(feature = "mobile", not(feature = "mobile-test")))]
 uniffi::setup_scaffolding!();
@@ -33,10 +35,10 @@ use lightway_app_utils::{
 };
 use lightway_core::TlsClientFactory;
 use lightway_core::{
-    BuilderPredicates, ClientContextBuilder, ClientIpConfig, Connection, ConnectionError,
-    ConnectionType, Event, EventCallback, IOCallbackResult, InsideIOSendCallbackArg,
-    InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType, State,
-    ipv4_update_destination, ipv4_update_source,
+    BuilderPredicates, ClientContextBuilder, ClientIpConfig, ClientTransportFactory, Connection,
+    ConnectionError, ConnectionType, Event, EventCallback, IOCallbackResult,
+    InsideIOSendCallbackArg, InsideIpConfig, OutsidePacket, PacketDecoderType, PacketEncoderType,
+    State, ipv4_update_destination, ipv4_update_source,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -87,7 +89,8 @@ use tracing::info;
 ///
 /// Lightway uses the returned IO as it is, for a datagram
 /// ([`ClientConnectionMode::DatagramIoConnector`]) or stream
-/// ([`ClientConnectionMode::StreamIoConnector`]) connection. The connector
+/// ([`ClientConnectionMode::StreamIoConnector`]) connection, or under a
+/// custom transport ([`ClientConnectionMode::Transport`]). The connector
 /// does any setup the transport needs first, such as a tunnel through an
 /// intermediate host or a TLS layer, and sets the socket options Lightway
 /// would otherwise set: [`io::outside::Tcp::new`] does that for a connected
@@ -115,6 +118,22 @@ pub enum ClientConnectionMode {
     /// A stream transport the application connects when the connection
     /// attempt starts; see [`OutsideIoConnector`].
     StreamIoConnector(OutsideIoConnector),
+    /// A transport the application builds, over an outside IO that the
+    /// application connects when the connection attempt starts.
+    ///
+    /// The factory gets `server_dn`, `sni_header` and the key share offer
+    /// in [`lightway_core::ClientTransportArgs`]. The offer is `keyshare`, or no
+    /// key share when the outside IO sets `empty_first_key_share`. The TLS
+    /// context settings go unused: `cipher` and `cert_content` on
+    /// [`ClientConnectionConfig`], and `tls_debug` and `keylog` on
+    /// [`ClientConfig`]. The outside IO owns the peer address and the
+    /// socket, so `server` on [`ClientConnectionConfig`] only names the
+    /// peer in logs, and the socket settings on [`ClientConfig`] go
+    /// unused.
+    Transport {
+        factory: Arc<dyn ClientTransportFactory>,
+        connector: OutsideIoConnector,
+    },
 }
 
 impl std::fmt::Debug for ClientConnectionMode {
@@ -124,6 +143,7 @@ impl std::fmt::Debug for ClientConnectionMode {
             Self::Datagram(_) => f.debug_tuple("Datagram").finish(),
             Self::DatagramIoConnector(_) => f.debug_tuple("DatagramIoConnector").finish(),
             Self::StreamIoConnector(_) => f.debug_tuple("StreamIoConnector").finish(),
+            Self::Transport { .. } => f.debug_struct("Transport").finish_non_exhaustive(),
         }
     }
 }
@@ -1778,11 +1798,11 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
     server: SocketAddr,
 ) -> Result<(ConnectionType, Arc<dyn io::outside::OutsideIO>)> {
     Ok(match mode {
+        ClientConnectionMode::Transport { .. } => {
+            unreachable!("connect() runs the connector of a custom transport")
+        }
         ClientConnectionMode::DatagramIoConnector(connector) => {
-            let io = connector()
-                .await
-                .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
-                .context("Outside IO connector")?;
+            let io = run_connector(connector).await?;
             (ConnectionType::Datagram, io)
         }
         ClientConnectionMode::Datagram(maybe_sock) => {
@@ -1830,10 +1850,7 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
             (ConnectionType::Datagram, Arc::new(sock))
         }
         ClientConnectionMode::StreamIoConnector(connector) => {
-            let io = connector()
-                .await
-                .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
-                .context("Outside IO connector")?;
+            let io = run_connector(connector).await?;
             (ConnectionType::Stream, io)
         }
         ClientConnectionMode::Stream(maybe_sock) => {
@@ -1860,6 +1877,46 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
             (ConnectionType::Stream, Arc::new(sock))
         }
     })
+}
+
+/// Run the connector of an outside IO.
+async fn run_connector(connector: OutsideIoConnector) -> Result<Arc<dyn io::outside::OutsideIO>> {
+    connector()
+        .await
+        .inspect_err(|e| tracing::error!("Failed to connect outside IO: {e}"))
+        .context("Outside IO connector")
+}
+
+fn tls_client_factory<ExtAppState: Send + Sync>(
+    #[cfg_attr(not(feature = "debug"), allow(unused_variables))] config: &ClientConfig<ExtAppState>,
+    connection_type: ConnectionType,
+    cert_content: &str,
+    cipher: Cipher,
+) -> Result<Arc<dyn ClientTransportFactory>> {
+    #[cfg(feature = "debug")]
+    if config.tls_debug {
+        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
+    }
+
+    let transport = TlsClientFactory::builder(
+        connection_type,
+        RootCertificate::PemBuffer(cert_content.as_bytes()),
+    )?
+    .with_cipher(cipher.into())?
+    // Ensures any per-connection PQ key share is also offered in the TLS
+    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
+    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
+    // nothing, because wolfSSL configures PQ groups per session.
+    .enable_pq_crypto()?;
+
+    // Register the TLS key logger once on the factory; core applies it at the
+    // correct layer for the active TLS backend (SSL_CTX vs per session).
+    #[cfg(feature = "debug")]
+    let transport = transport.when_some(config.keylog.clone(), |b, k| {
+        b.with_key_logger(WiresharkKeyLogger::new(k))
+    });
+
+    Ok(Arc::new(transport.build()))
 }
 
 #[tracing::instrument(
@@ -1893,7 +1950,18 @@ pub async fn connect<
         event_handler,
     } = server_config;
 
-    let (connection_type, outside_io) = connect_outside_io(config, mode, server).await?;
+    let (transport, outside_io): (_, Arc<dyn OutsideIO>) = match mode {
+        ClientConnectionMode::Transport { factory, connector } => {
+            (factory, run_connector(connector).await?)
+        }
+        mode => {
+            let (connection_type, io) = connect_outside_io(config, mode, server).await?;
+            (
+                tls_client_factory(config, connection_type, &cert_content, cipher)?,
+                io,
+            )
+        }
+    };
 
     let required_outside_mtu = outside_io.required_outside_mtu();
     let (outside_mtu, enable_pmtud) = effective_outside_io_settings(
@@ -1920,11 +1988,6 @@ pub async fn connect<
     };
     let (pmtud_timer, pmtud_timer_task) = DplpmtudTimer::new();
 
-    #[cfg(feature = "debug")]
-    if config.tls_debug {
-        set_logging_callback(|m: &str| tracing::debug!(target: "ssl_debug", m));
-    }
-
     let (inside_io_codec, encoded_pkt_receiver, decoded_pkt_receiver, codec_stats_handles) =
         match &inside_pkt_codec {
             Some(codec_factory) => {
@@ -1940,26 +2003,8 @@ pub async fn connect<
             None => (None, None, None, None),
         };
 
-    let transport = TlsClientFactory::builder(
-        connection_type,
-        RootCertificate::PemBuffer(cert_content.as_bytes()),
-    )?
-    .with_cipher(cipher.into())?
-    // Ensures any per-connection PQ key share is also offered in the TLS
-    // context's (SSL_CTX) supported_groups. On BoringSSL, enable_pq_crypto
-    // sets the SSL_CTX supported groups to the PQ list. On wolfSSL it does
-    // nothing, because wolfSSL configures PQ groups per session.
-    .enable_pq_crypto()?;
-
-    // Register the TLS key logger once on the factory; core applies it at the
-    // correct layer for the active TLS backend (SSL_CTX vs per session).
-    #[cfg(feature = "debug")]
-    let transport = transport.when_some(config.keylog.clone(), |b, k| {
-        b.with_key_logger(WiresharkKeyLogger::new(k))
-    });
-
     let ctx_builder = ClientContextBuilder::new(
-        Arc::new(transport.build()),
+        transport,
         None,
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
