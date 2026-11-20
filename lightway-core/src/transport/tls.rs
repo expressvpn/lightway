@@ -285,7 +285,8 @@ pub(crate) const fn max_dtls_mtu(outside_mtu: usize) -> usize {
 /// In lightway for simplicity we do not treat this as a strict
 /// timeout (firing after a period of inactivity) but instead treat it
 /// as a tick (albeit with an interval which may be adjusted over
-/// time). This tick runs until the connection reaches `State::Online`.
+/// time). This tick runs until the connection reaches `State::Online`,
+/// and again while a key update is pending.
 const TLS_TICK_INTERVAL_DIVISOR: u32 = 1000 / 100;
 
 const TLS_TICK_DTLS13_QUICK_TIMEOUT_DIVISOR: u32 = 4;
@@ -294,6 +295,7 @@ pub(crate) struct TlsTransport {
     session: Session<TlsIOAdapter>,
     connection_type: ConnectionType,
     max_record_size: usize,
+    online: bool,
 }
 
 impl TlsTransport {
@@ -306,6 +308,7 @@ impl TlsTransport {
             session,
             connection_type,
             max_record_size,
+            online: false,
         }
     }
 
@@ -427,7 +430,9 @@ impl Transport for TlsTransport {
     }
 
     fn tick_interval(&mut self) -> Option<Duration> {
-        if !self.connection_type.is_datagram() {
+        if !self.connection_type.is_datagram()
+            || (self.online && !self.session.is_update_keys_pending())
+        {
             return None;
         }
         let mut interval = self.session.dtls_current_timeout() / TLS_TICK_INTERVAL_DIVISOR;
@@ -463,5 +468,6 @@ impl Transport for TlsTransport {
     /// it ends here and not when the TLS handshake completes.
     fn online(&mut self) {
         self.session.io_cb_mut().aggressive_send = false;
+        self.online = true;
     }
 }

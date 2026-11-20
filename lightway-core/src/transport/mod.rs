@@ -147,8 +147,10 @@ pub trait Transport: Send {
     fn key_update_pending(&mut self) -> bool;
 
     /// Interval until the transport needs a tick, `None` when it
-    /// needs no ticks. The connection asks only while the link comes
-    /// up or a key update is pending.
+    /// needs no ticks. The connection asks each time it takes records
+    /// from the transport, in every state. When the interval ends before
+    /// the tick that is already due, the connection schedules a new
+    /// tick.
     fn tick_interval(&mut self) -> Option<Duration>;
 
     /// The connection calls this on each tick, except while the client
