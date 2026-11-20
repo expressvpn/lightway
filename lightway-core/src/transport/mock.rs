@@ -242,7 +242,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const LOSSY: TransportCaps = TransportCaps {
-        delivery: Delivery::Datagram { wire_header: false },
+        delivery: Delivery::Datagram {
+            wire_header: false,
+            reliable_control: false,
+        },
         supports_roaming: false,
     };
 
@@ -252,8 +255,19 @@ mod tests {
     };
 
     const WIRE_HEADER: TransportCaps = TransportCaps {
-        delivery: Delivery::Datagram { wire_header: true },
+        delivery: Delivery::Datagram {
+            wire_header: true,
+            reliable_control: false,
+        },
         supports_roaming: true,
+    };
+
+    const RELIABLE_CONTROL: TransportCaps = TransportCaps {
+        delivery: Delivery::Datagram {
+            wire_header: false,
+            reliable_control: true,
+        },
+        supports_roaming: false,
     };
 
     struct Auth;
@@ -710,6 +724,19 @@ mod tests {
         // The tick of the first schedule arrives before the new deadline.
         p.client.tick(TickType::ConnectionTick).unwrap();
         assert_eq!(p.client_ticks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_tick_while_authenticating_reaches_a_reliable_control_transport() {
+        let mut p = pair(RELIABLE_CONTROL);
+        assert_eq!(p.client.state(), State::Authenticating);
+        let server_inbox = p.server_io.inbox();
+        assert_eq!(server_inbox.lock().unwrap().len(), 1);
+
+        p.client.tick(TickType::ConnectionTick).unwrap();
+        assert_eq!(server_inbox.lock().unwrap().len(), 1);
+        assert_eq!(p.client_ticks.load(Ordering::SeqCst), 1);
+        p.pump_to_online();
     }
 
     #[test]
