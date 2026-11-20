@@ -2761,7 +2761,8 @@ async fn pmtud_probe_not_sent_is_not_counted() {
 /// A change of outside path restarts PMTUD: the estimate learned on the old
 /// path is dropped, a fresh base probe goes out at once and the search runs
 /// to completion again. `set_outside_io` does the same, probing through the
-/// new outside I/O.
+/// new outside I/O. Losing the path stops PMTUD until the next reported
+/// change; a new outside I/O alone does not restart it.
 #[tokio::test]
 async fn pmtud_restarts_when_outside_path_changes() {
     /// PMTUD events and outside sends (tagged with the socket that carried
@@ -3005,6 +3006,51 @@ async fn pmtud_restarts_when_outside_path_changes() {
                         if s.state == PmtudState::Base && len == base_probe_len
                 ),
                 "after outside I/O change: {:?}",
+                &log[mark..]
+            );
+        }
+
+        search_complete().await;
+        assert_eq!(states_since(mark), first_search);
+        assert_eq!(client.lock().unwrap().pmtud_status(), converged);
+
+        // No path at all: discovery stops without probing.
+        let mark = log.lock().unwrap().len();
+        client.lock().unwrap().pmtud_path_lost().unwrap();
+        {
+            let log = log.lock().unwrap();
+            assert!(
+                matches!(
+                    log[mark..],
+                    [Entry::Pmtud(s)] if s.state == PmtudState::Disabled && s.plpmtu.is_none()
+                ),
+                "after path loss: {:?}",
+                &log[mark..]
+            );
+        }
+
+        // A new outside I/O while the path is lost (e.g. a socket reset
+        // that completes after going offline) does not restart it.
+        let mark = log.lock().unwrap().len();
+        client.lock().unwrap().set_outside_io(recording_sock(2));
+        assert!(log.lock().unwrap()[mark..].is_empty());
+        assert_eq!(
+            client.lock().unwrap().pmtud_status().map(|s| s.state),
+            Some(PmtudState::Disabled)
+        );
+
+        // The next path change starts it again from the base probe.
+        let mark = log.lock().unwrap().len();
+        client.lock().unwrap().pmtud_path_changed().unwrap();
+        {
+            let log = log.lock().unwrap();
+            assert!(
+                matches!(
+                    log[mark..],
+                    [Entry::Pmtud(s), Entry::Send { sock: 2, len }]
+                        if s.state == PmtudState::Base && len == base_probe_len
+                ),
+                "after path change: {:?}",
                 &log[mark..]
             );
         }
