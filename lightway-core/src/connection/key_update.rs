@@ -28,10 +28,6 @@ impl State {
         }
     }
 
-    pub fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending { .. })
-    }
-
     pub fn online(&mut self) {
         match *self {
             Self::Disabled => {}

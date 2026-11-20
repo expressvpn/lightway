@@ -4,8 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use lightway_core::{
-    ConnectionType, Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsidePacket,
-    SessionId, Version,
+    Header, IOCallbackResult, MAX_IO_BATCH_SIZE, MAX_OUTSIDE_MTU, OutsidePacket, SessionId,
+    TlsServerFactory, Version,
 };
 use std::sync::Arc;
 use tracing::warn;
@@ -19,19 +19,28 @@ use crate::{connection::Connection, connection_manager::ConnectionManager, metri
 /// without a lock.
 pub(crate) struct DatagramServer {
     io: Box<dyn OutsideIO>,
+    transport: TlsServerFactory,
     conn_manager: Arc<ConnectionManager>,
 }
 
 impl DatagramServer {
-    pub(crate) fn new(io: Box<dyn OutsideIO>, conn_manager: Arc<ConnectionManager>) -> Self {
-        Self { io, conn_manager }
+    pub(crate) fn new(
+        io: Box<dyn OutsideIO>,
+        transport: TlsServerFactory,
+        conn_manager: Arc<ConnectionManager>,
+    ) -> Self {
+        Self {
+            io,
+            transport,
+            conn_manager,
+        }
     }
 
     /// Parse and validate one wire packet.
     ///
     /// `None` means the packet was dropped and the reason was metered.
     fn parse<'pkt>(&self, buf: &'pkt mut BytesMut) -> Option<(OutsidePacket<'pkt>, Header)> {
-        let pkt = OutsidePacket::Wire(buf, ConnectionType::Datagram);
+        let pkt = OutsidePacket::Wire(buf);
         let pkt = match self.conn_manager.parse_raw_outside_packet(pkt) {
             Ok(pkt) => pkt,
             Err(e) => {
@@ -72,6 +81,7 @@ impl DatagramServer {
             hdr.session,
             meta.local,
             || self.io.send_callback(meta),
+            |args| self.transport.accept(args),
         ) {
             Ok(routed) => Some(routed),
             Err(_e) => {
@@ -179,8 +189,9 @@ pub(crate) mod tests {
     use ipnet::Ipv4Net;
     use lightway_app_utils::connection_ticker_cb;
     use lightway_core::{
-        AuthMethod, IOCallbackResult, InsideIOSendCallback, InsideIpConfig,
+        AuthMethod, ConnectionType, IOCallbackResult, InsideIOSendCallback, InsideIpConfig,
         OutsideIOSendCallbackArg, Secret, ServerAuth, ServerAuthResult, ServerContextBuilder,
+        TlsServerFactory,
     };
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -230,7 +241,7 @@ pub(crate) mod tests {
         test_conn_manager_with_minimum_version(Version::MINIMUM)
     }
 
-    fn test_conn_manager_with_minimum_version(minimum: Version) -> Arc<ConnectionManager> {
+    fn tls_factory() -> TlsServerFactory {
         let cert = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../tests/certs/server.crt"
@@ -239,7 +250,16 @@ pub(crate) mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../tests/certs/server.key"
         ));
+        TlsServerFactory::new(
+            ConnectionType::Datagram,
+            Secret::PemFile(cert),
+            Secret::PemFile(key),
+            false,
+        )
+        .unwrap()
+    }
 
+    fn test_conn_manager_with_minimum_version(minimum: Version) -> Arc<ConnectionManager> {
         let pool: Ipv4Net = "10.125.0.0/16".parse().unwrap();
         let ip_manager = Arc::new(IpManager::new(
             pool,
@@ -256,15 +276,11 @@ pub(crate) mod tests {
         ));
 
         let ctx = ServerContextBuilder::new(
-            ConnectionType::Datagram,
-            Secret::PemFile(cert),
-            Secret::PemFile(key),
             Arc::new(StubAuth),
             ip_manager,
             Arc::new(StubInsideIo),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_minimum_protocol_version(minimum)
         .unwrap()
         .build()
@@ -324,7 +340,7 @@ pub(crate) mod tests {
     }
 
     fn server(io: &Arc<MockIo>, manager: Arc<ConnectionManager>) -> DatagramServer {
-        DatagramServer::new(Box::new(io.clone()), manager)
+        DatagramServer::new(Box::new(io.clone()), tls_factory(), manager)
     }
 
     /// A wire packet with a valid lightway header and an opaque body.
