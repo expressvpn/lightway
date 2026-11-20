@@ -1032,9 +1032,31 @@ impl<AppState: Send> Connection<AppState> {
     }
 
     /// Update TLS Session to use the new outside IO Callback
+    ///
+    /// The new callback may send over a different path, so path MTU
+    /// discovery restarts as in [`Connection::pmtud_path_changed`].
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
         self.session.io_cb_mut().io = new_io;
         self.activity.last_data_delivered_to_inside = Instant::now();
+        let online = matches!(self.state, State::Online);
+        if let Err(e) = self.drive_pmtud(|pmtud, state| pmtud.restart(online, state)) {
+            warn!("Failed to restart PMTUD on the new outside IO: {e}");
+        }
+    }
+
+    /// Report that the outside path to the peer may have changed (e.g.
+    /// the device moved to another network), so path MTU discovery
+    /// starts again.
+    ///
+    /// The estimate learned on the old path is dropped and, if the
+    /// connection is [`State::Online`], discovery starts again from the
+    /// base probe; [`Event::PmtudStateChanged`] reports the change.
+    /// Applications should call this when the path changes underneath
+    /// the current outside IO; [`Connection::set_outside_io`] already
+    /// does it. Does nothing when PMTUD is not enabled.
+    pub fn pmtud_path_changed(&mut self) -> ConnectionResult<()> {
+        let online = matches!(self.state, State::Online);
+        self.drive_pmtud(|pmtud, state| pmtud.restart(online, state))
     }
 
     /// Accept some data from outside and run an iteration of the I/O
