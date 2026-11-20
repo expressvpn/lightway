@@ -64,8 +64,8 @@ pub trait OutsideIOSendCallback {
 
     /// Stop force enabling the IPv4 DF bit (UDP only).
     ///
-    /// Called after each PMTUD probe. On error PMTUD carries on and the
-    /// next probe tries again.
+    /// Called after each PMTUD probe. On error PMTUD carries on, and it
+    /// is called again before each later send until it succeeds.
     fn disable_pmtud_probe(&self) -> std::io::Result<()> {
         Err(std::io::Error::other("pmtud probe not supported"))
     }
