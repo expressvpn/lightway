@@ -12,7 +12,10 @@ use lightway_core::{
 };
 
 const CAPS: TransportCaps = TransportCaps {
-    delivery: Delivery::Datagram { wire_header: false },
+    delivery: Delivery::Datagram {
+        wire_header: false,
+        reliable_control: false,
+    },
     supports_roaming: true,
 };
 
@@ -267,7 +270,10 @@ const ROAMING_STREAM: TransportCaps = TransportCaps {
 };
 
 const FIXED_DATAGRAM: TransportCaps = TransportCaps {
-    delivery: Delivery::Datagram { wire_header: false },
+    delivery: Delivery::Datagram {
+        wire_header: false,
+        reliable_control: false,
+    },
     supports_roaming: false,
 };
 
