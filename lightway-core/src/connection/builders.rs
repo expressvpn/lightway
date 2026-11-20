@@ -1,6 +1,6 @@
-use std::{num::NonZeroU16, sync::Arc};
+use std::num::NonZeroU16;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rand::distr::{Distribution, StandardUniform};
 use thiserror::Error;
 
@@ -10,12 +10,13 @@ use crate::{
     PacketEncoderType, ServerContext, ServerIpPoolArg, Version,
     connection::{EventCallbackArg, dplpmtud, fragment_map::FragmentMap, key_update},
     context::ServerAuthArg,
+    encapsulation::Encapsulation,
     max_dtls_outside_mtu,
     plugin::PluginFactoryError,
     wire::SessionId,
 };
 
-use super::{ConnectionError, ConnectionMode, NewConnectionArgs, PluginList};
+use super::{ConnectionError, ConnectionMode, NewConnectionArgs};
 
 /// An error while building a [`Connection`] via [`ClientConnectionBuilder`]
 /// or [`ServerConnectionBuilder`].
@@ -51,10 +52,10 @@ pub struct ClientConnectionBuilder<AppState> {
     pmtud_base_mtu: Option<u16>,
     auth_method: Option<AuthMethod>,
     session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    encapsulation: Encapsulation,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
     pmtud_timer: Option<dplpmtud::TimerArg<AppState>>,
-    outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
 }
 
@@ -71,21 +72,20 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         let connection_type = ctx.connection_type;
         let outside_plugins = ctx.outside_plugins.build()?;
-        let outside_plugins = Arc::new(outside_plugins);
 
         let io = super::TlsIOAdapter {
-            connection_type,
-            protocol_version: Version::MAXIMUM,
             aggressive_send: connection_type.is_datagram(),
-            outside_mtu,
-            recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
-            session_id: SessionId::EMPTY,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
+            ..Default::default()
         };
+        let encapsulation = Encapsulation::new(
+            connection_type,
+            false,
+            Version::MAXIMUM,
+            outside_mtu,
+            outside_io,
+            SessionId::EMPTY,
+            outside_plugins,
+        );
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
@@ -105,12 +105,12 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             ctx,
             outside_mtu,
             session_config,
+            encapsulation,
             auth_method: None,
             event_cb: None,
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
             pmtud_timer: None,
             pmtud_base_mtu: None,
-            outside_plugins,
             inside_pkt_codec: None,
         })
     }
@@ -251,14 +251,12 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
 
         tracing::info!("New Connection");
 
-        let protocol_version = Version::MAXIMUM;
-
         Ok(Connection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
-            protocol_version,
             outside_mtu: self.outside_mtu,
             session,
+            encapsulation: self.encapsulation,
             session_id: SessionId::EMPTY,
             mode: ConnectionMode::Client {
                 auth_method,
@@ -269,7 +267,6 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             schedule_tick_cb: self.ctx.schedule_tick_cb,
             event_cb: self.event_cb,
             inside_plugins: self.ctx.inside_plugins.build()?,
-            outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: self.pmtud_timer,
             pmtud_base_mtu: self.pmtud_base_mtu,
@@ -294,10 +291,10 @@ pub struct ServerConnectionBuilder<'a, AppState> {
     auth: ServerAuthArg<AppState>,
     ip_pool: ServerIpPoolArg<AppState>,
     session_config: crate::tls::SessionConfig<super::TlsIOAdapter>,
+    encapsulation: Encapsulation,
     session_id: SessionId,
     event_cb: Option<EventCallbackArg>,
     max_fragment_map_entries: NonZeroU16,
-    outside_plugins: Arc<PluginList>,
     inside_pkt_codec: Option<(PacketEncoderType, PacketDecoderType)>,
 }
 
@@ -316,21 +313,17 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
 
         let outside_mtu = MAX_OUTSIDE_MTU;
         let outside_plugins = ctx.outside_plugins.build()?;
-        let outside_plugins = Arc::new(outside_plugins);
 
-        let io = super::TlsIOAdapter {
+        let io = super::TlsIOAdapter::default();
+        let encapsulation = Encapsulation::new(
             connection_type,
+            true,
             protocol_version,
-            aggressive_send: false,
             outside_mtu,
-            recv_buf: BytesMut::new(),
-            send_buf: super::io_adapter::SendBuffer::new(outside_mtu),
-            io: outside_io,
+            outside_io,
             session_id,
-            outside_plugins: outside_plugins.clone(),
-            #[cfg(target_os = "linux")]
-            gso_buf: super::io_adapter::GsoBuffer::default(),
-        };
+            outside_plugins,
+        );
         let session_config =
             crate::tls::SessionConfig::new(io).when(connection_type.is_datagram(), |s| {
                 s.with_dtls_mtu(max_dtls_outside_mtu(outside_mtu) as u16)
@@ -343,12 +336,12 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             protocol_version,
             ctx,
             session_config,
+            encapsulation,
             session_id,
             auth,
             ip_pool,
             event_cb: None,
             max_fragment_map_entries: FragmentMap::DEFAULT_MAX_ENTRIES,
-            outside_plugins,
             inside_pkt_codec: None,
         })
     }
@@ -394,8 +387,8 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
         Ok(Connection::new(NewConnectionArgs {
             app_state,
             connection_type: self.connection_type,
-            protocol_version: self.protocol_version,
             session,
+            encapsulation: self.encapsulation,
             session_id: self.session_id,
             mode: ConnectionMode::Server {
                 auth: self.auth,
@@ -410,7 +403,6 @@ impl<'a, AppState: Send + 'static> ServerConnectionBuilder<'a, AppState> {
             schedule_tick_cb: self.ctx.schedule_tick_cb,
             event_cb: self.event_cb,
             inside_plugins: self.ctx.inside_plugins.build()?,
-            outside_plugins: self.outside_plugins,
             max_fragment_map_entries: self.max_fragment_map_entries,
             pmtud_timer: None,
             pmtud_base_mtu: None,
