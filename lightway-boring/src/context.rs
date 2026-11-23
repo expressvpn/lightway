@@ -17,13 +17,26 @@ use crate::debug::Tls13SecretCallbacksArg;
 use super::{CurveGroup, IOCallbacks, Method, RootCertificate, Secret, SslVerifyMode, TlsError};
 use boring::error::ErrorStack;
 use boring::pkey::PKey;
-use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslVersion};
+use boring::ssl::{SslContext, SslContextBuilder, SslMethod, SslSignatureAlgorithm, SslVersion};
 use boring::x509::X509;
 use boring::x509::store::X509StoreBuilder;
 use zeroize::Zeroizing;
 
 use super::config::SessionConfig;
 use super::session::Session;
+
+/// The signature algorithms we use in boring.
+const CLIENT_VERIFY_SIGALGS: &[SslSignatureAlgorithm] = &[
+    SslSignatureAlgorithm::ECDSA_SECP256R1_SHA256,
+    SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256,
+    SslSignatureAlgorithm::RSA_PKCS1_SHA256,
+    SslSignatureAlgorithm::ECDSA_SECP384R1_SHA384,
+    SslSignatureAlgorithm::RSA_PSS_RSAE_SHA384,
+    SslSignatureAlgorithm::RSA_PKCS1_SHA384,
+    SslSignatureAlgorithm::RSA_PSS_RSAE_SHA512,
+    SslSignatureAlgorithm::RSA_PKCS1_SHA512,
+    SslSignatureAlgorithm::RSA_PKCS1_SHA1,
+];
 
 /// BoringSSL context builder.
 ///
@@ -52,6 +65,9 @@ impl ContextBuilder {
         // Currently this could be overridden by per-session config.
         if method.is_client() {
             builder.set_verify(SslVerifyMode::SslVerifyPeer.into());
+            builder
+                .set_verify_algorithm_prefs(CLIENT_VERIFY_SIGALGS)
+                .map_err(|e| NewContextBuilderError(e.to_string()))?;
         }
 
         // Pin the context to the requested protocol version
