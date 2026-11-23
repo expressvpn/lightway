@@ -859,6 +859,11 @@ async fn handle_network_change(
                                 reset_outside_io_tx.send(()).await?;
                             }
                             _ => {
+                                // The socket is kept, so restart PMTUD here (replacing
+                                // the socket does it on iOS)
+                                if let Err(e) = conn.lock().unwrap().pmtud_path_changed() {
+                                    warn!("Failed to restart PMTUD after network change: {e}");
+                                }
                                 // Trigger a new keepalive on the new socket (keepalive will
                                 // be triggered after the socket has been updated on iOS)
                                 keepalive.network_changed().await;
@@ -878,6 +883,9 @@ async fn handle_network_change(
                         // UDP survives updating the network, but to ensure that the new network
                         // with the current endpoint works reliably, we trigger keep-alives
                         // e.g swapping from an unrestricted network to one that blocks UDP
+                        if let Err(e) = conn.lock().unwrap().pmtud_path_changed() {
+                            warn!("Failed to restart PMTUD after network change: {e}");
+                        }
                         info!("sending keepalives due to network change ..");
                         keepalive.network_changed().await;
                     }

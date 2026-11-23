@@ -1319,6 +1319,11 @@ async fn handle_network_change<ExtAppState: Send + Sync>(
         let conn_type = conn.lock().unwrap().connection_type();
         match conn_type {
             ConnectionType::Datagram => {
+                // The path MTU learned on the old network may not hold on
+                // the new one.
+                if let Err(e) = conn.lock().unwrap().pmtud_path_changed() {
+                    tracing::warn!("Failed to restart PMTUD after network change: {e}");
+                }
                 info!("sending keepalives due to network change ..");
                 keepalive.network_changed().await;
             }
