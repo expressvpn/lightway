@@ -1034,7 +1034,9 @@ impl<AppState: Send> Connection<AppState> {
     /// Update TLS Session to use the new outside IO Callback
     ///
     /// The new callback may send over a different path, so path MTU
-    /// discovery restarts as in [`Connection::pmtud_path_changed`].
+    /// discovery restarts as in [`Connection::pmtud_path_changed`],
+    /// unless the path was lost ([`Connection::pmtud_path_lost`]) and
+    /// no change has been reported since.
     pub fn set_outside_io(&mut self, new_io: OutsideIOSendCallbackArg) {
         self.session.io_cb_mut().io = new_io;
         self.activity.last_data_delivered_to_inside = Instant::now();
@@ -1056,7 +1058,24 @@ impl<AppState: Send> Connection<AppState> {
     /// does it. Does nothing when PMTUD is not enabled.
     pub fn pmtud_path_changed(&mut self) -> ConnectionResult<()> {
         let online = matches!(self.state, State::Online);
-        self.drive_pmtud(|pmtud, state| pmtud.restart(online, state))
+        self.drive_pmtud(|pmtud, state| pmtud.path_changed(online, state))
+    }
+
+    /// Report that there is no usable outside path (e.g. the device went
+    /// offline), so path MTU discovery stops.
+    ///
+    /// Probes sent now would only be lost, and the loss would look like a
+    /// black hole. The estimate is dropped and nothing is probed until
+    /// [`Connection::pmtud_path_changed`] reports a path again; neither a
+    /// new outside IO from [`Connection::set_outside_io`] nor the
+    /// connection coming online starts it before then.
+    /// [`Event::PmtudStateChanged`] reports the change. Does nothing when
+    /// PMTUD is not enabled.
+    pub fn pmtud_path_lost(&mut self) -> ConnectionResult<()> {
+        self.drive_pmtud(|pmtud, state| {
+            pmtud.path_lost(state);
+            dplpmtud::Action::None
+        })
     }
 
     /// Accept some data from outside and run an iteration of the I/O
