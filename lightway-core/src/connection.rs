@@ -644,15 +644,20 @@ impl<AppState: Send> Connection<AppState> {
             (_, false) => ExpresslaneState::Disabled,
         };
         let caps = args.transport.caps();
-        let pmtud = match caps.is_lossy() {
-            false => None,
-            true => args.pmtud_timer.map(|t| {
+        // A PMTUD probe is a Ping. When nothing can lose it, every probe
+        // size passes.
+        let pmtud = match caps.delivery {
+            crate::Delivery::Datagram {
+                reliable_control: false,
+                ..
+            } => args.pmtud_timer.map(|t| {
                 dplpmtud::Dplpmtud::new(
                     args.pmtud_base_mtu.unwrap_or(BASE_PLPMTU),
                     args.transport.max_frame_payload() as u16,
                     t,
                 )
             }),
+            _ => None,
         };
         let mut conn = Connection {
             app_state: args.app_state,
@@ -1687,7 +1692,8 @@ impl<AppState: Send> Connection<AppState> {
     /// Current path MTU discovery status, or `None` when PMTUD is not
     /// enabled on this connection (no timer was supplied via
     /// [`crate::ClientConnectionBuilder::with_pmtud_timer`], or the
-    /// connection is not a datagram connection).
+    /// transport cannot lose a probe: a stream transport, or one with
+    /// `reliable_control`).
     ///
     /// Changes are also delivered as [`Event::PmtudStateChanged`].
     pub fn pmtud_status(&self) -> Option<dplpmtud::Status> {

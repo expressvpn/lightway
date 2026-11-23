@@ -739,6 +739,36 @@ mod tests {
         p.pump_to_online();
     }
 
+    struct IdleTimer;
+
+    impl crate::DplpmtudTimer<()> for IdleTimer {
+        fn start(&self, _d: Duration, _state: &mut ()) {}
+        fn stop(&self, _state: &mut ()) {}
+    }
+
+    fn client_with_pmtud(caps: TransportCaps) -> Connection<()> {
+        let (client_io, _server_io) = MockOutsideIo::pair();
+        ClientContextBuilder::new(
+            Arc::new(MockFactory::new(MockTransport::new(caps))),
+            Some(Arc::new(Tun::default())),
+            Arc::new(ClientIp),
+            tick,
+        )
+        .build()
+        .start_connect(client_io, MAX_OUTSIDE_MTU)
+        .unwrap()
+        .with_auth_token("LET ME IN")
+        .with_pmtud_timer(Arc::new(IdleTimer))
+        .connect(())
+        .unwrap()
+    }
+
+    #[test]
+    fn pmtud_runs_only_where_a_probe_can_be_lost() {
+        assert!(client_with_pmtud(LOSSY).pmtud_status().is_some());
+        assert!(client_with_pmtud(RELIABLE_CONTROL).pmtud_status().is_none());
+    }
+
     #[test]
     fn a_session_id_rotation_reaches_the_client_in_the_wire_header() {
         let mut p = pair(WIRE_HEADER).pump_to_online();
