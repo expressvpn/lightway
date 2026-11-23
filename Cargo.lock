@@ -1989,6 +1989,7 @@ dependencies = [
  "delegate",
  "internet-checksum",
  "itertools 0.15.0",
+ "libc",
  "lightway-app-utils",
  "lightway-boring",
  "lightway-expresslane",
