@@ -77,6 +77,7 @@ pub use utils::{
 pub use version::Version;
 pub use wire::{
     AuthMethod, ExpresslaneError, ExpresslaneKey, ExpresslaneVersion, Header, SessionId,
+    is_data_frame,
 };
 
 /// Default MTU size for a packet on the outside path (on the wire)

@@ -315,6 +315,19 @@ pub(crate) enum FrameKind {
     ExpresslaneConfig = 20,
 }
 
+/// Whether `frame`, one encoded Lightway frame, carries inside packets.
+/// A transport can send these frames unreliably. It must deliver every
+/// other frame.
+pub fn is_data_frame(frame: &[u8]) -> bool {
+    matches!(
+        frame.first().map(|&k| FrameKind::try_from(k)),
+        Some(Ok(FrameKind::Data
+            | FrameKind::DataFrag
+            | FrameKind::EncodedData
+            | FrameKind::EncodedDataFrag))
+    )
+}
+
 /// Encapsulates a single frame.
 ///
 /// Wire Format:
@@ -558,6 +571,19 @@ mod test_header {
 mod test_frame_kind {
     use super::*;
     use test_case::test_case;
+
+    #[test_case(&[] => false)]
+    #[test_case(&[1] => false)]
+    #[test_case(&[2, 0] => false)]
+    #[test_case(&[5, 0] => true)]
+    #[test_case(&[15, 0] => true)]
+    #[test_case(&[16, 0] => true)]
+    #[test_case(&[17, 0] => true)]
+    #[test_case(&[20, 0] => false)]
+    #[test_case(&[13, 0] => false)]
+    fn is_data_frame(frame: &[u8]) -> bool {
+        super::is_data_frame(frame)
+    }
 
     #[test_case(FrameKind::NoOp => 1)]
     #[test_case(FrameKind::Ping => 2)]
