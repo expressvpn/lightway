@@ -21,6 +21,9 @@ const PROBE_SMALL_STEP: u16 = 8;
 
 /// Timeout for the PROBE_TIMER timer
 const PROBE_TIME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for the PROBE_TIMER timer in [`State::Error`], where the
+/// base probe is retried at a slower pace until connectivity returns.
+const ERROR_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Timeout for the PMTU_RAISE_TIMER timer. Also used a CONFIRMATION_TIMER.
 const PMTU_RAISE_TIMER_TIMEOUT: Duration = Duration::from_mins(10);
 
@@ -335,7 +338,11 @@ impl<AppState> Dplpmtud<AppState> {
         let id = self.next_probe_id();
         self.probe_count += 1;
         self.pending_probe = Some(PendingProbe { id, size });
-        self.timer.start(PROBE_TIME_TIMEOUT, state);
+        let timeout = match self.state {
+            State::Error => ERROR_RETRY_TIMEOUT,
+            _ => PROBE_TIME_TIMEOUT,
+        };
+        self.timer.start(timeout, state);
         Action::SendProbe {
             id: id.as_u16(),
             size: probe_payload_size_for_plpmtu(size),
@@ -469,9 +476,20 @@ impl<AppState> Dplpmtud<AppState> {
         self.send_probe(state, self.base_plpmtu)
     }
 
+    /// Transition to [`State::Error`] when the base probe was refused
+    /// locally, and probe the base again only when the retry timer fires.
+    fn error_after_too_big(&mut self, state: &mut AppState) -> Action {
+        self.end_probe(state);
+        self.state = State::Error;
+        self.timer.start(ERROR_RETRY_TIMEOUT, state);
+        Action::None
+    }
+
     /// Handle probe timeout while in [`State::Error`]
     fn error_probe_timeout(&mut self, state: &mut AppState) -> Action {
-        // In error state keep trying the base until we find connectivity
+        // In error state keep trying the base until we find connectivity.
+        // There is no retry limit here, so don't count the attempts.
+        self.probe_count = 0;
         self.send_probe(state, self.base_plpmtu)
     }
 
@@ -531,8 +549,9 @@ impl<AppState> Dplpmtud<AppState> {
         tracing::debug!(id = ?pending.id, size = pending.size, state = ?self.state, "DPLPMTUD probe too big to send");
         match self.state {
             State::Disabled => Action::None,
-            // Not even the base fits.
-            State::Base => self.error(state),
+            // Not even the base fits. Refusing the same size again at
+            // once is pointless: wait for the Error retry.
+            State::Base => self.error_after_too_big(state),
             // Leave the retry timer running, the interface may change.
             State::Error => Action::None,
             State::Searching => match self.step_size {
@@ -1037,7 +1056,7 @@ mod tests {
         );
         timer.expect_pending(Duration::from_secs(5));
 
-        // 4th attempt, transition to error
+        // 4th attempt, transition to error, retried after a longer timeout
         let expected_id = base_id + 4;
         timer.reset();
         let action = pmtud.tick(&mut ());
@@ -1050,22 +1069,22 @@ mod tests {
         assert!(
             matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
         );
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
-        // 5th attempt, still error
+        // 5th attempt, still error, same timeout and the count does not grow
         let expected_id = base_id + 5;
         timer.reset();
         let action = pmtud.tick(&mut ());
         assert!(matches!(pmtud.state, State::Error));
         assert!(pmtud.effective_pmtu().is_none());
-        assert_eq!(pmtud.probe_count, 2);
+        assert_eq!(pmtud.probe_count, 1);
         assert!(
             matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
         );
         assert!(
             matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
         );
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
     }
 
     #[test]
@@ -1078,42 +1097,37 @@ mod tests {
         assert!(matches!(pmtud.state, State::Disabled));
         timer.expect_idle();
 
-        // online, the 1st base probe cannot be sent: straight to error
-        // without retrying, which probes the base again
+        // online, the 1st base probe cannot be sent: straight to error,
+        // waiting for the retry timer rather than refusing it again
         pmtud.online(&mut ());
         let base_id = pmtud.pending_probe.as_ref().unwrap().id;
         timer.reset();
         let action = pmtud.probe_too_big(&mut ());
-        let expected_id = base_id + 1;
+        assert!(matches!(action, Action::None));
         assert!(matches!(pmtud.state, State::Error));
         assert!(pmtud.effective_pmtu().is_none());
+        assert!(pmtud.pending_probe.is_none());
+        timer.expect_pending(Duration::from_secs(60));
+
+        // the timer retries the base
+        let expected_id = base_id + 1;
+        let action = pmtud.tick(&mut ());
+        assert!(matches!(pmtud.state, State::Error));
         assert_eq!(pmtud.probe_count, 1);
-        assert!(
-            matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
-        );
         assert!(
             matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
         );
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
-        // that one cannot be sent either: wait for the retry timer
+        // that one cannot be sent either: wait for the next retry
+        timer.reset();
         let action = pmtud.probe_too_big(&mut ());
         assert!(matches!(action, Action::None));
         assert!(matches!(pmtud.state, State::Error));
-        assert_eq!(pmtud.probe_count, 1);
         assert!(
             matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
         );
-        timer.expect_pending(Duration::from_secs(5));
-
-        // the timer retries the base
-        let expected_id = base_id + 2;
-        let action = pmtud.tick(&mut ());
-        assert!(matches!(pmtud.state, State::Error));
-        assert!(
-            matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
-        );
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_idle();
     }
 
     #[test]
@@ -1133,7 +1147,7 @@ mod tests {
         assert!(pmtud.effective_pmtu().is_none());
         assert!(matches!(action, Action::SendProbe { .. }));
         assert!(pmtud.pending_probe.is_some());
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
         // the fourth probe succeeds and we move to searching
         timer.reset();
@@ -1180,14 +1194,14 @@ mod tests {
         let action = pmtud.tick(&mut ());
         assert!(matches!(pmtud.state, State::Error));
         assert!(pmtud.effective_pmtu().is_none());
-        assert_eq!(pmtud.probe_count, 2);
+        assert_eq!(pmtud.probe_count, 1);
         assert!(
             matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
         );
         assert!(
             matches!(action, Action::SendProbe{id, size} if id == expected_id && size == 1250 - 1 - 4)
         );
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
         // 4th probe completes, which is ignored since it is too late
         let completed_id = base_id + 4;
@@ -1205,7 +1219,7 @@ mod tests {
             matches!(pmtud.pending_probe, Some(ref pending) if pending == &PendingProbe{ id: expected_id, size: 1250 })
         );
         assert!(matches!(action, Action::None));
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
         // 5th probe completes, which is accepted and search starts
         timer.reset();
@@ -1832,7 +1846,7 @@ mod tests {
         assert!(matches!(pmtud.state, State::Error));
         assert!(pmtud.pending_probe.is_some());
         assert!(matches!(action, Action::SendProbe { .. }));
-        timer.expect_pending(Duration::from_secs(5));
+        timer.expect_pending(Duration::from_secs(60));
 
         pmtud.offline(&mut ());
         assert!(matches!(pmtud.state, State::Disabled));
