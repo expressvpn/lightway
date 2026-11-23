@@ -2788,10 +2788,12 @@ impl<AppState: Send> Connection<AppState> {
             return Ok(());
         }
 
+        // A full-size inside packet must fit one datagram unless PMTUD is
+        // there to fragment it.
         if let Ok(inside_mtu) = cfg.mtu.parse()
             && self.connection_type.is_datagram()
             && self.outside_mtu < dtls_required_outside_mtu(inside_mtu)
-            && self.pmtud.is_some()
+            && self.pmtud.is_none()
         {
             return Err(ConnectionError::PathMtuDiscoveryRequired {
                 inside_mtu,
