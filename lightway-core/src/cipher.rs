@@ -152,7 +152,8 @@ mod tests {
         );
     }
 
-    fn parse_client_hello_supported_groups(wire: &[u8]) -> Option<Vec<u16>> {
+    /// Get the raw bytes of extension `ext_type` in u8.
+    fn parse_client_hello_extension(wire: &[u8], ext_type: u16) -> Option<&[u8]> {
         if wire.len() < 5 || wire[0] != 22 {
             return None;
         }
@@ -170,22 +171,34 @@ mod tests {
         off += 2;
         let ext_end = off + ext_total;
         while off + 4 <= ext_end {
-            let ext_type = ((*ch.get(off)? as usize) << 8) | (*ch.get(off + 1)? as usize);
+            let this_type = ((*ch.get(off)? as u16) << 8) | (*ch.get(off + 1)? as u16);
             let ext_len = ((*ch.get(off + 2)? as usize) << 8) | (*ch.get(off + 3)? as usize);
             let data = ch.get(off + 4..off + 4 + ext_len)?;
-            if ext_type == 0x000a {
-                // supported_groups: 2-byte list length prefix, then 2-byte ids.
-                let (chunks, _) = data.get(2..)?.as_chunks::<2>();
-                return Some(
-                    chunks
-                        .iter()
-                        .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
-                        .collect(),
-                );
+            if this_type == ext_type {
+                return Some(data);
             }
             off += 4 + ext_len;
         }
         None
+    }
+
+    /// Combine 2 `u8` into 1 `u16` in the list, for every 2 items.
+    fn parse_u16_list(data: &[u8]) -> Option<Vec<u16>> {
+        let (chunks, _) = data.get(2..)?.as_chunks::<2>();
+        Some(
+            chunks
+                .iter()
+                .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
+                .collect(),
+        )
+    }
+
+    fn parse_client_hello_supported_groups(wire: &[u8]) -> Option<Vec<u16>> {
+        parse_u16_list(parse_client_hello_extension(wire, 0x000a)?)
+    }
+
+    fn parse_client_hello_signature_algorithms(wire: &[u8]) -> Option<Vec<u16>> {
+        parse_u16_list(parse_client_hello_extension(wire, 0x000d)?)
     }
 
     #[test]
@@ -249,6 +262,62 @@ mod tests {
                 0x023a, // kyber512 (from wireshark)
                 0x2f3a, // p256_kyber512 (from wireshark)
                 0x2f39, // Unknown
+            ]
+        );
+    }
+
+    /// Pin the client's `signature_algorithms`, which size the ClientHello.
+    #[test]
+    fn ensure_signature_algorithm_list() {
+        let ctx = crate::tls::ContextBuilder::new(crate::tls::Method::TlsClientV1_3)
+            .unwrap()
+            .build();
+        let mut session = ctx
+            .new_session(crate::tls::SessionConfig::new(CaptureIO {
+                sent: Vec::new(),
+            }))
+            .unwrap();
+        let _ = session.try_negotiate();
+        let wire = &session.io_cb().sent;
+        let sigalgs = parse_client_hello_signature_algorithms(wire)
+            .expect("captured bytes were not a well-formed ClientHello");
+
+        // IANA TLS SignatureScheme registry:
+        // https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme
+
+        #[cfg(boringssl)]
+        assert_eq!(
+            sigalgs,
+            vec![
+                0x0403, // ecdsa_secp256r1_sha256
+                0x0804, // rsa_pss_rsae_sha256
+                0x0401, // rsa_pkcs1_sha256
+                0x0503, // ecdsa_secp384r1_sha384
+                0x0805, // rsa_pss_rsae_sha384
+                0x0501, // rsa_pkcs1_sha384
+                0x0806, // rsa_pss_rsae_sha512
+                0x0601, // rsa_pkcs1_sha512
+                0x0201, // rsa_pkcs1_sha1
+            ]
+        );
+
+        #[cfg(wolfssl)]
+        assert_eq!(
+            sigalgs,
+            vec![
+                0x0603, // ecdsa_secp521r1_sha512
+                0x0503, // ecdsa_secp384r1_sha384
+                0x0403, // ecdsa_secp256r1_sha256
+                0x0806, // rsa_pss_rsae_sha512
+                0x080b, // rsa_pss_pss_sha512
+                0x0805, // rsa_pss_rsae_sha384
+                0x080a, // rsa_pss_pss_sha384
+                0x0804, // rsa_pss_rsae_sha256
+                0x0809, // rsa_pss_pss_sha256
+                0x0601, // rsa_pkcs1_sha512
+                0x0501, // rsa_pkcs1_sha384
+                0x0401, // rsa_pkcs1_sha256
+                0x0301, // rsa_pkcs1_sha224
             ]
         );
     }
