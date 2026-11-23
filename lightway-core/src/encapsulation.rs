@@ -106,6 +106,20 @@ impl GsoBuffer {
         self.buf.extend_from_slice(seg);
     }
 
+    /// Whether `put` can add a segment of `len` bytes. This is true when
+    /// the batch has no segment yet. It is also true when the segment has
+    /// the same expresslane flag, is not longer than the stride, and no
+    /// short segment ended the batch.
+    pub(crate) fn fits(&self, len: usize, expresslane: bool) -> bool {
+        match self.state {
+            GsoBufferState::Passthrough => false,
+            GsoBufferState::Pending => true,
+            GsoBufferState::Coalescing(gso_size, first) => {
+                first == expresslane && len <= gso_size.get() && self.buf.len() % gso_size == 0
+            }
+        }
+    }
+
     /// The assembled frame, its `gso_size` for the `UDP_SEGMENT`
     /// sendmsg and its expresslane flag. `None` when nothing coalesced
     /// (Passthrough or Pending). This does not reset the buffer, so call
@@ -357,6 +371,12 @@ impl Encapsulation {
         // so this branch covers both.
         #[cfg(target_os = "linux")]
         if self.gso_buf.is_batching() {
+            // A transport can produce records of different lengths in one
+            // batch. One that does not fit goes into a new GSO send.
+            if !self.gso_buf.fits(buf.len(), expresslane_data) {
+                self.end_batch();
+                self.begin_batch();
+            }
             self.gso_buf.put(buf, expresslane_data);
             return Ok(());
         }
@@ -1147,32 +1167,34 @@ mod tests {
         g.put(&[0xCC; 1280], false);
     }
 
+    /// Records each GSO send: the frame and its `gso_size`.
+    #[cfg(target_os = "linux")]
+    struct GsoCapture(Mutex<Vec<(Vec<u8>, u16)>>);
+
+    impl OutsideIOSendCallback for GsoCapture {
+        fn send(&self, _buf: &[u8]) -> IOCallbackResult<usize> {
+            std::unreachable!("a batch sends only with GSO")
+        }
+
+        fn send_gso(
+            &self,
+            bufs: &[std::io::IoSlice<'_>],
+            gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            let frame: Vec<u8> = bufs.iter().flat_map(|b| b.iter().copied()).collect();
+            let n = frame.len();
+            self.0.lock().unwrap().push((frame, gso_size));
+            IOCallbackResult::Ok(n)
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            std::unreachable!("Should not be testing peer_addr");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn udp_send_gso_sends_every_segment_in_the_batch() {
-        struct GsoCapture(Mutex<Vec<(Vec<u8>, u16)>>);
-
-        impl OutsideIOSendCallback for GsoCapture {
-            fn send(&self, _buf: &[u8]) -> IOCallbackResult<usize> {
-                std::unreachable!("a batch sends only with GSO")
-            }
-
-            fn send_gso(
-                &self,
-                bufs: &[std::io::IoSlice<'_>],
-                gso_size: u16,
-            ) -> IOCallbackResult<usize> {
-                let frame: Vec<u8> = bufs.iter().flat_map(|b| b.iter().copied()).collect();
-                let n = frame.len();
-                self.0.lock().unwrap().push((frame, gso_size));
-                IOCallbackResult::Ok(n)
-            }
-
-            fn peer_addr(&self) -> std::net::SocketAddr {
-                std::unreachable!("Should not be testing peer_addr");
-            }
-        }
-
         let io = Arc::new(GsoCapture(Mutex::new(Vec::new())));
         let mut e = make_encapsulation(DATAGRAM, io.clone(), Default::default());
         e.gso_buf.open();
@@ -1198,6 +1220,36 @@ mod tests {
         assert_eq!(
             *sent,
             vec![(expected, (wire::Header::WIRE_SIZE + 4) as u16)]
+        );
+    }
+
+    /// A segment longer than the batch stride, or any segment after a
+    /// short one, does not fit the batch. It starts a new GSO send.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_segment_that_does_not_fit_starts_a_new_gso_send() {
+        let io = Arc::new(GsoCapture(Mutex::new(Vec::new())));
+        let mut e = make_encapsulation(DATAGRAM, io.clone(), Default::default());
+        e.begin_batch();
+        for len in [4, 4, 6, 6, 3, 6] {
+            e.udp_send(&vec![0xAB; len], false).unwrap();
+        }
+        e.end_batch();
+
+        let h = wire::Header::WIRE_SIZE;
+        let sent: Vec<(usize, u16)> =
+            io.0.lock()
+                .unwrap()
+                .iter()
+                .map(|(frame, gso_size)| (frame.len(), *gso_size))
+                .collect();
+        assert_eq!(
+            sent,
+            vec![
+                (2 * (h + 4), (h + 4) as u16),
+                (2 * (h + 6) + h + 3, (h + 6) as u16),
+                (h + 6, (h + 6) as u16),
+            ]
         );
     }
 
