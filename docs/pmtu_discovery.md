@@ -41,6 +41,12 @@ Probes are sent with DF set (`OutsideIOSendCallback::enable_pmtud_probe`):
 - A probe that never leaves the host (an earlier write is pending, or the write blocks) is not
   counted as lost. Its timer sends it again.
 
+Only probes carry DF. It is cleared again (`disable_pmtud_probe`) as soon as a probe is written, so
+ordinary traffic goes without it, during discovery and after: a datagram larger than the path is
+fragmented on the way instead of dropped where no ICMP "fragmentation needed" comes back. If DF
+cannot be cleared, each later send tries again first. The client's UDP socket also clears DF for
+ordinary traffic, since the Linux default (`IP_PMTUDISC_WANT`) sets it on every datagram.
+
 In `Error` the base probe is retried once a minute.
 
 The outside path can change under a running connection. The application reports it:

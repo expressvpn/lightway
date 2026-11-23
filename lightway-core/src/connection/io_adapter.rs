@@ -312,6 +312,10 @@ pub(crate) struct TlsIOAdapter {
     /// PMTUD probe handling of the datagrams passing through `udp_send`.
     pub(crate) probe_send: ProbeSend,
 
+    /// Probe mode could not be turned off after a probe, so DF may still
+    /// be set. Ordinary sends try again first.
+    pub(crate) df_left_on: bool,
+
     pub(crate) session_id: wire::SessionId,
 
     /// Plugins to act while egressing outside packet
@@ -351,7 +355,19 @@ impl TlsIOAdapter {
             ProbeSend::Probing(refusal) => refusal,
             ProbeSend::Idle | ProbeSend::Discarding => None,
         };
-        (refusal, self.io.disable_pmtud_probe())
+        let disabled = self.io.disable_pmtud_probe();
+        self.df_left_on = disabled.is_err();
+        (refusal, disabled)
+    }
+
+    /// Turn probe mode off before an ordinary send if a probe left it on:
+    /// with DF set, a datagram larger than the path is dropped instead of
+    /// fragmented.
+    fn clear_df_left_on(&mut self) {
+        if self.df_left_on && self.io.disable_pmtud_probe().is_ok() {
+            tracing::debug!("PMTUD probe mode turned off after an earlier failure");
+            self.df_left_on = false;
+        }
     }
 
     /// While set, datagrams are reported as sent without being sent.
@@ -369,20 +385,23 @@ impl TlsIOAdapter {
         expresslane_data: bool,
     ) -> IOCallbackResult<usize> {
         match self.probe_send {
-            ProbeSend::Idle => match self.udp_send_datagram(buf, expresslane_data) {
-                // Too big for the interface with DF set: DF was left on
-                // after a probe, or a connected socket reports an ICMP
-                // learned limit late. Drop it like a datagram lost on the
-                // way; an error would have the TLS library retry the
-                // record ahead of every later write.
-                IOCallbackResult::Err(err)
-                    if ProbeRefusal::from_send_error(&err) == ProbeRefusal::TooBig =>
-                {
-                    tracing::debug!(?err, len = buf.len(), "Outside datagram too big, dropped");
-                    IOCallbackResult::Ok(buf.len())
+            ProbeSend::Idle => {
+                self.clear_df_left_on();
+                match self.udp_send_datagram(buf, expresslane_data) {
+                    // Too big for the interface with DF set: DF was left
+                    // on after a probe, or a connected socket reports an
+                    // ICMP learned limit late. Drop it like a datagram
+                    // lost on the way; an error would have the TLS
+                    // library retry the record ahead of every later write.
+                    IOCallbackResult::Err(err)
+                        if ProbeRefusal::from_send_error(&err) == ProbeRefusal::TooBig =>
+                    {
+                        tracing::debug!(?err, len = buf.len(), "Outside datagram too big, dropped");
+                        IOCallbackResult::Ok(buf.len())
+                    }
+                    res => res,
                 }
-                res => res,
-            },
+            }
             ProbeSend::Probing(refusal) => match self.udp_send_datagram(buf, expresslane_data) {
                 IOCallbackResult::Err(err) => {
                     tracing::debug!(?err, len = buf.len(), "PMTUD probe refused");
@@ -496,6 +515,8 @@ impl TlsIOAdapter {
         expresslane_data: bool,
     ) -> IOCallbackResult<()> {
         use std::io::{Error, IoSlice};
+
+        self.clear_df_left_on();
 
         // No coalesced frame yet — caller's `gso.reset()` cleanup
         // path runs unconditionally, so this is also the safe exit
@@ -848,6 +869,7 @@ mod tests {
             send_buf: SendBuffer::new(MAX_OUTSIDE_MTU),
             io,
             probe_send: Default::default(),
+            df_left_on: false,
             session_id: SessionId::from_const(*b"\xde\xad\xbe\xef\xde\xad\xbe\xef"),
             outside_plugins: outside_plugins.into(),
             #[cfg(target_os = "linux")]
@@ -917,6 +939,106 @@ mod tests {
             adapter.udp_send(b"abc", false),
             IOCallbackResult::Err(_)
         ));
+    }
+
+    /// Outside IO with a probe mode switch. Each `disable_pmtud_probe`
+    /// takes the next scripted result (success once none are left).
+    struct ProbeModeIo(Mutex<ProbeModeIoState>);
+
+    #[derive(Default)]
+    struct ProbeModeIoState {
+        df: bool,
+        disable_results: VecDeque<bool>,
+        disable_calls: usize,
+        /// Whether DF was set for each datagram sent.
+        sends_df: Vec<bool>,
+    }
+
+    impl ProbeModeIo {
+        fn new(disable_results: Vec<bool>) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(ProbeModeIoState {
+                disable_results: disable_results.into(),
+                ..Default::default()
+            })))
+        }
+    }
+
+    impl OutsideIOSendCallback for ProbeModeIo {
+        fn send(&self, buf: &[u8]) -> IOCallbackResult<usize> {
+            let mut s = self.0.lock().unwrap();
+            let df = s.df;
+            s.sends_df.push(df);
+            IOCallbackResult::Ok(buf.len())
+        }
+
+        fn send_gso(
+            &self,
+            _bufs: &[std::io::IoSlice<'_>],
+            _gso_size: u16,
+        ) -> IOCallbackResult<usize> {
+            IOCallbackResult::Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+
+        fn peer_addr(&self) -> std::net::SocketAddr {
+            std::unreachable!("Should not be testing peer_addr");
+        }
+
+        fn enable_pmtud_probe(&self) -> std::io::Result<()> {
+            self.0.lock().unwrap().df = true;
+            Ok(())
+        }
+
+        fn disable_pmtud_probe(&self) -> std::io::Result<()> {
+            let mut s = self.0.lock().unwrap();
+            s.disable_calls += 1;
+            if s.disable_results.pop_front().unwrap_or(true) {
+                s.df = false;
+                Ok(())
+            } else {
+                Err(Error::other("disable failed"))
+            }
+        }
+    }
+
+    // DF is on for the probe only. If turning it off fails, ordinary sends
+    // try again until it works, then stop trying. Returns whether DF was
+    // set for the probe and the two sends after it, and how often the
+    // adapter tried to turn probe mode off.
+    #[test_case(vec![] => (vec![true, false, false], 1); "turned off after the probe")]
+    #[test_case(vec![false] => (vec![true, false, false], 2); "turned off before the next send")]
+    #[test_case(vec![false, false] => (vec![true, true, false], 3); "retried until turned off")]
+    fn udp_send_turns_off_probe_mode_left_on(disable_results: Vec<bool>) -> (Vec<bool>, usize) {
+        let io = ProbeModeIo::new(disable_results);
+        let mut adapter = make_adapter(ConnectionType::Datagram, io.clone(), Default::default());
+
+        adapter.begin_pmtud_probe().unwrap();
+        assert!(matches!(
+            adapter.udp_send(b"probe", false),
+            IOCallbackResult::Ok(5)
+        ));
+        let _ = adapter.end_pmtud_probe();
+        for _ in 0..2 {
+            assert!(matches!(
+                adapter.udp_send(b"data", false),
+                IOCallbackResult::Ok(4)
+            ));
+        }
+
+        let s = io.0.lock().unwrap();
+        (s.sends_df.clone(), s.disable_calls)
+    }
+
+    // A socket without probe mode support never turned DF on, so ordinary
+    // sends do not keep trying to turn it off.
+    #[test]
+    fn probe_mode_unsupported_is_not_retried() {
+        let mut adapter = make_adapter(
+            ConnectionType::Datagram,
+            FakeOutsideIOSend::new(),
+            Default::default(),
+        );
+        assert!(adapter.begin_pmtud_probe().is_err());
+        assert!(!adapter.df_left_on);
     }
 
     // Reminder: `udp_send` adds a 16 byte [`wire::Header`].

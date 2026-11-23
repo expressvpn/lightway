@@ -1759,9 +1759,9 @@ impl<AppState: Send> Connection<AppState> {
         }
         let res = self.send_frame_or_queue(msg);
         let (refusal, disabled) = self.session.io_cb_mut().end_pmtud_probe();
-        // DF may still be on for ordinary traffic. Keep PMTUD running:
-        // its estimate keeps packets to sizes the path carries with DF
-        // set, and the next probe tries to clear it again.
+        // DF may still be on: the next ordinary send tries again to
+        // clear it. Keep PMTUD running, as its estimate keeps packets to
+        // sizes the path carries with DF set.
         if let Err(err) = disabled {
             warn!(?err, "Failed to disable PMTUD probe");
         }
