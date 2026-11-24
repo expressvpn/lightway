@@ -5,6 +5,8 @@ pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
 pub mod platform;
+#[cfg(linux)]
+pub use route_manager::policy_routing;
 #[cfg(desktop)]
 pub mod route_manager;
 
@@ -266,9 +268,9 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     #[cfg(desktop)]
     pub route_mode: RouteMode,
 
-    /// Firewall mark applied to the outside socket (Linux only).
+    /// Fwmark policy-routing parameters. Only effective under [`RouteMode::Fwmark`].
     #[cfg(linux)]
-    pub fwmark: u32,
+    pub fwmark_config: policy_routing::FWMarkConfig,
 
     /// Disable pinning the outside UDP socket to the physical egress interface
     /// via `IP_UNICAST_IF`/`IPV6_UNICAST_IF` (Windows).
@@ -441,10 +443,10 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             enable_batch_receive: config.enable_batch_receive,
             #[cfg(desktop)]
             route_mode: config.route_mode,
-            #[cfg(linux)]
-            fwmark: config.fwmark,
             #[cfg(windows)]
             disable_pin_egress_interface: config.disable_pin_egress_interface,
+            #[cfg(linux)]
+            fwmark_config: config.fwmark_config(),
             #[cfg(desktop)]
             dns_config_mode: config.dns_config_mode,
             enable_pmtud: config.enable_pmtud,
@@ -1704,6 +1706,7 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
         #[cfg(apple)] nudge_on_route_update: bool,
         stop_signal: Option<mpsc::Sender<String>>,
         #[cfg(windows)] pin_egress_interface: bool,
+        #[cfg(linux)] fwmark_config: policy_routing::FWMarkConfig,
     ) -> Result<()> {
         let server_ip = self.outside_io.peer_addr().ip();
         let tun_index = self.inside_io.if_index()?;
@@ -1716,8 +1719,17 @@ impl<ExtAppState: Send + Sync> ClientConnection<ExtAppState> {
             tun_peer_ip,
             tun_dns_ip
         );
-        let mut route_manager =
-            RouteManager::new(route_mode, server_ip, tun_index, tun_peer_ip, tun_dns_ip)?;
+        // Under Fwmark mode the route manager installs the policy rules
+        // itself, before any tunnel route, and removes them on stop.
+        let mut route_manager = RouteManager::new(
+            route_mode,
+            server_ip,
+            tun_index,
+            tun_peer_ip,
+            tun_dns_ip,
+            #[cfg(linux)]
+            fwmark_config,
+        )?;
         let route_updater = route_manager.start().await?;
 
         // A weak ref keeps the coordinator task from extending the outside
@@ -1804,7 +1816,7 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
                 server,
                 maybe_sock,
                 #[cfg(all(linux, not(feature = "mobile")))]
-                config.fwmark,
+                config.fwmark_config.fwmark,
             )
             .await
             .inspect_err(|e| tracing::error!("Failed to create outside IO UDP socket: {e}"))
@@ -1854,7 +1866,7 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
                 server,
                 maybe_sock,
                 #[cfg(all(linux, not(feature = "mobile")))]
-                config.fwmark,
+                config.fwmark_config.fwmark,
             )
             .await
             .inspect_err(|e| tracing::error!("Failed to create outside IO TCP socket: {e}"))
@@ -2660,6 +2672,8 @@ pub async fn client<
                 stop_signal,
                 #[cfg(windows)]
                 !config.disable_pin_egress_interface,
+                #[cfg(linux)]
+                config.fwmark_config,
             )
             .await?;
     }
@@ -2667,7 +2681,12 @@ pub async fn client<
     #[cfg(desktop)]
     connection.set_dns(config.dns_config_mode, config.tun_dns_ip.into())?;
 
-    let result = connection.task.await?;
+    // Held without `?` so the route manager always tears routes and policy
+    // rules down, even when the connection task failed or panicked.
+    let result = match connection.task.await {
+        Ok(result) => result,
+        Err(e) => Err(anyhow::Error::from(e)),
+    };
 
     #[cfg(desktop)]
     if let Some(mut route_manager) = connection.route_manager {
