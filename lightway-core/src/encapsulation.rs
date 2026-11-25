@@ -558,6 +558,9 @@ impl Encapsulation {
         if self.pending.len() >= MAX_PENDING_PACKETS {
             return Err(std::io::Error::other("too many outside packets wait"));
         }
+        // Some plugins grow a packet only into its spare capacity. A
+        // stream has no MTU, so give them room for one more MTU.
+        packet.reserve(self.outside_mtu);
         match self.outside_plugins.do_egress(&mut packet) {
             PluginResult::Accept => {}
             // Outside plugins cannot drop with reply
@@ -868,6 +871,37 @@ mod tests {
 
         let sent = io.0.lock().unwrap().1.clone();
         (r, sent)
+    }
+
+    /// Grows a packet only into its spare capacity, as a plugin that
+    /// cannot reallocate the buffer does.
+    struct InPlacePadPlugin;
+
+    impl Plugin for InPlacePadPlugin {
+        fn ingress(&self, _data: &mut BytesMut) -> PluginResult {
+            std::unreachable!("Should not be testing ingress")
+        }
+
+        fn egress(&self, data: &mut BytesMut) -> PluginResult {
+            if data.capacity() - data.len() >= MAX_OUTSIDE_MTU {
+                data.resize(data.len() + MAX_OUTSIDE_MTU, b'P');
+            }
+            PluginResult::Accept
+        }
+    }
+
+    #[test]
+    fn stream_send_gives_egress_plugins_room_to_grow() {
+        let plugins: Vec<crate::PluginType> = vec![Box::new(InPlacePadPlugin)];
+        let io = FakeOutsideIOSend::new();
+        let mut e = make_encapsulation(ConnectionType::Stream, io.clone(), plugins.into());
+        let record = BytesMut::from(&b"abc"[..]);
+        assert_eq!(record.capacity(), record.len());
+
+        e.send(record).unwrap();
+
+        let sent = io.0.lock().unwrap().1.clone();
+        assert_eq!(sent.len(), 3 + MAX_OUTSIDE_MTU);
     }
 
     #[test_case(vec![] => matches (Ok(()), sent, waiting) if sent == b"abcdefghi" && waiting.is_empty(); "send all")]
