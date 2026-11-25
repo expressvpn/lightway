@@ -189,14 +189,18 @@ impl<A: ExpresslaneAead> ExpresslaneSession<A> {
 
     /// Install a new RX key, retaining the previous one as a rotation grace so
     /// packets already in flight under the old key still decrypt.
+    ///
+    /// Reinstalling the current key is a no-op: a resent config carries it,
+    /// and replacing it would push out the grace key the peer may still be
+    /// sending under.
     pub fn update_peer_key(&self, key: ExpresslaneKey) -> ExpresslaneResult<()> {
-        let keyed = Keyed {
-            key,
-            aead: A::new(&key)?,
-        };
+        let aead = A::new(&key)?;
         let mut keys = self.keys_write();
+        if keys.current_peer.as_ref().is_some_and(|k| k.key == key) {
+            return Ok(());
+        }
         self.has_peer.store(!key.is_invalid(), Ordering::Relaxed);
-        keys.prev_peer = keys.current_peer.replace(keyed);
+        keys.prev_peer = keys.current_peer.replace(Keyed { key, aead });
         Ok(())
     }
 
@@ -700,6 +704,27 @@ mod tests {
         // Receiver rotates: the key that encrypted this packet becomes prev.
         rx.update_peer_key(ExpresslaneKey([2u8; EXPRESSLANE_KEY_SIZE]))
             .unwrap();
+
+        let (pt, _) = rx
+            .try_from_wire(&mut buf, SID)
+            .expect("must fall back to prev_peer");
+        assert_eq!(&pt[..], b"old-key");
+    }
+
+    #[test]
+    fn resent_peer_key_keeps_the_grace_key() {
+        let tx = keyed(ExpresslaneVersion::Version2);
+        let rx = keyed(ExpresslaneVersion::Version2);
+
+        let mut buf = BytesMut::new();
+        tx.append_to_wire(&mut buf, SID, b"old-key", [4u8; 12], false)
+            .unwrap();
+
+        // The peer resends its config until it sees our ack, so the new key
+        // can arrive twice while the peer still sends under the old one.
+        let new_key = ExpresslaneKey([2u8; EXPRESSLANE_KEY_SIZE]);
+        rx.update_peer_key(new_key).unwrap();
+        rx.update_peer_key(new_key).unwrap();
 
         let (pt, _) = rx
             .try_from_wire(&mut buf, SID)
