@@ -1997,7 +1997,7 @@ pub async fn connect<
             b.with_server_domain_name_validation(&sdn)
         })
         .when_some(
-            config.sni_header.as_deref().filter(|s| !s.is_empty()),
+            effective_sni_header(config.sni_header.as_deref()),
             |b, sni| b.with_sni_header(sni),
         )
         .when(connection_type.is_datagram() && enable_pmtud, |b| {
@@ -2681,11 +2681,26 @@ pub async fn client<
     result
 }
 
+/// The SNI header to send, if any.
+///
+/// An empty string is treated as "no SNI", so the client never emits a
+/// `server_name` extension with a zero-length host name.
+pub(crate) fn effective_sni_header(sni_header: Option<&str>) -> Option<&str> {
+    sni_header.filter(|sni| !sni.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use test_case::test_case;
+
+    #[test_case(None => None; "unset")]
+    #[test_case(Some("") => None; "empty string is treated as unset")]
+    #[test_case(Some("example.com") => Some("example.com"); "non-empty is kept")]
+    fn effective_sni_header_skips_empty(sni_header: Option<&'static str>) -> Option<&'static str> {
+        effective_sni_header(sni_header)
+    }
 
     #[test]
     fn sni_header_flows_from_config_into_client_config() {
