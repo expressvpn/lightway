@@ -1958,6 +1958,7 @@ version = "0.1.0"
 dependencies = [
  "boring",
  "boring-sys",
+ "built",
  "bytes",
  "foreign-types",
  "libc",
