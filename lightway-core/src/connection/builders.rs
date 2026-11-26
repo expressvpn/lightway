@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::{collections::VecDeque, num::NonZeroU16};
 
 use bytes::Bytes;
 use rand::distr::{Distribution, StandardUniform};
@@ -16,7 +16,7 @@ use crate::{
     wire::SessionId,
 };
 
-use super::{ConnectionError, ConnectionMode, NewConnectionArgs};
+use super::{ConnectionError, ConnectionMode, MAX_RETIRED_SESSION_IDS, NewConnectionArgs};
 
 /// An error while building a [`Connection`] via [`ClientConnectionBuilder`]
 /// or [`ServerConnectionBuilder`].
@@ -261,6 +261,7 @@ impl<AppState: Send + 'static> ClientConnectionBuilder<AppState> {
             mode: ConnectionMode::Client {
                 auth_method,
                 ip_config_cb: self.ctx.ip_config,
+                retired_session_ids: VecDeque::with_capacity(MAX_RETIRED_SESSION_IDS),
             },
             rng: self.ctx.rng.clone(),
             inside_io: self.ctx.inside_io,

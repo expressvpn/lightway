@@ -456,6 +456,10 @@ pub trait EventCallback {
 /// wrapped the connection in.
 pub type EventCallbackArg = Box<dyn EventCallback + Send + Sync>;
 
+/// How many retired session ids a client remembers. Only a reordered or
+/// lagging packet can carry one, so the last few rotations are enough.
+const MAX_RETIRED_SESSION_IDS: usize = 4;
+
 /// Client vs Server state.
 enum ConnectionMode<AppState> {
     Client {
@@ -463,6 +467,8 @@ enum ConnectionMode<AppState> {
         auth_method: AuthMethod,
         /// Callback to notify about inside ip config
         ip_config_cb: ClientIpConfigArg<AppState>,
+        /// Session ids the server has rotated away from, oldest first.
+        retired_session_ids: VecDeque<SessionId>,
     },
     Server {
         /// Authentication oracle.
@@ -1719,7 +1725,24 @@ impl<AppState: Send> Connection<AppState> {
         );
 
         match self.mode {
-            Client { .. } => {
+            Client {
+                ref mut retired_session_ids,
+                ..
+            } => {
+                // The server never goes back to an id it rotated away from,
+                // so a packet carrying one is stale: reordered, or sent by an
+                // offload engine that lags the control plane.
+                if retired_session_ids.contains(&session_id) {
+                    debug!(?session_id, "Ignoring retired session ID");
+                    return;
+                }
+                if !self.session_id.is_reserved() {
+                    if retired_session_ids.len() == MAX_RETIRED_SESSION_IDS {
+                        retired_session_ids.pop_front();
+                    }
+                    retired_session_ids.push_back(self.session_id);
+                }
+
                 self.session_id = session_id;
                 self.encapsulation.set_session_id(session_id);
                 self.publish_expresslane_key();
