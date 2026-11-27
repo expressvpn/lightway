@@ -54,6 +54,10 @@ services:
       # is removed. Otherwise all addresses are removed which breaks
       # the UDP floating test.
       - net.ipv4.conf.all.promote_secondaries=1
+      # The client never forwards: TCP coalescing is only allowed then,
+      # and the TUN inherits the default.
+      - net.ipv4.conf.all.forwarding=0
+      - net.ipv4.conf.default.forwarding=0
     cap_add:
       - NET_ADMIN
     devices:
