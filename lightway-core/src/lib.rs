@@ -10,9 +10,11 @@ mod context;
 mod encapsulation;
 mod encoding_request_states;
 mod features;
-#[cfg(any(target_os = "linux", test))]
+// Linux for the vnet-hdr offload paths; Android for the raw TCP
+// coalescer built on `gro::TcpGroBatch::take_raw`.
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 pub mod gro;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 pub mod gso;
 mod io;
 mod keyshare;
@@ -45,7 +47,7 @@ pub use context::{
 };
 pub use encapsulation::OutsidePacket;
 pub use features::LightwayFeature;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 pub use gso::VirtioNetHdr;
 pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, OutsideIOSendCallback,
