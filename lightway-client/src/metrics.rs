@@ -1,0 +1,75 @@
+//! Client metrics.
+//!
+//! These counters cover the raw TCP coalescer (`io::inside::raw_gro`),
+//! which sheds load by design — a full TUN write queue drops the
+//! coalesced run and reports success upstream so the inner TCP flow
+//! drives recovery. That makes the sheds invisible without explicit
+//! counters. A shed records the number of **segments** lost as well as
+//! the number of runs, because one coalesced run can carry many
+//! segments.
+
+use ::metrics::{Counter, counter};
+use std::sync::LazyLock;
+
+static METRIC_TUN_RAW_GRO_BATCH_DROPPED_WOULD_BLOCK: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_batch_dropped_would_block"));
+static METRIC_TUN_RAW_GRO_SEGMENTS_DROPPED_WOULD_BLOCK: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_segments_dropped_would_block"));
+static METRIC_TUN_RAW_GRO_BATCH_DROPPED_ERR: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_batch_dropped_err"));
+static METRIC_TUN_RAW_GRO_PROBE_FAILED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_probe_failed"));
+static METRIC_TUN_RAW_GRO_PERMANENT_FALLBACK: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_permanent_fallback"));
+static METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_resplit_segment_dropped"));
+static METRIC_TUN_RAW_GRO_RUN_WRITE_FAILED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("tun_raw_gro_run_write_failed"));
+
+/// A coalesced run (or a single held segment) was shed because the
+/// TUN write queue was full. Load shedding, not a fault: sustained
+/// non-zero values mean the inside device is the bottleneck, and the
+/// segment counter gives the number of TCP segments actually lost.
+pub(crate) fn tun_raw_gro_batch_dropped_would_block(segments: u64) {
+    METRIC_TUN_RAW_GRO_BATCH_DROPPED_WOULD_BLOCK.increment(1);
+    METRIC_TUN_RAW_GRO_SEGMENTS_DROPPED_WOULD_BLOCK.increment(segments);
+}
+
+/// A single segment held for coalescing was dropped because its TUN
+/// write failed outright — a genuine device error, unlike the
+/// would-block case above. A failed multi-segment run is re-sent per
+/// segment instead; see [`tun_raw_gro_run_write_failed`].
+pub(crate) fn tun_raw_gro_batch_dropped_err() {
+    METRIC_TUN_RAW_GRO_BATCH_DROPPED_ERR.increment(1);
+}
+
+/// The raw oversized-write capability probe failed (`IFF_VNET_HDR`
+/// framing present, `TUNGETIFF` refused, or the oversized write did
+/// not return the full count): TCP coalescing stays disabled for the
+/// life of the device. At most once per tunnel.
+pub(crate) fn tun_raw_gro_probe_failed() {
+    METRIC_TUN_RAW_GRO_PROBE_FAILED.increment(1);
+}
+
+/// An oversized raw TUN write was rejected (`EMSGSIZE`, `EINVAL` or a
+/// short write) after the probe had succeeded. The client permanently
+/// reverted to per-packet writes. At most once per tunnel; any
+/// occurrence in the field is worth investigating.
+pub(crate) fn tun_raw_gro_permanent_fallback() {
+    METRIC_TUN_RAW_GRO_PERMANENT_FALLBACK.increment(1);
+}
+
+/// A segment of a re-split run (the no-loss fallback after a rejected
+/// oversized write) could not be rebuilt or written and was dropped —
+/// the inner TCP flow must retransmit it.
+pub(crate) fn tun_raw_gro_resplit_segment_dropped() {
+    METRIC_TUN_RAW_GRO_RESPLIT_SEGMENT_DROPPED.increment(1);
+}
+
+/// An oversized run write failed with an error that says nothing about
+/// oversized writes (e.g. `ENOBUFS`), so the run was re-sent per segment
+/// and coalescing stayed on. Each costs one extra failed syscall;
+/// sustained values point at a device problem.
+pub(crate) fn tun_raw_gro_run_write_failed() {
+    METRIC_TUN_RAW_GRO_RUN_WRITE_FAILED.increment(1);
+}

@@ -1984,6 +1984,7 @@ dependencies = [
  "libc",
  "lightway-app-utils",
  "lightway-core",
+ "metrics",
  "mockall",
  "more-asserts",
  "objc2-core-foundation",

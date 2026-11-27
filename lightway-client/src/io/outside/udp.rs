@@ -1,4 +1,4 @@
-#[cfg(linux)]
+#[cfg(gro)]
 use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Context, Result, anyhow};
@@ -66,7 +66,7 @@ pub struct Udp {
     /// that did not; rate-limits the truncation warning.
     #[cfg(batch_receive)]
     truncated_recvs: AtomicU64,
-    #[cfg(linux)]
+    #[cfg(gro)]
     gro_enabled: bool,
     /// Latched `true` (for the socket's lifetime) once a `UDP_SEGMENT`
     /// send is rejected with a capability error; read via
@@ -134,7 +134,7 @@ impl Udp {
             batch_receive_enabled: false,
             #[cfg(batch_receive)]
             truncated_recvs: AtomicU64::new(0),
-            #[cfg(linux)]
+            #[cfg(gro)]
             gro_enabled: false,
             #[cfg(linux)]
             gso_broken: std::sync::atomic::AtomicBool::new(false),
@@ -235,17 +235,16 @@ impl Udp {
     /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
     /// this logs and continues, with that path degrading to one wire
     /// packet per slot.
-    #[cfg(linux)]
+    #[cfg(gro)]
     pub fn enable_gro(&mut self) {
-        // Route receives through `recv_gro_batch` whenever offload is
-        // requested, not only when the sockopt succeeds: socket-read
-        // coalescing (the `UDP_GRO` sockopt) is what makes the kernel
-        // coalesce, but the path degrades to single-datagram slots when it
-        // does not (old kernel, or a zero-checksum peer the GRO engine
-        // skips), and the independent TUN-write coalescing still applies.
+        // Set whether or not the sockopt succeeds: `recv_gro_batch`
+        // always reads with `recvmmsg`, whatever `enable_batch_receive`
+        // says, and degrades to single-datagram slots when the kernel
+        // does not coalesce (old kernel, or a zero-checksum peer the
+        // GRO engine skips).
         self.gro_enabled = true;
         match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
-            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket (batch receive path)"),
             Err(e) => tracing::warn!(
                 "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
             ),
@@ -448,7 +447,7 @@ impl OutsideIO for Udp {
         })
     }
 
-    #[cfg(linux)]
+    #[cfg(gro)]
     fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
         if self.gro_enabled { Some(self) } else { None }
     }
@@ -535,7 +534,7 @@ impl OutsideIO for Udp {
     }
 }
 
-#[cfg(linux)]
+#[cfg(gro)]
 impl OutsideIORecvGro for Udp {
     fn recv_gro_batch(
         &self,

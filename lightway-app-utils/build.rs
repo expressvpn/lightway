@@ -19,5 +19,7 @@ fn main() {
         mobile: { any(android, ios, tvos) },
         // Apple platform
         apple: { any(macos, ios, tvos) },
+        // UDP_GRO and TUN TCP coalescing
+        gro: { any(linux, android) },
     }
 }

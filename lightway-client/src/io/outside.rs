@@ -73,7 +73,7 @@ pub trait OutsideIO: Sync + Send {
     /// Capability is per-instance but does not require the `UDP_GRO`
     /// sockopt to have stuck — the batched loop degrades to plain
     /// single-datagram slots when the kernel does not coalesce.
-    #[cfg(linux)]
+    #[cfg(gro)]
     fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
         None
     }
@@ -133,7 +133,7 @@ pub trait OutsideIO: Sync + Send {
 ///
 /// Implementers must also override [`OutsideIO::as_gro`] to return
 /// `Some(self)` — the default `None` hides the capability.
-#[cfg(linux)]
+#[cfg(gro)]
 pub trait OutsideIORecvGro: OutsideIO {
     /// Fill up to `MAX_IO_BATCH_SIZE` datagrams in a single `recvmmsg`,
     /// writing each datagram's GRO segment size into `gro_sizes[i]`

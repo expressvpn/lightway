@@ -4,6 +4,8 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
+#[cfg(gro)]
+mod metrics;
 pub mod platform;
 #[cfg(desktop)]
 pub mod route_manager;
@@ -20,6 +22,11 @@ use bytesize::ByteSize;
 use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
 #[cfg(linux)]
 pub use io::inside::InsideIORecvGso;
+/// The embedder's runtime switch for downlink TCP coalescing,
+/// re-exported so applications can veto it without reaching into the
+/// io module tree.
+#[cfg(gro)]
+pub use io::inside::raw_gro::set_tun_tcp_coalescing_allowed;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
 use keepalive::Keepalive;
@@ -323,6 +330,34 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// Only effective on Linux; ignored elsewhere.
     pub enable_tun_offload: bool,
 
+    /// Enable downlink TCP coalescing on the TUN write path, merging
+    /// same-flow segments into one oversized write. For devices with no
+    /// `virtio_net_hdr` framing — the Android `VpnService` fd, or a
+    /// Linux TUN opened without [`Self::enable_tun_offload`], with which
+    /// it is mutually exclusive. Ignored on other platforms.
+    ///
+    /// `client()` does not coalesce while IPv4 forwarding is on for the
+    /// TUN (re-checked periodically); see `io::inside::raw_gro` for why
+    /// a forwarded coalesced packet blackholes its flow.
+    ///
+    /// Coalescing needs several segments in one decrypt batch to have
+    /// anything to merge, which in practice means pairing this with
+    /// [`Self::enable_udp_gro`] (or at least `enable_batch_receive`).
+    pub enable_tun_tcp_coalescing: bool,
+
+    /// Enable `UDP_GRO` on the outside socket: the kernel returns a
+    /// train of same-flow datagrams per `recvmsg` instead of one, and
+    /// reports the segment size in a control message.
+    ///
+    /// Worth having on its own (fewer receive syscalls) and it is what
+    /// supplies [`Self::enable_tun_tcp_coalescing`] with multi-segment
+    /// runs. Implied by [`Self::enable_tun_offload`], which cannot work
+    /// without it. Only effective in `client()` on Linux. Android
+    /// embedders wire it themselves (`Udp::enable_gro` on the outside
+    /// socket, then `outside_io_task_gro`); this crate's `mobile`
+    /// module does not do so yet.
+    pub enable_udp_gro: bool,
+
     /// Enable IO-uring interface for Tunnel
     #[cfg(feature = "io-uring")]
     pub enable_tun_iouring: bool,
@@ -451,6 +486,8 @@ impl<ExtAppState: Send + Sync> ClientConfig<ExtAppState> {
             pmtud_base_mtu: config.pmtud_base_mtu,
             sni_header: config.sni_header.clone(),
             enable_tun_offload: config.enable_tun_offload,
+            enable_tun_tcp_coalescing: config.enable_tun_tcp_coalescing,
+            enable_udp_gro: config.enable_udp_gro,
             #[cfg(feature = "io-uring")]
             enable_tun_iouring: config.enable_tun_iouring,
             #[cfg(feature = "io-uring")]
@@ -724,11 +761,21 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
+///
+/// When `inside_io` is provided, a TUN coalescing window is opened
+/// around each decrypt batch: same-flow TCP segments delivered through
+/// the inside send callback may be merged into superpackets, and the
+/// window is flushed before the batch's conn lock is released, so
+/// packets never wait on future traffic. On backends without a
+/// coalescing-capable device the window calls are no-ops; `None` opens
+/// no window.
+#[cfg_attr(not(gro), allow(unused_variables))]
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
     connection_type: ConnectionType,
     outside_io: Arc<dyn io::outside::OutsideIO>,
+    inside_io: Option<Arc<dyn io::inside::InsideIORecv<ExtAppState>>>,
     keepalive: Keepalive,
     mut ready_signal: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
@@ -761,14 +808,26 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             },
         };
 
-        let pkts = bufs
-            .iter_mut()
-            .take(count)
-            .map(|b| OutsidePacket::Wire(b, connection_type));
-        let frames_decoded = conn
-            .lock()
-            .unwrap()
-            .multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type))?;
+        // One coalescing window per decrypt batch, flushed under the
+        // conn lock (see `outside_io_task_gro`).
+        #[cfg(gro)]
+        if let Some(inside_io) = &inside_io {
+            inside_io.gro_open();
+        }
+        let frames_decoded = {
+            let mut conn = conn.lock().unwrap();
+            let pkts = bufs
+                .iter_mut()
+                .take(count)
+                .map(|b| OutsidePacket::Wire(b, connection_type));
+            let result =
+                conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
+            #[cfg(gro)]
+            if let Some(inside_io) = &inside_io {
+                inside_io.gro_flush();
+            }
+            result
+        }?;
 
         // The receives above go through tokio's manual readiness API
         // (`ready()` + `try_io`-style receives), which charges no
@@ -800,7 +859,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 /// Split a GRO aggregate into per-datagram buffers on `gro_size`
 /// boundaries; the final segment may be shorter. The split-off views
 /// share the aggregate's backing slab — no copies.
-#[cfg(linux)]
+#[cfg(gro)]
 fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
     debug_assert!(gro_size > 0);
     while !buf.is_empty() {
@@ -809,8 +868,10 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
     }
 }
 
-/// Outside traffic handler when TUN offload is enabled on a UDP
-/// connection. Two independent receive optimizations run here:
+/// Outside traffic handler for a UDP connection whose socket was put
+/// on the GRO receive path (`enable_tun_offload` or `enable_udp_gro`).
+/// Receives always use `recvmmsg`, whatever `enable_batch_receive`
+/// says. Two independent receive optimizations run here:
 ///
 /// - **Socket read coalescing** (kernel `UDP_GRO`): the socket sets the
 ///   `UDP_GRO` sockopt, so the kernel returns an equal-size datagram train
@@ -819,12 +880,15 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
 ///   not sufficient. Without coalescing (old kernel, or zero-checksum peer)
 ///   each slot just holds one datagram.
 ///
-/// - **TUN write coalescing** (userspace `TcpGroTable`): in-order TCP
-///   segments are merged into TSO superpackets and written once. This needs
+/// - **TUN write coalescing**: in-order TCP segments are merged and
+///   written once — as TSO superpackets through the vnet-hdr
+///   `TcpGroTable` when the device negotiated `IFF_VNET_HDR`, or as
+///   raw oversized packets through `io::inside::raw_gro` otherwise
+///   (when `enable_tun_tcp_coalescing` is on). This needs
 ///   only several same-flow segments in one window, not socket-level
 ///   coalescing. One window spans one `recvmmsg` batch: it opens before the
 ///   batch is decoded and is flushed before the conn lock is released.
-#[cfg(linux)]
+#[cfg(gro)]
 pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     connection_type: ConnectionType,
@@ -893,12 +957,12 @@ pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
                     }
                 }
             }
-            // Flush while the conn lock is still held. `send()` only runs
-            // under this mutex, so closing the window here leaves no gap for
-            // another task to coalesce past the drain and strand a packet
-            // until the next receive. `write_super` only does non-blocking
-            // `try_send`s, so holding the lock a moment longer costs
-            // nothing.
+            // Flush while the conn lock is still held. This connection's
+            // `send()` only runs under this mutex, so closing the window
+            // here leaves it no gap to coalesce past the drain and strand
+            // a packet until the next receive. Both coalescers only do
+            // non-blocking TUN writes, so holding the lock a moment longer
+            // costs nothing.
             inside_io.gro_flush();
             acc
         };
@@ -1819,8 +1883,10 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
             // (a plain recv would merge separate datagrams), so
             // only flip the sockopt when the GRO outside loop
             // in connect() will consume it.
+            // `enable_tun_offload` implies it: the GSO path cannot
+            // work without it.
             #[cfg(linux)]
-            if config.enable_tun_offload {
+            if config.enable_tun_offload || config.enable_udp_gro {
                 sock.enable_gro();
             }
 
@@ -2038,15 +2104,18 @@ pub async fn connect<
     let mut ticker_task = ticker_task.spawn(Arc::downgrade(&conn));
     pmtud_timer_task.spawn(Arc::downgrade(&conn), &mut join_set);
 
-    // GRO capability is present only when `enable_tun_offload` flipped
-    // the sockopt on a UDP socket above; TCP mode and non-Linux targets
-    // fall back to the per-packet loop.
+    // GRO capability is present only when `enable_tun_offload` or
+    // `enable_udp_gro` put the UDP socket above on the GRO receive
+    // path; TCP mode and non-Linux targets use the per-packet loop.
     let spawn_outside_io_task = || {
         tokio::spawn(outside_io_task(
             conn.clone(),
             outside_mtu,
             connection_type,
             outside_io.clone(),
+            // A coalescing window per receive batch; a no-op when no
+            // coalescer is enabled.
+            Some(inside_io.clone()),
             keepalive.clone(),
             None,
         ))
@@ -2338,6 +2407,65 @@ where
     }
 }
 
+/// Whether IPv4 packets arriving on the TUN `tun_name` can be
+/// forwarded rather than delivered locally. The kernel decides per
+/// ingress device, so this reads the TUN's own
+/// `/proc/sys/net/ipv4/conf/<tun>/forwarding`; `ip_forward` is only the
+/// value written to every device's entry. Fails closed: an unknown
+/// name or an unreadable entry counts as forwarding.
+#[cfg(linux)]
+fn tun_forwarding_enabled(tun_name: Option<&str>) -> bool {
+    let contents = tun_name.and_then(|name| {
+        std::fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{name}/forwarding")).ok()
+    });
+    forwarding_value(contents.as_deref())
+}
+
+/// Parse a forwarding sysctl; `None` (unreadable) counts as forwarding.
+#[cfg(linux)]
+fn forwarding_value(contents: Option<&str>) -> bool {
+    contents.is_none_or(|s| s.trim() != "0")
+}
+
+/// How often `client()` re-reads the TUN's forwarding sysctl while TCP
+/// coalescing can be active.
+#[cfg(linux)]
+const FORWARDING_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Keep the host-safety switch in step with `forwarding()` until
+/// `alive` is dropped. `last` is the value already stored. Every tick
+/// passes the reading to `store`, as "host is safe"; only a change is
+/// logged.
+#[cfg(linux)]
+async fn forwarding_watch_task(
+    alive: Weak<()>,
+    mut last: bool,
+    forwarding: impl Fn() -> bool + Send,
+    store: impl Fn(bool) + Send,
+) {
+    let mut tick = tokio::time::interval(FORWARDING_POLL_INTERVAL);
+    tick.tick().await; // The first tick completes immediately.
+    loop {
+        tick.tick().await;
+        if alive.strong_count() == 0 {
+            return;
+        }
+        let now = forwarding();
+        store(!now);
+        if now != last {
+            last = now;
+            if now {
+                tracing::warn!(
+                    "IPv4 forwarding turned on for the TUN (or became unreadable): \
+                     stopping TCP coalescing"
+                );
+            } else {
+                tracing::info!("IPv4 forwarding turned off for the TUN: TCP coalescing allowed");
+            }
+        }
+    }
+}
+
 fn validate_client_config<
     EventHandler: 'static + Send + EventCallback,
     ExtAppState: Send + Sync,
@@ -2363,6 +2491,26 @@ fn validate_client_config<
         return Err(anyhow!(
             "enable_tun_offload and enable_tun_iouring cannot be enabled together: \
              the io-uring inside IO backend does not support GSO offload"
+        ));
+    }
+
+    // The io-uring backend opens its own `Tun` and never applies the
+    // coalescing config gate, so the flag would be silently ignored.
+    #[cfg(all(linux, feature = "io-uring"))]
+    if config.enable_tun_tcp_coalescing && config.enable_tun_iouring {
+        return Err(anyhow!(
+            "enable_tun_tcp_coalescing and enable_tun_iouring cannot be enabled together: \
+             the io-uring inside IO backend does not support raw TCP coalescing"
+        ));
+    }
+
+    // A device uses one coalescer, so one of the two would be ignored.
+    #[cfg(linux)]
+    if config.enable_tun_offload && config.enable_tun_tcp_coalescing {
+        return Err(anyhow!(
+            "enable_tun_offload and enable_tun_tcp_coalescing cannot be enabled together: \
+             offload coalesces behind a virtio_net_hdr, which supersedes the raw \
+             oversized-write path; pick one"
         ));
     }
 
@@ -2449,6 +2597,30 @@ pub async fn client<
         tracing::warn!("enable_tun_offload is only supported on Linux, ignoring");
     }
 
+    #[cfg(linux)]
+    if config.enable_tun_tcp_coalescing {
+        // A window only merges what one receive returns; warn when
+        // that is about one segment. The flags only apply to a plain
+        // `Datagram` socket: a connector's IO is the application's own.
+        let any_udp = conn_confs
+            .iter()
+            .any(|c| matches!(c.mode, ClientConnectionMode::Datagram(_)));
+        if !(any_udp && (config.enable_udp_gro || config.enable_batch_receive)) {
+            tracing::warn!(
+                "enable_tun_tcp_coalescing needs a UDP server with enable_udp_gro or \
+                 enable_batch_receive: otherwise each receive holds about one segment"
+            );
+        }
+        // The config gate is applied only to a TUN this function opens
+        // (below); a caller-supplied device keeps whatever its owner set.
+        if config.inside_io.is_some() {
+            tracing::warn!(
+                "enable_tun_tcp_coalescing has no effect on a caller-supplied inside_io: \
+                 call Tun::set_tcp_coalescing_configured on the device instead"
+            );
+        }
+    }
+
     let inside_io = match &config.inside_io {
         Some(io) => Arc::clone(io),
         #[cfg(feature = "io-uring")]
@@ -2462,11 +2634,51 @@ pub async fn client<
             )
             .await?,
         ),
-        None => Arc::new(
-            io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
-                .await?,
-        ),
+        None => Arc::new({
+            #[cfg_attr(not(gro), allow(unused_mut))]
+            let mut tun =
+                io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
+                    .await?;
+            #[cfg(gro)]
+            tun.set_tcp_coalescing_configured(config.enable_tun_tcp_coalescing);
+            tun
+        }),
     };
+
+    // The host-safety switch follows the TUN's forwarding sysctl (see
+    // `io::inside::raw_gro`): stored before any connection can open a
+    // window, and kept current by `forwarding_watch_task` until
+    // `client()` returns. A caller-supplied TUN may have coalescing
+    // configured by its owner, so it is covered too. The switch is
+    // process-wide, so this assumes one `client()` at a time.
+    #[cfg(linux)]
+    let coalescing_possible = config.enable_tun_tcp_coalescing || config.inside_io.is_some();
+    #[cfg(linux)]
+    let tun_name = inside_io.name().ok();
+    #[cfg(linux)]
+    let forwarding = tun_forwarding_enabled(tun_name.as_deref());
+    #[cfg(linux)]
+    {
+        io::inside::raw_gro::set_host_safe_to_coalesce(!forwarding);
+        if forwarding && config.enable_tun_tcp_coalescing {
+            tracing::warn!(
+                tun = ?tun_name,
+                "IPv4 forwarding is on for the TUN (or unreadable): not coalescing TCP"
+            );
+        }
+    }
+    #[cfg(linux)]
+    let _forwarding_watch = coalescing_possible.then(|| {
+        let alive = Arc::new(());
+        tokio::spawn(forwarding_watch_task(
+            Arc::downgrade(&alive),
+            forwarding,
+            move || tun_forwarding_enabled(tun_name.as_deref()),
+            io::inside::raw_gro::set_host_safe_to_coalesce,
+        ));
+        alive
+    });
+
     if let Ok(device_name) = inside_io.name() {
         tracing::info!(
             message = "Interface Details",
@@ -2774,6 +2986,51 @@ mod tests {
         assert!(validate_client_config(&config, &servers).is_ok());
     }
 
+    /// The two coalescing flags are mutually exclusive: a device that
+    /// negotiated `IFF_VNET_HDR` uses the vnet-hdr path and leaves the
+    /// raw coalescer dormant, so accepting both would silently ignore
+    /// one of them.
+    #[cfg(linux)]
+    #[test]
+    fn validate_tun_offload_with_tcp_coalescing() {
+        let mut config = test_client_config();
+        config.enable_tun_offload = true;
+        config.enable_tun_tcp_coalescing = true;
+        let err = validate_client_config(&config, &[test_conn_config(None)])
+            .expect_err("offload + raw coalescing must be rejected");
+        assert!(
+            err.to_string().contains("enable_tun_tcp_coalescing"),
+            "{err}"
+        );
+
+        // Either one alone is fine.
+        config.enable_tun_offload = false;
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+        config.enable_tun_tcp_coalescing = false;
+        config.enable_tun_offload = true;
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
+    /// The io-uring backend never applies the coalescing config gate,
+    /// so accepting the pair would silently ignore the flag.
+    ///
+    /// Needs `--features io-uring`, which CI does not test with; run
+    /// `cargo test -p lightway-client --features io-uring validate_` by
+    /// hand on Linux.
+    #[cfg(all(linux, feature = "io-uring"))]
+    #[test]
+    fn validate_tun_iouring_with_tcp_coalescing() {
+        let mut config = test_client_config();
+        config.enable_tun_iouring = true;
+        config.enable_tun_tcp_coalescing = true;
+        let err = validate_client_config(&config, &[test_conn_config(None)])
+            .expect_err("io-uring + raw coalescing must be rejected");
+        assert!(err.to_string().contains("enable_tun_iouring"), "{err}");
+
+        config.enable_tun_tcp_coalescing = false;
+        assert!(validate_client_config(&config, &[test_conn_config(None)]).is_ok());
+    }
+
     #[cfg(linux)]
     #[test]
     fn validate_tun_offload_with_inside_pkt_codec() {
@@ -2892,6 +3149,202 @@ mod tests {
 
         assert!(matches!(connection_type, ConnectionType::Datagram));
         assert_eq!(io.peer_addr(), addr);
+    }
+
+    /// The watch stores the reading every tick, as "host is safe", and
+    /// exits once its guard is dropped. The store is injected, so the
+    /// process-wide switch is never touched.
+    #[cfg(linux)]
+    #[tokio::test(start_paused = true)]
+    async fn forwarding_watch_follows_forwarding_until_dropped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let forwarding = Arc::new(AtomicBool::new(false));
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let alive = Arc::new(());
+        let task = tokio::spawn(forwarding_watch_task(
+            Arc::downgrade(&alive),
+            false,
+            {
+                let forwarding = forwarding.clone();
+                move || forwarding.load(Ordering::Relaxed)
+            },
+            {
+                let stored = stored.clone();
+                move |safe| stored.lock().unwrap().push(safe)
+            },
+        ));
+        let poll = || tokio::time::sleep(FORWARDING_POLL_INTERVAL + Duration::from_millis(1));
+
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true], "stored on every tick");
+
+        forwarding.store(true, Ordering::Relaxed);
+        poll().await;
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true, false, false]);
+
+        forwarding.store(false, Ordering::Relaxed);
+        poll().await;
+        assert_eq!(*stored.lock().unwrap(), [true, false, false, true]);
+
+        drop(alive);
+        poll().await;
+        assert!(task.is_finished());
+    }
+
+    /// Inside device that records the coalescing window calls, and
+    /// whether the connection lock was held at each flush.
+    #[cfg(gro)]
+    struct WindowRecorder {
+        conn: std::sync::OnceLock<Weak<Mutex<Connection<ConnectionState>>>>,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    #[cfg(gro)]
+    #[async_trait::async_trait]
+    impl InsideIORecv<()> for WindowRecorder {
+        async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
+            std::future::pending().await
+        }
+        fn try_send(&self, pkt: BytesMut, _ip_config: Option<InsideIpConfig>) -> Result<usize> {
+            Ok(pkt.len())
+        }
+        fn mtu(&self) -> usize {
+            1350
+        }
+        fn gro_open(&self) {
+            self.events.lock().unwrap().push("open");
+        }
+        fn gro_flush(&self) {
+            let conn = self.conn.get().and_then(Weak::upgrade).unwrap();
+            let locked = conn.try_lock().is_err();
+            self.events.lock().unwrap().push(if locked {
+                "flush (locked)"
+            } else {
+                "flush (UNLOCKED)"
+            });
+        }
+        fn into_io_send_callback(self: Arc<Self>) -> InsideIOSendCallbackArg<ConnectionState> {
+            unreachable!("not wired into the connection")
+        }
+    }
+
+    /// `outside_io_task` brackets every receive batch with one
+    /// coalescing window and flushes it while the connection lock is
+    /// still held, so the connection cannot coalesce into a drained
+    /// batch.
+    #[cfg(gro)]
+    #[tokio::test]
+    async fn outside_io_task_flushes_each_batch_under_the_conn_lock() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_addr = sock.local_addr().unwrap();
+        let udp = io::outside::Udp::new(
+            peer.local_addr().unwrap(),
+            Some(sock),
+            #[cfg(all(linux, not(feature = "mobile")))]
+            0,
+        )
+        .await
+        .unwrap();
+        let outside_io: Arc<dyn io::outside::OutsideIO> = Arc::new(udp);
+
+        let ca = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/certs/ca.crt"
+        ))
+        .unwrap();
+        let (ticker, _ticker_task) = ConnectionTicker::new();
+        let state = ConnectionState {
+            ticker,
+            ip_config: None,
+            extended: (),
+            tun_activity: Default::default(),
+        };
+        let conn = ClientContextBuilder::new(
+            ConnectionType::Datagram,
+            RootCertificate::PemBuffer(&ca),
+            None,
+            Arc::new(ClientIpConfigCb),
+            connection_ticker_cb,
+        )
+        .unwrap()
+        .build()
+        .start_connect(outside_io.clone().into_io_send_callback(), 1350)
+        .unwrap()
+        .with_auth(AuthMethod::UserPass {
+            user: "user".to_string(),
+            password: "password".to_string(),
+        })
+        .connect(state)
+        .unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+
+        let recorder = Arc::new(WindowRecorder {
+            conn: std::sync::OnceLock::new(),
+            events: Mutex::new(Vec::new()),
+        });
+        recorder.conn.set(Arc::downgrade(&conn)).unwrap();
+        let (keepalive, _keepalive_task) = Keepalive::new(
+            keepalive::Config {
+                interval: Duration::from_secs(60),
+                timeout: Duration::from_secs(60),
+                continuous: false,
+                tracer_trigger_timeout: None,
+            },
+            Arc::downgrade(&conn),
+        );
+
+        let task = tokio::spawn(outside_io_task(
+            conn.clone(),
+            1350,
+            ConnectionType::Datagram,
+            outside_io,
+            Some(recorder.clone() as Arc<dyn io::inside::InsideIORecv<()>>),
+            keepalive,
+            None,
+        ));
+
+        // Not a valid wire frame: the batch decodes nothing, which is
+        // fine, the window must still be opened and flushed.
+        for _ in 0..2 {
+            peer.send_to(b"not a lightway frame", sock_addr)
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let before = recorder.events.lock().unwrap().len();
+            while recorder.events.lock().unwrap().len() < before + 2 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "batch not processed"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        task.abort();
+
+        assert_eq!(
+            *recorder.events.lock().unwrap(),
+            ["open", "flush (locked)", "open", "flush (locked)"]
+        );
+    }
+
+    /// The sysctl parse fails closed: only an explicit 0 means "not
+    /// forwarding".
+    #[cfg(linux)]
+    #[test_case(Some("0\n") => false)]
+    #[test_case(Some("1\n") => true)]
+    #[test_case(Some("") => true; "empty")]
+    #[test_case(None => true; "unreadable")]
+    fn forwarding_value_fails_closed(contents: Option<&str>) -> bool {
+        forwarding_value(contents)
+    }
+
+    /// An unknown TUN name counts as forwarding.
+    #[cfg(linux)]
+    #[test]
+    fn tun_forwarding_without_a_name_fails_closed() {
+        assert!(tun_forwarding_enabled(None));
     }
 
     #[test_case(1, vec![], false => None)]

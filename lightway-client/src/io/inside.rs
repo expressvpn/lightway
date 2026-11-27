@@ -1,3 +1,8 @@
+// Builds on `lightway_core::gro`, which exists on Linux and Android
+// only (a dependency's `cfg(test)` is never set), so its unit tests
+// run on Linux.
+#[cfg(gro)]
+pub(crate) mod raw_gro;
 pub mod tun;
 
 use anyhow::Result;
@@ -59,14 +64,15 @@ pub trait InsideIORecv<ExtAppState: Send + Sync>: Send + Sync {
 
     /// Open a GRO coalescing window on the send path. Until the matching
     /// [`Self::gro_flush`], packets delivered via the inside send callback
-    /// may be coalesced into TSO superpackets instead of written
-    /// individually. Backends without TUN offload leave this a no-op.
-    #[cfg(linux)]
+    /// may be coalesced into superpackets instead of written
+    /// individually. Backends without a coalescing-capable device leave
+    /// this a no-op.
+    #[cfg(gro)]
     fn gro_open(&self) {}
 
     /// Flush any coalesced packets and close the window opened by
     /// [`Self::gro_open`].
-    #[cfg(linux)]
+    #[cfg(gro)]
     fn gro_flush(&self) {}
 
     fn into_io_send_callback(

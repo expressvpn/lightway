@@ -24,6 +24,8 @@ fn main() {
         },
         // Feature that is supported on specific platforms
         batch_receive: { any(linux, apple, android) },
+        // UDP_GRO and TUN TCP coalescing
+        gro: { any(linux, android) },
     }
 
     let git_hash = get_git_hash();
