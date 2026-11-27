@@ -1,4 +1,4 @@
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 use std::os::fd::AsRawFd;
 #[cfg(linux)]
 use std::sync::{
@@ -26,7 +26,7 @@ use lightway_core::{
 
 #[cfg(linux)]
 use crate::io::inside::InsideIORecvGso;
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 use crate::io::inside::raw_gro::{self, RawGro, RawTunIo};
 use crate::{ConnectionState, io::inside::InsideIORecv};
 
@@ -34,14 +34,14 @@ pub struct Tun {
     tun: AppUtilsTun,
     ip: Ipv4Addr,
     dns_ip: Ipv4Addr,
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     coalescer: Coalescer,
 }
 
 /// The downlink TCP coalescer a device uses, fixed when it is opened.
 // One long-lived value per `Tun`, so the size gap between the variants
 // costs nothing.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 #[cfg_attr(linux, allow(clippy::large_enum_variant))]
 enum Coalescer {
     /// The device negotiated `IFF_VNET_HDR`: runs are written as TSO
@@ -72,7 +72,7 @@ impl Tun {
     }
 
     fn from_app_utils_tun(tun: AppUtilsTun, ip: Ipv4Addr, dns_ip: Ipv4Addr) -> Self {
-        #[cfg(any(linux, android))]
+        #[cfg(gro)]
         let coalescer = cfg_select! {
             linux => {
                 if tun.supports_gso() {
@@ -84,7 +84,7 @@ impl Tun {
             _ => { Coalescer::Raw(RawGro::new(raw_gro::DEFAULT_MAX_SUPERPACKET)) }
         };
         Tun {
-            #[cfg(any(linux, android))]
+            #[cfg(gro)]
             coalescer,
             tun,
             ip,
@@ -104,7 +104,7 @@ impl Tun {
     /// Has no effect on a device that negotiated `IFF_VNET_HDR`
     /// (`enable_tun_offload`), which coalesces through the vnet-hdr
     /// path instead.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     pub fn set_tcp_coalescing_configured(&mut self, enabled: bool) {
         match &mut self.coalescer {
             #[cfg(linux)]
@@ -121,7 +121,7 @@ impl Tun {
     /// through its coalescer where the platform has one.
     fn send_packet(&self, buf: BytesMut) -> IOCallbackResult<usize> {
         cfg_select! {
-            any(linux, android) => {
+            gro => {
                 match &self.coalescer {
                     #[cfg(linux)]
                     Coalescer::Vnet(gro) => gro.send(&self.tun, buf),
@@ -136,7 +136,7 @@ impl Tun {
 /// The device writes the raw coalescer performs, on the real TUN.
 /// `send_slice` borrows so a rejected superpacket can be re-split and
 /// re-sent from the same bytes.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 impl RawTunIo for AppUtilsTun {
     fn vnet_hdr_framing(&self) -> Option<bool> {
         /// `IFF_VNET_HDR` in `ifreq.ifr_flags`.
@@ -156,7 +156,7 @@ impl RawTunIo for AppUtilsTun {
 /// Read the interface flags via `TUNGETIFF` — `_IOR('T', 210, unsigned
 /// int)`, the one tun ioctl Android allows app domains. `None` if the
 /// ioctl failed.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 fn tun_iff_flags(fd: std::os::fd::RawFd) -> Option<libc::c_short> {
     // `ioctl`'s request type is `c_ulong` on glibc/musl and `c_int` on
     // bionic; `as _` at the call site picks the width.
@@ -383,7 +383,7 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         }
     }
 
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     fn gro_open(&self) {
         match &self.coalescer {
             #[cfg(linux)]
@@ -392,7 +392,7 @@ impl<ExtAppState: Send + Sync> InsideIORecv<ExtAppState> for Tun {
         }
     }
 
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     fn gro_flush(&self) {
         match &self.coalescer {
             #[cfg(linux)]

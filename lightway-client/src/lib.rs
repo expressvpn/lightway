@@ -4,7 +4,7 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 mod metrics;
 pub mod platform;
 #[cfg(desktop)]
@@ -25,7 +25,7 @@ pub use io::inside::InsideIORecvGso;
 /// The embedder's runtime switch for downlink TCP coalescing,
 /// re-exported so applications can veto it without reaching into the
 /// io module tree.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 pub use io::inside::raw_gro::set_tun_tcp_coalescing_allowed;
 pub use io::inside::{InsideIO, InsideIORecv};
 use io::outside::OutsideIO;
@@ -769,7 +769,7 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 /// packets never wait on future traffic. On backends without a
 /// coalescing-capable device the window calls are no-ops; `None` opens
 /// no window.
-#[cfg_attr(not(any(linux, android)), allow(unused_variables))]
+#[cfg_attr(not(gro), allow(unused_variables))]
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     mtu: usize,
@@ -810,7 +810,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 
         // One coalescing window per decrypt batch, flushed under the
         // conn lock (see `outside_io_task_gro`).
-        #[cfg(any(linux, android))]
+        #[cfg(gro)]
         if let Some(inside_io) = &inside_io {
             inside_io.gro_open();
         }
@@ -822,7 +822,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
                 .map(|b| OutsidePacket::Wire(b, connection_type));
             let result =
                 conn.multiple_outside_data_received(pkts, |err| err.is_fatal(connection_type));
-            #[cfg(any(linux, android))]
+            #[cfg(gro)]
             if let Some(inside_io) = &inside_io {
                 inside_io.gro_flush();
             }
@@ -859,7 +859,7 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
 /// Split a GRO aggregate into per-datagram buffers on `gro_size`
 /// boundaries; the final segment may be shorter. The split-off views
 /// share the aggregate's backing slab — no copies.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<BytesMut>) {
     debug_assert!(gro_size > 0);
     while !buf.is_empty() {
@@ -888,7 +888,7 @@ fn split_gro_segments(buf: &mut BytesMut, gro_size: usize, segments: &mut Vec<By
 ///   only several same-flow segments in one window, not socket-level
 ///   coalescing. One window spans one `recvmmsg` batch: it opens before the
 ///   batch is decoded and is flushed before the conn lock is released.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 pub async fn outside_io_task_gro<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
     connection_type: ConnectionType,
@@ -2635,11 +2635,11 @@ pub async fn client<
             .await?,
         ),
         None => Arc::new({
-            #[cfg_attr(not(any(linux, android)), allow(unused_mut))]
+            #[cfg_attr(not(gro), allow(unused_mut))]
             let mut tun =
                 io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
                     .await?;
-            #[cfg(any(linux, android))]
+            #[cfg(gro)]
             tun.set_tcp_coalescing_configured(config.enable_tun_tcp_coalescing);
             tun
         }),
@@ -3194,13 +3194,13 @@ mod tests {
 
     /// Inside device that records the coalescing window calls, and
     /// whether the connection lock was held at each flush.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     struct WindowRecorder {
         conn: std::sync::OnceLock<Weak<Mutex<Connection<ConnectionState>>>>,
         events: Mutex<Vec<&'static str>>,
     }
 
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     #[async_trait::async_trait]
     impl InsideIORecv<()> for WindowRecorder {
         async fn recv_buf(&self, _buf: &mut BytesMut) -> IOCallbackResult<usize> {
@@ -3233,7 +3233,7 @@ mod tests {
     /// coalescing window and flushes it while the connection lock is
     /// still held, so the connection cannot coalesce into a drained
     /// batch.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     #[tokio::test]
     async fn outside_io_task_flushes_each_batch_under_the_conn_lock() {
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

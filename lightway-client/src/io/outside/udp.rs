@@ -1,4 +1,4 @@
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 use super::OutsideIORecvGro;
 use super::{OutsideIO, OutsideSocket};
 use anyhow::{Context, Result, anyhow};
@@ -66,7 +66,7 @@ pub struct Udp {
     /// that did not; rate-limits the truncation warning.
     #[cfg(batch_receive)]
     truncated_recvs: AtomicU64,
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     gro_enabled: bool,
     /// Latched `true` (for the socket's lifetime) once a `UDP_SEGMENT`
     /// send is rejected with a capability error; read via
@@ -134,7 +134,7 @@ impl Udp {
             batch_receive_enabled: false,
             #[cfg(batch_receive)]
             truncated_recvs: AtomicU64::new(0),
-            #[cfg(any(linux, android))]
+            #[cfg(gro)]
             gro_enabled: false,
             #[cfg(linux)]
             gso_broken: std::sync::atomic::AtomicBool::new(false),
@@ -235,7 +235,7 @@ impl Udp {
     /// `UDP_GRO` sockopt is best-effort, and on failure (kernel < 5.0)
     /// this logs and continues, with that path degrading to one wire
     /// packet per slot.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     pub fn enable_gro(&mut self) {
         // Set whether or not the sockopt succeeds: `recv_gro_batch`
         // always reads with `recvmmsg`, whatever `enable_batch_receive`
@@ -447,7 +447,7 @@ impl OutsideIO for Udp {
         })
     }
 
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     fn as_gro(self: Arc<Self>) -> Option<Arc<dyn OutsideIORecvGro>> {
         if self.gro_enabled { Some(self) } else { None }
     }
@@ -534,7 +534,7 @@ impl OutsideIO for Udp {
     }
 }
 
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 impl OutsideIORecvGro for Udp {
     fn recv_gro_batch(
         &self,

@@ -13,9 +13,9 @@ mod features;
 // TCP coalescer built on `gro::TcpGroBatch::take_raw`. Dependents
 // cannot see these under their own `cfg(test)`, so they must gate
 // their users to Linux/Android too.
-#[cfg(any(target_os = "linux", target_os = "android", test))]
+#[cfg(any(gro, test))]
 pub mod gro;
-#[cfg(any(target_os = "linux", target_os = "android", test))]
+#[cfg(any(gro, test))]
 pub mod gso;
 mod io;
 mod keyshare;
@@ -48,7 +48,7 @@ pub use context::{
     ip_pool::{ClientIpConfig, ClientIpConfigArg, InsideIpConfig, ServerIpPool, ServerIpPoolArg},
 };
 pub use features::LightwayFeature;
-#[cfg(any(target_os = "linux", target_os = "android", test))]
+#[cfg(any(gro, test))]
 pub use gso::VirtioNetHdr;
 pub use io::{
     InsideIOSendCallback, InsideIOSendCallbackArg, MAX_IO_BATCH_SIZE, OutsideIOSendCallback,

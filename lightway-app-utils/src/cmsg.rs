@@ -68,7 +68,7 @@ impl<const N: usize> Default for Buffer<N> {
 
 pub enum Message<'a> {
     IpPktinfo(&'a libc::in_pktinfo),
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     UdpGroSegment(libc::c_int),
     Unknown(#[allow(dead_code)] &'a libc::cmsghdr),
 }
@@ -112,7 +112,7 @@ pub fn iter_control(control: &[u8]) -> Iter<'_> {
     }
 }
 
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 pub fn first_udp_gro_segment(control: &[u8]) -> Option<u16> {
     iter_control(control).find_map(|m| match m {
         Message::UdpGroSegment(seg) => Some(seg as u16),
@@ -160,7 +160,7 @@ impl<'a> Iterator for Iter<'a> {
                 return Some(Message::IpPktinfo(pi));
             }
 
-            #[cfg(any(linux, android))]
+            #[cfg(gro)]
             if item.cmsg_level == libc::SOL_UDP && item.cmsg_type == libc::UDP_GRO {
                 // SAFETY: `item` is a valid `cmsghdr` from a prior call
                 // to `CMSG_FIRSTHDR` or `CMSG_NXTHDR`.

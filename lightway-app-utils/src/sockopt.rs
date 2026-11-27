@@ -6,11 +6,11 @@ mod ip_mtu_discover;
 mod ip_pktinfo;
 // `UDP_GRO` is a kernel feature, not a libc one: Android runs the same
 // Linux networking stack, so the sockopt works there too.
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 mod udp_gro;
 
 pub use ip_mtu_discover::*;
 #[cfg(unix)]
 pub use ip_pktinfo::*;
-#[cfg(any(linux, android))]
+#[cfg(gro)]
 pub use udp_gro::*;
