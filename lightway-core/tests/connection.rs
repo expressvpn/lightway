@@ -181,13 +181,15 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
     let state = ConnectionState { ticker };
 
     let client = ClientContextBuilder::new(
-        client_sock.connection_type(),
-        ca_cert,
+        Arc::new(
+            TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                .unwrap()
+                .build(),
+        ),
         Some(Arc::new(tun)),
         Arc::new(Client),
         connection_ticker_cb,
     )
-    .unwrap()
     .build()
     .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
     .unwrap()
@@ -235,7 +237,7 @@ async fn inside_pkt_codec_stall_triggers_codec_downgrade() {
                         Err(e) => panic!("client recv: {e}"),
                     }
                     let mut c = client.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     c.outside_data_received(pkt).expect("outside data received");
                     if !matches!(c.state(), State::Online) {
                         continue;
@@ -392,8 +394,8 @@ async fn test_stream_connection_versioned_token() {
 
 #[test_case(None; "No server domain name")]
 #[test_case(Some(TestPki::SERVER_DOMAIN); "Valid server domain name")]
-#[cfg_attr(boringssl, test_case(Some("invalid") => panics "TLS Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
-#[cfg_attr(wolfssl, test_case(Some("invalid") => panics "TLS Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
+#[cfg_attr(boringssl, test_case(Some("invalid") => panics "Transport Error: Fatal error: DomainNameMismatch"; "Invalid server domain name"))]
+#[cfg_attr(wolfssl, test_case(Some("invalid") => panics "Transport Error: Fatal: Domain name mismatch"; "Invalid server domain name"))]
 #[tokio::test]
 async fn test_server_dn(server_dn: Option<&str>) {
     // Communicate over a local stream socket for simplicity
@@ -464,13 +466,15 @@ async fn mark_offload_activity_bumps_by_rule() {
     let state = ConnectionState { ticker };
 
     let mut conn = ClientContextBuilder::new(
-        client_sock.connection_type(),
-        ca_cert,
+        Arc::new(
+            TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                .unwrap()
+                .build(),
+        ),
         None,
         Arc::new(Client),
         connection_ticker_cb,
     )
-    .unwrap()
     .build()
     .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
     .unwrap()
@@ -511,13 +515,15 @@ async fn expresslane_state_reports_initial_client_state(
     let state = ConnectionState { ticker };
 
     let conn = ClientContextBuilder::new(
-        client_sock.connection_type(),
-        ca_cert,
+        Arc::new(
+            TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                .unwrap()
+                .build(),
+        ),
         None,
         Arc::new(Client),
         connection_ticker_cb,
     )
-    .unwrap()
     .when(enable_expresslane, |b| {
         b.with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
     })
@@ -587,13 +593,15 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
         let state = ConnectionState { ticker };
 
         let conn = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_expresslane(INTERVAL)
         .with_expresslane_cb(keys.clone())
         .build()
@@ -627,7 +635,7 @@ async fn server_nudge_rotates_both_ends_while_client_is_idle() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -744,16 +752,19 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
         let (server_tun, _server_inside_rx) = ChannelTun::new();
         let auth = Arc::new(TestAuth::default());
 
-        let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
+        let transport = TlsServerFactory::new(
             server_sock.connection_type(),
             server_cert,
             server_key,
+            false,
+        )
+        .unwrap();
+        let server_ctx = ServerContextBuilder::<ConnectionTicker>::new(
             auth,
             ip_pool,
             Arc::new(server_tun),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_minimum_protocol_version(Version::MINIMUM)
         .unwrap()
         .with_maximum_protocol_version(Version::MAXIMUM)
@@ -771,7 +782,7 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
                     server_sock.clone().into_io_send_callback(),
                 )
                 .unwrap()
-                .accept(server_ticker)
+                .accept(server_ticker, Box::new(|args| transport.accept(args)))
                 .unwrap(),
         ));
 
@@ -783,13 +794,15 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
         };
 
         let conn = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(client_tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_expresslane(INTERVAL)
         .with_expresslane_cb(client_obs.clone())
         .build()
@@ -823,7 +836,7 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
                     };
 
                     let mut server_conn = server_conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, server_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = server_conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -843,7 +856,7 @@ async fn rotate_now_suppressed_while_outstanding_reopens_after_ack() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -987,19 +1000,22 @@ async fn expresslane_health_probe(
         let (event_cb, mut event_stream) = EventStreamCallback::new();
 
         let client = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    // Match the shared client helper: the server asserts the
+                    // negotiated curve against PQCrypto::expected_curve,
+                    // which assumes this.
+                    .enable_pq_crypto()
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
         .when_some(client_metrics, |b, m| b.with_expresslane_metrics(m));
-
-        // Match the shared client helper: the server asserts the negotiated
-        // curve against PQCrypto::expected_curve, which assumes this.
-        let client = client.enable_pq_crypto().unwrap();
 
         let conn = client
             .build()
@@ -1038,7 +1054,7 @@ async fn expresslane_health_probe(
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -1275,13 +1291,15 @@ async fn disabled_server_ignores_expresslane_config() {
         let state = ConnectionState { ticker };
 
         let conn = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .with_expresslane(DEFAULT_EXPRESSLANE_KEYS_ROTATION_INTERVAL)
         .with_expresslane_cb(client_cb.clone())
         .build()
@@ -1313,7 +1331,7 @@ async fn disabled_server_ignores_expresslane_config() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -1392,13 +1410,15 @@ async fn idle_client_acknowledges_session_id_rotation_with_its_pong() {
         let state = ConnectionState { ticker };
 
         let conn = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .build()
         .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
         .unwrap()
@@ -1429,7 +1449,7 @@ async fn idle_client_acknowledges_session_id_rotation_with_its_pong() {
                     };
 
                     let mut conn = conn.lock().unwrap();
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -1519,13 +1539,15 @@ async fn client_ignores_session_id_of_replayed_or_corrupted_packets() {
         let state = ConnectionState { ticker };
 
         let conn = ClientContextBuilder::new(
-            client_sock.connection_type(),
-            ca_cert,
+            Arc::new(
+                TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .build()
         .start_connect(client_sock.clone().into_io_send_callback(), MAX_OUTSIDE_MTU)
         .unwrap()
@@ -1563,10 +1585,10 @@ async fn client_ignores_session_id_of_replayed_or_corrupted_packets() {
                         Phase::Connecting => {}
                         Phase::AwaitPing => {
                             // Deliver the ping, then replay it under another id.
-                            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                            let pkt = OutsidePacket::Wire(&mut buf);
                             conn.outside_data_received(pkt).unwrap();
                             let mut replay = with_session(&raw, bogus);
-                            let pkt = OutsidePacket::Wire(&mut replay, client_sock.connection_type());
+                            let pkt = OutsidePacket::Wire(&mut replay);
                             let _ = conn.outside_data_received(pkt);
                             assert_eq!(conn.session_id(), session, "adopted a replayed packet's id");
                             phase = Phase::AwaitSecondPing;
@@ -1578,14 +1600,14 @@ async fn client_ignores_session_id_of_replayed_or_corrupted_packets() {
                             let mut corrupted = with_session(&raw, bogus);
                             let last = corrupted.len() - 1;
                             corrupted[last] ^= 0xff;
-                            let pkt = OutsidePacket::Wire(&mut corrupted, client_sock.connection_type());
+                            let pkt = OutsidePacket::Wire(&mut corrupted);
                             let _ = conn.outside_data_received(pkt);
                             assert_eq!(conn.session_id(), session, "adopted a corrupted packet's id");
                             phase = Phase::Done;
                         }
                         Phase::Done => unreachable!(),
                     }
-                    let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+                    let pkt = OutsidePacket::Wire(&mut buf);
                     if let Err(err) = conn.outside_data_received(pkt) {
                         panic!("{err}")
                     }
@@ -1725,13 +1747,15 @@ async fn pmtud_reports_status_changes() {
     });
 
     let client = ClientContextBuilder::new(
-        client_sock.connection_type(),
-        ca_cert,
+        Arc::new(
+            TlsClientFactory::builder(client_sock.connection_type(), ca_cert)
+                .unwrap()
+                .build(),
+        ),
         Some(Arc::new(tun)),
         Arc::new(Client),
         connection_ticker_cb,
     )
-    .unwrap()
     .build()
     .start_connect(outside, MAX_OUTSIDE_MTU)
     .unwrap()
@@ -1768,7 +1792,7 @@ async fn pmtud_reports_status_changes() {
                 Err(e) => panic!("client recv: {e}"),
             }
             let mut c = client.lock().unwrap();
-            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            let pkt = OutsidePacket::Wire(&mut buf);
             c.outside_data_received(pkt).expect("outside data received");
             if c.pmtud_status()
                 .is_some_and(|s| s.state == PmtudState::SearchComplete)
@@ -1946,13 +1970,15 @@ async fn a_blocked_pmtud_probe_never_leaves_without_probe_mode() {
     });
 
     let client = ClientContextBuilder::new(
-        client_sock.connection_type(),
-        pki.root_ca(),
+        Arc::new(
+            TlsClientFactory::builder(client_sock.connection_type(), pki.root_ca())
+                .unwrap()
+                .build(),
+        ),
         Some(Arc::new(tun)),
         Arc::new(Client),
         connection_ticker_cb,
     )
-    .unwrap()
     .build()
     .start_connect(outside, MAX_OUTSIDE_MTU)
     .unwrap()
@@ -1980,7 +2006,7 @@ async fn a_blocked_pmtud_probe_never_leaves_without_probe_mode() {
                 Err(e) => panic!("client recv: {e}"),
             }
             let mut c = client.lock().unwrap();
-            let pkt = OutsidePacket::Wire(&mut buf, client_sock.connection_type());
+            let pkt = OutsidePacket::Wire(&mut buf);
             c.outside_data_received(pkt).expect("outside data received");
             if c.state() == State::Online {
                 return;
@@ -2061,13 +2087,15 @@ async fn a_failed_send_still_sends_the_other_records() {
         let (tun, _inside_rx) = ChannelTun::new();
         let (ticker, _ticker_task) = ConnectionTicker::new();
         let result = ClientContextBuilder::new(
-            ConnectionType::Datagram,
-            pki.root_ca(),
+            Arc::new(
+                TlsClientFactory::builder(ConnectionType::Datagram, pki.root_ca())
+                    .unwrap()
+                    .build(),
+            ),
             Some(Arc::new(tun)),
             Arc::new(Client),
             connection_ticker_cb,
         )
-        .unwrap()
         .build()
         .start_connect(sock.clone(), MAX_OUTSIDE_MTU)
         .unwrap()
@@ -2140,13 +2168,15 @@ fn a_failed_retransmit_keeps_the_dtls_timer() {
         sends: AtomicUsize::new(0),
     });
     let mut client = ClientContextBuilder::new(
-        ConnectionType::Datagram,
-        pki.root_ca(),
+        Arc::new(
+            TlsClientFactory::builder(ConnectionType::Datagram, pki.root_ca())
+                .unwrap()
+                .build(),
+        ),
         None,
         Arc::new(NoIpConfig),
         count_tick,
     )
-    .unwrap()
     .build()
     .start_connect(sock.clone(), MAX_OUTSIDE_MTU)
     .unwrap()

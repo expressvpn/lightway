@@ -16,6 +16,7 @@ use lightway_app_utils::{
     ConnectionTicker, DplpmtudTimer, EventStream, EventStreamCallback, TunConfig,
     connection_ticker_cb,
 };
+use lightway_core::TlsClientFactory;
 use lightway_core::{
     BuilderPredicates, ClientContextBuilder, Connection, ConnectionError, ConnectionType, Event,
     EventCallback, IOCallbackResult, InsideIOSendCallback, PluginFactoryList, State,
@@ -440,7 +441,6 @@ pub(crate) async fn async_lightway_start(
 
 struct OutsideIOConfig {
     mtu: usize,
-    connection_type: ConnectionType,
     outside_io: Arc<dyn OutsideIO>,
 }
 
@@ -483,7 +483,7 @@ async fn restartable_outside_io_task(
         };
 
         tokio::select! {
-            result = outside_io_task(conn.clone(), outside_io_config.mtu, outside_io_config.connection_type, current_outside_io.clone(), keepalive.clone(), ready_tx) => return result,
+            result = outside_io_task(conn.clone(), outside_io_config.mtu, current_outside_io.clone(), keepalive.clone(), ready_tx) => return result,
 
             new_outside_io_result = new_outside_io_receiver.recv() => {
                 match new_outside_io_result {
@@ -632,20 +632,22 @@ async fn lightway_client_connect(
         ..
     } = connect_conf;
 
+    let transport = TlsClientFactory::builder(connection_type, root_ca_cert)?
+        .with_cipher(cipher.into())?
+        .enable_pq_crypto()?
+        .build();
+
     let ctx_builder = ClientContextBuilder::new(
-        connection_type,
-        root_ca_cert,
+        Arc::new(transport),
         Some(inside_io),
         Arc::new(ClientIpConfigCb),
         connection_ticker_cb,
-    )?
-    .with_cipher(cipher.into())?
+    )
     .with_inside_plugins(inside_plugins)
     .with_outside_plugins(outside_plugins)
-    .when(connection_type.is_datagram() && enable_expresslane, |b| {
+    .when(enable_expresslane, |b| {
         b.with_expresslane(expresslane_keys_rotation_interval)
-    })
-    .enable_pq_crypto()?;
+    });
 
     let conn_builder = ctx_builder
         .build()
@@ -656,9 +658,7 @@ async fn lightway_client_connect(
             b.with_server_domain_name_validation(&server_dn.expect("checked in builder pattern"))
         })
         .when_some(sni_header.as_deref(), |b, sni| b.with_sni_header(sni))
-        .when(connection_type.is_datagram() && ENABLE_PMTUD, |b| {
-            b.with_pmtud_timer(pmtud_timer)
-        })
+        .when(ENABLE_PMTUD, |b| b.with_pmtud_timer(pmtud_timer))
         .with_pq_crypto(lightway_app_utils::args::KeyShare::default().into());
 
     let conn = Arc::new(Mutex::new(conn_builder.connect(state)?));
@@ -700,7 +700,6 @@ async fn lightway_client_connect(
             conn.clone(),
             OutsideIOConfig {
                 mtu: outside_mtu,
-                connection_type,
                 outside_io,
             },
             keepalive.clone(),
@@ -844,48 +843,42 @@ async fn handle_network_change(
         let Some(conn) = weak.upgrade() else {
             return Ok(ClientResult::UserDisconnect);
         };
-        let conn_type = conn.lock().unwrap().connection_type();
+        let roams = conn.lock().unwrap().transport_caps().supports_roaming;
         info!("Device network state change to {network_state:?}");
         match network_state {
             DeviceNetworkState::Online | DeviceNetworkState::InterfaceChanged => {
-                match conn_type {
-                    ConnectionType::Datagram => {
-                        // We only need to use reset new socket on iOS but not on Android
-                        cfg_select! {
-                            apple => {
-                                // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
-                                // via the new network path and avoid using mobile data unnecessarily.
-                                info!("resetting udp transport due to network change ..");
-                                reset_outside_io_tx.send(()).await?;
-                            }
-                            _ => {
-                                // Trigger a new keepalive on the new socket (keepalive will
-                                // be triggered after the socket has been updated on iOS)
-                                keepalive.network_changed().await;
-                            }
+                if roams {
+                    // We only need to use reset new socket on iOS but not on Android
+                    cfg_select! {
+                        apple => {
+                            // Reset UDP transport when the network changes. This will ensure the udp traffic is routed
+                            // via the new network path and avoid using mobile data unnecessarily.
+                            info!("resetting udp transport due to network change ..");
+                            reset_outside_io_tx.send(()).await?;
+                        }
+                        _ => {
+                            // Trigger a new keepalive on the new socket (keepalive will
+                            // be triggered after the socket has been updated on iOS)
+                            keepalive.network_changed().await;
                         }
                     }
-                    ConnectionType::Stream => {
-                        info!("client shutting down due to network change ..");
-                        let _ = conn.lock().unwrap().disconnect();
-                        return Ok(ClientResult::NetworkChange);
-                    }
+                } else {
+                    info!("client shutting down due to network change ..");
+                    let _ = conn.lock().unwrap().disconnect();
+                    return Ok(ClientResult::NetworkChange);
                 }
             }
             DeviceNetworkState::RouteUpdated => {
-                match conn_type {
-                    ConnectionType::Datagram => {
-                        // UDP survives updating the network, but to ensure that the new network
-                        // with the current endpoint works reliably, we trigger keep-alives
-                        // e.g swapping from an unrestricted network to one that blocks UDP
-                        info!("sending keepalives due to network change ..");
-                        keepalive.network_changed().await;
-                    }
-                    ConnectionType::Stream => {
-                        info!("client shutting down due to network change ..");
-                        let _ = conn.lock().unwrap().disconnect();
-                        return Ok(ClientResult::NetworkChange);
-                    }
+                if roams {
+                    // UDP survives updating the network, but to ensure that the new network
+                    // with the current endpoint works reliably, we trigger keep-alives
+                    // e.g swapping from an unrestricted network to one that blocks UDP
+                    info!("sending keepalives due to network change ..");
+                    keepalive.network_changed().await;
+                } else {
+                    info!("client shutting down due to network change ..");
+                    let _ = conn.lock().unwrap().disconnect();
+                    return Ok(ClientResult::NetworkChange);
                 }
             }
             DeviceNetworkState::Offline => {

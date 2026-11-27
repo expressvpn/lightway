@@ -549,7 +549,7 @@ impl<AppState> Dplpmtud<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MAX_OUTSIDE_MTU, max_dtls_mtu};
+    use crate::{MAX_OUTSIDE_MTU, transport::tls::max_dtls_mtu};
 
     use super::*;
     use std::sync::Mutex;
