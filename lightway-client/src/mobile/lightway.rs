@@ -105,10 +105,8 @@ impl OutsideIOBuilder {
                 let mut sock = io::outside::Udp::new(self.server_sockaddr, Some(s))
                     .await
                     .context("Outside IO UDP")?;
-                // With the sockopt on, the kernel can merge a train of
-                // datagrams into one buffer, so this socket must be read
-                // by the GRO loop: `run_outside_io` picks it from
-                // `as_gro()`, which this call turns on.
+                // The kernel may now merge datagrams into one buffer, so
+                // `run_outside_io` reads this socket with the GRO loop.
                 #[cfg(android)]
                 if use_udp_gro {
                     sock.enable_gro();
@@ -495,10 +493,8 @@ fn outside_loop(outside_io: &Arc<dyn OutsideIO>) -> OutsideLoop {
     OutsideLoop::Plain
 }
 
-/// Run whichever outside receive loop this socket needs: the GRO loop
-/// when `UDP_GRO` was enabled on it (the plain loop would pass a merged
-/// buffer to the decryptor as one packet), the plain loop otherwise.
-/// Both get the TUN so each decrypt batch is a coalescing window.
+/// Run the receive loop [`outside_loop`] picks for this socket. Both
+/// get the TUN so each decrypt batch is a coalescing window.
 async fn run_outside_io(
     conn: Arc<Mutex<Connection<ConnectionState<TunnelState>>>>,
     mtu: usize,
@@ -669,12 +665,9 @@ struct LightwayClientConnectArgs {
     online_signal_sender: tokio::sync::mpsc::Sender<usize>,
     event_stream_handler: EventStreamCallback,
     external_event_handler: Arc<dyn EventHandlers>,
-    /// The shared tunnel device, handed to `outside_io_task` so it can
-    /// bracket each decrypt batch with a TUN coalescing window. Every
-    /// parallel connection attempt opens and flushes windows on it,
-    /// winner or not; inner packets only reach it once this connection
-    /// wins and the tunnel is attached to its state. A no-op where
-    /// coalescing is gated off.
+    /// The shared TUN, so the outside loop can bracket each decrypt
+    /// batch with a coalescing window. Inner packets only reach it once
+    /// this connection wins.
     inside_io: Arc<io::inside::Tun>,
 }
 

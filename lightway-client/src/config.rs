@@ -332,13 +332,11 @@ pub struct Config {
     #[patch(attribute(serde(default)))]
     #[patch(attribute(
         doc = "Enable UDP_GRO on the outside socket, so the kernel returns a train \
-               of same-flow datagrams per recvmsg instead of one. Reduces receive \
-               syscalls on its own, and is what puts several segments inside one \
-               decrypt batch — so enable_tun_tcp_coalescing has little to coalesce \
-               without it (or enable_batch_receive). Implied by enable_tun_offload. \
-               Linux 5.0+ and Android"
+               of same-flow datagrams per recvmsg instead of one. Without it (or \
+               enable_batch_receive) enable_tun_tcp_coalescing has little to merge. \
+               Implied by enable_tun_offload. Linux 5.0+ and Android"
     ))]
-    #[schemars(extend("x-cfg" = "linux"))]
+    #[schemars(extend("x-cfg" = "gro"))]
     pub enable_udp_gro: bool,
 
     #[patch(attribute(clap(long)))]
