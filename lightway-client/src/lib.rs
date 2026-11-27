@@ -4,8 +4,6 @@ mod debug;
 pub mod dns_manager;
 pub mod io;
 pub mod keepalive;
-// Counters for the raw TCP coalescer (`linux` for devices opened
-// without `enable_tun_offload`, `android` for the `VpnService` fd).
 #[cfg(any(linux, android))]
 mod metrics;
 pub mod platform;
@@ -339,14 +337,12 @@ pub struct ClientConfig<ExtAppState: Send + Sync> {
     /// it is mutually exclusive. Ignored on other platforms.
     ///
     /// `client()` does not coalesce while IPv4 forwarding is on for the
-    /// TUN (re-checked every 5 s); see
-    /// `io::inside::raw_gro` for why a forwarded coalesced packet
-    /// blackholes its flow.
+    /// TUN (re-checked periodically); see `io::inside::raw_gro` for why
+    /// a forwarded coalesced packet blackholes its flow.
     ///
     /// Coalescing needs several segments in one decrypt batch to have
     /// anything to merge, which in practice means pairing this with
     /// [`Self::enable_udp_gro`] (or at least `enable_batch_receive`).
-    /// They are separate flags so each can be measured on its own.
     pub enable_tun_tcp_coalescing: bool,
 
     /// Enable `UDP_GRO` on the outside socket: the kernel returns a
@@ -766,14 +762,13 @@ async fn handle_events<A: 'static + Send + EventCallback, ExtAppState: Send + Sy
 /// An async function to handle all the outside traffic
 /// You can pass in an optional oneshot channel to listen to when the socket is ready to read.
 ///
-/// When `inside_io` is provided (both `client()` and the mobile data
-/// plane do), a TUN
-/// coalescing window is opened around each decrypt batch: decrypted
-/// same-flow TCP segments delivered through the inside send callback
-/// may be merged into superpackets and the window is flushed before
-/// the batch's conn lock is released, so packets never wait on future
-/// traffic. On backends without a coalescing-capable device the
-/// window calls are no-ops; `None` keeps the historical behaviour.
+/// When `inside_io` is provided, a TUN coalescing window is opened
+/// around each decrypt batch: same-flow TCP segments delivered through
+/// the inside send callback may be merged into superpackets, and the
+/// window is flushed before the batch's conn lock is released, so
+/// packets never wait on future traffic. On backends without a
+/// coalescing-capable device the window calls are no-ops; `None` opens
+/// no window.
 #[cfg_attr(not(any(linux, android)), allow(unused_variables))]
 pub async fn outside_io_task<ExtAppState: Send + Sync>(
     conn: Arc<Mutex<Connection<ConnectionState<ExtAppState>>>>,
@@ -813,15 +808,8 @@ pub async fn outside_io_task<ExtAppState: Send + Sync>(
             },
         };
 
-        // Open one TUN coalescing window across the whole decrypt
-        // batch (`gro_open` is idempotent and a no-op on incapable
-        // backends). The flush runs while the conn lock is still held,
-        // for the same reason `outside_io_task_gro` does it: this
-        // connection's `send()` only runs under this mutex, so closing
-        // the window here leaves it no gap to coalesce into an
-        // already-drained batch. Parallel connections on the same tun
-        // are kept apart by the current-thread runtime instead (see
-        // `RawGro::window_open`).
+        // One coalescing window per decrypt batch, flushed under the
+        // conn lock (see `outside_io_task_gro`).
         #[cfg(any(linux, android))]
         if let Some(inside_io) = &inside_io {
             inside_io.gro_open();
@@ -1895,13 +1883,8 @@ async fn connect_outside_io<ExtAppState: 'static + Default + Send + Sync>(
             // (a plain recv would merge separate datagrams), so
             // only flip the sockopt when the GRO outside loop
             // in connect() will consume it.
-            //
-            // `UDP_GRO` is what makes one `recvmsg` return a *train*
-            // of datagrams, which is what puts several same-flow
-            // segments inside one decrypt batch. It is worth having
-            // on its own (fewer receive syscalls), so it has its own
-            // flag; `enable_tun_offload` implies it because the GSO
-            // path cannot work without it.
+            // `enable_tun_offload` implies it: the GSO path cannot
+            // work without it.
             #[cfg(linux)]
             if config.enable_tun_offload || config.enable_udp_gro {
                 sock.enable_gro();
@@ -2130,13 +2113,8 @@ pub async fn connect<
             outside_mtu,
             connection_type,
             outside_io.clone(),
-            // Bracket each decrypt batch with a coalescing window. This
-            // loop runs when the GRO loop below is not selected; the
-            // window still lets one receive batch coalesce (several
-            // datagrams with `enable_batch_receive`; in TCP mode a read of
-            // about one MTU, so little merges), and without it every run
-            // would hold a single segment. A no-op when no coalescer is
-            // enabled.
+            // A coalescing window per receive batch; a no-op when no
+            // coalescer is enabled.
             Some(inside_io.clone()),
             keepalive.clone(),
             None,
@@ -2455,11 +2433,9 @@ fn forwarding_value(contents: Option<&str>) -> bool {
 const FORWARDING_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Keep the host-safety switch in step with `forwarding()` until
-/// `alive` is dropped, so forwarding turned on after startup (a
-/// container runtime, a hotspot) stops coalescing within one interval.
-/// `last` is the value already stored. Every tick passes the reading to
-/// `store`, as "host is safe", so the switch recovers even if something
-/// else wrote it; only a change is logged.
+/// `alive` is dropped. `last` is the value already stored. Every tick
+/// passes the reading to `store`, as "host is safe"; only a change is
+/// logged.
 #[cfg(linux)]
 async fn forwarding_watch_task(
     alive: Weak<()>,
@@ -2528,11 +2504,7 @@ fn validate_client_config<
         ));
     }
 
-    // Both flags ask for downlink TCP coalescing by different means, and
-    // a device can only use one: with `IFF_VNET_HDR` negotiated the
-    // vnet-hdr path takes precedence and the raw coalescer stays dormant
-    // for the life of the device. Reject the pair rather than silently
-    // ignoring the one the operator may have meant.
+    // A device uses one coalescer, so one of the two would be ignored.
     #[cfg(linux)]
     if config.enable_tun_offload && config.enable_tun_tcp_coalescing {
         return Err(anyhow!(
@@ -2627,11 +2599,8 @@ pub async fn client<
 
     #[cfg(linux)]
     if config.enable_tun_tcp_coalescing {
-        // Legal, but it will look like the feature is broken: a window
-        // only merges what one receive returns, which is one datagram
-        // over UDP without either option, and one read of about an MTU
-        // over TCP. Say so rather than let it be measured as
-        // "coalescing does nothing". The flags only apply to a plain
+        // A window only merges what one receive returns; warn when
+        // that is about one segment. The flags only apply to a plain
         // `Datagram` socket: a connector's IO is the application's own.
         let any_udp = conn_confs
             .iter()
@@ -2670,29 +2639,18 @@ pub async fn client<
             let mut tun =
                 io::inside::Tun::new(&config.tun_config, config.tun_local_ip, config.tun_dns_ip)
                     .await?;
-            // The static rollout gate; the runtime switches (the
-            // embedder's, and the host check below) and the device
-            // capability probe still apply on top. A device that
-            // negotiated `IFF_VNET_HDR` ignores this and uses the
-            // vnet-hdr path instead.
             #[cfg(any(linux, android))]
             tun.set_tcp_coalescing_configured(config.enable_tun_tcp_coalescing);
             tun
         }),
     };
 
-    // A coalesced packet that the host forwards instead of delivering
-    // locally is dropped, blackholing its flow (see `io::inside::raw_gro`),
-    // so the host-safety switch follows the TUN's forwarding sysctl.
-    // Stored both ways on every start, before any connection can open a
-    // coalescing window, so an earlier run in this process cannot leak
-    // in; `forwarding_watch_task` keeps it current afterwards. A
-    // caller-supplied TUN may have coalescing configured by its owner,
-    // so it is covered too. The watch runs from here, so it also covers
-    // the connection phase, and stops once `client()` returns and drops
-    // `_forwarding_watch`. The switch is process-wide, so this assumes
-    // one `client()` at a time: concurrent ones on different TUNs would
-    // overwrite each other's reading.
+    // The host-safety switch follows the TUN's forwarding sysctl (see
+    // `io::inside::raw_gro`): stored before any connection can open a
+    // window, and kept current by `forwarding_watch_task` until
+    // `client()` returns. A caller-supplied TUN may have coalescing
+    // configured by its owner, so it is covered too. The switch is
+    // process-wide, so this assumes one `client()` at a time.
     #[cfg(linux)]
     let coalescing_possible = config.enable_tun_tcp_coalescing || config.inside_io.is_some();
     #[cfg(linux)]
@@ -2705,13 +2663,7 @@ pub async fn client<
         if forwarding && config.enable_tun_tcp_coalescing {
             tracing::warn!(
                 tun = ?tun_name,
-                "IPv4 forwarding is on for the TUN (or unreadable): not coalescing TCP, \
-                 it would blackhole forwarded flows"
-            );
-        } else if forwarding && coalescing_possible {
-            tracing::debug!(
-                tun = ?tun_name,
-                "IPv4 forwarding is on for the TUN (or unreadable): TCP coalescing not allowed"
+                "IPv4 forwarding is on for the TUN (or unreadable): not coalescing TCP"
             );
         }
     }

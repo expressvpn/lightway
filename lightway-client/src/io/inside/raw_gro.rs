@@ -1,20 +1,17 @@
 //! Downlink TCP coalescing for a TUN with no offload metadata channel.
 //!
-//! Two devices land here. The Android `VpnService` fd *can never* have
+//! Two devices land here. The Android `VpnService` fd can never have
 //! the channel: the fd handed over by `VpnService.establish()` is
 //! already attached to the tun, so `TUNSETIFF` with `IFF_VNET_HDR`
-//! fails with `EEXIST` before any capability check, and SELinux ioctl
-//! xperms block `TUNSETOFFLOAD` (only `TUNGETIFF` is whitelisted for
-//! app domains). A Linux device simply *does not* have it whenever it
-//! was opened without `enable_tun_offload`.
+//! fails with `EEXIST`, and SELinux blocks `TUNSETOFFLOAD` for app
+//! domains (only `TUNGETIFF` is allowed). A Linux device does not have
+//! it whenever it was opened without `enable_tun_offload`.
 //!
-//! Either way there is no `virtio_net_hdr` framing in either
-//! direction: one `write()` injects exactly one packet, and neither
-//! `gso_size` nor checksum metadata can accompany it. The vnet-hdr GRO
-//! path in [`super::tun`] does not apply — where a device *did*
-//! negotiate that framing it is used instead and this module stays
-//! dormant, since telling the kernel the real `gso_size` is strictly
-//! better than the technique below.
+//! Either way there is no `virtio_net_hdr` framing: one `write()`
+//! injects exactly one packet, and neither `gso_size` nor checksum
+//! metadata can accompany it. Where a device did negotiate that
+//! framing, the vnet-hdr path in [`super::tun`] is used instead and
+//! this module stays dormant.
 //!
 //! What does work — verified on Android GKI 6.6 — is that
 //! `tun_get_user()` performs no MTU check: a single oversized IPv4
@@ -41,22 +38,12 @@
 //!   retransmission would be coalesced and dropped again: a permanent
 //!   blackhole for that flow, not a slowdown. Nothing here can tell a
 //!   to-be-forwarded packet from a locally-delivered one, so the
-//!   condition cannot be handled per packet; it is governed by the
-//!   two gates below instead.
+//!   condition cannot be handled per packet.
 //!
-//!   On Android the condition is not reachable through this device:
-//!   tethered-client traffic is forwarded between interfaces by the
-//!   kernel and never enters the app's `VpnService` tun. On Linux it
-//!   is, so two process-wide runtime switches, both default on, must
-//!   agree: a host-safety switch that `client()` keeps off while the
-//!   TUN forwards IPv4, and an embedder switch
-//!   ([`set_tun_tcp_coalescing_allowed`]) for an application that
-//!   knows inner packets can be forwarded or wants coalescing off.
-//! - **Config-gated rollout.** Independently of the runtime switches,
-//!   the `enable_tun_tcp_coalescing` config flag (default off,
-//!   [`RawGro::set_configured`]) gates the feature per connection
-//!   config, exactly as `enable_tun_offload` gates the Linux offload
-//!   paths.
+//!   On Android it cannot arise through this device: tethered-client
+//!   traffic is forwarded between interfaces by the kernel and never
+//!   enters the app's `VpnService` tun. On Linux it can, which is what
+//!   the `allowed` and `host_safe` gates on [`RawGro`] are for.
 //! - **Probed capability, permanent fallback.** Unbounded tun writes
 //!   are a fuzzed attack surface and a future GKI may bound the write
 //!   path, so the oversized write is probed at runtime (after
@@ -94,7 +81,6 @@ use std::sync::{Mutex, OnceLock};
 use bytes::BytesMut;
 use libc::{EINVAL, EMSGSIZE};
 use lightway_core::IOCallbackResult;
-use lightway_core::IP_MAX_DATAGRAM_SIZE;
 use lightway_core::gro::{GroAppend, RawSuperpacket, TcpGroBatch};
 
 /// IPv4 header length with IHL == 5 — the only shape the coalescer
@@ -106,14 +92,10 @@ const IPV4_HDR_LEN: usize = 20;
 /// protocol dispatch (see [`probe_packet`]).
 const IPPROTO_EXPERIMENTAL: u8 = 253;
 
-/// Default cap on a coalesced superpacket (headers + payload).
-///
-/// The hard ceiling is 65535 (IPv4 `total_length`), but the target
-/// stays well below it to bound per-write latency and buffer memory,
-/// and to keep the fake segment lengths fed to the peer stack's
-/// `tcp_measure_rcv_mss()` moderate. Per-write cost decomposes to
-/// ~0.9µs fixed + ~31ns/KB, so 32KB already removes ~95% of the
-/// per-packet overhead; doubling it again buys almost nothing.
+/// Default cap on a coalesced superpacket (headers + payload). Well
+/// below the 65535 ceiling (IPv4 `total_length`) to bound per-write
+/// latency and buffer memory, and to keep the lengths seen by the
+/// local stack's `tcp_measure_rcv_mss()` moderate.
 pub(crate) const DEFAULT_MAX_SUPERPACKET: usize = 32 * 1024;
 
 /// The embedder's switch; see [`set_tun_tcp_coalescing_allowed`].
@@ -124,27 +106,19 @@ static COALESCING_ALLOWED: AtomicBool = AtomicBool::new(true);
 /// IPv4. `client()` owns it on Linux; elsewhere it stays on.
 static HOST_SAFE: AtomicBool = AtomicBool::new(true);
 
-/// Allow or forbid raw downlink TCP coalescing on every TUN in the
-/// process. **Correctness gate, not a tuning knob**: turn it off when
-/// inner packets might be *forwarded* rather than delivered locally,
-/// which would blackhole those flows (see the module docs), or to
-/// switch coalescing off at runtime. Whether to coalesce at all is the
-/// per-device config gate (`Tun::set_tcp_coalescing_configured`).
+/// Process-wide runtime switch for raw downlink TCP coalescing;
+/// default on. Turn it off when inner packets may be forwarded rather
+/// than delivered locally, which would blackhole those flows (see the
+/// module docs), or to stop coalescing at runtime.
 ///
-/// Defaults to on and belongs to the embedder: nothing in this crate
-/// writes it, so a veto holds across tunnel restarts. On Linux,
-/// `client()` additionally stops coalescing while the TUN forwards
-/// IPv4, through a separate switch this one cannot override. That
-/// switch is process-wide too, so run one `client()` at a time.
-///
-/// The store takes effect immediately: every packet offered after this
-/// returns is written per-packet (at most one in-flight oversized
-/// write can still complete), with no need to wait for a batch
-/// boundary. Enabling is lazy: the first coalescing window afterwards
-/// runs the capability probe.
+/// Takes effect on the next packet, and nothing in this crate writes
+/// it, so a veto holds across tunnel restarts. On Linux `client()`
+/// also stops coalescing while the TUN forwards IPv4, through a
+/// separate switch this one cannot override; that switch is
+/// process-wide too, so run one `client()` at a time.
 pub fn set_tun_tcp_coalescing_allowed(allowed: bool) {
     COALESCING_ALLOWED.store(allowed, Ordering::Relaxed);
-    tracing::info!(allowed, "tun TCP coalescing allow flag set");
+    tracing::info!(allowed, "TUN TCP coalescing allow flag set");
 }
 
 /// Set the host-safety switch; `client()` drives it from the TUN's
@@ -186,40 +160,21 @@ pub(crate) trait RawTunIo {
 /// | `fell_back`   | per device     | `EMSGSIZE`/`EINVAL`/short run write | latched for the device      | run re-split, window never opens       |
 /// | `window_open` | per device     | [`Self::open`] / [`Self::flush`]    | one decrypt batch           | [`Self::send`] skips the batch lock    |
 ///
-/// `configured` is the operator's choice (`enable_tun_tcp_coalescing`);
-/// `allowed` is the embedder's runtime switch and `host_safe` says
-/// whether the host forwards; both can flip at runtime.
-/// `capable` and `fell_back` live on
-/// this struct, so a new device (each tunnel start creates one)
-/// probes again.
+/// `configured` is the `enable_tun_tcp_coalescing` config flag.
+/// `capable` and `fell_back` live on this struct, so a new device
+/// (each tunnel start creates one) probes again.
 pub(crate) struct RawGro {
-    /// The `enable_tun_tcp_coalescing` config flag: static rollout
-    /// gate, fixed before the device is shared. Off means windows
-    /// never open and the probe never runs, regardless of the runtime
-    /// switches.
     configured: bool,
-    /// Whether a coalescing window is open (between the outside IO
-    /// loop's `gro_open` and `gro_flush` around one decrypt batch).
     /// Kept outside the batch mutex so the send path pays only a
     /// relaxed load when coalescing is off.
     ///
-    /// This is a hint, not a lock: only `batch` protects the run.
-    /// Every outside IO task on the device shares it — both `client()`
-    /// and the mobile start run one per parallel connection attempt on
-    /// the same `Tun` — so one task's `flush` could close a window
-    /// another task is still sending into. Windows never interleave
-    /// today only because every in-tree runtime is current-thread (the
-    /// CLI's `tokio::main`, the mobile builder) and nothing awaits
-    /// between `gro_open` and `gro_flush`. On a multi-thread runtime a
-    /// segment absorbed after a foreign flush would be held until some
-    /// later window.
+    /// A hint, not a lock: only `batch` protects the run. Every
+    /// outside IO task on the device shares it, and windows do not
+    /// interleave only because the in-tree runtimes are current-thread
+    /// and nothing awaits between open and flush.
     window_open: AtomicBool,
-    /// Probe outcome, run at most once per device: `TUNGETIFF`
-    /// confirms the framing, then one oversized write must return the
-    /// full count. A failed probe is final for this device.
+    /// Probe outcome; see [`Self::probe`].
     capable: OnceLock<bool>,
-    /// Permanent per-packet fallback, tripped by `EMSGSIZE`, `EINVAL`
-    /// or a short write on a coalesced packet.
     fell_back: AtomicBool,
     /// The single run accumulator (strict arrival order — deliberately
     /// not the multi-flow table the vnet-hdr path uses, which holds
@@ -230,11 +185,6 @@ pub(crate) struct RawGro {
     /// another caller reach the device ahead of the run it follows.
     /// TUN writes are non-blocking, so holding it is cheap.
     batch: Mutex<TcpGroBatch>,
-    /// Superpacket byte cap; also the probe write's size, so the probe
-    /// validates exactly the envelope of writes that will follow. It
-    /// must equal the cap `batch` enforces: both clamp to
-    /// `IP_MAX_DATAGRAM_SIZE` (here and in `TcpGroBatch::with_max_len`).
-    max_len: usize,
     /// The two runtime switches consulted on every packet; the
     /// globals [`COALESCING_ALLOWED`] and [`HOST_SAFE`] in production,
     /// injectable for tests.
@@ -242,8 +192,8 @@ pub(crate) struct RawGro {
     host_safe: &'static AtomicBool,
     /// Rate limits the warning for any write this path drops.
     drops: Streak,
-    /// Rate limits the warning for an oversized write that failed with
-    /// a non-capability error and was re-sent per segment.
+    /// Rate limits the log for an oversized write that failed with a
+    /// non-capability error and was re-sent per segment.
     run_errors: Streak,
 }
 
@@ -293,14 +243,12 @@ impl RawGro {
         allowed: &'static AtomicBool,
         host_safe: &'static AtomicBool,
     ) -> Self {
-        let max_len = max_len.min(IP_MAX_DATAGRAM_SIZE);
         Self {
             configured: false,
             window_open: AtomicBool::new(false),
             capable: OnceLock::new(),
             fell_back: AtomicBool::new(false),
             batch: Mutex::new(TcpGroBatch::with_max_len(max_len)),
-            max_len,
             allowed,
             host_safe,
             drops: Streak::default(),
@@ -309,9 +257,7 @@ impl RawGro {
     }
 
     /// Set the `enable_tun_tcp_coalescing` config gate. `&mut self`
-    /// pins this to device setup, before the `Tun` is shared: the
-    /// static feature flag is not a runtime toggle — that role belongs
-    /// to the runtime switches.
+    /// pins this to device setup, before the `Tun` is shared.
     pub(crate) fn set_configured(&mut self, enabled: bool) {
         self.configured = enabled;
     }
@@ -330,9 +276,12 @@ impl RawGro {
         if !self.configured || !self.allowed() || self.fell_back.load(Ordering::Relaxed) {
             return;
         }
-        let capable = *self
-            .capable
-            .get_or_init(|| Self::probe(tun, local_ip, self.max_len));
+        let capable = *self.capable.get_or_init(|| {
+            // The probe write is the size of the largest packet the
+            // batch will ever emit. The lock is released before it.
+            let max_len = self.batch.lock().unwrap().max_len();
+            Self::probe(tun, local_ip, max_len)
+        });
         if !capable {
             return;
         }
@@ -349,9 +298,7 @@ impl RawGro {
             return;
         }
         let mut batch = self.batch.lock().unwrap();
-        if let Some(sp) = batch.take_raw() {
-            self.write_run(tun, sp);
-        }
+        self.flush_run(tun, &mut batch);
     }
 
     /// Send one packet. Outside an open window the batch is not even
@@ -375,9 +322,7 @@ impl RawGro {
             // so no further oversized packet is emitted — and only then
             // write this packet, preserving within-flow order.
             self.window_open.store(false, Ordering::Relaxed);
-            if let Some(sp) = batch.take_raw() {
-                self.write_run(tun, sp);
-            }
+            self.flush_run(tun, &mut batch);
             return tun.send_owned(buf);
         }
 
@@ -394,33 +339,31 @@ impl RawGro {
         buf: BytesMut,
     ) -> IOCallbackResult<usize> {
         let len = buf.len();
-        match batch.append(&buf) {
+        let mut appended = batch.append(&buf);
+        if appended == GroAppend::Incompatible {
+            // Anything the run cannot absorb ends it: the held
+            // segments must reach the device before this packet to
+            // preserve within-flow order. The packet then re-seeds
+            // the empty run when it can (it may be non-coalescable
+            // outright — UDP, pure ACK, PSH-first — in which case
+            // it is written directly).
+            self.flush_run(tun, batch);
+            appended = batch.append(&buf);
+        }
+        match appended {
             GroAppend::Coalesced => IOCallbackResult::Ok(len),
             GroAppend::CoalescedFlush => {
-                let sp = batch.take_raw().expect("batch just absorbed a segment");
-                self.write_run(tun, sp);
+                self.flush_run(tun, batch);
                 IOCallbackResult::Ok(len)
             }
-            GroAppend::Incompatible => {
-                // Anything the run cannot absorb ends it: the held
-                // segments must reach the device before this packet to
-                // preserve within-flow order. The packet then re-seeds
-                // the empty run when it can (it may be non-coalescable
-                // outright — UDP, pure ACK, PSH-first — in which case
-                // it is written directly).
-                if let Some(sp) = batch.take_raw() {
-                    self.write_run(tun, sp);
-                }
-                match batch.append(&buf) {
-                    GroAppend::Coalesced => IOCallbackResult::Ok(len),
-                    GroAppend::CoalescedFlush => {
-                        let sp = batch.take_raw().expect("batch just absorbed a segment");
-                        self.write_run(tun, sp);
-                        IOCallbackResult::Ok(len)
-                    }
-                    GroAppend::Incompatible => tun.send_owned(buf),
-                }
-            }
+            GroAppend::Incompatible => tun.send_owned(buf),
+        }
+    }
+
+    /// Write out the run `batch` holds, if any.
+    fn flush_run(&self, tun: &impl RawTunIo, batch: &mut TcpGroBatch) {
+        if let Some(sp) = batch.take_raw() {
+            self.write_run(tun, sp);
         }
     }
 
@@ -434,11 +377,11 @@ impl RawGro {
             match tun.send_slice(sp.pkt()) {
                 IOCallbackResult::Ok(_) => self.drops.ok(),
                 IOCallbackResult::WouldBlock => {
-                    crate::metrics::tun_gro_batch_dropped_would_block(1);
+                    crate::metrics::tun_raw_gro_batch_dropped_would_block(1);
                     self.warn_drop("held TCP segment", "TUN would block");
                 }
                 IOCallbackResult::Err(err) => {
-                    crate::metrics::tun_gro_batch_dropped_err(1);
+                    crate::metrics::tun_raw_gro_batch_dropped_err();
                     self.warn_drop("held TCP segment", err);
                 }
             }
@@ -462,7 +405,7 @@ impl RawGro {
                 // The kernel drops the truncated injection at
                 // `ip_rcv` (total_length exceeds the bytes), so the
                 // re-split below is a clean resend, not a duplicate.
-                self.trip_fallback(&format!("short write ({n} of {} bytes)", sp.pkt().len()));
+                self.trip_fallback(&format!("short write, {n} of {} bytes", sp.pkt().len()));
                 self.write_resplit(tun, &sp);
             }
             IOCallbackResult::WouldBlock => {
@@ -471,7 +414,7 @@ impl RawGro {
                 // and re-splitting would write into the same full
                 // queue. One dropped run costs up to `segs` segments;
                 // the counters keep that amplification measurable.
-                crate::metrics::tun_gro_batch_dropped_would_block(sp.segs() as u64);
+                crate::metrics::tun_raw_gro_batch_dropped_would_block(sp.segs() as u64);
                 self.warn_drop(
                     format_args!("coalesced run of {} segments", sp.segs()),
                     "TUN would block",
@@ -480,7 +423,7 @@ impl RawGro {
             IOCallbackResult::Err(err)
                 if matches!(err.raw_os_error(), Some(EMSGSIZE) | Some(EINVAL)) =>
             {
-                self.trip_fallback(&format!("{err}"));
+                self.trip_fallback(&err.to_string());
                 self.write_resplit(tun, &sp);
             }
             IOCallbackResult::Err(err) => {
@@ -488,13 +431,14 @@ impl RawGro {
                 // allocating the large skb), so coalescing stays on.
                 // The segments may still fit as ordinary writes:
                 // re-send them rather than lose the whole run. Any
-                // segment that also fails is counted there.
+                // segment that also fails is counted and warned about
+                // there.
                 crate::metrics::tun_raw_gro_run_write_failed();
                 if let Some(count) = self.run_errors.hit() {
-                    tracing::warn!(
-                        segments = sp.segs(),
-                        "Coalesced run write failed ({count} in this streak), \
-                         re-sending per segment: {err}"
+                    tracing::debug!(
+                        "coalesced run of {} segments failed to write ({count} in this \
+                         streak), re-sending per segment: {err}",
+                        sp.segs()
                     );
                 }
                 self.write_resplit(tun, &sp);
@@ -514,17 +458,16 @@ impl RawGro {
                 tracing::warn!(idx, "re-split segment rebuild failed");
                 continue;
             }
-            match tun.send_slice(&out) {
-                IOCallbackResult::Ok(_) => self.drops.ok(),
-                IOCallbackResult::WouldBlock => {
-                    crate::metrics::tun_raw_gro_resplit_segment_dropped();
-                    self.warn_drop("re-split segment", "TUN would block");
+            let err = match tun.send_slice(&out) {
+                IOCallbackResult::Ok(_) => {
+                    self.drops.ok();
+                    continue;
                 }
-                IOCallbackResult::Err(err) => {
-                    crate::metrics::tun_raw_gro_resplit_segment_dropped();
-                    self.warn_drop("re-split segment", err);
-                }
-            }
+                IOCallbackResult::WouldBlock => "TUN would block".to_string(),
+                IOCallbackResult::Err(err) => err.to_string(),
+            };
+            crate::metrics::tun_raw_gro_resplit_segment_dropped();
+            self.warn_drop("re-split segment", err);
         }
     }
 
@@ -532,7 +475,7 @@ impl RawGro {
     /// The metrics count every drop; only the log is thinned.
     fn warn_drop(&self, what: impl std::fmt::Display, err: impl std::fmt::Display) {
         if let Some(count) = self.drops.hit() {
-            tracing::warn!("Dropping {what} ({count} in this streak): {err}");
+            tracing::warn!("dropping {what} ({count} in this streak): {err}");
         }
     }
 
@@ -542,73 +485,52 @@ impl RawGro {
         if !self.fell_back.swap(true, Ordering::Relaxed) {
             crate::metrics::tun_raw_gro_permanent_fallback();
             tracing::warn!(
-                cause,
-                "oversized TUN write rejected; permanently falling back to per-packet writes"
+                "oversized TUN write rejected ({cause}); permanently falling back to \
+                 per-packet writes"
             );
         }
     }
 
-    /// One-shot capability probe.
+    /// One-shot capability probe; a failure is final for this device.
     ///
-    /// First `TUNGETIFF`: if the fd somehow carries `IFF_VNET_HDR`
-    /// (a future Android, or a misrouted platform), raw oversized
-    /// writes are the wrong tool — the standard virtio GSO path is
-    /// strictly better — so this path disables itself. If the ioctl
-    /// fails outright the framing cannot be verified, which is treated
-    /// the same way.
-    ///
-    /// Then one oversized write of exactly `max_len` bytes — the
+    /// The fd must be confirmed (`TUNGETIFF`) to carry no
+    /// `IFF_VNET_HDR` framing, since a device with it should use the
+    /// vnet-hdr path. Then one write of exactly `max_len` bytes — the
     /// largest packet the coalescer will ever emit — of a harmless
     /// probe packet (see [`probe_packet`]) must return the full count.
     fn probe(tun: &impl RawTunIo, local_ip: Ipv4Addr, max_len: usize) -> bool {
-        match tun.vnet_hdr_framing() {
-            Some(false) => {}
-            Some(true) => {
-                tracing::info!(
-                    "TUN has IFF_VNET_HDR framing; raw TCP coalescing does not apply \
-                     (the virtio GSO path should be used instead)"
-                );
-                crate::metrics::tun_raw_gro_probe_failed();
-                return false;
+        let failure = match tun.vnet_hdr_framing() {
+            Some(true) => Some("the TUN has IFF_VNET_HDR framing".to_string()),
+            None => Some("TUNGETIFF failed, cannot verify the TUN framing".to_string()),
+            Some(false) => {
+                let pkt = probe_packet(local_ip, max_len);
+                match tun.send_slice(&pkt) {
+                    IOCallbackResult::Ok(n) if n == pkt.len() => None,
+                    IOCallbackResult::Ok(n) => Some(format!(
+                        "oversized TUN write probe was short ({n} of {max_len} bytes)"
+                    )),
+                    // A fresh tun's queue should never be full; an
+                    // indeterminate probe counts as a failed one.
+                    IOCallbackResult::WouldBlock => {
+                        Some("oversized TUN write probe would block".to_string())
+                    }
+                    IOCallbackResult::Err(err) => {
+                        Some(format!("oversized TUN write probe failed: {err}"))
+                    }
+                }
             }
+        };
+        match failure {
             None => {
-                tracing::warn!(
-                    "TUNGETIFF failed; cannot verify TUN framing, raw TCP coalescing disabled"
-                );
-                crate::metrics::tun_raw_gro_probe_failed();
-                return false;
-            }
-        }
-
-        let pkt = probe_packet(local_ip, max_len);
-        match tun.send_slice(&pkt) {
-            IOCallbackResult::Ok(n) if n == pkt.len() => {
                 tracing::info!(
                     max_len,
                     "oversized TUN write probe succeeded; TCP coalescing available"
                 );
                 true
             }
-            IOCallbackResult::Ok(n) => {
-                tracing::warn!(
-                    n,
-                    max_len,
-                    "oversized TUN write probe was short; TCP coalescing disabled"
-                );
+            Some(reason) => {
                 crate::metrics::tun_raw_gro_probe_failed();
-                false
-            }
-            IOCallbackResult::WouldBlock => {
-                // A fresh tun's queue should never be full; treat an
-                // indeterminate probe as unavailable rather than risk
-                // assuming capability.
-                tracing::warn!("oversized TUN write probe would block; TCP coalescing disabled");
-                crate::metrics::tun_raw_gro_probe_failed();
-                false
-            }
-            IOCallbackResult::Err(err) => {
-                tracing::warn!("oversized TUN write probe failed ({err}); TCP coalescing disabled");
-                crate::metrics::tun_raw_gro_probe_failed();
+                tracing::warn!("TCP coalescing disabled: {reason}");
                 false
             }
         }
@@ -618,7 +540,8 @@ impl RawGro {
 /// Build the probe packet: a valid IPv4 header (checksum included, so
 /// `ip_rcv` accepts it) of `len` total bytes, addressed from and to
 /// the tun's own address so it can never be forwarded, whatever the
-/// device's forwarding state.
+/// device's forwarding state. `len` must fit IPv4 `total_length`,
+/// which [`TcpGroBatch::max_len`] guarantees.
 ///
 /// The probe only observes that the TUN *write* accepted the full
 /// length; what the stack does afterwards does not matter. In practice
@@ -630,7 +553,7 @@ impl RawGro {
 fn probe_packet(local_ip: Ipv4Addr, len: usize) -> Vec<u8> {
     use pnet_packet::ipv4::MutableIpv4Packet;
 
-    let len = len.clamp(IPV4_HDR_LEN, IP_MAX_DATAGRAM_SIZE);
+    let len = len.max(IPV4_HDR_LEN);
     let mut pkt = vec![0u8; len];
     pkt[0] = 0x45; // version 4, IHL 5
     pkt[2..4].copy_from_slice(&(len as u16).to_be_bytes());

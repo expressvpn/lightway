@@ -320,11 +320,11 @@ pub struct Config {
                or a Linux TUN opened without enable_tun_offload (mutually exclusive \
                with it). Coalescing still engages only once the device passes the \
                oversized-write capability probe. \
-               Not applied while IPv4 forwarding is on for the TUN (re-checked every \
-               5 s): a coalesced packet that is forwarded rather than delivered \
-               locally is dropped, blackholing that flow"
+               Not applied while IPv4 forwarding is on for the TUN (re-checked \
+               periodically): a coalesced packet that is forwarded rather than \
+               delivered locally is dropped, blackholing that flow"
     ))]
-    #[schemars(extend("x-cfg" = "linux"))]
+    #[schemars(extend("x-cfg" = "gro"))]
     pub enable_tun_tcp_coalescing: bool,
 
     #[patch(attribute(clap(long)))]

@@ -16,14 +16,9 @@
 //!   `virtio_net_hdr` carrying `gso_size` and checksum metadata; the
 //!   TCP checksum field holds only the pseudo-header partial, which
 //!   the kernel completes.
-//! - [`TcpGroBatch::take_raw`]: for a TUN with **no metadata channel**
-//!   (an Android `VpnService` fd, where `IFF_VNET_HDR` cannot be
-//!   enabled and `TUNSETOFFLOAD` is blocked by SELinux, or a Linux
-//!   TUN opened without offload). The result is
-//!   a plain oversized IPv4 packet, fully self-contained — lengths and
-//!   both checksums valid — injected with an ordinary `write()`. The
-//!   local stack accepts it because `tun_get_user()` performs no MTU
-//!   check and TCP sockets have no packet boundaries. Such a packet
+//! - [`TcpGroBatch::take_raw`]: for a TUN with no offload metadata
+//!   channel. The result is a plain oversized IPv4 packet with lengths
+//!   and both checksums valid, injected with an ordinary `write()`. It
 //!   must never exceed 65535 bytes (`tot_len` is a u16 and
 //!   `ip_rcv_core()` trims to it); [`TcpGroBatch::with_max_len`]
 //!   enforces a cap at or below that ceiling.

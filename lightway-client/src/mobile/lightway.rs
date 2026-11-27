@@ -172,12 +172,8 @@ async fn setup_tunnel_interface(
         .await
         .context("Tun creation")?;
 
-    // Only the per-tun gate: the process-wide runtime switches stay at
-    // their defaults. The host-safety one guards against forwarding,
-    // which cannot happen through a `VpnService` tun (tethered traffic
-    // never enters it), and the embedder's is not exposed to mobile
-    // apps, which turn coalescing off with the config flag. The
-    // capability probe still gates the first coalescing window.
+    // Per-tun gate only; the runtime switches stay at their defaults
+    // (a `VpnService` tun never forwards).
     #[cfg(android)]
     tun.set_tcp_coalescing_configured(enable_tcp_coalescing);
 

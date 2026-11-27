@@ -237,19 +237,14 @@ impl Udp {
     /// packet per slot.
     #[cfg(any(linux, android))]
     pub fn enable_gro(&mut self) {
-        // Route receives through `recv_gro_batch` whenever this is
-        // called (`enable_tun_offload` or `enable_udp_gro`), not only
-        // when the sockopt succeeds: socket-read
-        // coalescing (the `UDP_GRO` sockopt) is what makes the kernel
-        // coalesce, but the path degrades to single-datagram slots when it
-        // does not (old kernel, or a zero-checksum peer the GRO engine
-        // skips), and the independent TUN-write coalescing still applies.
+        // Set whether or not the sockopt succeeds: `recv_gro_batch`
+        // always reads with `recvmmsg`, whatever `enable_batch_receive`
+        // says, and degrades to single-datagram slots when the kernel
+        // does not coalesce (old kernel, or a zero-checksum peer the
+        // GRO engine skips).
         self.gro_enabled = true;
-        // `recv_gro_batch` always reads with `recvmmsg`, whatever
-        // `enable_batch_receive` says.
-        tracing::info!("Using batch receiver (GRO receive path)");
         match lightway_app_utils::sockopt::socket_enable_udp_gro(self.sock.as_ref()) {
-            Ok(()) => tracing::info!("UDP GRO enabled on outside socket"),
+            Ok(()) => tracing::info!("UDP GRO enabled on outside socket (batch receive path)"),
             Err(e) => tracing::warn!(
                 "UDP_GRO sockopt unavailable ({e}); using per-datagram receive with userspace TUN coalescing"
             ),
