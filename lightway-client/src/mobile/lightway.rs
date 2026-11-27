@@ -475,7 +475,7 @@ struct OutsideIOConfig {
 enum OutsideLoop {
     /// `UDP_GRO` is on: the kernel may merge datagrams into one buffer,
     /// which only the GRO loop splits again.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     Gro(Arc<dyn io::outside::OutsideIORecvGro>),
     Plain,
 }
@@ -484,13 +484,18 @@ enum OutsideLoop {
 /// it can be tested there; only Android enables `UDP_GRO` on mobile, so
 /// elsewhere this always picks the plain loop.
 fn outside_loop(outside_io: &Arc<dyn OutsideIO>) -> OutsideLoop {
-    #[cfg(any(linux, android))]
-    if let Some(gro_io) = outside_io.clone().as_gro() {
-        return OutsideLoop::Gro(gro_io);
+    cfg_select! {
+        gro => {
+            match outside_io.clone().as_gro() {
+                Some(gro_io) => OutsideLoop::Gro(gro_io),
+                None => OutsideLoop::Plain,
+            }
+        }
+        _ => {
+            let _ = outside_io;
+            OutsideLoop::Plain
+        }
     }
-    #[cfg(not(any(linux, android)))]
-    let _ = outside_io;
-    OutsideLoop::Plain
 }
 
 /// Run the receive loop [`outside_loop`] picks for this socket. Both
@@ -505,7 +510,7 @@ async fn run_outside_io(
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> uniffi::Result<()> {
     match outside_loop(&outside_io) {
-        #[cfg(any(linux, android))]
+        #[cfg(gro)]
         OutsideLoop::Gro(gro_io) => {
             let inside_io: Arc<dyn io::inside::InsideIO<TunnelState>> = inside_io;
             crate::outside_io_task_gro(
@@ -1112,7 +1117,7 @@ mod test {
     /// A socket with `UDP_GRO` enabled must be read by the GRO loop,
     /// which splits merged datagrams again; any other socket by the
     /// plain loop.
-    #[cfg(any(linux, android))]
+    #[cfg(gro)]
     #[tokio::test]
     async fn gro_socket_selects_the_gro_loop() {
         async fn udp(gro: bool) -> Arc<dyn OutsideIO> {
