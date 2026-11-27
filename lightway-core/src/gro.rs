@@ -255,6 +255,12 @@ impl TcpGroBatch {
         }
     }
 
+    /// The superpacket size cap in bytes, after clamping (see
+    /// [`Self::with_max_len`]).
+    pub fn max_len(&self) -> usize {
+        self.max_len
+    }
+
     /// True if no segment has been absorbed since the last
     /// [`Self::take`].
     pub fn is_empty(&self) -> bool {
@@ -435,16 +441,11 @@ impl TcpGroBatch {
         self.take_run().map(RawSuperpacket::finalize_tcp_checksum)
     }
 
-    /// Shared prologue of [`Self::take`]/[`Self::take_raw`]: reset the
-    /// batch and hand back the accumulated run. A single-segment run's
-    /// bytes are untouched; a multi-segment run gets its IP header
-    /// fixed up (total length over the whole aggregate, first
-    /// segment's id kept, header checksum recomputed) and the
-    /// accumulated PSH/FIN bits OR'd into the TCP flags. The TCP
-    /// checksum field is left for the caller: a multi-segment run is
-    /// not valid on the wire until
-    /// [`RawSuperpacket::finalize_tcp_checksum`] (or [`Self::take`]'s
-    /// `NEEDS_CSUM` seeding) fills it in.
+    /// Reset the batch and return the accumulated run with its IP
+    /// header and PSH/FIN flags fixed up. A single-segment run's bytes
+    /// are untouched. The TCP checksum of a multi-segment run is left
+    /// to the caller ([`Self::take`] or
+    /// [`RawSuperpacket::finalize_tcp_checksum`]).
     fn take_run(&mut self) -> Option<RawSuperpacket> {
         if self.segs == 0 {
             return None;
@@ -490,24 +491,14 @@ impl TcpGroBatch {
 /// channel: one self-contained IPv4 TCP packet — lengths and both
 /// checksums valid — to be injected with a single plain `write()`.
 ///
-/// Produced by [`TcpGroBatch::take_raw`]. If the device rejects the
-/// oversized write, [`Self::build_segment`] regenerates the individual
-/// wire segments so the run can be written packet-by-packet instead of
-/// being dropped.
-///
-/// Read-only outside this module: the fields are private and
-/// [`TcpGroBatch::take_raw`], the only public producer, always
-/// finalizes it first, so a caller can only ever hold a finalized
-/// packet.
+/// Produced only by [`TcpGroBatch::take_raw`], already finalized. If
+/// the device rejects the oversized write, [`Self::build_segment`]
+/// regenerates the individual wire segments so the run can be written
+/// packet-by-packet instead of being dropped.
 pub struct RawSuperpacket {
-    /// The packet bytes.
     pkt: BytesMut,
-    /// Number of TCP segments coalesced into `pkt`.
     segs: usize,
-    /// Payload bytes per segment — the run's MSS, fixed by its first
-    /// segment. The last segment may be shorter.
     gso_size: usize,
-    /// IP + TCP header length in bytes.
     hdr_len: usize,
 }
 
