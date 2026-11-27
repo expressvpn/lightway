@@ -352,7 +352,10 @@ impl Transport for TlsTransport {
         let datagram = self.connection_type.is_datagram();
         TransportCaps {
             delivery: if datagram {
-                Delivery::Datagram { wire_header: true }
+                Delivery::Datagram {
+                    wire_header: true,
+                    reliable_control: false,
+                }
             } else {
                 Delivery::Stream
             },

@@ -320,7 +320,10 @@ mod expresslane_error_mapping_tests {
     use super::*;
 
     const LOSSY: TransportCaps = TransportCaps {
-        delivery: crate::Delivery::Datagram { wire_header: true },
+        delivery: crate::Delivery::Datagram {
+            wire_header: true,
+            reliable_control: false,
+        },
         supports_roaming: true,
     };
 
@@ -419,7 +422,10 @@ mod is_fatal_tests {
     use super::*;
 
     const LOSSY: TransportCaps = TransportCaps {
-        delivery: crate::Delivery::Datagram { wire_header: false },
+        delivery: crate::Delivery::Datagram {
+            wire_header: false,
+            reliable_control: false,
+        },
         supports_roaming: false,
     };
 
@@ -959,7 +965,15 @@ impl<AppState: Send> Connection<AppState> {
         trace!(session_id = ?self.session_id, "Processing connection tick");
 
         match self.state {
-            State::Authenticating => {
+            State::Authenticating
+                if !matches!(
+                    self.caps.delivery,
+                    crate::Delivery::Datagram {
+                        reliable_control: true,
+                        ..
+                    }
+                ) =>
+            {
                 if let ConnectionMode::Client { auth_method, .. } = &self.mode {
                     self.authenticate(auth_method.clone())?; // Resend authentication request
                 } else {

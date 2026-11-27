@@ -145,7 +145,7 @@ async fn handle_connection(
     });
     // TCP has no version indication, default to the minimum
     // supported version.
-    let Ok(conn) = conn_manager.create_streaming_connection(
+    let Ok(conn) = conn_manager.create_connection(
         Version::MINIMUM,
         local_addr,
         outside_io,
@@ -214,15 +214,13 @@ async fn handle_connection(
 }
 
 pub(crate) struct TcpServer {
-    conn_manager: Arc<ConnectionManager>,
-    sock: Arc<tokio::net::TcpListener>,
+    sock: tokio::net::TcpListener,
     transport: Arc<TlsServerFactory>,
     proxy_protocol: bool,
 }
 
 impl TcpServer {
     pub(crate) async fn new(
-        conn_manager: Arc<ConnectionManager>,
         bind_address: SocketAddr,
         transport: TlsServerFactory,
         proxy_protocol: bool,
@@ -232,10 +230,8 @@ impl TcpServer {
             Some(s) => s,
             None => tokio::net::TcpListener::bind(bind_address).await?,
         };
-        let sock = Arc::new(sock);
 
         Ok(Self {
-            conn_manager,
             sock,
             transport: Arc::new(transport),
             proxy_protocol,
@@ -245,7 +241,7 @@ impl TcpServer {
 
 #[async_trait]
 impl Server for TcpServer {
-    async fn run(&mut self) -> Result<()> {
+    async fn run(self: Box<Self>, conn_manager: Arc<ConnectionManager>) -> Result<()> {
         info!("Accepting traffic on {}", self.sock.local_addr()?);
 
         loop {
@@ -283,7 +279,7 @@ impl Server for TcpServer {
                 sock,
                 peer_addr,
                 local_addr,
-                self.conn_manager.clone(),
+                conn_manager.clone(),
                 self.transport.clone(),
                 self.proxy_protocol,
             ));
